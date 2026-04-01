@@ -6,10 +6,13 @@ const pool = new Pool(
   process.env.DATABASE_URL
     ? {
         connectionString: process.env.DATABASE_URL,
-        // Railway (and most managed PG providers) require SSL
-        ssl: process.env.NODE_ENV === 'production'
-          ? { rejectUnauthorized: false }
-          : false,
+        // Railway internal network (.railway.internal) does not use SSL.
+        // External managed PG providers do. Auto-detect based on URL.
+        ssl: process.env.DATABASE_URL?.includes('.railway.internal')
+          ? false
+          : process.env.NODE_ENV === 'production'
+            ? { rejectUnauthorized: false }
+            : false,
         max: 20,
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 5000,
