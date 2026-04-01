@@ -1,0 +1,145 @@
+'use strict';
+
+const pool = require('../db/pool');
+const { AppError } = require('../utils/errors');
+const logsService = require('./logs');
+
+async function getLeads(clientId, filters = {}, pagination = {}) {
+  const { status, signal_tier, source, pipeline_stage, search } = filters;
+  const { page = 1, perPage = 20 } = pagination;
+  const offset = (page - 1) * perPage;
+
+  const searchPattern = search ? `%${search}%` : null;
+
+  const countResult = await pool.query(
+    `SELECT COUNT(*) FROM leads
+     WHERE client_id = $1
+       AND deleted_at IS NULL
+       AND ($2::text IS NULL OR status = $2)
+       AND ($3::text IS NULL OR signal_tier = $3)
+       AND ($4::text IS NULL OR source = $4)
+       AND ($5::text IS NULL OR pipeline_stage = $5)
+       AND ($6::text IS NULL OR name ILIKE $6 OR company ILIKE $6 OR email ILIKE $6)`,
+    [clientId, status || null, signal_tier || null, source || null, pipeline_stage || null, searchPattern]
+  );
+
+  const result = await pool.query(
+    `SELECT * FROM leads
+     WHERE client_id = $1
+       AND deleted_at IS NULL
+       AND ($2::text IS NULL OR status = $2)
+       AND ($3::text IS NULL OR signal_tier = $3)
+       AND ($4::text IS NULL OR source = $4)
+       AND ($5::text IS NULL OR pipeline_stage = $5)
+       AND ($6::text IS NULL OR name ILIKE $6 OR company ILIKE $6 OR email ILIKE $6)
+     ORDER BY created_at DESC
+     LIMIT $7 OFFSET $8`,
+    [clientId, status || null, signal_tier || null, source || null, pipeline_stage || null, searchPattern, perPage, offset]
+  );
+
+  return {
+    data: result.rows,
+    meta: { total: parseInt(countResult.rows[0].count, 10), page, perPage },
+  };
+}
+
+async function getLead(clientId, leadId) {
+  const result = await pool.query(
+    `SELECT * FROM leads WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL`,
+    [leadId, clientId]
+  );
+  if (result.rows.length === 0) {
+    throw new AppError('Lead not found', 404, 'NOT_FOUND');
+  }
+  return result.rows[0];
+}
+
+const STATUS_TO_PIPELINE = {
+  new: 'prospecting',
+  contacted: 'outreach',
+  replied: 'qualifying',
+  meeting_booked: 'booked',
+  closed_won: 'closed',
+  closed_lost: 'closed',
+};
+
+async function createLead(clientId, data) {
+  const { name, email, company, title, linkedin_url, source, signal_tier, status = 'new', score = 0, metadata = {} } = data;
+  const pipeline_stage = data.pipeline_stage || STATUS_TO_PIPELINE[status] || 'prospecting';
+  const result = await pool.query(
+    `INSERT INTO leads (client_id, name, email, company, title, linkedin_url, source, signal_tier, status, score, pipeline_stage, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     RETURNING *`,
+    [clientId, name, email, company, title, linkedin_url, source, signal_tier, status, score, pipeline_stage, JSON.stringify(metadata)]
+  );
+  const lead = result.rows[0];
+
+  await logsService.createLog(clientId, {
+    agent: 'system',
+    action: 'lead_created',
+    target_type: 'lead',
+    target_id: lead.id,
+    metadata: { name: lead.name, company: lead.company, signal_tier: lead.signal_tier },
+  });
+
+  return lead;
+}
+
+async function updateLead(clientId, leadId, data) {
+  await getLead(clientId, leadId); // verify exists
+
+  const fields = ['name', 'email', 'company', 'title', 'linkedin_url', 'source', 'signal_tier', 'status', 'score', 'pipeline_stage', 'metadata'];
+  const updates = [];
+  const values = [clientId, leadId];
+  let idx = 3;
+
+  for (const field of fields) {
+    if (data[field] !== undefined) {
+      updates.push(`${field} = $${idx}`);
+      values.push(field === 'metadata' ? JSON.stringify(data[field]) : data[field]);
+      idx++;
+    }
+  }
+
+  // Auto-sync pipeline_stage when status changes
+  if (data.status && !data.pipeline_stage && STATUS_TO_PIPELINE[data.status]) {
+    updates.push(`pipeline_stage = $${idx}`);
+    values.push(STATUS_TO_PIPELINE[data.status]);
+    idx++;
+  }
+  if (updates.length === 0) return getLead(clientId, leadId);
+
+  updates.push(`updated_at = NOW()`);
+  const result = await pool.query(
+    `UPDATE leads SET ${updates.join(', ')} WHERE client_id = $1 AND id = $2 AND deleted_at IS NULL RETURNING *`,
+    values
+  );
+
+  await logsService.createLog(clientId, {
+    agent: 'system',
+    action: 'lead_updated',
+    target_type: 'lead',
+    target_id: leadId,
+    metadata: { updated_fields: Object.keys(data) },
+  });
+
+  return result.rows[0];
+}
+
+async function deleteLead(clientId, leadId) {
+  const lead = await getLead(clientId, leadId);
+  await pool.query(
+    `UPDATE leads SET deleted_at = NOW() WHERE id = $1 AND client_id = $2`,
+    [leadId, clientId]
+  );
+
+  await logsService.createLog(clientId, {
+    agent: 'system',
+    action: 'lead_deleted',
+    target_type: 'lead',
+    target_id: leadId,
+    metadata: { name: lead.name },
+  });
+}
+
+module.exports = { getLeads, getLead, createLead, updateLead, deleteLead };

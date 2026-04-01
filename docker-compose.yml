@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: thedam_db
+    environment:
+      POSTGRES_DB: thedam
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d thedam"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    ports:
+      - "5432:5432"
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: thedam_server
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/thedam
+      JWT_SECRET: dev-jwt-secret-change-in-production-please
+      ENCRYPTION_KEY: 0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b
+      PORT: 3001
+      NODE_ENV: development
+      ALLOWED_ORIGINS: http://localhost:5173
+      ANTHROPIC_API_KEY: ANTHROPIC_KEY_REMOVED
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./server:/app
+      - /app/node_modules
+    restart: unless-stopped
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: thedam_client
+    environment:
+      VITE_API_TARGET: http://server:3001
+    depends_on:
+      - server
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./client:/app
+      - /app/node_modules
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

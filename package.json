@@ -1,0 +1,17 @@
+{
+  "name": "the-dam-v2",
+  "version": "2.0.0",
+  "description": "The Dam v2 — AI-powered sales pipeline by Beaver Solutions",
+  "private": true,
+  "scripts": {
+    "build": "cd client && npm install && npm run build",
+    "start": "cd server && node index.js",
+    "install:all": "cd client && npm install && cd ../server && npm install",
+    "dev:server": "cd server && node index.js",
+    "dev:client": "cd client && npm run dev"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=9.0.0"
+  }
+}

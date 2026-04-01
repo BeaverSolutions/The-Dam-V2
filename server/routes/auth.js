@@ -1,0 +1,106 @@
+'use strict';
+
+const router = require('express').Router();
+const { body } = require('express-validator');
+const validate = require('../middleware/validate');
+const authService = require('../services/auth');
+const authMiddleware = require('../middleware/auth');
+
+// POST /api/auth/signup
+router.post('/signup',
+  [
+    body('email').isEmail().normalizeEmail(),
+    body('password').isLength({ min: 8 }),
+    body('name').optional().trim().isLength({ max: 200 }),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      const result = await authService.signup(req.body);
+      res.status(201).json({ data: result });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/auth/login
+router.post('/login',
+  [
+    body('email').isEmail().normalizeEmail(),
+    body('password').notEmpty(),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      const result = await authService.login(req.body);
+      res.json({ data: result });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/auth/verify-email
+router.post('/verify-email',
+  [
+    body('email').isEmail().normalizeEmail(),
+    body('code').isLength({ min: 6, max: 6 }),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      const result = await authService.verifyEmail(req.body);
+      res.json({ data: result });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/auth/verify-access-code
+router.post('/verify-access-code',
+  [
+    body('code').matches(/^BEAVER-[A-Z0-9]{4}-[A-Z0-9]{4}$/),
+    body('deviceFingerprint').notEmpty(),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      const result = await authService.verifyAccessCode({
+        ...req.body,
+        userAgent: req.headers['user-agent'],
+      });
+      res.json({ data: result });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/auth/refresh-token
+router.post('/refresh-token', authMiddleware, async (req, res, next) => {
+  try {
+    const user = await authService.getMe(req.user.userId);
+    const token = authService.generateToken({
+      id: req.user.userId,
+      client_id: req.user.clientId,
+      role: req.user.role,
+    });
+    res.json({ data: { token, user } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/auth/me
+router.get('/me', authMiddleware, async (req, res, next) => {
+  try {
+    const user = await authService.getMe(req.user.userId);
+    res.json({ data: user });
+  } catch (err) {
+    next(err);
+  }
+});
+
+module.exports = router;

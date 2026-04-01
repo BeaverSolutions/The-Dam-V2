@@ -1,0 +1,50 @@
+'use strict';
+
+const router = require('express').Router();
+const { body } = require('express-validator');
+const validate = require('../middleware/validate');
+const approvalsService = require('../services/approvals');
+
+router.get('/', async (req, res, next) => {
+  try {
+    const result = await approvalsService.getApprovals(
+      req.clientId,
+      { status: req.query.status || 'pending' },
+      { page: parseInt(req.query.page, 10) || 1, perPage: parseInt(req.query.perPage, 10) || 20 }
+    );
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+router.post('/',
+  [
+    body('message_id').isUUID(),
+    body('requested_by').notEmpty().trim(),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      const approval = await approvalsService.createApproval(req.clientId, req.body);
+      res.status(201).json({ data: approval });
+    } catch (err) { next(err); }
+  }
+);
+
+router.put('/:id',
+  [
+    body('status').isIn(['approved', 'rejected']),
+    body('notes').optional().trim(),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      const approval = await approvalsService.resolveApproval(req.clientId, req.params.id, {
+        ...req.body,
+        userId: req.user.userId,
+      });
+      res.json({ data: approval });
+    } catch (err) { next(err); }
+  }
+);
+
+module.exports = router;

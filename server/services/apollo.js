@@ -1,0 +1,96 @@
+'use strict';
+
+const secrets = require('./secrets');
+
+let axios;
+try {
+  axios = require('axios');
+} catch {
+  console.warn('[apollo] axios not installed — Apollo calls will fail');
+}
+
+const APOLLO_BASE = 'https://api.apollo.io/v1';
+
+async function getApiKey(clientId) {
+  const data = await secrets.getClientSecret(clientId, 'system', 'apollo_api_key');
+  return data?.key || null;
+}
+
+/**
+ * Search for people matching a query using Apollo People Search.
+ * Returns array of normalized lead objects.
+ */
+async function searchPeople(clientId, { query, limit = 5 }) {
+  if (!axios) throw new Error('axios not installed');
+
+  const apiKey = await getApiKey(clientId);
+  if (!apiKey) return null; // caller should fall back to Claude
+
+  // Parse query into title + keywords
+  const titleMatch = query.match(/\b(ceo|cto|coo|cfo|vp|director|manager|founder|head|lead|engineer|developer|sales|marketing)\b/i);
+  const title = titleMatch ? titleMatch[0] : undefined;
+
+  const payload = {
+    api_key: apiKey,
+    q_keywords: query,
+    page: 1,
+    per_page: limit,
+  };
+  if (title) payload.person_titles = [title];
+
+  try {
+    const resp = await axios.post(`${APOLLO_BASE}/mixed_people/search`, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 15000,
+    });
+
+    const people = resp.data?.people || [];
+
+    return people.map(p => ({
+      name: [p.first_name, p.last_name].filter(Boolean).join(' ') || 'Unknown',
+      email: p.email || '',
+      company: p.organization?.name || p.employment_history?.[0]?.organization_name || '',
+      title: p.title || '',
+      linkedin_url: p.linkedin_url || '',
+      location: [p.city, p.state, p.country].filter(Boolean).join(', '),
+      score: 50,
+      metadata: {
+        apollo_person_id: p.id,
+        apollo_org_id: p.organization_id,
+        phone: p.phone_numbers?.[0]?.sanitized_number || '',
+        industry: p.organization?.industry || '',
+        employees: p.organization?.estimated_num_employees,
+        source: 'apollo',
+      },
+    }));
+  } catch (err) {
+    const status = err.response?.status;
+    if (status === 401 || status === 403) {
+      console.warn('[apollo] Invalid API key');
+      return null;
+    }
+    console.error('[apollo] Search failed:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Test if the stored API key works.
+ */
+async function testConnection(clientId) {
+  if (!axios) return false;
+  const apiKey = await getApiKey(clientId);
+  if (!apiKey) return false;
+  try {
+    const resp = await axios.post(`${APOLLO_BASE}/mixed_people/search`, {
+      api_key: apiKey,
+      q_keywords: 'test',
+      per_page: 1,
+    }, { timeout: 10000 });
+    return resp.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { searchPeople, testConnection, getApiKey };
