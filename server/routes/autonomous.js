@@ -34,7 +34,7 @@ router.post('/kickoff', requireInternalKey, async (req, res) => {
 
 router.post('/kickoff-all', requireInternalKey, async (req, res) => {
   const { rows: clients } = await pool.query(
-    `SELECT id FROM clients WHERE deleted_at IS NULL`
+    `SELECT id FROM clients `
   );
 
   res.json({ data: { status: 'kickoff_started', clients: clients.length } });
@@ -52,7 +52,7 @@ router.post('/weekly-review', requireInternalKey, async (req, res) => {
   res.json({ data: { status: 'weekly_review_started' } });
 
   const { rows: clients } = await pool.query(
-    `SELECT id FROM clients WHERE deleted_at IS NULL`
+    `SELECT id FROM clients `
   );
 
   for (const client of clients) {
