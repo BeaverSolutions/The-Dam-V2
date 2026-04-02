@@ -475,7 +475,7 @@ async function directorExecute(clientId, { plan_id, command }) {
       await pool.query(
         `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = $3, updated_at = NOW()
          WHERE id = $4 AND client_id = $5`,
-        [rangerResult.score || 75, rangerNotes, newStatus, msg.id, clientId]
+        [Math.round(rangerResult.score || 75), rangerNotes, newStatus, msg.id, clientId]
       );
 
       await logsService.createLog(clientId, {
