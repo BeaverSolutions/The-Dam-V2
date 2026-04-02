@@ -67,14 +67,10 @@ router.post('/weekly-review', requireInternalKey, async (req, res) => {
 router.get('/pending-approvals', requireInternalKey, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT a.id, a.status, a.created_at,
-              m.subject, m.body,
-              l.company_name, l.contact_name
-       FROM approvals a
-       JOIN messages m ON a.message_id = m.id
-       JOIN leads l ON m.lead_id = l.id
-       WHERE a.status = 'pending'
-       ORDER BY a.created_at DESC
+      `SELECT id, status, created_at
+       FROM approvals
+       WHERE status = 'pending'
+       ORDER BY created_at DESC
        LIMIT 100`
     );
     res.json({ data: rows, meta: { total: rows.length } });
