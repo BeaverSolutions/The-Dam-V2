@@ -77,6 +77,32 @@ router.post('/agentmail', require('express').raw({ type: '*/*' }), async (req, r
       console.warn('[webhook] stopSequence failed:', err.message);
     }
 
+    // Sprint 7C: Detect unsubscribe intent — stop sequence + flag lead
+    const UNSUBSCRIBE_KEYWORDS = [
+      'unsubscribe', 'remove me', 'stop emailing', 'not interested',
+      'please stop', 'do not contact', 'take me off', 'opt out',
+      'buang', 'jangan email', 'tak berminat', // Malaysian variants
+    ];
+    const snippetLower = snippet.toLowerCase();
+    const isUnsubscribe = UNSUBSCRIBE_KEYWORDS.some(kw => snippetLower.includes(kw));
+
+    if (isUnsubscribe) {
+      await pool.query(
+        `UPDATE leads SET sequence_status = 'unsubscribed', updated_at = NOW() WHERE id = $1`,
+        [msg.lead_id]
+      );
+      await pool.query(
+        `UPDATE followup_queue SET status = 'cancelled' WHERE lead_id = $1 AND status = 'pending'`,
+        [msg.lead_id]
+      );
+      await pool.query(
+        `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)
+         VALUES ($1, 'system', 'lead_unsubscribed', 'lead', $2, $3)`,
+        [msg.client_id, msg.lead_id, JSON.stringify({ snippet: snippet.slice(0, 200) })]
+      );
+      console.log(`[webhook] Lead ${msg.lead_id} unsubscribed.`);
+    }
+
     // Log the event
     await pool.query(
       `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)
@@ -84,11 +110,11 @@ router.post('/agentmail', require('express').raw({ type: '*/*' }), async (req, r
       [
         msg.client_id,
         msg.lead_id,
-        JSON.stringify({ message_id: msg.id, thread_id: threadId, snippet: snippet.slice(0, 200), source: 'agentmail_webhook' }),
+        JSON.stringify({ message_id: msg.id, thread_id: threadId, snippet: snippet.slice(0, 200), source: 'agentmail_webhook', unsubscribed: isUnsubscribe }),
       ]
     );
 
-    console.log(`[webhook] Reply detected — lead ${msg.lead_id}, thread ${threadId}`);
+    console.log(`[webhook] Reply detected — lead ${msg.lead_id}, thread ${threadId}${isUnsubscribe ? ' [UNSUBSCRIBED]' : ''}`);
   } catch (err) {
     console.error('[webhook] AgentMail processing error:', err.message);
   }

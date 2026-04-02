@@ -108,10 +108,12 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
 
   if (callAgent) {
     try {
+      const persona = await getClientPersona(clientId);
+      const personaContext = buildPersonaContext(persona);
       const result = await callAgent(
         'sales_beaver',
-        `Write a ${channel} outreach message for this lead: ${context}`,
-        { lead_id, channel, context }
+        `Write a ${channel} outreach message for this lead: ${context}${personaContext}`,
+        { lead_id, channel }
       );
 
       if (result?.body) {
@@ -153,9 +155,11 @@ async function rangerReview(clientId, { message_id, message_body }) {
 
   if (callAgent) {
     try {
+      const persona = await getClientPersona(clientId);
+      const personaContext = buildPersonaContext(persona);
       const result = await callAgent(
         'ranger',
-        `Review this message:\n\n${message_body}`,
+        `Review this message:\n\n${message_body}${personaContext}`,
         { message_id }
       );
 
@@ -239,14 +243,15 @@ async function directorPlan(clientId, { command }) {
   }
 
   const planId = uuidv4();
-  const icp = await directorGetICP(clientId);
+  const [icp, persona] = await Promise.all([directorGetICP(clientId), getClientPersona(clientId)]);
 
   if (callAgent) {
     try {
       const icpContext = Object.keys(icp).length > 0
         ? `\n\nClient ICP Profile:\n${JSON.stringify(icp, null, 2)}`
         : '';
-      const result = await callAgent('director', command + icpContext);
+      const personaContext = buildPersonaContext(persona);
+      const result = await callAgent('director', command + icpContext + personaContext);
 
       if (result?.steps) {
         return {
@@ -379,6 +384,28 @@ async function directorExecute(clientId, { plan_id, command }) {
   // ── Step 2: Save leads to DB ─────────────────────────────
   const savedLeads = [];
   for (const lead of enrichedLeads) {
+    // ── Sprint 7B: Deduplication ──────────────────────────
+    if (lead.email) {
+      const dup = await pool.query(
+        `SELECT id FROM leads WHERE client_id = $1 AND email = $2 AND deleted_at IS NULL LIMIT 1`,
+        [clientId, lead.email]
+      );
+      if (dup.rows.length > 0) {
+        console.log(`[dedup] Skipping ${lead.email} — already in pipeline`);
+        continue;
+      }
+    }
+    if (lead.linkedin_url) {
+      const dup = await pool.query(
+        `SELECT id FROM leads WHERE client_id = $1 AND linkedin_url = $2 AND deleted_at IS NULL LIMIT 1`,
+        [clientId, lead.linkedin_url]
+      );
+      if (dup.rows.length > 0) {
+        console.log(`[dedup] Skipping ${lead.linkedin_url} — already in pipeline`);
+        continue;
+      }
+    }
+
     try {
       const meta = lead.metadata || {};
       if (lead.apollo_person_id) {
@@ -390,8 +417,8 @@ async function directorExecute(clientId, { plan_id, command }) {
       const res = await pool.query(
         `INSERT INTO leads (client_id, name, email, company, title, signal_tier, score, source,
                             pipeline_stage, status, email_verified, email_source,
-                            apollo_enriched, apollo_person_id, apollo_org_id, metadata)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11,$12,$13)
+                            apollo_enriched, apollo_person_id, apollo_org_id, linkedin_url, metadata)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11,$12,$13,$14)
          RETURNING *`,
         [
           clientId,
@@ -406,6 +433,7 @@ async function directorExecute(clientId, { plan_id, command }) {
           !!(lead.metadata?.apollo_person_id),
           lead.metadata?.apollo_person_id || null,
           lead.metadata?.apollo_org_id || null,
+          lead.linkedin_url || null,
           JSON.stringify({ short_description: lead.short_description || '', ...meta }),
         ]
       );
@@ -577,6 +605,34 @@ Return JSON: { "summary": string (2-3 sentences, conversational), "stats": { "to
 
 /**
  * =========================
+ * CLIENT PERSONA
+ * =========================
+ */
+async function getClientPersona(clientId) {
+  const res = await pool.query(
+    `SELECT content FROM agent_memory WHERE client_id = $1 AND key = 'client_persona' LIMIT 1`,
+    [clientId]
+  );
+  return res.rows[0]?.content || {};
+}
+
+async function upsertClientPersona(clientId, data) {
+  await pool.query(
+    `INSERT INTO agent_memory (client_id, agent, memory_type, key, content)
+     VALUES ($1, 'system', 'persona', 'client_persona', $2)
+     ON CONFLICT (client_id, agent, key) DO UPDATE SET content = $2, updated_at = NOW()`,
+    [clientId, JSON.stringify(data)]
+  );
+  return data;
+}
+
+function buildPersonaContext(persona) {
+  if (!persona || Object.keys(persona).length === 0) return '';
+  return `\n\nCLIENT CONTEXT — you are writing outreach on behalf of this company:\n${JSON.stringify(persona, null, 2)}\n`;
+}
+
+/**
+ * =========================
  * DIRECTOR — ICP
  * =========================
  */
@@ -607,4 +663,6 @@ module.exports = {
   directorBrief,
   directorGetICP,
   directorUpsertICP,
+  getClientPersona,
+  upsertClientPersona,
 };

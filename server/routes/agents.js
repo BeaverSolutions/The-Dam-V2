@@ -93,6 +93,34 @@ router.post('/director/execute',
   }
 );
 
+/* ─── Client Persona ─────────────────────────────────────── */
+
+router.get('/persona', async (req, res, next) => {
+  try {
+    const result = await agentsService.getClientPersona(req.clientId);
+    res.json({ data: result });
+  } catch (err) { next(err); }
+});
+
+router.put('/persona',
+  [
+    body('company_name').optional().trim(),
+    body('company_description').optional().trim(),
+    body('value_proposition').optional().trim(),
+    body('tone').optional().trim(),
+    body('differentiator').optional().trim(),
+    body('social_proof').optional().trim(),
+    body('cta_preference').optional().trim(),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      const result = await agentsService.upsertClientPersona(req.clientId, req.body);
+      res.json({ data: result });
+    } catch (err) { next(err); }
+  }
+);
+
 /* ─── Memory ─────────────────────────────────────────────── */
 
 const pool = require('../db/pool');

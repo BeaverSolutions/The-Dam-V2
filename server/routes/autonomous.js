@@ -170,6 +170,35 @@ async function runAutonomousKickoff(clientId) {
     console.warn('[Autonomous] Follow-up processing skipped:', err.message);
   }
 
+  // Sprint 7D: Ranger rejection pattern detection
+  // If 3+ messages rejected for the same reason today, store a warning in agent_memory
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const { rows: patterns } = await pool.query(
+      `SELECT metadata->>'reject_reason' AS reason, COUNT(*) AS count
+       FROM logs
+       WHERE client_id = $1
+         AND action IN ('message_rejected', 'ranger_review')
+         AND metadata->>'decision' = 'reject'
+         AND DATE(created_at) = $2
+       GROUP BY reason
+       HAVING COUNT(*) >= 3`,
+      [clientId, today]
+    );
+
+    if (patterns.length > 0) {
+      await pool.query(
+        `INSERT INTO agent_memory (client_id, agent, memory_type, key, content)
+         VALUES ($1, 'ranger', 'pattern', 'daily_rejection_patterns', $2)
+         ON CONFLICT (client_id, agent, key) DO UPDATE SET content = $2, updated_at = NOW()`,
+        [clientId, JSON.stringify({ date: today, patterns })]
+      );
+      console.log(`[Autonomous] Ranger pattern alert stored for client ${clientId}: ${patterns.length} repeated rejection reason(s)`);
+    }
+  } catch (err) {
+    console.warn('[Autonomous] Ranger feedback loop error:', err.message);
+  }
+
   // Re-check gap after processing follow-ups
   const { rows: refreshCounts } = await pool.query(
     `SELECT COUNT(*) FILTER (WHERE status = 'sent' AND DATE(sent_at) = $2) AS total_sent
@@ -198,7 +227,14 @@ async function runAutonomousKickoff(clientId) {
   );
   const lastLearnings = learnings[0] || null;
 
-  const brief = buildAutonomousBrief({ gap: remainingGap, icp, lastLearnings, sent: sentAfterFollowUps, target });
+  // Load today's Ranger rejection patterns (Sprint 7D)
+  const { rows: rangerPatterns } = await pool.query(
+    `SELECT content FROM agent_memory WHERE client_id = $1 AND key = 'daily_rejection_patterns' LIMIT 1`,
+    [clientId]
+  );
+  const rejectionPatterns = rangerPatterns[0]?.content || null;
+
+  const brief = buildAutonomousBrief({ gap: remainingGap, icp, lastLearnings, rejectionPatterns, sent: sentAfterFollowUps, target });
 
   await logAction(clientId, 'director', 'autonomous_kickoff', 'system', null, {
     gap: remainingGap, sent: sentAfterFollowUps, target, brief: brief.substring(0, 200),
@@ -208,7 +244,7 @@ async function runAutonomousKickoff(clientId) {
   await directorExecute(clientId, { plan_id: uuidv4(), command: brief });
 }
 
-function buildAutonomousBrief({ gap, icp, lastLearnings, sent, target }) {
+function buildAutonomousBrief({ gap, icp, lastLearnings, rejectionPatterns, sent, target }) {
   let brief = `AUTONOMOUS DAILY RUN — ${new Date().toLocaleDateString('en-MY', { weekday: 'long', day: 'numeric', month: 'long' })}
 
 Daily KPI: ${target} outreach. Sent so far today: ${sent}. Gap remaining: ${gap}.
@@ -229,6 +265,14 @@ ICP:
 - Worst industries: ${JSON.stringify(lastLearnings.worst_industries)}
 - What Ranger rejected most: ${JSON.stringify(lastLearnings.ranger_top_rejections)}
 - Director notes: ${lastLearnings.director_notes || 'None'}
+
+`;
+  }
+
+  if (rejectionPatterns?.patterns?.length > 0) {
+    brief += `TODAY'S RANGER REJECTION PATTERNS (AVOID THESE):
+${rejectionPatterns.patterns.map(p => `- "${p.reason}" — rejected ${p.count}x today already`).join('\n')}
+Do NOT use any messaging approach matching these patterns.
 
 `;
   }

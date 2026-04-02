@@ -24,6 +24,14 @@ export default function Settings() {
   const [icpSaving, setIcpSaving] = useState(false);
   const [icpSaved, setIcpSaved] = useState(false);
 
+  const [persona, setPersona] = useState({
+    company_name: '', company_description: '', value_proposition: '',
+    tone: '', differentiator: '', social_proof: '', banned_phrases: '', cta_preference: '',
+  });
+  const [personaLoading, setPersonaLoading] = useState(true);
+  const [personaSaving, setPersonaSaving] = useState(false);
+  const [personaSaved, setPersonaSaved] = useState(false);
+
   // AgentMail webhook state
   const [webhookUrl, setWebhookUrl] = useState('');
   const [webhookRegistering, setWebhookRegistering] = useState(false);
@@ -73,6 +81,25 @@ export default function Settings() {
       })
       .catch(() => {})
       .finally(() => setIcpLoading(false));
+
+    request('/agents/persona')
+      .then(res => {
+        if (res?.data && Object.keys(res.data).length > 0) {
+          const d = res.data;
+          setPersona({
+            company_name: d.company_name || '',
+            company_description: d.company_description || '',
+            value_proposition: d.value_proposition || '',
+            tone: d.tone || '',
+            differentiator: d.differentiator || '',
+            social_proof: d.social_proof || '',
+            banned_phrases: Array.isArray(d.banned_phrases) ? d.banned_phrases.join(', ') : (d.banned_phrases || ''),
+            cta_preference: d.cta_preference || '',
+          });
+        }
+      })
+      .catch(() => {})
+      .finally(() => setPersonaLoading(false));
   }, []);
 
   const handleConnectGmail = async () => {
@@ -164,6 +191,23 @@ export default function Settings() {
       setTimeout(() => setIcpSaved(false), 2000);
     } catch {}
     setIcpSaving(false);
+  };
+
+  const handleSavePersona = async () => {
+    setPersonaSaving(true);
+    try {
+      // Convert banned_phrases from comma string to array
+      const payload = {
+        ...persona,
+        banned_phrases: persona.banned_phrases
+          ? persona.banned_phrases.split(',').map(s => s.trim()).filter(Boolean)
+          : [],
+      };
+      await request('/agents/persona', { method: 'PUT', body: JSON.stringify(payload) });
+      setPersonaSaved(true);
+      setTimeout(() => setPersonaSaved(false), 2000);
+    } catch {}
+    setPersonaSaving(false);
   };
 
   const gmailInfo = integrations.gmail;
@@ -465,6 +509,107 @@ export default function Settings() {
                 <Save size={14} /> {icpSaving ? 'Saving…' : 'Save ICP'}
               </button>
               {icpSaved && <span style={{ fontSize: '0.8rem', color: 'var(--lime)' }}>✓ Saved!</span>}
+            </div>
+          </div>
+        )}
+      </Section>
+
+      {/* Client Persona */}
+      <Section title="Agent Config — Client Persona">
+        <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '1.25rem', marginTop: '-0.5rem' }}>
+          Sales Beaver writes outreach in this company's voice. Fill this in for every client — this is what makes messages sound human, not generic.
+        </p>
+        {personaLoading ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {[1, 2, 3, 4].map(i => <div key={i} className="skeleton" style={{ height: 44 }} />)}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+              <div className="form-group">
+                <label className="form-label">Company Name</label>
+                <input
+                  className="form-input"
+                  placeholder="e.g. TRL, Beaver Solutions"
+                  value={persona.company_name}
+                  onChange={e => setPersona(p => ({ ...p, company_name: e.target.value }))}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Tone</label>
+                <input
+                  className="form-input"
+                  placeholder="e.g. Professional but warm, Malaysian English, Expert peer"
+                  value={persona.tone}
+                  onChange={e => setPersona(p => ({ ...p, tone: e.target.value }))}
+                />
+              </div>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Company Description <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(2 sentences max)</span></label>
+              <textarea
+                className="form-input"
+                rows={2}
+                placeholder="e.g. A B2B SaaS platform for retail analytics in Malaysia."
+                value={persona.company_description}
+                onChange={e => setPersona(p => ({ ...p, company_description: e.target.value }))}
+                style={{ resize: 'vertical' }}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Value Proposition <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(outcome-focused, not feature-focused)</span></label>
+              <textarea
+                className="form-input"
+                rows={2}
+                placeholder="e.g. We help retail brands see exactly where they're losing revenue."
+                value={persona.value_proposition}
+                onChange={e => setPersona(p => ({ ...p, value_proposition: e.target.value }))}
+                style={{ resize: 'vertical' }}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Key Differentiator</label>
+              <input
+                className="form-input"
+                placeholder="e.g. Only platform built specifically for Malaysian retail data"
+                value={persona.differentiator}
+                onChange={e => setPersona(p => ({ ...p, differentiator: e.target.value }))}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Social Proof <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(clients, numbers, results)</span></label>
+              <input
+                className="form-input"
+                placeholder="e.g. Used by 40+ brands including Aeon, Parkson, and Mr DIY"
+                value={persona.social_proof}
+                onChange={e => setPersona(p => ({ ...p, social_proof: e.target.value }))}
+              />
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+              <div className="form-group">
+                <label className="form-label">Banned Phrases <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(comma-separated)</span></label>
+                <input
+                  className="form-input"
+                  placeholder="e.g. cutting-edge, paradigm shift, seamless"
+                  value={persona.banned_phrases}
+                  onChange={e => setPersona(p => ({ ...p, banned_phrases: e.target.value }))}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">CTA Preference</label>
+                <input
+                  className="form-input"
+                  placeholder="e.g. Ask for a 20-min call, not a demo"
+                  value={persona.cta_preference}
+                  onChange={e => setPersona(p => ({ ...p, cta_preference: e.target.value }))}
+                />
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '0.25rem' }}>
+              <button className="btn btn-primary" onClick={handleSavePersona} disabled={personaSaving}>
+                <Save size={14} /> {personaSaving ? 'Saving…' : 'Save Persona'}
+              </button>
+              {personaSaved && <span style={{ fontSize: '0.8rem', color: 'var(--lime)' }}>✓ Saved — agents will use this voice from now on</span>}
             </div>
           </div>
         )}
