@@ -72,7 +72,7 @@ function clearCache(clientId) {
  */
 async function warmCache() {
   try {
-    const { rows } = await pool.query(`SELECT id FROM clients WHERE slug IS NOT NULL AND deleted_at IS NULL`);
+    const { rows } = await pool.query(`SELECT id FROM clients WHERE slug IS NOT NULL`);
     for (const row of rows) {
       await getClientConfig(row.id);
     }
