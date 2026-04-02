@@ -121,6 +121,56 @@ router.put('/persona',
   }
 );
 
+/* ─── Smart Actions ──────────────────────────────────────── */
+
+const smartActions = require('../services/smartActions');
+
+// GET /api/agents/smart-actions/:leadId — available actions for this lead's stage
+router.get('/smart-actions/:leadId', async (req, res, next) => {
+  try {
+    const result = await smartActions.getAvailableActions(req.clientId, req.params.leadId);
+    res.json({ data: result });
+  } catch (err) { next(err); }
+});
+
+// GET /api/agents/smart-actions/:leadId/:briefType — fetch a generated brief
+router.get('/smart-actions/:leadId/:briefType', async (req, res, next) => {
+  try {
+    const brief = await smartActions.getBrief(req.clientId, req.params.leadId, req.params.briefType);
+    if (!brief) return res.status(404).json({ error: 'Brief not generated yet', code: 'NOT_FOUND' });
+    res.json({ data: brief });
+  } catch (err) { next(err); }
+});
+
+// POST /api/agents/smart-actions/:leadId/:briefType — generate a brief
+router.post('/smart-actions/:leadId/:briefType',
+  [body('notes').optional().trim(), validate],
+  async (req, res, next) => {
+    try {
+      const { leadId, briefType } = req.params;
+      const options = req.body.notes ? { notes: req.body.notes } : {};
+      const content = await smartActions.generateBrief(req.clientId, leadId, briefType, options);
+      res.json({ data: content });
+    } catch (err) { next(err); }
+  }
+);
+
+// PUT /api/agents/leads/:leadId/meeting-date — set meeting date
+router.put('/leads/:leadId/meeting-date',
+  [body('meeting_date').notEmpty(), validate],
+  async (req, res, next) => {
+    try {
+      const pool2 = require('../db/pool');
+      await pool2.query(
+        `UPDATE leads SET meeting_date = $1, pipeline_stage = 'meeting_booked', updated_at = NOW()
+         WHERE id = $2 AND client_id = $3`,
+        [req.body.meeting_date, req.params.leadId, req.clientId]
+      );
+      res.json({ data: { updated: true } });
+    } catch (err) { next(err); }
+  }
+);
+
 /* ─── Memory ─────────────────────────────────────────────── */
 
 const pool = require('../db/pool');
