@@ -34,7 +34,7 @@ router.post('/kickoff', requireInternalKey, async (req, res) => {
 
 router.post('/kickoff-all', requireInternalKey, async (req, res) => {
   const { rows: clients } = await pool.query(
-    `SELECT id FROM clients `
+    `SELECT id FROM clients`
   );
 
   res.json({ data: { status: 'kickoff_started', clients: clients.length } });
@@ -52,13 +52,34 @@ router.post('/weekly-review', requireInternalKey, async (req, res) => {
   res.json({ data: { status: 'weekly_review_started' } });
 
   const { rows: clients } = await pool.query(
-    `SELECT id FROM clients `
+    `SELECT id FROM clients`
   );
 
   for (const client of clients) {
     runWeeklyReview(client.id).catch(err =>
       console.error(`[Weekly Review] Failed for ${client.id}:`, err.message)
     );
+  }
+});
+
+/* ─── GET /api/autonomous/pending-approvals ──────────────── */
+
+router.get('/pending-approvals', requireInternalKey, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT a.id, a.status, a.created_at,
+              m.subject, m.body,
+              l.company_name, l.contact_name
+       FROM approvals a
+       JOIN messages m ON a.message_id = m.id
+       JOIN leads l ON m.lead_id = l.id
+       WHERE a.status = 'pending'
+       ORDER BY a.created_at DESC
+       LIMIT 100`
+    );
+    res.json({ data: rows, meta: { total: rows.length } });
+  } catch (err) {
+    res.status(500).json({ error: err.message, code: 'DB_ERROR' });
   }
 });
 
@@ -171,7 +192,6 @@ async function runAutonomousKickoff(clientId) {
   }
 
   // Sprint 7D: Ranger rejection pattern detection
-  // If 3+ messages rejected for the same reason today, store a warning in agent_memory
   try {
     const today = new Date().toISOString().split('T')[0];
     const { rows: patterns } = await pool.query(
