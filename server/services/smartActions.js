@@ -8,11 +8,13 @@ const STAGE_ACTIONS = {
   new:              ['account_research'],
   outreach:         ['account_research'],
   qualifying:       ['account_research', 'call_prep'],
-  meeting_booked:   ['call_prep', 'competitive_brief'],
+  booked:           ['call_prep', 'competitive_brief'],   // Pipeline UI value
+  meeting_booked:   ['call_prep', 'competitive_brief'],   // DB value alias
   proposal:         ['competitive_brief', 'post_meeting'],
   negotiating:      ['competitive_brief'],
   closed_won:       [],
   closed_lost:      [],
+  closed:           [],
 };
 
 const ACTION_META = {

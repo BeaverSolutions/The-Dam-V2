@@ -112,6 +112,9 @@ async function start() {
       logger.info({ msg: `The Dam v2 API running on port ${config.port}`, env: config.nodeEnv });
     });
 
+    // Pre-warm client config cache (reads clients/<slug>/config.md for each client)
+    require('./services/clientConfig').warmCache().catch(() => {});
+
     // Reply detection — poll every 5 minutes
     const { checkAllClients } = require('./services/replyDetector');
     setInterval(() => {

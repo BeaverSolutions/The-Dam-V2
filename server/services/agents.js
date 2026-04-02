@@ -5,6 +5,7 @@ const logsService = require('./logs');
 const pool = require('../db/pool');
 const apolloService = require('./apollo');
 const hunterService = require('./hunter');
+const { getClientConfig, buildClientContext } = require('./clientConfig');
 
 let callAgent;
 
@@ -108,11 +109,12 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
 
   if (callAgent) {
     try {
-      const persona = await getClientPersona(clientId);
+      const [persona, fileConfig] = await Promise.all([getClientPersona(clientId), getClientConfig(clientId)]);
       const personaContext = buildPersonaContext(persona);
+      const fileContext = buildClientContext(fileConfig);
       const result = await callAgent(
         'sales_beaver',
-        `Write a ${channel} outreach message for this lead: ${context}${personaContext}`,
+        `Write a ${channel} outreach message for this lead: ${context}${personaContext}${fileContext}`,
         { lead_id, channel }
       );
 
@@ -243,7 +245,7 @@ async function directorPlan(clientId, { command }) {
   }
 
   const planId = uuidv4();
-  const [icp, persona] = await Promise.all([directorGetICP(clientId), getClientPersona(clientId)]);
+  const [icp, persona, fileConfig] = await Promise.all([directorGetICP(clientId), getClientPersona(clientId), getClientConfig(clientId)]);
 
   if (callAgent) {
     try {
@@ -251,7 +253,8 @@ async function directorPlan(clientId, { command }) {
         ? `\n\nClient ICP Profile:\n${JSON.stringify(icp, null, 2)}`
         : '';
       const personaContext = buildPersonaContext(persona);
-      const result = await callAgent('director', command + icpContext + personaContext);
+      const fileContext = buildClientContext(fileConfig);
+      const result = await callAgent('director', command + icpContext + personaContext + fileContext);
 
       if (result?.steps) {
         return {
