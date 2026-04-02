@@ -75,11 +75,14 @@ app.use('/api/agents', authMiddleware, tenantScope, require('./routes/agents'));
 app.use('/api/integrations', authMiddleware, tenantScope, require('./routes/integrations'));
 app.use('/api/dashboard', authMiddleware, tenantScope, require('./routes/dashboard'));
 
+// Autonomous routes — internal key auth (no JWT required)
+app.use('/api/autonomous', require('./routes/autonomous'));
+
 // Routes - admin only
 app.use('/api/admin', authMiddleware, tenantScope, adminOnly, require('./routes/admin'));
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.0.0', sprint: 6, timestamp: new Date().toISOString() }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.0.0', tag: 'Autonomous', timestamp: new Date().toISOString() }));
 
 // Serve React frontend in production (must come AFTER all API routes)
 if (process.env.NODE_ENV === 'production') {

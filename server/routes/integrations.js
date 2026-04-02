@@ -155,7 +155,7 @@ async function sendMessageById(clientId, message_id, provider) {
   if (usedProvider === 'agentmail') {
     await pool.query(
       `UPDATE messages
-       SET status = 'sent', updated_at = NOW(),
+       SET status = 'sent', sent_at = NOW(), updated_at = NOW(),
            agentmail_message_id = $3, agentmail_thread_id = $4
        WHERE id = $1 AND client_id = $2`,
       [message_id, clientId, sendResult.messageId, sendResult.threadId]
@@ -163,7 +163,7 @@ async function sendMessageById(clientId, message_id, provider) {
   } else {
     await pool.query(
       `UPDATE messages
-       SET status = 'sent', updated_at = NOW(),
+       SET status = 'sent', sent_at = NOW(), updated_at = NOW(),
            gmail_message_id = $3, gmail_thread_id = $4
        WHERE id = $1 AND client_id = $2`,
       [message_id, clientId, sendResult.messageId, sendResult.threadId]
@@ -183,6 +183,22 @@ async function sendMessageById(clientId, message_id, provider) {
     target_id: message_id,
     metadata: { to: message.lead_email, lead_name: message.lead_name, provider: usedProvider, send_result: sendResult },
   });
+
+  // Schedule follow-ups if this is the first message sent to this lead
+  try {
+    const { rows: prevSent } = await pool.query(
+      `SELECT COUNT(*) AS cnt FROM messages
+       WHERE lead_id = $1 AND status = 'sent'`,
+      [message.lead_id]
+    );
+    if (parseInt(prevSent[0].cnt) === 1) {
+      // This is the first sent message — schedule the follow-up sequence
+      const { scheduleFollowUps } = require('../services/followupSequence');
+      await scheduleFollowUps(clientId, message.lead_id, new Date());
+    }
+  } catch (err) {
+    console.warn('[integrations] Follow-up scheduling failed:', err.message);
+  }
 
   return { status: sendResult.status, message_id, thread_id: sendResult.threadId, provider: usedProvider };
 }

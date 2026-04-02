@@ -69,6 +69,14 @@ router.post('/agentmail', require('express').raw({ type: '*/*' }), async (req, r
       [msg.lead_id, msg.client_id]
     );
 
+    // Stop the follow-up sequence — they replied, no more follow-ups needed
+    try {
+      const { stopSequence } = require('../services/followupSequence');
+      await stopSequence(msg.lead_id, 'replied');
+    } catch (err) {
+      console.warn('[webhook] stopSequence failed:', err.message);
+    }
+
     // Log the event
     await pool.query(
       `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)

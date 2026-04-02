@@ -113,4 +113,77 @@ router.get('/stats', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/dashboard/daily-progress
+// Returns today's KPI progress, upserts daily_kpi row
+router.get('/daily-progress', async (req, res, next) => {
+  try {
+    const clientId = req.clientId;
+    const today = new Date().toISOString().split('T')[0];
+
+    // Ensure today's row exists
+    await pool.query(
+      `INSERT INTO daily_kpi (client_id, date) VALUES ($1, $2)
+       ON CONFLICT (client_id, date) DO NOTHING`,
+      [clientId, today]
+    );
+
+    // Count today's sent messages from the messages table
+    const { rows: counts } = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'sent' AND DATE(sent_at) = $2) AS email_sent,
+         COUNT(*) FILTER (WHERE status = 'sent' AND DATE(sent_at) = $2 AND channel = 'linkedin') AS linkedin_sent
+       FROM messages
+       WHERE client_id = $1`,
+      [clientId, today]
+    );
+
+    const emailSent = parseInt(counts[0].email_sent) || 0;
+    const linkedinSent = parseInt(counts[0].linkedin_sent) || 0;
+    const totalSent = emailSent + linkedinSent;
+
+    await pool.query(
+      `UPDATE daily_kpi SET
+         outreach_sent = $1,
+         outreach_email = $2,
+         outreach_linkedin = $3,
+         updated_at = NOW()
+       WHERE client_id = $4 AND date = $5`,
+      [totalSent, emailSent, linkedinSent, clientId, today]
+    );
+
+    const { rows: [kpi] } = await pool.query(
+      `SELECT * FROM daily_kpi WHERE client_id = $1 AND date = $2`,
+      [clientId, today]
+    );
+
+    const gap = Math.max(0, kpi.target - totalSent);
+
+    res.json({
+      data: {
+        date: today,
+        target: kpi.target,
+        sent: totalSent,
+        email: emailSent,
+        linkedin: linkedinSent,
+        gap,
+        kpi_met: kpi.kpi_met,
+        percentage: Math.min(100, Math.round((totalSent / kpi.target) * 100)),
+      }
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/dashboard/weekly-learnings
+// Returns the most recent weekly_learnings record for the client
+router.get('/weekly-learnings', async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM weekly_learnings WHERE client_id = $1
+       ORDER BY week_start DESC LIMIT 1`,
+      [req.clientId]
+    );
+    res.json({ data: rows[0] || null });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

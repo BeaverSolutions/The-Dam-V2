@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { Search, Mail, ExternalLink, Zap, MessageSquare, Activity, X, CornerDownLeft } from 'lucide-react';
+import { Search, Mail, ExternalLink, Zap, MessageSquare, Activity, X, CornerDownLeft, CheckCircle, Clock, Lock, XCircle, PauseCircle } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import BeaverAvatar from '../components/BeaverAvatar';
 import FilterTabs from '../components/FilterTabs';
@@ -127,6 +127,128 @@ function MsgStatusBadge({ status }) {
 }
 
 /* ─── Lead Detail Panel ──────────────────────────────────── */
+
+/* ─── Sequence Timeline ──────────────────────────────────── */
+
+const TOUCH_LABELS = {
+  1: 'First outreach',
+  2: 'Follow-up 1 — value add',
+  3: 'Follow-up 2 — new angle',
+  4: 'Break-up email',
+};
+
+function SequenceSection({ leadId, clientId }) {
+  const { request } = useApi();
+  const [seq, setSeq] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [acting, setActing] = useState(false);
+
+  const load = () => {
+    setLoading(true);
+    request(`/leads/${leadId}/sequence`)
+      .then(r => setSeq(r?.data || null))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { load(); }, [leadId]);
+
+  const handleAction = async (action) => {
+    setActing(true);
+    try {
+      await request(`/leads/${leadId}/sequence`, { method: 'PUT', body: JSON.stringify({ action }) });
+      load();
+    } catch {}
+    setActing(false);
+  };
+
+  if (loading) return <div className="skeleton" style={{ height: 80, borderRadius: 6 }} />;
+  if (!seq || seq.sequence_touch === 0) return (
+    <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>No sequence started yet. Sequence begins when first message is sent.</div>
+  );
+
+  const statusIcon = (t) => {
+    const qs = t.queue_status;
+    const ms = t.message_status;
+    if (qs === 'cancelled') return <XCircle size={14} style={{ color: '#ef4444' }} />;
+    if (ms === 'sent' || qs === 'sent') return <CheckCircle size={14} style={{ color: 'var(--lime)' }} />;
+    const today = new Date().toISOString().split('T')[0];
+    const due = t.scheduled_for ? String(t.scheduled_for).split('T')[0] : null;
+    if (ms === 'pending_approval' || (due && due <= today)) return <Clock size={14} style={{ color: 'var(--orange)' }} />;
+    return <Lock size={14} style={{ color: 'var(--text-muted)' }} />;
+  };
+
+  const statusLabel = (t) => {
+    const qs = t.queue_status;
+    const ms = t.message_status;
+    if (qs === 'cancelled') return 'cancelled';
+    if (ms === 'sent') return 'sent';
+    if (ms === 'pending_approval') return 'awaiting approval';
+    if (ms === 'ranger_rejected') return 'ranger rejected';
+    if (qs === 'sent') return 'queued';
+    return 'scheduled';
+  };
+
+  const formatDate = (d) => {
+    if (!d) return '—';
+    return new Date(d).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  };
+
+  return (
+    <div>
+      {/* Timeline */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.375rem', marginBottom: '0.75rem' }}>
+        {[1, 2, 3, 4].map(num => {
+          const touch = seq.touches?.find(t => t.touch_number === num);
+          if (!touch && num === 1) return null;
+          const placeholder = !touch;
+          return (
+            <div key={num} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', opacity: placeholder ? 0.4 : 1 }}>
+              {placeholder ? <Lock size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} /> : statusIcon(touch)}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: '0.75rem', fontWeight: 500, color: 'var(--text)' }}>
+                    Touch {num} — {TOUCH_LABELS[num]}
+                  </span>
+                  <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                    {touch ? formatDate(touch.scheduled_for) : '—'}
+                  </span>
+                </div>
+                {touch && (
+                  <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>{statusLabel(touch)}</div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Status + controls */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+          Status: <strong style={{ color: seq.sequence_status === 'active' ? 'var(--lime)' : seq.sequence_status === 'replied' ? 'var(--blue)' : 'var(--orange)' }}>
+            {seq.sequence_status}
+          </strong>
+        </span>
+        {seq.sequence_status === 'active' && (
+          <>
+            <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', gap: '0.25rem' }} onClick={() => handleAction('pause')} disabled={acting}>
+              <PauseCircle size={11} /> Pause
+            </button>
+            <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', color: '#ef4444' }} onClick={() => handleAction('stop')} disabled={acting}>
+              Stop
+            </button>
+          </>
+        )}
+        {seq.sequence_status === 'paused' && (
+          <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', gap: '0.25rem' }} onClick={() => handleAction('resume')} disabled={acting}>
+            ▶ Resume
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function LeadDetail({ lead, onUpdate }) {
   const { request } = useApi();
@@ -337,7 +459,13 @@ function LeadDetail({ lead, onUpdate }) {
           {generating ? 'Generating…' : 'Generate Outreach with Sales Beaver'}
         </button>
 
-        {/* 5. Messages */}
+        {/* 5. Outreach Sequence */}
+        <div>
+          <SectionLabel label="Outreach Sequence" />
+          <SequenceSection leadId={lead.id} />
+        </div>
+
+        {/* 6. Messages */}
         <div>
           <SectionLabel icon={MessageSquare} label={`Messages (${messages.length})`} />
           {msgsLoading ? (
@@ -361,7 +489,7 @@ function LeadDetail({ lead, onUpdate }) {
           )}
         </div>
 
-        {/* 6. Activity */}
+        {/* 7. Activity */}
         <div>
           <SectionLabel icon={Activity} label="Activity" />
           {actLoading ? (

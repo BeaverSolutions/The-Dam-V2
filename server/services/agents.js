@@ -159,6 +159,19 @@ async function rangerReview(clientId, { message_id, message_body }) {
         { message_id }
       );
 
+      // Normalise new format { decision, score, breakdown, feedback, suggested_edit, reject_reason }
+      // to include approved: boolean for backward compat with pipeline code
+      if (result?.decision !== undefined) {
+        const approved = result.decision === 'approve' || result.decision === 'approve_with_edits';
+        return {
+          ...result,
+          approved,
+          notes: result.feedback || result.reject_reason || null,
+          issues: result.reject_reason ? [result.reject_reason] : [],
+          suggestions: result.suggested_edit ? [result.suggested_edit] : [],
+        };
+      }
+      // Legacy format
       if (result?.approved !== undefined) {
         return result;
       }
@@ -170,6 +183,7 @@ async function rangerReview(clientId, { message_id, message_body }) {
   return {
     message_id,
     approved: true,
+    decision: 'approve',
     score: 80,
     notes: 'Fallback approval',
     issues: [],
@@ -182,7 +196,48 @@ async function rangerReview(clientId, { message_id, message_body }) {
  * DIRECTOR — PLAN
  * =========================
  */
+/**
+ * Pre-screen a Director command for things that are explicitly out of scope.
+ * Returns a plain message string if the command should be rejected, null otherwise.
+ */
+function screenCommand(command) {
+  // Ranger bypass attempts
+  if (/\b(skip|bypass|without|disable|remove|ignore)\s+(the\s+)?ranger\b/i.test(command) ||
+      /\bno\s+ranger\b/i.test(command) ||
+      /\bskip\s+qa\b/i.test(command)) {
+    return "The Ranger review is a mandatory quality gate and cannot be skipped or bypassed. Every message must pass Ranger's QA check before it reaches your approval queue. This protects you from sending non-compliant, low-quality, or off-brand messages — it's a core safety feature of The Dam.\n\nIf Ranger keeps rejecting messages, try asking me to adjust the messaging style instead.";
+  }
+
+  // Direct personal notification email (not outreach)
+  // Pattern: "email me", "email us", "send me an email", "email [person]@[domain]"
+  // but NOT if the command also mentions leads/outreach/campaign/companies (that's sales)
+  const isOutreach = /\b(lead|leads|campaign|outreach|prospect|company|companies|target|find|search)\b/i.test(command);
+  const isDirectEmail = /\b(email|send\s+an?\s+email|notify|message)\s+(me|us|them|[a-zA-Z]+\s+and\s+[a-zA-Z]+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+)\b/i.test(command);
+
+  if (isDirectEmail && !isOutreach) {
+    return "I'm built to run sales outreach campaigns, not send one-off notification emails to specific people.\n\nThe pipeline is: I find leads → Sales Beaver drafts messages → Ranger reviews → you approve → email sends.\n\nFor campaigns, try something like:\n• \"Find 10 VPs of Engineering at B2B SaaS companies and reach out\"\n• \"Target fintech startups in London with a cold email sequence\"\n\nIf you need to send a manual email outside the pipeline, you can do that directly from your Gmail account.";
+  }
+
+  return null;
+}
+
 async function directorPlan(clientId, { command }) {
+  // Pre-screen before calling AI or building a plan
+  const rejection = screenCommand(command);
+  if (rejection) {
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'command_out_of_scope',
+      metadata: { command, reason: rejection.split('\n')[0] },
+    });
+    return {
+      plan_id: uuidv4(),
+      command,
+      status: 'out_of_scope',
+      message: rejection,
+    };
+  }
+
   const planId = uuidv4();
   const icp = await directorGetICP(clientId);
 

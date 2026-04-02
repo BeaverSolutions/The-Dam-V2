@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, GitBranch, MessageSquare, CheckCircle,
-  Activity, Calendar, Users, MessageCircle, Settings, Menu, X, Bell, LogOut
+  Activity, Calendar, Users, MessageCircle, Settings, Menu, X, Bell, LogOut, Brain,
 } from 'lucide-react';
 import BeaverAvatar from './BeaverAvatar';
 import { clearToken, getUser } from '../utils/auth';
@@ -17,6 +17,7 @@ const navItems = [
   { path: '/calendar', label: 'Calendar', icon: Calendar },
   { path: '/team', label: 'The Crew', icon: Users },
   { path: '/chat', label: 'Director Chat', icon: MessageCircle },
+  { path: '/memory', label: 'Memory', icon: Brain },
   { path: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -63,7 +64,7 @@ export default function Layout() {
         <BeaverAvatar agent="director" size="xs" />
         <div>
           <div style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--lime)' }}>The Dam</div>
-          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>v2 — Sprint 6</div>
+          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>v2 — Sprint 7</div>
         </div>
       </div>
 

@@ -4,6 +4,7 @@ const router = require('express').Router();
 const { body, query, param } = require('express-validator');
 const validate = require('../middleware/validate');
 const leadsService = require('../services/leads');
+const { getLeadSequence, pauseSequence, resumeSequence, stopSequence } = require('../services/followupSequence');
 
 // GET /api/leads
 router.get('/', async (req, res, next) => {
@@ -73,5 +74,27 @@ router.delete('/:id', async (req, res, next) => {
     res.json({ data: { deleted: true } });
   } catch (err) { next(err); }
 });
+
+// GET /api/leads/:id/sequence
+router.get('/:id/sequence', async (req, res, next) => {
+  try {
+    const sequence = await getLeadSequence(req.clientId, req.params.id);
+    res.json({ data: sequence });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/leads/:id/sequence
+router.put('/:id/sequence',
+  [body('action').isIn(['pause', 'resume', 'stop']), validate],
+  async (req, res, next) => {
+    try {
+      const { action } = req.body;
+      if (action === 'pause') await pauseSequence(req.params.id);
+      else if (action === 'resume') await resumeSequence(req.params.id);
+      else if (action === 'stop') await stopSequence(req.params.id, 'completed');
+      res.json({ data: { action, lead_id: req.params.id } });
+    } catch (err) { next(err); }
+  }
+);
 
 module.exports = router;

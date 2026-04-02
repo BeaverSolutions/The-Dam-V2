@@ -8,23 +8,23 @@ const BEAVER_IMAGES = {
 };
 
 const BEAVER_COLORS = {
-  research_beaver: 'var(--blue)',
+  research_beaver: 'var(--orange)',
   sales_beaver: 'var(--lime)',
-  ranger: 'var(--orange)',
+  ranger: 'var(--police-blue)',
   director: 'var(--purple)',
 };
 
 const BEAVER_LABELS = {
   research_beaver: 'Research Beaver',
   sales_beaver: 'Sales Beaver',
-  ranger: 'The Ranger',
+  ranger: 'Ranger Beaver',
   director: 'The Director',
 };
 
 const BEAVER_INITIALS = {
   research_beaver: 'R',
   sales_beaver: 'S',
-  ranger: 'G',
+  ranger: 'R',
   director: 'D',
 };
 

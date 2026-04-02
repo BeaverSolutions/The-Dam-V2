@@ -14,6 +14,7 @@ import Logs from './pages/Logs';
 import Calendar from './pages/Calendar';
 import Team from './pages/Team';
 import Chat from './pages/Chat';
+import Memory from './pages/Memory';
 import Settings from './pages/Settings';
 
 function PrivateRoute({ children }) {
@@ -43,6 +44,7 @@ export default function App() {
         <Route path="calendar" element={<Calendar />} />
         <Route path="team" element={<Team />} />
         <Route path="chat" element={<Chat />} />
+        <Route path="memory" element={<Memory />} />
         <Route path="settings" element={<Settings />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

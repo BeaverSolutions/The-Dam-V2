@@ -93,4 +93,49 @@ router.post('/director/execute',
   }
 );
 
+/* ─── Memory ─────────────────────────────────────────────── */
+
+const pool = require('../db/pool');
+
+router.get('/memory', async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, agent, memory_type, key, content, updated_at
+       FROM agent_memory WHERE client_id = $1
+       ORDER BY updated_at DESC`,
+      [req.clientId]
+    );
+    res.json({ data: result.rows });
+  } catch (err) { next(err); }
+});
+
+router.post('/memory/journal',
+  [body('text').notEmpty().trim(), validate],
+  async (req, res, next) => {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const content = JSON.stringify({ text: req.body.text, created_at: new Date().toISOString() });
+      const result = await pool.query(
+        `INSERT INTO agent_memory (client_id, agent, memory_type, key, content)
+         VALUES ($1, 'system', 'journal', $2, $3)
+         ON CONFLICT (client_id, agent, key)
+         DO UPDATE SET content = agent_memory.content || $3::jsonb, updated_at = NOW()
+         RETURNING *`,
+        [req.clientId, today, content]
+      );
+      res.status(201).json({ data: result.rows[0] });
+    } catch (err) { next(err); }
+  }
+);
+
+router.delete('/memory/:id', async (req, res, next) => {
+  try {
+    await pool.query(
+      `DELETE FROM agent_memory WHERE id = $1 AND client_id = $2`,
+      [req.params.id, req.clientId]
+    );
+    res.json({ data: { deleted: true } });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

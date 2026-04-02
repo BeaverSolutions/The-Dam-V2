@@ -160,6 +160,11 @@ function Message({ msg }) {
         {msg.plan?.resolved === 'rejected' && (
           <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: 'var(--orange)' }}>Plan rejected</div>
         )}
+        {msg.plan?.resolved === 'expired' && (
+          <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+            Session ended — this plan is no longer actionable
+          </div>
+        )}
 
         {/* Execution results */}
         {msg.results && <ExecutionResults results={msg.results} />}
@@ -170,18 +175,60 @@ function Message({ msg }) {
   );
 }
 
+const STORAGE_KEY = 'dam_director_chat';
+const WELCOME_MSG = {
+  id: 1,
+  role: 'assistant',
+  content: "Hi! I'm The Director. Tell me what you want to achieve — I'll create a plan and coordinate the crew.\n\nTry: \"Find 20 VP-level leads at Series B SaaS companies and start outreach\"",
+};
+
+// Strip non-serializable function refs before writing to storage.
+// Plans that were pending approval are marked expired so stale buttons don't appear.
+function serializeMessages(msgs) {
+  return msgs.map(m => {
+    if (!m.plan) return m;
+    const { onApprove, onReject, ...planData } = m.plan;
+    return {
+      ...m,
+      plan: {
+        ...planData,
+        resolved: planData.resolved === null ? 'expired' : planData.resolved,
+      },
+    };
+  });
+}
+
+function loadMessages() {
+  try {
+    const stored = sessionStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        // Any plan that was still pending when the page unloaded is now expired
+        return parsed.map(m =>
+          m.plan && !m.plan.resolved
+            ? { ...m, plan: { ...m.plan, resolved: 'expired' } }
+            : m
+        );
+      }
+    }
+  } catch {}
+  return [WELCOME_MSG];
+}
+
 export default function Chat() {
   const { request, loading } = useApi();
   const navigate = useNavigate();
-  const [messages, setMessages] = useState([
-    {
-      id: 1,
-      role: 'assistant',
-      content: "Hi! I'm The Director. Tell me what you want to achieve — I'll create a plan and coordinate the crew.\n\nTry: \"Find 20 VP-level leads at Series B SaaS companies and start outreach\"",
-    },
-  ]);
+  const [messages, setMessages] = useState(loadMessages);
   const [input, setInput] = useState('');
   const bottomRef = useRef(null);
+
+  // Persist messages to sessionStorage whenever they change
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(serializeMessages(messages)));
+    } catch {}
+  }, [messages]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -202,6 +249,17 @@ export default function Chat() {
 
       if (res?.data) {
         const plan = res.data;
+
+        // Director flagged this command as out of scope — show explanation, no plan
+        if (plan.status === 'out_of_scope') {
+          setMessages(prev => [...prev, {
+            id: Date.now() + 1,
+            role: 'assistant',
+            content: plan.message,
+          }]);
+          return;
+        }
+
         const planMsgId = Date.now() + 1;
 
         const resolvePlan = (resolution) => {
@@ -270,6 +328,16 @@ export default function Chat() {
             <p className="page-subtitle">Give commands — the crew executes</p>
           </div>
         </div>
+        <button
+          className="btn btn-ghost"
+          style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}
+          onClick={() => {
+            sessionStorage.removeItem(STORAGE_KEY);
+            setMessages([WELCOME_MSG]);
+          }}
+        >
+          Clear chat
+        </button>
       </div>
 
       {/* Messages */}

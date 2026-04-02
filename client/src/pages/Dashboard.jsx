@@ -3,6 +3,7 @@ import {
   Users, MessageSquare, CheckCircle, Calendar,
   Zap, Coffee, Sun, Moon, Sunrise, X, FileText,
   Mail, Search, Send, AtSign, CornerDownRight, RefreshCw,
+  ArrowRight, MessageCircle, Target, TrendingUp, BookOpen,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import BeaverAvatar, { BEAVER_COLORS, BEAVER_LABELS } from '../components/BeaverAvatar';
@@ -319,6 +320,303 @@ function MorningBriefModal({ open, onClose }) {
   );
 }
 
+/* ─── Director Floating Bubble ───────────────────────────── */
+
+const BUBBLE_STORAGE = 'dam_director_chat';
+
+function DirectorBubble({ prefilledCommand, onCommandUsed }) {
+  const { request, loading } = useApi();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const [input, setInput] = useState('');
+
+  // Open + pre-fill when KPI button fires
+  useEffect(() => {
+    if (prefilledCommand) {
+      setOpen(true);
+      setInput(prefilledCommand);
+      onCommandUsed && onCommandUsed();
+    }
+  }, [prefilledCommand]);
+  const [messages, setMessages] = useState(() => {
+    try {
+      const s = sessionStorage.getItem(BUBBLE_STORAGE);
+      if (s) {
+        const parsed = JSON.parse(s);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed.slice(-4);
+      }
+    } catch {}
+    return [{ role: 'assistant', content: 'Hi! Give me a goal and I\'ll coordinate the crew.' }];
+  });
+  const bottomRef = useRef(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, open]);
+
+  const send = async () => {
+    if (!input.trim() || loading) return;
+    const cmd = input.trim();
+    const next = [...messages, { role: 'user', content: cmd }];
+    setMessages(next);
+    setInput('');
+    try {
+      const res = await request('/agents/director/plan', { method: 'POST', body: JSON.stringify({ command: cmd }) });
+      const plan = res?.data;
+      let reply;
+      if (plan?.status === 'out_of_scope') {
+        reply = plan.message;
+      } else if (plan?.steps) {
+        reply = `Plan ready: ${plan.steps.length} steps, ~${plan.estimated_leads} leads. Open Director Chat to approve & execute.`;
+      } else {
+        reply = 'Got it — open Director Chat to manage the full pipeline.';
+      }
+      const final = [...next, { role: 'assistant', content: reply }];
+      setMessages(final);
+      try { sessionStorage.setItem(BUBBLE_STORAGE, JSON.stringify(final)); } catch {}
+    } catch {
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Something went wrong. Try from Director Chat.' }]);
+    }
+  };
+
+  return (
+    <>
+      {/* Chat panel */}
+      {open && (
+        <div style={{
+          position: 'fixed', bottom: 90, right: 24,
+          width: 320, maxHeight: 420,
+          background: 'var(--panel)', border: '1px solid var(--border)',
+          borderRadius: 12, boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+          display: 'flex', flexDirection: 'column',
+          zIndex: 300,
+        }}>
+          {/* Header */}
+          <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+            <BeaverAvatar agent="director" size="xs" animate />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: '0.85rem' }}>The Director</div>
+              <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>Quick command</div>
+            </div>
+            <button
+              className="btn btn-ghost"
+              style={{ padding: '0.2rem', fontSize: '0.72rem', color: 'var(--purple)', gap: 3 }}
+              onClick={() => navigate('/chat')}
+            >
+              Full chat <ArrowRight size={11} />
+            </button>
+            <button className="btn btn-ghost" style={{ padding: '0.2rem' }} onClick={() => setOpen(false)}>
+              <X size={15} />
+            </button>
+          </div>
+
+          {/* Messages */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            {messages.map((m, i) => (
+              <div key={i} style={{
+                alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+                maxWidth: '85%',
+                background: m.role === 'user' ? 'rgba(200,255,0,0.1)' : 'var(--bg)',
+                border: `1px solid ${m.role === 'user' ? 'rgba(200,255,0,0.2)' : 'var(--border)'}`,
+                borderRadius: 8, padding: '0.4rem 0.6rem',
+                fontSize: '0.78rem', lineHeight: 1.5,
+              }}>
+                {m.content}
+              </div>
+            ))}
+            {loading && (
+              <div style={{ display: 'flex', gap: 4, padding: '0.4rem 0.6rem' }}>
+                {[0,1,2].map(i => <div key={i} className="skeleton" style={{ width: 6, height: 6, borderRadius: '50%', animationDelay: `${i * 0.15}s` }} />)}
+              </div>
+            )}
+            <div ref={bottomRef} />
+          </div>
+
+          {/* Input */}
+          <div style={{ padding: '0.5rem', borderTop: '1px solid var(--border)', display: 'flex', gap: '0.4rem' }}>
+            <input
+              className="form-input"
+              style={{ flex: 1, fontSize: '0.8rem', padding: '0.4rem 0.6rem' }}
+              placeholder="Give a command…"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') send(); }}
+            />
+            <button className="btn btn-primary" style={{ padding: '0.4rem 0.6rem' }} onClick={send} disabled={!input.trim() || loading}>
+              <Send size={13} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Floating trigger button */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          position: 'fixed', bottom: 24, right: 24,
+          width: 56, height: 56,
+          borderRadius: '50%',
+          background: 'var(--purple)',
+          border: '2px solid rgba(168,85,247,0.4)',
+          boxShadow: '0 4px 20px rgba(168,85,247,0.35)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          cursor: 'pointer',
+          zIndex: 301,
+          transition: 'transform 0.2s ease, box-shadow 0.2s ease',
+        }}
+        onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.08)'; e.currentTarget.style.boxShadow = '0 6px 28px rgba(168,85,247,0.5)'; }}
+        onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.boxShadow = '0 4px 20px rgba(168,85,247,0.35)'; }}
+        title="Quick command to The Director"
+      >
+        {open ? <X size={22} color="#fff" /> : <MessageCircle size={22} color="#fff" />}
+      </button>
+    </>
+  );
+}
+
+/* ─── KPI Progress Card ──────────────────────────────────── */
+
+function KpiCard({ onDirectorCommand }) {
+  const { request } = useApi();
+  const [kpi, setKpi] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const loadKpi = useCallback(async () => {
+    try {
+      const res = await request('/dashboard/daily-progress');
+      setKpi(res?.data || null);
+    } catch {}
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    loadKpi();
+    const iv = setInterval(loadKpi, 5 * 60 * 1000); // refresh every 5 min
+    return () => clearInterval(iv);
+  }, []);
+
+  if (loading) return <div className="card"><div className="skeleton" style={{ height: 80 }} /></div>;
+  if (!kpi) return null;
+
+  const pct = kpi.percentage || 0;
+  const met = kpi.kpi_met;
+  const barColor = met ? 'var(--lime)' : 'var(--lime)';
+  const today = new Date().toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+
+  return (
+    <div className="card fade-in" style={{ marginBottom: '1.25rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <Target size={14} style={{ color: 'var(--lime)' }} />
+          <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+            Today's KPI
+          </span>
+        </div>
+        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{today}</span>
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ marginBottom: '0.5rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.3rem' }}>
+          <span style={{ fontSize: '1.5rem', fontWeight: 700, color: met ? 'var(--lime)' : 'var(--text)' }}>
+            {kpi.sent} <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)', fontWeight: 400 }}>/ {kpi.target}</span>
+          </span>
+          <span style={{ fontSize: '0.85rem', color: met ? 'var(--lime)' : 'var(--text-muted)', fontWeight: 600, alignSelf: 'flex-end', marginBottom: '0.15rem' }}>
+            {met ? '✓ KPI met!' : `${pct}%`}
+          </span>
+        </div>
+        <div style={{ height: 6, background: 'var(--bg)', borderRadius: 3, overflow: 'hidden' }}>
+          <div style={{ height: '100%', width: `${pct}%`, background: barColor, borderRadius: 3, transition: 'width 0.6s ease' }} />
+        </div>
+      </div>
+
+      {/* Channel breakdown */}
+      <div style={{ display: 'flex', gap: '1.5rem', marginBottom: met ? 0 : '0.75rem' }}>
+        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>📧 Email: <strong style={{ color: 'var(--text)' }}>{kpi.email}</strong></span>
+        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>💼 LinkedIn: <strong style={{ color: 'var(--text)' }}>{kpi.linkedin}</strong></span>
+        {!met && <span style={{ fontSize: '0.72rem', color: 'var(--orange)' }}>Gap: <strong>{kpi.gap}</strong></span>}
+      </div>
+
+      {/* CTA button */}
+      {!met && kpi.gap > 0 && (
+        <button
+          className="btn btn-secondary"
+          style={{ width: '100%', justifyContent: 'center', gap: '0.5rem', fontSize: '0.8rem', marginTop: '0.25rem' }}
+          onClick={() => onDirectorCommand && onDirectorCommand(
+            `We need ${kpi.gap} more outreach today to hit our ${kpi.target} target. Find leads and send messages now.`
+          )}
+        >
+          <Zap size={13} /> Ask Director to close the gap →
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ─── Weekly Learnings Card ──────────────────────────────── */
+
+function WeeklyLearningsCard() {
+  const { request } = useApi();
+  const [learnings, setLearnings] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    request('/dashboard/weekly-learnings')
+      .then(res => setLearnings(res?.data || null))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div className="card"><div className="skeleton" style={{ height: 80 }} /></div>;
+  if (!learnings) return null;
+
+  const hooks = Array.isArray(learnings.best_hooks) ? learnings.best_hooks : [];
+  const weekLabel = learnings.week_start
+    ? `${new Date(learnings.week_start).toLocaleDateString([], { month: 'short', day: 'numeric' })} – ${new Date(learnings.week_end).toLocaleDateString([], { month: 'short', day: 'numeric' })}`
+    : 'Last week';
+
+  return (
+    <div className="card fade-in" style={{ marginBottom: '1.25rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+        <BookOpen size={14} style={{ color: 'var(--purple)' }} />
+        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+          Director's Weekly Brief
+        </span>
+        <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginLeft: 'auto' }}>{weekLabel}</span>
+      </div>
+
+      {/* Stats row */}
+      <div style={{ display: 'flex', gap: '1.5rem', marginBottom: '0.75rem', padding: '0.5rem 0.75rem', background: 'var(--bg)', borderRadius: 6 }}>
+        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>📊 <strong style={{ color: 'var(--text)' }}>{learnings.total_outreach}</strong> outreach</span>
+        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>↩ <strong style={{ color: 'var(--text)' }}>{learnings.total_replies}</strong> replies</span>
+        <span style={{ fontSize: '0.72rem', color: learnings.reply_rate > 5 ? 'var(--lime)' : 'var(--text-muted)' }}>
+          <strong>{learnings.reply_rate}%</strong> reply rate
+        </span>
+      </div>
+
+      {/* Best hooks */}
+      {hooks.length > 0 && (
+        <div style={{ marginBottom: '0.625rem' }}>
+          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--lime)', marginBottom: '0.35rem' }}>🏆 Best hooks</div>
+          {hooks.slice(0, 2).map((h, i) => (
+            <div key={i} style={{ fontSize: '0.75rem', color: 'var(--text)', padding: '0.2rem 0', borderBottom: '1px solid var(--border)' }}>
+              "{h}"
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Director notes */}
+      {learnings.director_notes && (
+        <div>
+          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--purple)', marginBottom: '0.25rem' }}>📝 Director's notes</div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>{learnings.director_notes}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ─── Main Page ──────────────────────────────────────────── */
 
 export default function Dashboard() {
@@ -333,6 +631,7 @@ export default function Dashboard() {
   const [liveLogs, setLiveLogs] = useState([]);
 
   const [briefOpen, setBriefOpen] = useState(false);
+  const [directorCommand, setDirectorCommand] = useState(null);
 
   const loadLogs = useCallback(async () => {
     try {
@@ -372,6 +671,9 @@ export default function Dashboard() {
   return (
     <div className="fade-in">
       <GreetingHeader onBriefOpen={() => setBriefOpen(true)} onRefresh={handleRefresh} refreshing={refreshing} />
+
+      {/* KPI Progress */}
+      <KpiCard onDirectorCommand={(cmd) => setDirectorCommand(cmd)} />
 
       {/* Integration chips */}
       <IntegrationChips integrations={stats.integrations} loading={statsLoading} />
@@ -417,6 +719,9 @@ export default function Dashboard() {
         />
       </div>
 
+      {/* Weekly Learnings */}
+      <WeeklyLearningsCard />
+
       {/* Bottom Row */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 240px', gap: '1rem' }} className="dashboard-bottom">
         {/* Pipeline funnel */}
@@ -438,6 +743,7 @@ export default function Dashboard() {
       </div>
 
       <MorningBriefModal open={briefOpen} onClose={() => setBriefOpen(false)} />
+      <DirectorBubble prefilledCommand={directorCommand} onCommandUsed={() => setDirectorCommand(null)} />
     </div>
   );
 }
