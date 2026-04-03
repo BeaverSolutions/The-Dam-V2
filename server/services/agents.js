@@ -277,6 +277,16 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
 }
 
 /**
+ * Strip em dashes as a hard safety net before saving any message body.
+ * Replaces — with a comma or space depending on context.
+ */
+function stripEmDashes(text) {
+  if (!text) return text;
+  // Replace em dash with a comma-space for mid-sentence, or just a space
+  return text.replace(/\s*—\s*/g, ', ').replace(/—/g, ' ');
+}
+
+/**
  * =========================
  * RANGER
  * =========================
@@ -331,6 +341,67 @@ async function rangerReview(clientId, { message_id, message_body }) {
     issues: [],
     suggestions: [],
   };
+}
+
+/**
+ * =========================
+ * RANGER DRAFT (last resort)
+ * =========================
+ * Called when Sales Beaver fails all 3 Ranger attempts.
+ * The Ranger writes the message itself using its own rules — guaranteed compliant.
+ */
+async function rangerDraft(clientId, { lead_name, lead_company, lead_title, lead_angle, lead_friction, rejected_body }) {
+  if (!callAgent) return null;
+
+  try {
+    const [persona, fileConfig] = await Promise.all([
+      getClientPersona(clientId),
+      getClientConfig(clientId),
+    ]);
+    const personaContext = buildPersonaContext(persona);
+    const fileContext = buildClientContext(fileConfig);
+
+    const result = await callAgent(
+      'ranger',
+      `Sales Beaver has failed your QA gate 3 times for this lead. You must now write the message yourself.
+
+LEAD:
+- Name: ${lead_name || 'Unknown'}
+- Company: ${lead_company || 'Unknown'}
+- Title: ${lead_title || 'Unknown'}
+- Research angle: ${lead_angle || 'General operational pain'}
+- Friction detected: ${lead_friction || 'Founder-led sales, pipeline inconsistency'}
+
+Last rejected message (do NOT copy — write from scratch):
+${rejected_body || '(none)'}
+
+Write a Day 0 cold email that passes ALL your own gates:
+- Under 80 words (body only)
+- No em dashes (—) anywhere
+- No bullet points
+- Exactly 1 question
+- No product or service name in opener
+- No soft CTAs (no "worth a quick chat", "happy to jump on")
+- Specific reference to a real signal about this company
+- Reads like a human, not a vendor
+- No banned phrases${personaContext}${fileContext}
+
+Return JSON only: {"subject":"Subject line (max 6 words, no em dashes)","body":"Message body here"}`,
+      { mode: 'ranger_draft', lead_name, lead_company }
+    );
+
+    if (result?.body) {
+      return {
+        subject: result.subject || null,
+        body: stripEmDashes(result.body), // safety net even on Ranger's own draft
+      };
+    }
+    return null;
+  } catch (err) {
+    console.warn('[agents] Ranger draft failed:', err.message);
+    await logMistake(clientId, 'ranger', 'Ranger draft failed after Sales Beaver exhausted attempts', err.message, 'Lead needs manual message from user');
+    return null;
+  }
 }
 
 /**
@@ -664,6 +735,14 @@ async function directorExecute(clientId, { plan_id, command }) {
         });
 
         if (rangerApproved) {
+          // If Ranger returned approve_with_edits, use its suggested_edit (the cleaned version)
+          // This is critical — the suggested_edit has em dashes and other issues already fixed by Ranger
+          if (rangerResult.decision === 'approve_with_edits' && rangerResult.suggested_edit) {
+            currentBody = rangerResult.suggested_edit;
+          }
+          // Safety net: strip em dashes from the final body no matter what
+          currentBody = stripEmDashes(currentBody);
+
           // Save final approved body and push to approval queue
           await pool.query(
             `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
@@ -733,28 +812,95 @@ async function directorExecute(clientId, { plan_id, command }) {
     } // end retry loop
 
     if (!finalApproved) {
-      // All attempts exhausted — mark as ranger_rejected
-      const finalNotes = lastRangerResult
-        ? (Array.isArray(lastRangerResult.issues) && lastRangerResult.issues.length > 0
-            ? lastRangerResult.issues.join('; ')
-            : lastRangerResult.notes || 'Failed Ranger QA after max retries')
-        : 'Ranger review failed';
-
-      await pool.query(
-        `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'ranger_rejected', updated_at = NOW()
-         WHERE id = $3 AND client_id = $4`,
-        [Math.round(lastRangerResult?.score || 0), finalNotes, msg.id, clientId]
-      );
-
+      // All Sales Beaver attempts exhausted — Ranger now writes it from scratch
       await logsService.createLog(clientId, {
         agent: 'ranger',
-        action: 'message_rejected_final',
+        action: 'ranger_draft_triggered',
         target_type: 'message',
         target_id: msg.id,
-        metadata: { attempts: MAX_RANGER_RETRIES, final_notes: finalNotes },
+        metadata: { attempts_failed: MAX_RANGER_RETRIES, lead_name: msg.lead_name },
       });
 
-      rejectedCount++;
+      // Pull lead details for context
+      let leadRow = null;
+      try {
+        const leadRes = await pool.query(
+          `SELECT title, metadata FROM leads WHERE id = $1 AND client_id = $2 LIMIT 1`,
+          [msg.lead_id, clientId]
+        );
+        leadRow = leadRes.rows[0] || null;
+      } catch {}
+
+      const rangerDraftResult = await rangerDraft(clientId, {
+        lead_name: msg.lead_name,
+        lead_company: msg.lead_company,
+        lead_title: leadRow?.title || null,
+        lead_angle: leadRow?.metadata?.angle || null,
+        lead_friction: leadRow?.metadata?.friction || null,
+        rejected_body: currentBody,
+      });
+
+      if (rangerDraftResult?.body) {
+        // Ranger's own draft — save and send to approval queue
+        await pool.query(
+          `UPDATE messages SET body = $1, subject = $2, ranger_score = 80, ranger_notes = $3,
+           status = 'pending_approval', updated_at = NOW()
+           WHERE id = $4 AND client_id = $5`,
+          [
+            rangerDraftResult.body,
+            rangerDraftResult.subject || currentSubject,
+            'Drafted by Ranger after 3 Sales Beaver attempts failed QA',
+            msg.id,
+            clientId,
+          ]
+        );
+
+        await pool.query(
+          `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'ranger')`,
+          [clientId, msg.id]
+        );
+
+        await logsService.createLog(clientId, {
+          agent: 'ranger',
+          action: 'ranger_draft_approved',
+          target_type: 'message',
+          target_id: msg.id,
+          metadata: { note: 'Ranger wrote this message after Sales Beaver failed 3 QA checks' },
+        });
+
+        finalApproved = true;
+        approvedCount++;
+      } else {
+        // Even Ranger's draft failed — mark lead for manual message
+        const finalNotes = lastRangerResult
+          ? (Array.isArray(lastRangerResult.issues) && lastRangerResult.issues.length > 0
+              ? lastRangerResult.issues.join('; ')
+              : lastRangerResult.notes || 'Failed QA after max retries + Ranger draft')
+          : 'All QA attempts exhausted';
+
+        await pool.query(
+          `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'ranger_rejected', updated_at = NOW()
+           WHERE id = $3 AND client_id = $4`,
+          [Math.round(lastRangerResult?.score || 0), finalNotes, msg.id, clientId]
+        );
+
+        // Flag the lead so user knows it needs a manual message
+        await pool.query(
+          `UPDATE leads SET metadata = jsonb_set(COALESCE(metadata, '{}'), '{needs_manual_message}', 'true'), updated_at = NOW()
+           WHERE id = $1 AND client_id = $2`,
+          [msg.lead_id, clientId]
+        );
+
+        await logsService.createLog(clientId, {
+          agent: 'ranger',
+          action: 'message_rejected_final',
+          target_type: 'message',
+          target_id: msg.id,
+          metadata: { attempts: MAX_RANGER_RETRIES, ranger_draft_failed: true, final_notes: finalNotes, lead_needs_manual: true },
+        });
+
+        rejectedCount++;
+      }
     }
   }
 
@@ -880,6 +1026,7 @@ module.exports = {
   researchSearch,
   salesGenerate,
   rangerReview,
+  rangerDraft,
   directorPlan,
   directorExecute,
   directorBrief,
