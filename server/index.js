@@ -13,6 +13,7 @@ const authMiddleware = require('./middleware/auth');
 const tenantScope = require('./middleware/tenantScope');
 const rateLimiter = require('./middleware/rateLimiter');
 const adminOnly = require('./middleware/adminOnly');
+const superAdminOnly = require('./middleware/superAdminOnly');
 const config = require('./config');
 
 const app = express();
@@ -78,8 +79,8 @@ app.use('/api/dashboard', authMiddleware, tenantScope, require('./routes/dashboa
 // Autonomous routes — internal key auth (no JWT required)
 app.use('/api/autonomous', require('./routes/autonomous'));
 
-// Routes - admin only
-app.use('/api/admin', authMiddleware, tenantScope, adminOnly, require('./routes/admin'));
+// Routes - super admin only (Beaver Solutions)
+app.use('/api/admin', authMiddleware, tenantScope, superAdminOnly, require('./routes/admin'));
 
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.0.0', tag: 'Autonomous', timestamp: new Date().toISOString() }));
