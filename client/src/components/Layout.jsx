@@ -28,7 +28,7 @@ export default function Layout() {
   const navigate = useNavigate();
   const user = getUser();
   const { request } = useApi();
-  const isSuperAdmin = user?.client?.name?.toLowerCase().includes('beaver solutions') || user?.client?.name?.toLowerCase() === 'beaver solutions';
+  const isSuperAdmin = user?.role === 'admin';
 
   useEffect(() => {
     request('/approvals?status=pending&perPage=1')
