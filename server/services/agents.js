@@ -1,5 +1,9 @@
 'use strict';
 
+// ─── Sprint 9: Agent Intelligence Upgrade ─────────────────────
+// Memory injection added: cross-agent reads, mistake logging.
+// Last updated: 2026-04-03
+
 const { v4: uuidv4 } = require('uuid');
 const logsService = require('./logs');
 const pool = require('../db/pool');
@@ -14,6 +18,111 @@ try {
   console.log('[agents] Claude loaded successfully');
 } catch (err) {
   console.warn('[agents] Failed to load claude service:', err.message);
+}
+
+/**
+ * =========================
+ * MEMORY HELPERS (Sprint 9)
+ * =========================
+ */
+
+/** Read a single agent_memory entry. Returns content or null. */
+async function getMemory(clientId, agent, key) {
+  try {
+    const res = await pool.query(
+      `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = $2 AND key = $3 LIMIT 1`,
+      [clientId, agent, key]
+    );
+    return res.rows[0]?.content || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Log an agent mistake to agent_memory for future runs to learn from.
+ * Keeps the last 20 entries per agent.
+ */
+async function logMistake(clientId, agent, mistake, cause, newRule) {
+  try {
+    const existing = await pool.query(
+      `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = $2 AND key = 'mistakes' LIMIT 1`,
+      [clientId, agent]
+    );
+    const entry = { mistake, cause, new_rule: newRule, ts: new Date().toISOString() };
+    let mistakes = [];
+    if (existing.rows.length > 0) {
+      const prev = existing.rows[0].content;
+      mistakes = Array.isArray(prev) ? prev : [];
+    }
+    mistakes.unshift(entry);
+    mistakes = mistakes.slice(0, 20); // cap at 20 entries
+
+    await pool.query(
+      `INSERT INTO agent_memory (client_id, agent, memory_type, key, content)
+       VALUES ($1, $2, 'mistakes', 'mistakes', $3)
+       ON CONFLICT (client_id, agent, key) DO UPDATE SET content = $3, updated_at = NOW()`,
+      [clientId, agent, JSON.stringify(mistakes)]
+    );
+  } catch (err) {
+    console.warn(`[memory] Failed to log mistake for ${agent}:`, err.message);
+  }
+}
+
+/**
+ * Pull the last 10 Ranger rejection reasons from the messages table.
+ * Used to brief Sales Beaver on patterns to avoid.
+ */
+async function getRangerRejectionPatterns(clientId) {
+  try {
+    const res = await pool.query(
+      `SELECT ranger_notes FROM messages
+       WHERE client_id = $1 AND status = 'ranger_rejected' AND ranger_notes IS NOT NULL
+       ORDER BY created_at DESC LIMIT 10`,
+      [clientId]
+    );
+    if (res.rows.length === 0) return null;
+    return res.rows.map(r => r.ranger_notes).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build a shared memory brief for the Director to inject at kickoff.
+ * Reads ICP, weekly learnings, recent Ranger rejections, and past agent mistakes.
+ */
+async function buildDirectorMemoryBrief(clientId) {
+  try {
+    const [icp, weeklyLearnings, rangerPatterns, salesMistakes, researchMistakes] = await Promise.all([
+      getMemory(clientId, 'director', 'icp'),
+      getMemory(clientId, 'director', 'weekly_learnings'),
+      getRangerRejectionPatterns(clientId),
+      getMemory(clientId, 'sales_beaver', 'mistakes'),
+      getMemory(clientId, 'research_beaver', 'mistakes'),
+    ]);
+
+    const parts = [];
+    if (icp && Object.keys(icp).length > 0) {
+      parts.push(`ICP: ${JSON.stringify(icp)}`);
+    }
+    if (weeklyLearnings) {
+      parts.push(`Weekly learnings (apply these): ${JSON.stringify(weeklyLearnings)}`);
+    }
+    if (rangerPatterns?.length) {
+      parts.push(`Recent Ranger rejections — avoid these patterns:\n${rangerPatterns.slice(0, 5).join('\n')}`);
+    }
+    if (Array.isArray(salesMistakes) && salesMistakes.length > 0) {
+      parts.push(`Sales Beaver past mistakes: ${JSON.stringify(salesMistakes.slice(0, 3))}`);
+    }
+    if (Array.isArray(researchMistakes) && researchMistakes.length > 0) {
+      parts.push(`Research Beaver past mistakes: ${JSON.stringify(researchMistakes.slice(0, 3))}`);
+    }
+
+    return parts.length > 0 ? `\n\nSHARED MEMORY BRIEF (read before acting):\n${parts.join('\n\n')}` : '';
+  } catch {
+    return '';
+  }
 }
 
 /**
@@ -47,9 +156,22 @@ async function researchSearch(clientId, { query, filters = {} }) {
 
   if (callAgent) {
     try {
+      // MEMORY: Load ICP + weekly learnings before sourcing (Sprint 9)
+      const [icpMemory, weeklyLearnings] = await Promise.all([
+        getMemory(clientId, 'director', 'icp'),
+        getMemory(clientId, 'director', 'weekly_learnings'),
+      ]);
+      let memoryContext = '';
+      if (icpMemory && Object.keys(icpMemory).length > 0) {
+        memoryContext += `\n\nICP TO TARGET:\n${JSON.stringify(icpMemory, null, 2)}`;
+      }
+      if (weeklyLearnings) {
+        memoryContext += `\n\nWEEKLY LEARNINGS (apply these to targeting):\n${JSON.stringify(weeklyLearnings)}`;
+      }
+
       const result = await callAgent(
         'research_beaver',
-        `Find companies and people matching this query: "${query}". Return exactly the number of leads requested in the query (default 3 if not specified).`,
+        `Find companies and people matching this query: "${query}". Return exactly the number of leads requested in the query (default 3 if not specified).${memoryContext}`,
         { query, filters }
       );
 
@@ -84,6 +206,7 @@ async function researchSearch(clientId, { query, filters = {} }) {
       console.log(`[research_beaver] Found ${leads.length} leads for query: "${query}"`);
     } catch (err) {
       console.error('[agents] Research Beaver failed:', err.message);
+      await logMistake(clientId, 'research_beaver', 'Claude call failed during research', err.message, 'Retry with a more specific query or check Apollo connection');
     }
   }
 
@@ -109,12 +232,23 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
 
   if (callAgent) {
     try {
-      const [persona, fileConfig] = await Promise.all([getClientPersona(clientId), getClientConfig(clientId)]);
+      const [persona, fileConfig, rangerPatterns] = await Promise.all([
+        getClientPersona(clientId),
+        getClientConfig(clientId),
+        // MEMORY: Load Ranger rejection patterns — brief Sales Beaver on what to avoid (Sprint 9)
+        getRangerRejectionPatterns(clientId),
+      ]);
       const personaContext = buildPersonaContext(persona);
       const fileContext = buildClientContext(fileConfig);
+
+      let rangerContext = '';
+      if (rangerPatterns?.length) {
+        rangerContext = `\n\nRANGER REJECTION HISTORY — these patterns were rejected recently, do NOT repeat them:\n${rangerPatterns.slice(0, 5).join('\n')}`;
+      }
+
       const result = await callAgent(
         'sales_beaver',
-        `Write a ${channel} outreach message for this lead: ${context}${personaContext}${fileContext}`,
+        `Write a ${channel} outreach message for this lead: ${context}${personaContext}${fileContext}${rangerContext}`,
         { lead_id, channel }
       );
 
@@ -129,6 +263,7 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
       }
     } catch (err) {
       console.warn('[agents] Sales Claude failed:', err.message);
+      await logMistake(clientId, 'sales_beaver', 'Claude call failed during message generation', err.message, 'Check Claude API connectivity and lead context quality');
     }
   }
 
@@ -183,6 +318,7 @@ async function rangerReview(clientId, { message_id, message_body }) {
       }
     } catch (err) {
       console.warn('[agents] Ranger failed:', err.message);
+      await logMistake(clientId, 'ranger', 'Claude call failed during QA review', err.message, 'Ranger fell back to default approval — investigate Claude API');
     }
   }
 
@@ -245,7 +381,13 @@ async function directorPlan(clientId, { command }) {
   }
 
   const planId = uuidv4();
-  const [icp, persona, fileConfig] = await Promise.all([directorGetICP(clientId), getClientPersona(clientId), getClientConfig(clientId)]);
+  const [icp, persona, fileConfig, memoryBrief] = await Promise.all([
+    directorGetICP(clientId),
+    getClientPersona(clientId),
+    getClientConfig(clientId),
+    // MEMORY: Build full shared context brief at kickoff (Sprint 9)
+    buildDirectorMemoryBrief(clientId),
+  ]);
 
   if (callAgent) {
     try {
@@ -254,7 +396,7 @@ async function directorPlan(clientId, { command }) {
         : '';
       const personaContext = buildPersonaContext(persona);
       const fileContext = buildClientContext(fileConfig);
-      const result = await callAgent('director', command + icpContext + personaContext + fileContext);
+      const result = await callAgent('director', command + icpContext + personaContext + fileContext + memoryBrief);
 
       if (result?.steps) {
         return {
@@ -269,6 +411,7 @@ async function directorPlan(clientId, { command }) {
       }
     } catch (err) {
       console.warn('[agents] Director failed:', err.message);
+      await logMistake(clientId, 'director', 'Plan generation failed', err.message, 'Simplify command or check ICP configuration');
     }
   }
 
@@ -668,4 +811,8 @@ module.exports = {
   directorUpsertICP,
   getClientPersona,
   upsertClientPersona,
+  // Memory helpers (Sprint 9)
+  getMemory,
+  logMistake,
+  getRangerRejectionPatterns,
 };
