@@ -629,56 +629,132 @@ async function directorExecute(clientId, { plan_id, command }) {
     }
   }
 
-  // ── Step 4: Ranger review ─────────────────────────────────
+  // ── Step 4: Ranger review with Sales Beaver retry loop ───────
+  // If Ranger rejects, Sales Beaver rewrites using the feedback.
+  // Max 3 attempts per message before marking as ranger_rejected.
+  const MAX_RANGER_RETRIES = 3;
   let approvedCount = 0;
   let rejectedCount = 0;
 
   for (const msg of savedMessages) {
-    try {
-      const rangerResult = await rangerReview(clientId, {
-        message_id: msg.id,
-        message_body: msg.body,
-      });
+    let currentBody = msg.body;
+    let currentSubject = msg.subject;
+    let finalApproved = false;
+    let lastRangerResult = null;
 
-      const rangerApproved = rangerResult.approved !== false;
-      const newStatus = rangerApproved ? 'pending_approval' : 'ranger_rejected';
-      const rangerNotes = Array.isArray(rangerResult.issues) && rangerResult.issues.length > 0
-        ? rangerResult.issues.join('; ')
-        : (rangerResult.notes || null);
+    for (let attempt = 1; attempt <= MAX_RANGER_RETRIES; attempt++) {
+      try {
+        const rangerResult = await rangerReview(clientId, {
+          message_id: msg.id,
+          message_body: currentBody,
+        });
+        lastRangerResult = rangerResult;
+
+        const rangerApproved = rangerResult.approved !== false;
+        const rangerNotes = Array.isArray(rangerResult.issues) && rangerResult.issues.length > 0
+          ? rangerResult.issues.join('; ')
+          : (rangerResult.notes || null);
+
+        await logsService.createLog(clientId, {
+          agent: 'ranger',
+          action: rangerApproved ? 'message_approved' : 'message_rejected',
+          target_type: 'message',
+          target_id: msg.id,
+          metadata: { score: rangerResult.score, approved: rangerApproved, attempt, notes: rangerNotes },
+        });
+
+        if (rangerApproved) {
+          // Save final approved body and push to approval queue
+          await pool.query(
+            `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
+             status = 'pending_approval', updated_at = NOW()
+             WHERE id = $5 AND client_id = $6`,
+            [currentBody, currentSubject, Math.round(rangerResult.score || 75), rangerNotes, msg.id, clientId]
+          );
+
+          await pool.query(
+            `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'ranger')`,
+            [clientId, msg.id]
+          );
+
+          await logsService.createLog(clientId, {
+            agent: 'director',
+            action: 'approval_requested',
+            target_type: 'message',
+            target_id: msg.id,
+            metadata: { message_id: msg.id, attempts_taken: attempt },
+          });
+
+          finalApproved = true;
+          approvedCount++;
+          break; // exit retry loop — message approved
+        }
+
+        // Ranger rejected — should Sales Beaver rewrite?
+        if (attempt < MAX_RANGER_RETRIES) {
+          // Update message status so logs reflect the rejection
+          await pool.query(
+            `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'pending_ranger', updated_at = NOW()
+             WHERE id = $3 AND client_id = $4`,
+            [Math.round(rangerResult.score || 0), rangerNotes, msg.id, clientId]
+          );
+
+          await logsService.createLog(clientId, {
+            agent: 'sales_beaver',
+            action: 'message_rewrite_triggered',
+            target_type: 'message',
+            target_id: msg.id,
+            metadata: { attempt, ranger_feedback: rangerNotes, lead_id: msg.lead_id },
+          });
+
+          // Sales Beaver rewrites using Ranger's rejection feedback
+          const leadContext = `Name: ${msg.lead_name || 'Unknown'}, Company: ${msg.lead_company || 'Unknown'}`;
+          const rewriteResult = await salesGenerate(clientId, {
+            lead_id: msg.lead_id,
+            channel: msg.channel || 'email',
+            context: `${leadContext}\n\nREWRITE REQUIRED (attempt ${attempt + 1}/${MAX_RANGER_RETRIES}).\n\nRanger rejected the previous message for these reasons:\n${rangerNotes}\n\nPrevious rejected message:\n${currentBody}\n\nRewrite the message fixing ALL of the above issues. Be specific, concise, no product pitch, no qualification questions, under 80 words.`,
+          });
+
+          currentBody = rewriteResult.body || currentBody;
+          currentSubject = rewriteResult.subject || currentSubject;
+
+          await logsService.createLog(clientId, {
+            agent: 'sales_beaver',
+            action: 'message_rewritten',
+            target_type: 'message',
+            target_id: msg.id,
+            metadata: { attempt: attempt + 1, rewrite_for_ranger: true },
+          });
+        }
+      } catch (err) {
+        console.error('[pipeline] Ranger/rewrite failed for message:', msg.id, `attempt ${attempt}`, err.message);
+        break; // don't loop on unexpected errors
+      }
+    } // end retry loop
+
+    if (!finalApproved) {
+      // All attempts exhausted — mark as ranger_rejected
+      const finalNotes = lastRangerResult
+        ? (Array.isArray(lastRangerResult.issues) && lastRangerResult.issues.length > 0
+            ? lastRangerResult.issues.join('; ')
+            : lastRangerResult.notes || 'Failed Ranger QA after max retries')
+        : 'Ranger review failed';
 
       await pool.query(
-        `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = $3, updated_at = NOW()
-         WHERE id = $4 AND client_id = $5`,
-        [Math.round(rangerResult.score || 75), rangerNotes, newStatus, msg.id, clientId]
+        `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'ranger_rejected', updated_at = NOW()
+         WHERE id = $3 AND client_id = $4`,
+        [Math.round(lastRangerResult?.score || 0), finalNotes, msg.id, clientId]
       );
 
       await logsService.createLog(clientId, {
         agent: 'ranger',
-        action: rangerApproved ? 'message_approved' : 'message_rejected',
+        action: 'message_rejected_final',
         target_type: 'message',
         target_id: msg.id,
-        metadata: { score: rangerResult.score, approved: rangerApproved },
+        metadata: { attempts: MAX_RANGER_RETRIES, final_notes: finalNotes },
       });
 
-      if (rangerApproved) {
-        await pool.query(
-          `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'ranger')`,
-          [clientId, msg.id]
-        );
-        approvedCount++;
-
-        await logsService.createLog(clientId, {
-          agent: 'director',
-          action: 'approval_requested',
-          target_type: 'message',
-          target_id: msg.id,
-          metadata: { message_id: msg.id },
-        });
-      } else {
-        rejectedCount++;
-      }
-    } catch (err) {
-      console.error('[pipeline] Ranger failed for message:', msg.id, err.message, err.detail || '');
+      rejectedCount++;
     }
   }
 
@@ -703,8 +779,8 @@ async function directorExecute(clientId, { plan_id, command }) {
     results: [
       { step: 1, agent: 'research_beaver', status: 'completed', result: `${savedLeads.length} lead${savedLeads.length !== 1 ? 's' : ''} found & saved` },
       { step: 2, agent: 'sales_beaver', status: 'completed', result: `${savedMessages.length} message${savedMessages.length !== 1 ? 's' : ''} drafted` },
-      { step: 3, agent: 'ranger', status: 'completed', result: `${approvedCount} approved${rejectedCount > 0 ? `, ${rejectedCount} rejected` : ''}` },
-      { step: 4, agent: 'director', status: approvedCount > 0 ? 'completed' : 'pending', result: approvedCount > 0 ? `${approvedCount} message${approvedCount !== 1 ? 's' : ''} in approval queue` : 'No messages to queue' },
+      { step: 3, agent: 'ranger', status: 'completed', result: `${approvedCount} approved${rejectedCount > 0 ? `, ${rejectedCount} failed after ${MAX_RANGER_RETRIES} rewrites` : ''}` },
+      { step: 4, agent: 'director', status: approvedCount > 0 ? 'completed' : 'pending', result: approvedCount > 0 ? `${approvedCount} message${approvedCount !== 1 ? 's' : ''} in approval queue` : 'All messages failed Ranger QA — check Memory for rejection patterns' },
     ],
   };
 }
