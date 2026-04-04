@@ -13,9 +13,10 @@ const pool = new Pool(
           : process.env.NODE_ENV === 'production'
             ? { rejectUnauthorized: false }
             : false,
-        max: 20,
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 5000,
+        max: 15,
+        idleTimeoutMillis: 60000,
+        connectionTimeoutMillis: 30000,
+        statement_timeout: 30000,
       }
     : {
         host: process.env.DB_HOST || 'localhost',
@@ -23,9 +24,10 @@ const pool = new Pool(
         database: process.env.DB_NAME || 'the_dam',
         user: process.env.DB_USER || 'postgres',
         password: process.env.DB_PASSWORD || 'postgres',
-        max: 20,
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 5000,
+        max: 15,
+        idleTimeoutMillis: 60000,
+        connectionTimeoutMillis: 30000,
+        statement_timeout: 30000,
       }
 );
 

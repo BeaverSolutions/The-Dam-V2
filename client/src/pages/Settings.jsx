@@ -65,8 +65,11 @@ export default function Settings() {
   // Check for gmail=connected in URL params
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('gmail') === 'connected') {
+    if (params.get('gmail') === 'connected' || params.get('gmail') === 'error') {
       window.history.replaceState({}, '', '/settings');
+      if (params.get('gmail') === 'connected') {
+        loadIntegrations();
+      }
     }
   }, []);
 
