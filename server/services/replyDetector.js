@@ -4,6 +4,7 @@ const pool = require('../db/pool');
 const gmailService = require('./gmail');
 const agentmailService = require('./agentmail');
 const logsService = require('./logs');
+const { handleReply } = require('./replyHandler');
 
 /**
  * Check for replies on all sent messages with thread IDs for a given client.
@@ -92,6 +93,15 @@ async function checkRepliesForClient(clientId) {
       });
 
       repliesFound++;
+
+      // Phase 2: Trigger reply intelligence — classify + auto-draft response
+      if (msg.lead_id) {
+        handleReply(clientId, {
+          messageId: msg.id,
+          leadId: msg.lead_id,
+          replySnippet: snippet.slice(0, 500),
+        }).catch(err => console.warn('[replyDetector] Reply handler error:', err.message));
+      }
     } catch (err) {
       const threadId = msg.gmail_thread_id || msg.agentmail_thread_id;
       console.warn(`[replyDetector] Error checking thread ${threadId}:`, err.message);

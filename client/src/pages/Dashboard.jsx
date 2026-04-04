@@ -3,7 +3,7 @@ import {
   Users, MessageSquare, CheckCircle, Calendar,
   Zap, Coffee, Sun, Moon, Sunrise, X, FileText,
   Mail, Search, Send, AtSign, CornerDownRight, RefreshCw,
-  ArrowRight, MessageCircle, Target, TrendingUp, BookOpen,
+  ArrowRight, MessageCircle, Target, TrendingUp, BookOpen, BarChart2,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import BeaverAvatar, { BEAVER_COLORS, BEAVER_LABELS } from '../components/BeaverAvatar';
@@ -617,6 +617,100 @@ function WeeklyLearningsCard() {
   );
 }
 
+/* ─── Analytics Card ─────────────────────────────────────── */
+
+const SENTIMENT_COLORS = { positive: 'var(--lime)', neutral: 'var(--blue)', objection: 'var(--orange)', no_fit: 'var(--text-muted)' };
+const SENTIMENT_LABELS = { positive: 'Positive', neutral: 'Neutral', objection: 'Objection', no_fit: 'No Fit' };
+
+function AnalyticsCard() {
+  const { request } = useApi();
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    request('/dashboard/analytics')
+      .then(res => setData(res?.data || null))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return (
+    <div className="card fade-in" style={{ marginBottom: '1.25rem' }}>
+      <div className="skeleton" style={{ height: 120 }} />
+    </div>
+  );
+  if (!data) return null;
+
+  const { funnel, reply_sentiments = {}, weekly_trend = [] } = data;
+  const sentimentTotal = Object.values(reply_sentiments).reduce((a, b) => a + b, 0);
+
+  return (
+    <div className="card fade-in" style={{ marginBottom: '1.25rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+        <BarChart2 size={14} style={{ color: 'var(--blue)' }} />
+        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+          Pipeline Analytics
+        </span>
+      </div>
+
+      {/* Funnel metrics */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem', marginBottom: '1rem' }}>
+        {[
+          { label: 'Sent', value: funnel.sent, color: 'var(--text)' },
+          { label: 'Replies', value: funnel.replies, color: 'var(--blue)' },
+          { label: 'Reply Rate', value: `${funnel.reply_rate}%`, color: funnel.reply_rate >= 5 ? 'var(--lime)' : funnel.reply_rate >= 2 ? 'var(--orange)' : 'var(--text-muted)' },
+          { label: 'Meetings', value: funnel.meetings_booked, color: 'var(--purple)' },
+        ].map(m => (
+          <div key={m.label} style={{ background: 'var(--bg)', borderRadius: 6, padding: '0.5rem 0.75rem', textAlign: 'center' }}>
+            <div style={{ fontSize: '1.4rem', fontWeight: 700, color: m.color, lineHeight: 1 }}>{m.value}</div>
+            <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: 4 }}>{m.label}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: sentimentTotal > 0 ? '1fr 1fr' : '1fr', gap: '1rem' }}>
+        {/* Weekly trend bars */}
+        {weekly_trend.length > 0 && (
+          <div>
+            <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Weekly Trend</div>
+            <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'flex-end', height: 48 }}>
+              {weekly_trend.slice(-8).map((w, i) => {
+                const maxSent = Math.max(...weekly_trend.map(x => x.sent), 1);
+                const h = Math.max(4, Math.round((w.sent / maxSent) * 48));
+                const label = new Date(w.week).toLocaleDateString([], { month: 'short', day: 'numeric' });
+                return (
+                  <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }} title={`${label}: ${w.sent} sent, ${w.replies} replies (${w.reply_rate}%)`}>
+                    <div style={{ width: '100%', height: h, background: w.reply_rate >= 5 ? 'var(--lime)' : 'var(--blue)', borderRadius: '2px 2px 0 0', opacity: 0.8 }} />
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)', marginTop: 4 }}>Last 8 weeks · green = 5%+ reply rate</div>
+          </div>
+        )}
+
+        {/* Reply sentiments */}
+        {sentimentTotal > 0 && (
+          <div>
+            <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Reply Sentiments</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+              {Object.entries(reply_sentiments).map(([s, count]) => (
+                <div key={s} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span style={{ fontSize: '0.7rem', color: SENTIMENT_COLORS[s] || 'var(--text-muted)', fontWeight: 600, width: 62 }}>{SENTIMENT_LABELS[s] || s}</span>
+                  <div style={{ flex: 1, height: 6, background: 'var(--bg)', borderRadius: 3, overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${Math.round((count / sentimentTotal) * 100)}%`, background: SENTIMENT_COLORS[s] || 'var(--text-muted)', borderRadius: 3 }} />
+                  </div>
+                  <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', width: 20, textAlign: 'right' }}>{count}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ─── Main Page ──────────────────────────────────────────── */
 
 export default function Dashboard() {
@@ -721,6 +815,9 @@ export default function Dashboard() {
 
       {/* Weekly Learnings */}
       <WeeklyLearningsCard />
+
+      {/* Pipeline Analytics */}
+      <AnalyticsCard />
 
       {/* Bottom Row */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 240px', gap: '1rem' }} className="dashboard-bottom">

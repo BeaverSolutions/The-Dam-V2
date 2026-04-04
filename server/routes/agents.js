@@ -15,6 +15,15 @@ router.post('/research/search',
   }
 );
 
+router.post('/sales/proposal/:leadId',
+  async (req, res, next) => {
+    try {
+      const result = await agentsService.salesProposal(req.clientId, req.params.leadId);
+      res.json({ data: result });
+    } catch (err) { next(err); }
+  }
+);
+
 router.post('/sales/generate',
   [
     body('lead_id').isUUID(),

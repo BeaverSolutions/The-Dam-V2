@@ -186,4 +186,90 @@ router.get('/weekly-learnings', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/dashboard/analytics
+// Pipeline funnel metrics: reply rate, meeting conversion, weekly trends, reply sentiments
+router.get('/analytics', async (req, res, next) => {
+  try {
+    const clientId = req.clientId;
+
+    const [funnelRes, weeklyRes, sentimentRes, replyTrendRes] = await Promise.all([
+      // Funnel counts
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'sent')                             AS total_sent,
+          COUNT(*) FILTER (WHERE reply_detected_at IS NOT NULL)               AS total_replies,
+          COUNT(DISTINCT lead_id) FILTER (WHERE reply_detected_at IS NOT NULL) AS leads_replied,
+          COUNT(*) FILTER (WHERE metadata->>'is_reply' = 'true')              AS reply_drafts_generated
+        FROM messages WHERE client_id = $1
+      `, [clientId]),
+
+      // Last 8 weeks of outreach + replies
+      pool.query(`
+        SELECT
+          DATE_TRUNC('week', sent_at)::date AS week,
+          COUNT(*) FILTER (WHERE status = 'sent')                    AS sent,
+          COUNT(*) FILTER (WHERE reply_detected_at IS NOT NULL)       AS replies
+        FROM messages
+        WHERE client_id = $1 AND sent_at IS NOT NULL
+          AND sent_at >= NOW() - INTERVAL '8 weeks'
+        GROUP BY week ORDER BY week ASC
+      `, [clientId]),
+
+      // Reply sentiment breakdown
+      pool.query(`
+        SELECT
+          metadata->>'reply_sentiment' AS sentiment,
+          COUNT(*) AS count
+        FROM messages
+        WHERE client_id = $1
+          AND metadata->>'reply_sentiment' IS NOT NULL
+        GROUP BY sentiment
+      `, [clientId]),
+
+      // Meetings booked
+      pool.query(`
+        SELECT COUNT(*) AS total
+        FROM leads
+        WHERE client_id = $1 AND pipeline_stage = 'meeting_booked'
+      `, [clientId]),
+    ]);
+
+    const funnel = funnelRes.rows[0];
+    const totalSent = parseInt(funnel.total_sent, 10) || 0;
+    const totalReplies = parseInt(funnel.total_replies, 10) || 0;
+    const leadsReplied = parseInt(funnel.leads_replied, 10) || 0;
+    const meetingsBooked = parseInt(replyTrendRes.rows[0]?.total || 0, 10);
+
+    const replyRate = totalSent > 0 ? +((totalReplies / totalSent) * 100).toFixed(1) : 0;
+    const meetingRate = totalReplies > 0 ? +((meetingsBooked / totalReplies) * 100).toFixed(1) : 0;
+
+    const sentimentMap = {};
+    for (const row of sentimentRes.rows) {
+      if (row.sentiment) sentimentMap[row.sentiment] = parseInt(row.count, 10);
+    }
+
+    res.json({
+      data: {
+        funnel: {
+          sent: totalSent,
+          replies: totalReplies,
+          leads_replied: leadsReplied,
+          meetings_booked: meetingsBooked,
+          reply_rate: replyRate,
+          meeting_rate: meetingRate,
+        },
+        reply_sentiments: sentimentMap,
+        weekly_trend: weeklyRes.rows.map(r => ({
+          week: r.week,
+          sent: parseInt(r.sent, 10),
+          replies: parseInt(r.replies, 10),
+          reply_rate: parseInt(r.sent, 10) > 0
+            ? +((parseInt(r.replies, 10) / parseInt(r.sent, 10)) * 100).toFixed(1)
+            : 0,
+        })),
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

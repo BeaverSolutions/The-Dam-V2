@@ -1046,9 +1046,93 @@ async function directorUpsertICP(clientId, data) {
   return data;
 }
 
+/**
+ * =========================
+ * SALES BEAVER — PROPOSAL
+ * =========================
+ * Generate a personalised proposal document for a lead after a qualified conversation.
+ */
+async function salesProposal(clientId, leadId) {
+  // Fetch lead details
+  const leadRes = await pool.query(
+    `SELECT name, company, title, metadata FROM leads WHERE id = $1 AND client_id = $2 LIMIT 1`,
+    [leadId, clientId]
+  );
+  const lead = leadRes.rows[0];
+  if (!lead) throw new Error('Lead not found');
+
+  // Fetch conversation history
+  const historyRes = await pool.query(
+    `SELECT subject, body, reply_snippet, created_at FROM messages
+     WHERE lead_id = $1 AND client_id = $2
+     ORDER BY created_at ASC LIMIT 10`,
+    [leadId, clientId]
+  );
+  const history = historyRes.rows;
+
+  const [persona, fileConfig] = await Promise.all([
+    getClientPersona(clientId),
+    getClientConfig(clientId),
+  ]);
+  const personaContext = buildPersonaContext(persona);
+  const fileContext = buildClientContext(fileConfig);
+  const meta = lead.metadata || {};
+
+  const prompt = `Generate a personalised sales proposal for this prospect.
+
+LEAD:
+- Name: ${lead.name}
+- Company: ${lead.company}
+- Title: ${lead.title || 'N/A'}
+- Pain signal: ${meta.signal || meta.friction || 'Not specified'}
+- Angle used: ${meta.angle || 'General pain'}
+
+CONVERSATION HISTORY:
+${history.map(m => `Sent: ${m.body}${m.reply_snippet ? `\nTheir reply: ${m.reply_snippet}` : ''}`).join('\n---\n')}
+
+Write a full proposal document. Sections:
+1. Problem Statement (use their words/signals — be specific, not generic)
+2. Our Approach (what we do and how it applies to their situation)
+3. Expected Outcome (specific, measurable where possible)
+4. Investment (keep placeholder: "RM X,XXX/month — finalised in our call")
+5. Next Step (one clear action — usually a short call to confirm fit)
+
+Rules:
+- Every line must be specific to this prospect — no generic filler
+- Use the conversation history to reference things they've said or signals detected
+- Tone: professional but conversational, not corporate
+- No bullet points in the main body — use short paragraphs${personaContext}${fileContext}
+
+Return JSON only:
+{"subject":"Proposal subject line","body":"Full proposal document as flowing text","pain_summary":"One sentence: the core pain we're solving for them","value_hypothesis":"One sentence: the outcome we deliver"}`;
+
+  if (!callAgent) throw new Error('Claude not available');
+
+  const result = await callAgent('sales_beaver', prompt, { lead_id: leadId, mode: 'proposal' });
+
+  await logsService.createLog(clientId, {
+    agent: 'sales_beaver',
+    action: 'proposal_generated',
+    target_type: 'lead',
+    target_id: leadId,
+    metadata: { lead_name: lead.name, lead_company: lead.company },
+  });
+
+  return {
+    lead_id: leadId,
+    lead_name: lead.name,
+    lead_company: lead.company,
+    subject: result?.subject || `Proposal for ${lead.company}`,
+    body: result?.body || '',
+    pain_summary: result?.pain_summary || '',
+    value_hypothesis: result?.value_hypothesis || '',
+  };
+}
+
 module.exports = {
   researchSearch,
   salesGenerate,
+  salesProposal,
   rangerReview,
   rangerDraft,
   directorPlan,

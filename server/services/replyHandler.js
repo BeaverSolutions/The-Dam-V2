@@ -1,0 +1,204 @@
+'use strict';
+
+/**
+ * Reply Handler — Phase 2: Conversion Intelligence
+ *
+ * When a reply is detected, this service:
+ * 1. Classifies the reply (positive / neutral / objection / no_fit)
+ * 2. Has Sales Beaver draft the appropriate response
+ * 3. Sends the draft through Ranger
+ * 4. Pushes Ranger-approved drafts to the approval queue
+ * 5. Logs everything
+ */
+
+const pool = require('../db/pool');
+const logsService = require('./logs');
+
+let callAgent;
+try {
+  callAgent = require('./claude').callAgent;
+} catch {
+  // Claude not available — handler will skip drafting
+}
+
+/**
+ * Handle a single detected reply.
+ * Called by replyDetector after marking reply_detected_at.
+ */
+async function handleReply(clientId, { messageId, leadId, replySnippet }) {
+  if (!callAgent) {
+    console.warn('[replyHandler] Claude not available — skipping reply intelligence');
+    return;
+  }
+
+  try {
+    // Fetch lead details
+    const leadRes = await pool.query(
+      `SELECT name, company, title, pipeline_stage, metadata FROM leads WHERE id = $1 AND client_id = $2 LIMIT 1`,
+      [leadId, clientId]
+    );
+    const lead = leadRes.rows[0];
+    if (!lead) return;
+
+    // Fetch conversation history (last 5 sent messages to this lead)
+    const historyRes = await pool.query(
+      `SELECT subject, body, created_at FROM messages
+       WHERE lead_id = $1 AND client_id = $2 AND status = 'sent'
+       ORDER BY created_at DESC LIMIT 5`,
+      [leadId, clientId]
+    );
+    const history = historyRes.rows.reverse();
+
+    // ── Step 1: Classify the reply ──────────────────────────
+    const classifyPrompt = `Prospect: ${lead.name} at ${lead.company} (${lead.title || 'N/A'})
+
+Outreach history (oldest to newest):
+${history.map((m, i) => `Message ${i + 1}: ${m.body}`).join('\n\n')}
+
+Their reply:
+"${replySnippet}"
+
+Classify this reply and tell Sales Beaver exactly what to write next.`;
+
+    const classification = await callAgent('reply_classifier', classifyPrompt);
+
+    if (!classification || !classification.classification) {
+      console.warn('[replyHandler] Classification failed for lead', leadId);
+      return;
+    }
+
+    const sentiment = classification.classification;
+
+    // Store classification on the original message metadata
+    await pool.query(
+      `UPDATE messages
+       SET metadata = COALESCE(metadata, '{}') || $1::jsonb, updated_at = NOW()
+       WHERE id = $2 AND client_id = $3`,
+      [JSON.stringify({ reply_sentiment: sentiment, reply_confidence: classification.confidence, reply_reason: classification.reason }), messageId, clientId]
+    );
+
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'reply_classified',
+      target_type: 'message',
+      target_id: messageId,
+      metadata: { lead_id: leadId, lead_name: lead.name, sentiment, confidence: classification.confidence, reason: classification.reason },
+    });
+
+    // ── Step 2: No-fit → disqualify lead, stop sequence ────
+    if (sentiment === 'no_fit') {
+      await pool.query(
+        `UPDATE leads SET pipeline_stage = 'lost', status = 'inactive',
+         metadata = COALESCE(metadata, '{}') || $1::jsonb, updated_at = NOW()
+         WHERE id = $2 AND client_id = $3`,
+        [JSON.stringify({ lost_reason: 'Reply indicated no fit', lost_at: new Date().toISOString() }), leadId, clientId]
+      );
+      await logsService.createLog(clientId, {
+        agent: 'director',
+        action: 'lead_disqualified',
+        target_type: 'lead',
+        target_id: leadId,
+        metadata: { reason: classification.reason, auto_disqualified: true },
+      });
+      console.log(`[replyHandler] Lead ${lead.name} disqualified (no_fit)`);
+      return;
+    }
+
+    // ── Step 3: Draft response via Sales Beaver ─────────────
+    const { salesGenerate } = require('./agents');
+
+    const draftContext = [
+      `Name: ${lead.name}`,
+      `Company: ${lead.company}`,
+      `Title: ${lead.title || 'N/A'}`,
+      `Reply received: "${replySnippet}"`,
+      `Reply classification: ${sentiment}`,
+      `Director instruction: ${classification.draft_instruction || classification.next_action}`,
+      `Previous messages sent: ${history.length}`,
+      `IMPORTANT: This is a REPLY message, not a cold outreach. Write a conversational response to their reply. Do not start from scratch — continue the conversation naturally.`,
+    ].join('\n');
+
+    const draft = await salesGenerate(clientId, {
+      lead_id: leadId,
+      channel: 'email',
+      context: draftContext,
+    });
+
+    if (!draft?.body) {
+      console.warn('[replyHandler] Sales Beaver returned no draft for lead', leadId);
+      return;
+    }
+
+    // ── Step 4: Ranger review ───────────────────────────────
+    const { rangerReview } = require('./agents');
+
+    const rangerResult = await rangerReview(clientId, {
+      message_id: null,
+      message_body: draft.body,
+    });
+
+    const rangerApproved = rangerResult.approved !== false;
+    const rangerNotes = rangerResult.notes || rangerResult.reject_reason || null;
+
+    // ── Step 5: Save draft message ─────────────────────────
+    const msgRes = await pool.query(
+      `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, ranger_score, ranger_notes, metadata)
+       VALUES ($1, $2, 'email', $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [
+        clientId,
+        leadId,
+        draft.subject || `Re: ${history[history.length - 1]?.subject || 'Following up'}`,
+        draft.body,
+        rangerApproved ? 'pending_approval' : 'ranger_rejected',
+        Math.round(rangerResult.score || 75),
+        rangerNotes,
+        JSON.stringify({ is_reply: true, reply_to_message_id: messageId, reply_sentiment: sentiment, auto_drafted: true }),
+      ]
+    );
+
+    const newMsgId = msgRes.rows[0].id;
+
+    // ── Step 6: Push to approval queue if Ranger approved ──
+    if (rangerApproved) {
+      await pool.query(
+        `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'director')`,
+        [clientId, newMsgId]
+      );
+
+      await logsService.createLog(clientId, {
+        agent: 'director',
+        action: 'reply_draft_queued',
+        target_type: 'message',
+        target_id: newMsgId,
+        metadata: { lead_id: leadId, lead_name: lead.name, sentiment, ranger_score: rangerResult.score },
+      });
+
+      console.log(`[replyHandler] Reply draft for ${lead.name} (${sentiment}) queued for approval`);
+    } else {
+      await logsService.createLog(clientId, {
+        agent: 'ranger',
+        action: 'reply_draft_rejected',
+        target_type: 'message',
+        target_id: newMsgId,
+        metadata: { lead_id: leadId, ranger_notes: rangerNotes },
+      });
+      console.warn(`[replyHandler] Reply draft for ${lead.name} failed Ranger: ${rangerNotes}`);
+    }
+
+    // Update lead stage based on sentiment
+    const stageMap = { positive: 'meeting_requested', neutral: 'qualifying', objection: 'qualifying' };
+    const newStage = stageMap[sentiment];
+    if (newStage) {
+      await pool.query(
+        `UPDATE leads SET pipeline_stage = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
+        [newStage, leadId, clientId]
+      );
+    }
+
+  } catch (err) {
+    console.error('[replyHandler] Error handling reply for lead', leadId, ':', err.message);
+  }
+}
+
+module.exports = { handleReply };
