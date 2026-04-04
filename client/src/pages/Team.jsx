@@ -7,10 +7,10 @@ import { getUser } from '../utils/auth';
 /* ─── AI Crew ────────────────────────────────────────────── */
 
 const CREW = [
-  { key: 'research_beaver', label: 'Research Beaver', color: 'var(--blue)',   role: 'Lead sourcing, prospect intelligence, signal detection', hat: 'Hard hat' },
-  { key: 'sales_beaver',    label: 'Sales Beaver',    color: 'var(--lime)',   role: 'Outreach, message generation, conversation management', hat: 'Baseball cap' },
-  { key: 'ranger',          label: 'The Ranger',      color: 'var(--orange)', role: 'QA gate on all agent outputs, security, compliance',    hat: 'Ranger hat' },
-  { key: 'director',        label: 'The Director',    color: 'var(--purple)', role: 'Orchestration, client comms, approval flow',            hat: 'Beret' },
+  { key: 'research_beaver', label: 'Research Beaver', color: 'var(--blue)',        role: 'Lead sourcing, prospect intelligence, signal detection', hat: 'Safari hat' },
+  { key: 'sales_beaver',    label: 'Sales Beaver',    color: 'var(--orange)',      role: 'Outreach, message generation, conversation management', hat: 'Viking helmet' },
+  { key: 'ranger',          label: 'Enforcer Beaver', color: 'var(--police-blue)', role: 'QA gate on all agent outputs, security, compliance',    hat: 'Police hat' },
+  { key: 'director',        label: 'Captain Beaver',  color: 'var(--purple)',      role: 'Orchestration, client comms, approval flow',            hat: "Captain's hat" },
 ];
 
 /* ─── Avatar helpers ─────────────────────────────────────── */

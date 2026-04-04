@@ -8,8 +8,8 @@ const BEAVER_IMAGES = {
 };
 
 const BEAVER_COLORS = {
-  research_beaver: 'var(--orange)',
-  sales_beaver: 'var(--lime)',
+  research_beaver: 'var(--blue)',
+  sales_beaver: 'var(--orange)',
   ranger: 'var(--police-blue)',
   director: 'var(--purple)',
 };
@@ -17,8 +17,8 @@ const BEAVER_COLORS = {
 const BEAVER_LABELS = {
   research_beaver: 'Research Beaver',
   sales_beaver: 'Sales Beaver',
-  ranger: 'Ranger Beaver',
-  director: 'The Director',
+  ranger: 'Enforcer Beaver',
+  director: 'Captain Beaver',
 };
 
 const BEAVER_INITIALS = {

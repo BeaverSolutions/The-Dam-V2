@@ -3,11 +3,11 @@
   --panel: #0D1420;
   --brand: #FF6A00;        /* Beaver Solutions primary brand orange */
   --brand-hover: #E65C00;  /* Darker orange for hover states */
-  --lime: #C8FF00;         /* Sales Beaver agent colour */
+  --lime: #C8FF00;         /* Accent / success colour */
   --blue: #00B4FF;         /* Research Beaver agent colour */
-  --orange: #FF8C00;       /* The Ranger agent colour */
-  --purple: #A855F7;       /* The Director agent colour */
-  --police-blue: #2563EB;
+  --orange: #FF8C00;       /* Sales Beaver agent colour */
+  --purple: #A855F7;       /* Captain Beaver agent colour */
+  --police-blue: #2563EB;  /* Enforcer Beaver agent colour */
   --text: #E2E8F0;
   --text-muted: #94A3B8;
   --radius: 10px;
@@ -105,6 +105,7 @@ button { cursor: pointer; font-family: inherit; }
 .badge-blue { background: rgba(0, 180, 255, 0.15); color: var(--blue); }
 .badge-orange { background: rgba(255, 140, 0, 0.15); color: var(--orange); }
 .badge-purple { background: rgba(168, 85, 247, 0.15); color: var(--purple); }
+.badge-police-blue { background: rgba(37, 99, 235, 0.15); color: var(--police-blue); }
 .badge-muted { background: rgba(148, 163, 184, 0.15); color: var(--text-muted); }
 
 /* Forms */

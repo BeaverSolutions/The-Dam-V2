@@ -6,7 +6,7 @@ import FilterTabs from '../components/FilterTabs';
 
 const STATUS_MAP = {
   draft: { label: 'Draft', cls: 'badge-muted' },
-  pending_ranger: { label: 'Ranger Review', cls: 'badge-orange' },
+  pending_ranger: { label: 'Enforcer Review', cls: 'badge-police-blue' },
   ranger_rejected: { label: 'Rejected', cls: 'badge-orange' },
   pending_approval: { label: 'Needs Approval', cls: 'badge-blue' },
   approved: { label: 'Approved', cls: 'badge-lime' },

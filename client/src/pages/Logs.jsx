@@ -7,8 +7,8 @@ import EmptyState from '../components/EmptyState';
 
 const AGENT_COLORS = {
   research_beaver: 'var(--blue)',
-  sales_beaver:    'var(--lime)',
-  ranger:          'var(--orange)',
+  sales_beaver:    'var(--orange)',
+  ranger:          'var(--police-blue)',
   director:        'var(--purple)',
   system:          'var(--text-muted)',
 };
@@ -16,8 +16,8 @@ const AGENT_COLORS = {
 const AGENT_LABELS = {
   research_beaver: 'Research Beaver',
   sales_beaver:    'Sales Beaver',
-  ranger:          'The Ranger',
-  director:        'The Director',
+  ranger:          'Enforcer Beaver',
+  director:        'Captain Beaver',
   system:          'System',
 };
 
@@ -25,8 +25,8 @@ const FILTER_TABS = [
   { value: '',               label: 'All Agents' },
   { value: 'research_beaver',label: 'Research Beaver' },
   { value: 'sales_beaver',   label: 'Sales Beaver' },
-  { value: 'ranger',         label: 'Ranger' },
-  { value: 'director',       label: 'Director' },
+  { value: 'ranger',         label: 'Enforcer' },
+  { value: 'director',       label: 'Captain' },
   { value: 'system',         label: 'System' },
 ];
 
@@ -113,7 +113,7 @@ export default function Logs() {
           { label: 'Total Events', value: total,         color: 'var(--text-muted)' },
           { label: 'Today',        value: todayCount,    color: 'var(--text-muted)' },
           { label: 'Research Beaver', value: researchCount, color: 'var(--blue)' },
-          { label: 'Sales Beaver',    value: salesCount,    color: 'var(--lime)' },
+          { label: 'Sales Beaver',    value: salesCount,    color: 'var(--orange)' },
         ].map(({ label, value, color }) => (
           <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: `${color}15`, border: `1px solid ${color}40`, borderRadius: 100, padding: '0.25rem 0.75rem' }}>
             <span style={{ fontSize: '0.72rem', color, fontWeight: 600 }}>{label}:</span>
