@@ -1,11 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import BeaverAvatar from '../components/BeaverAvatar';
 import { useApi } from '../hooks/useApi';
 import { setToken, setUser } from '../utils/auth';
-
-const DEMO_EMAIL = 'admin@beaversolutions.com';
-const DEMO_PASSWORD = '***REMOVED***';
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -34,12 +30,6 @@ export default function Login() {
     }
   };
 
-  const fillDemo = () => {
-    setEmail(DEMO_EMAIL);
-    setPassword(DEMO_PASSWORD);
-    setLocalError(null);
-  };
-
   return (
     <div style={{
       minHeight: '100vh',
@@ -53,10 +43,11 @@ export default function Login() {
         {/* Logo */}
         <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
           <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem' }}>
-            <BeaverAvatar agent="director" size="md" />
+            <img src="/assets/logo.png" alt="Beaver Solutions" style={{ width: 72, height: 72, objectFit: 'contain' }} />
           </div>
-          <h1 style={{ fontSize: '1.75rem', fontWeight: 700, marginBottom: '0.25rem' }}>
-            The <span style={{ color: 'var(--brand)' }}>Dam</span>
+          <h1 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.25rem', fontFamily: "'Nunito', 'Poppins', sans-serif" }}>
+            <span style={{ color: 'var(--brand)' }}>Beaver</span>{' '}
+            <span style={{ color: 'var(--text)' }}>Solutions</span>
           </h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>
             We ARE the whole Dam Crew!
@@ -74,7 +65,7 @@ export default function Login() {
                 type="email"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
-                placeholder="admin@beaversolutions.com"
+                placeholder="you@company.com"
                 required
               />
             </div>
@@ -98,38 +89,13 @@ export default function Login() {
               {loading ? 'Signing in...' : 'Sign in'}
             </button>
           </form>
-
-          {/* Demo credentials */}
-          <button
-            type="button"
-            onClick={fillDemo}
-            style={{
-              marginTop: '1.5rem',
-              padding: '0.75rem',
-              background: 'rgba(255,106,0,0.05)',
-              border: '1px solid rgba(255,106,0,0.15)',
-              borderRadius: 'var(--radius)',
-              cursor: 'pointer',
-              width: '100%',
-              textAlign: 'left',
-              transition: 'border-color var(--transition)',
-            }}
-            onMouseEnter={e => e.currentTarget.style.borderColor = 'rgba(255,106,0,0.4)'}
-            onMouseLeave={e => e.currentTarget.style.borderColor = 'rgba(255,106,0,0.15)'}
-          >
-            <p style={{ fontSize: '0.75rem', color: 'var(--brand)', marginBottom: '0.25rem', fontWeight: 600 }}>
-              Click to use demo credentials
-            </p>
-            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{DEMO_EMAIL}</p>
-            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>••••••••••••</p>
-          </button>
         </div>
 
         <p style={{ textAlign: 'center', marginTop: '1rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-          Don't have an account?{' '}
-          <button onClick={() => navigate('/verify-email')} style={{ background: 'none', border: 'none', color: 'var(--brand)', cursor: 'pointer', fontSize: '0.75rem' }}>
-            Verify email
-          </button>
+          Need access?{' '}
+          <a href="mailto:hello@beaver.solutions" style={{ color: 'var(--brand)', textDecoration: 'none' }}>
+            Contact Beaver Solutions
+          </a>
         </p>
       </div>
     </div>
