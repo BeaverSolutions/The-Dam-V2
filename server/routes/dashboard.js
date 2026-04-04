@@ -272,4 +272,94 @@ router.get('/analytics', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/dashboard/obsidian-export
+// Returns markdown content for the 3 Obsidian learnings files
+router.get('/obsidian-export', async (req, res, next) => {
+  try {
+    const clientId = req.clientId;
+    const today = new Date().toISOString().split('T')[0];
+
+    const [rangerLogsRes, weeklyRes, memoryRes, statsRes] = await Promise.all([
+      // Last 30 Ranger rejections
+      pool.query(
+        `SELECT metadata, created_at FROM logs
+         WHERE client_id = $1 AND agent = 'ranger' AND action = 'message_rejected'
+         ORDER BY created_at DESC LIMIT 30`,
+        [clientId]
+      ),
+      // Most recent weekly learnings
+      pool.query(
+        `SELECT * FROM weekly_learnings WHERE client_id = $1 ORDER BY week_start DESC LIMIT 1`,
+        [clientId]
+      ),
+      // Agent memory entries
+      pool.query(
+        `SELECT agent, memory_type, key, content, updated_at FROM agent_memory
+         WHERE client_id = $1 ORDER BY updated_at DESC`,
+        [clientId]
+      ),
+      // Quick stats for weekly review
+      pool.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE status = 'sent' AND sent_at >= NOW() - INTERVAL '7 days') AS sent_week,
+           COUNT(*) FILTER (WHERE reply_detected_at IS NOT NULL AND reply_detected_at >= NOW() - INTERVAL '7 days') AS replies_week
+         FROM messages WHERE client_id = $1`,
+        [clientId]
+      ),
+    ]);
+
+    const stats = statsRes.rows[0];
+    const sentWeek = parseInt(stats.sent_week) || 0;
+    const repliesWeek = parseInt(stats.replies_week) || 0;
+    const replyRate = sentWeek > 0 ? ((repliesWeek / sentWeek) * 100).toFixed(1) : '0';
+
+    // ── ranger-patterns.md ─────────────────────────────────────
+    const rejectionCounts = {};
+    for (const row of rangerLogsRes.rows) {
+      const reason = row.metadata?.reject_reason || row.metadata?.ranger_notes || 'unknown';
+      const gate = reason.split(':')[0].trim();
+      rejectionCounts[gate] = (rejectionCounts[gate] || 0) + 1;
+    }
+    const rangerPatterns = Object.entries(rejectionCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([gate, count]) => `- **${gate}** — ${count} rejection${count !== 1 ? 's' : ''}`)
+      .join('\n') || '- No rejections logged yet';
+
+    const rangerMd = `# Ranger Rejection Patterns\n_Last updated: ${today}_\n\n## Top Rejection Gates\n${rangerPatterns}\n\n## What This Means\nSales Beaver needs to focus on these rules before the next batch.\n`;
+
+    // ── what-works.md ───────────────────────────────────────────
+    const weekly = weeklyRes.rows[0];
+    const whatWorksMd = weekly
+      ? `# What Works\n_Week of ${weekly.week_start}_\n\n## Reply Rate\n${replyRate}% (${repliesWeek} replies from ${sentWeek} sent)\n\n## What Worked\n${weekly.what_worked || '_Not yet recorded_'}\n\n## What Didn't\n${weekly.what_didnt || '_Not yet recorded_'}\n\n## Agent Learnings\n${weekly.learnings || '_Not yet recorded_'}\n`
+      : `# What Works\n_Last updated: ${today}_\n\n## This Week\n- Sent: ${sentWeek}\n- Replies: ${repliesWeek}\n- Reply rate: ${replyRate}%\n\n_No weekly review recorded yet. Complete one in Director Chat._\n`;
+
+    // ── weekly-review.md ────────────────────────────────────────
+    const memEntries = memoryRes.rows
+      .filter(r => !['icp', 'client_persona'].includes(r.key))
+      .slice(0, 10)
+      .map(r => {
+        let content = '';
+        try {
+          const parsed = typeof r.content === 'string' ? JSON.parse(r.content) : r.content;
+          content = parsed?.text || parsed?.mistake || JSON.stringify(parsed).substring(0, 120);
+        } catch { content = String(r.content || '').substring(0, 120); }
+        return `- [${r.agent}] ${content}`;
+      })
+      .join('\n') || '- No memory entries yet';
+
+    const weeklyMd = `# Weekly Review — ${today}\n\n## Numbers\n| Metric | Value |\n|--------|-------|\n| Messages sent (7d) | ${sentWeek} |\n| Replies (7d) | ${repliesWeek} |\n| Reply rate | ${replyRate}% |\n\n## Recent Agent Memory\n${memEntries}\n\n## Notes\n_Add your observations here_\n`;
+
+    res.json({
+      data: {
+        files: [
+          { path: '07 — Learnings/ranger-patterns.md', content: rangerMd },
+          { path: '07 — Learnings/what-works.md',      content: whatWorksMd },
+          { path: `07 — Learnings/weekly/${today}.md`, content: weeklyMd },
+        ],
+        generated_at: new Date().toISOString(),
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

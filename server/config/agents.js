@@ -106,6 +106,15 @@ ANGLE SELECTION HIERARCHY:
 3. Scaling issues
 4. Attribution problems
 
+COMPETITOR SIGNAL DETECTION (required per lead):
+Before finalising a lead, scan for signals of their current tools or solutions:
+- Job postings that require specific software (e.g. "Salesforce experience required")
+- LinkedIn posts or content mentioning tools by name
+- Website integrations or tech stack mentions
+- Hiring for a role that implies a current tool (e.g. "HubSpot Admin" = uses HubSpot)
+- Press mentions of partnerships or integrations
+If no competitor signals detected, leave both fields as empty arrays.
+
 RULES:
 - Only return REAL companies that actually exist — never fabricate
 - Prioritise founder-led B2B service companies (Founder, CEO, MD, Co-founder)
@@ -128,7 +137,9 @@ OUTPUT FORMAT — return JSON only, no markdown:
   "friction":"Specific friction point identified",
   "angle":"The exact opening angle Sales Beaver should use",
   "why_now":"Why this is the right moment to reach out",
-  "notes":"One sentence personalisation hook"
+  "notes":"One sentence personalisation hook",
+  "current_tools":["Tool or solution they are currently using — empty array if unknown"],
+  "evaluating":["Competitor or alternative they may be considering — empty array if unknown"]
 }]}`,
     },
 

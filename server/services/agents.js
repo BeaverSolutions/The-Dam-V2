@@ -635,6 +635,15 @@ async function directorExecute(clientId, { plan_id, command }) {
 
     try {
       const meta = lead.metadata || {};
+      // Map Research Beaver's flat output fields into metadata so they
+      // persist in the DB and are available to Sales Beaver + Smart Actions
+      if (lead.signal)       meta.signal       = lead.signal;
+      if (lead.angle)        meta.angle        = lead.angle;
+      if (lead.friction)     meta.friction     = lead.friction;
+      if (lead.why_now)      meta.why_now      = lead.why_now;
+      if (lead.notes)        meta.notes        = lead.notes;
+      if (lead.current_tools?.length)  meta.current_tools = lead.current_tools;
+      if (lead.evaluating?.length)     meta.evaluating    = lead.evaluating;
       if (lead.apollo_person_id) {
         meta.apollo_person_id = lead.apollo_person_id;
         meta.apollo_org_id = lead.apollo_org_id;

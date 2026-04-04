@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Brain, BookOpen, Plus, Trash2, Settings, ChevronRight } from 'lucide-react';
+import { Brain, BookOpen, Plus, Trash2, Settings, ChevronRight, Download, X, Copy, Check } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { useNavigate } from 'react-router-dom';
 import BeaverAvatar, { BEAVER_COLORS, BEAVER_LABELS } from '../components/BeaverAvatar';
@@ -81,6 +81,9 @@ export default function Memory() {
   const [noteText, setNoteText] = useState('');
   const [saving, setSaving] = useState(false);
   const [showNoteForm, setShowNoteForm] = useState(false);
+  const [exportFiles, setExportFiles] = useState(null);
+  const [exporting, setExporting] = useState(false);
+  const [copiedFile, setCopiedFile] = useState(null);
 
   useEffect(() => {
     request('/agents/memory')
@@ -93,6 +96,22 @@ export default function Memory() {
       await request(`/agents/memory/${id}`, { method: 'DELETE' });
       setEntries(prev => prev.filter(e => e.id !== id));
     } catch {}
+  };
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const res = await request('/dashboard/obsidian-export');
+      setExportFiles(res?.data?.files || []);
+    } catch {}
+    setExporting(false);
+  };
+
+  const handleCopy = (file) => {
+    navigator.clipboard.writeText(file.content).then(() => {
+      setCopiedFile(file.path);
+      setTimeout(() => setCopiedFile(null), 2000);
+    });
   };
 
   const handleAddNote = async () => {
@@ -130,15 +149,52 @@ export default function Memory() {
             <p className="page-subtitle">{entries.length} stored {entries.length === 1 ? 'memory' : 'memories'} across all agents</p>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
           <button className="btn btn-secondary" style={{ fontSize: '0.8rem', gap: '0.4rem' }} onClick={() => navigate('/settings')}>
             <Settings size={14} /> Edit ICP <ChevronRight size={12} />
+          </button>
+          <button className="btn btn-secondary" style={{ fontSize: '0.8rem', gap: '0.4rem' }} onClick={handleExport} disabled={exporting}>
+            <Download size={14} /> {exporting ? 'Generating…' : 'Export for Obsidian'}
           </button>
           <button className="btn btn-primary" onClick={() => setShowNoteForm(v => !v)}>
             <Plus size={15} /> Add note
           </button>
         </div>
       </div>
+
+      {/* Obsidian Export Panel */}
+      {exportFiles && (
+        <div className="card fade-in" style={{ marginBottom: '1.25rem', border: '1px solid rgba(168,85,247,0.3)', background: 'rgba(168,85,247,0.05)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--purple)' }}>Obsidian Export</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>Copy each file into your Obsidian vault at the path shown</div>
+            </div>
+            <button className="btn btn-ghost" style={{ padding: '0.2rem' }} onClick={() => setExportFiles(null)}>
+              <X size={16} />
+            </button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {exportFiles.map(file => (
+              <div key={file.path} style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)' }}>
+                  <code style={{ fontSize: '0.75rem', color: 'var(--purple)' }}>{file.path}</code>
+                  <button
+                    className="btn btn-ghost"
+                    style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem', gap: '0.3rem', color: copiedFile === file.path ? 'var(--lime)' : 'var(--text-muted)' }}
+                    onClick={() => handleCopy(file)}
+                  >
+                    {copiedFile === file.path ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
+                  </button>
+                </div>
+                <pre style={{ padding: '0.75rem', fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.6, maxHeight: 160, overflowY: 'auto', margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {file.content}
+                </pre>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* What memory is */}
       <div style={{ background: 'rgba(168,85,247,0.06)', border: '1px solid rgba(168,85,247,0.15)', borderRadius: 'var(--radius)', padding: '0.875rem 1rem', marginBottom: '1.25rem', display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>

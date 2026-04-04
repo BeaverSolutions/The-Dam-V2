@@ -253,9 +253,18 @@ async function generateCompetitiveBrief(clientId, leadId) {
   const { callAgent } = require('./claude');
   const { lead, persona } = await getLeadContext(clientId, leadId);
 
+  const currentTools = lead.metadata?.current_tools?.length
+    ? `Known tools in use: ${lead.metadata.current_tools.join(', ')}`
+    : 'No tool signals detected';
+  const evaluating = lead.metadata?.evaluating?.length
+    ? `May be evaluating: ${lead.metadata.evaluating.join(', ')}`
+    : 'No competing evaluation signals detected';
+
   const prompt = `You are The Director at ${persona.company_name || 'our company'}. Generate a competitive positioning brief for a meeting with this prospect.
 
 PROSPECT COMPANY: ${lead.company} (${lead.industry || 'industry unknown'})
+${currentTools}
+${evaluating}
 
 OUR POSITIONING:
 - Company: ${persona.company_name || 'Us'}
