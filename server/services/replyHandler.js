@@ -186,14 +186,33 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       console.warn(`[replyHandler] Reply draft for ${lead.name} failed Ranger: ${rangerNotes}`);
     }
 
-    // Update lead stage based on sentiment
+    // Update lead stage and store sentiment in metadata for UI display
     const stageMap = { positive: 'meeting_requested', neutral: 'qualifying', objection: 'qualifying' };
     const newStage = stageMap[sentiment];
     if (newStage) {
       await pool.query(
-        `UPDATE leads SET pipeline_stage = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
-        [newStage, leadId, clientId]
+        `UPDATE leads
+         SET pipeline_stage = $1,
+             metadata = COALESCE(metadata, '{}') || $2::jsonb,
+             updated_at = NOW()
+         WHERE id = $3 AND client_id = $4`,
+        [
+          newStage,
+          JSON.stringify({ last_reply_sentiment: sentiment, last_reply_reason: classification.reason }),
+          leadId,
+          clientId,
+        ]
       );
+    }
+
+    // Auto-generate call prep + competitive brief when prospect shows interest
+    if (sentiment === 'positive') {
+      const { generateBrief } = require('./smartActions');
+      generateBrief(clientId, leadId, 'call_prep')
+        .catch(e => console.warn('[replyHandler] call_prep auto-gen failed:', e.message));
+      generateBrief(clientId, leadId, 'competitive_brief')
+        .catch(e => console.warn('[replyHandler] competitive_brief auto-gen failed:', e.message));
+      console.log(`[replyHandler] Auto-generating call prep + competitive brief for ${lead.name}`);
     }
 
   } catch (err) {

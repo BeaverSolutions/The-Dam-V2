@@ -107,7 +107,7 @@ async function saveBrief(clientId, leadId, briefType, content) {
  * Load lead context for brief generation
  */
 async function getLeadContext(clientId, leadId) {
-  const [leadRes, messagesRes, personaRes, icpRes] = await Promise.all([
+  const [leadRes, messagesRes, repliesRes, personaRes, icpRes] = await Promise.all([
     pool.query(
       `SELECT l.*, c.name as client_name
        FROM leads l
@@ -119,6 +119,14 @@ async function getLeadContext(clientId, leadId) {
       `SELECT subject, body, status, created_at FROM messages
        WHERE lead_id = $1 AND client_id = $2
        ORDER BY created_at ASC LIMIT 10`,
+      [leadId, clientId]
+    ),
+    // Inbound replies detected on outbound messages
+    pool.query(
+      `SELECT body, metadata, reply_detected_at FROM messages
+       WHERE lead_id = $1 AND client_id = $2
+         AND reply_detected_at IS NOT NULL
+       ORDER BY reply_detected_at DESC LIMIT 5`,
       [leadId, clientId]
     ),
     pool.query(
@@ -134,6 +142,7 @@ async function getLeadContext(clientId, leadId) {
   return {
     lead: leadRes.rows[0],
     messages: messagesRes.rows,
+    replies: repliesRes.rows,
     persona: personaRes.rows[0]?.content || {},
     icp: icpRes.rows[0]?.content || {},
   };
@@ -178,10 +187,17 @@ Return JSON:
  */
 async function generateCallPrep(clientId, leadId) {
   const { callAgent } = require('./claude');
-  const { lead, messages, persona, icp } = await getLeadContext(clientId, leadId);
+  const { lead, messages, replies, persona, icp } = await getLeadContext(clientId, leadId);
 
   const sentMessages = messages.filter(m => ['sent', 'pending_send'].includes(m.status));
   const messageHistory = sentMessages.map(m => `Subject: ${m.subject}\nBody: ${m.body?.substring(0, 200)}`).join('\n---\n');
+
+  const replyHistory = replies.length
+    ? replies.map(r => {
+        const sentiment = r.metadata?.reply_sentiment ? ` [${r.metadata.reply_sentiment}]` : '';
+        return `Reply${sentiment}: "${r.body?.substring(0, 300)}"`;
+      }).join('\n---\n')
+    : 'No replies yet';
 
   const prompt = `You are The Director at ${persona.company_name || 'our company'}. Generate a call prep brief for a sales call with this prospect.
 
@@ -190,9 +206,14 @@ PROSPECT:
 - Title: ${lead.title || 'Unknown'}
 - Company: ${lead.company}
 - Meeting date: ${lead.meeting_date || 'Soon'}
+- Signal: ${lead.metadata?.signal || 'Not recorded'}
+- Friction detected: ${lead.metadata?.friction || 'Not recorded'}
 
 MESSAGES WE SENT THEM:
 ${messageHistory || 'No messages sent yet'}
+
+THEIR REPLIES:
+${replyHistory}
 
 OUR COMPANY:
 - Value prop: ${persona.value_proposition || 'Not set'}

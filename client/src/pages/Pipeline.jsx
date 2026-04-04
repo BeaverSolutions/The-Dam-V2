@@ -649,15 +649,35 @@ function LeadDetail({ lead, onUpdate }) {
       </div>
 
       {/* Reply banner */}
-      {lead.last_reply_at && (
-        <div style={{ padding: '0.625rem 1.5rem', background: 'rgba(200,255,0,0.08)', borderBottom: '1px solid rgba(200,255,0,0.2)', display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
-          <CornerDownLeft size={13} style={{ color: 'var(--lime)', flexShrink: 0 }} />
-          <span style={{ fontSize: '0.78rem', color: 'var(--lime)', fontWeight: 600 }}>Replied</span>
-          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {new Date(lead.last_reply_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-          </span>
-        </div>
-      )}
+      {lead.last_reply_at && (() => {
+        const sentiment = lead.metadata?.last_reply_sentiment;
+        const sentimentStyle = {
+          positive:  { bg: 'rgba(200,255,0,0.08)',  border: 'rgba(200,255,0,0.2)',  color: 'var(--lime)',        label: 'Positive' },
+          neutral:   { bg: 'rgba(0,180,255,0.08)',  border: 'rgba(0,180,255,0.2)',  color: 'var(--blue)',        label: 'Neutral' },
+          objection: { bg: 'rgba(255,140,0,0.08)',  border: 'rgba(255,140,0,0.2)',  color: 'var(--orange)',      label: 'Objection' },
+          no_fit:    { bg: 'rgba(148,163,184,0.08)', border: 'rgba(148,163,184,0.2)', color: 'var(--text-muted)', label: 'No Fit' },
+        };
+        const s = sentimentStyle[sentiment] || sentimentStyle.positive;
+        return (
+          <div style={{ padding: '0.625rem 1.5rem', background: s.bg, borderBottom: `1px solid ${s.border}`, display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+            <CornerDownLeft size={13} style={{ color: s.color, flexShrink: 0 }} />
+            <span style={{ fontSize: '0.78rem', color: s.color, fontWeight: 600 }}>Replied</span>
+            {sentiment && (
+              <span style={{ fontSize: '0.7rem', color: s.color, background: s.bg, border: `1px solid ${s.border}`, borderRadius: 100, padding: '0.1rem 0.45rem', fontWeight: 500 }}>
+                {s.label}
+              </span>
+            )}
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginLeft: 'auto' }}>
+              {new Date(lead.last_reply_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+            </span>
+            {lead.metadata?.last_reply_reason && (
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '40%' }}>
+                {lead.metadata.last_reply_reason}
+              </span>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Body */}
       <div style={{ flex: 1, padding: '1.25rem 1.5rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
