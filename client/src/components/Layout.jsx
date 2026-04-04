@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, GitBranch, MessageSquare, CheckCircle,
-  Activity, Calendar, Users, MessageCircle, Settings, Menu, X, Bell, LogOut, Brain, ShieldCheck,
+  Activity, Calendar, Users, MessageCircle, Settings, Menu, X, Bell, LogOut, Brain, ShieldCheck, Upload,
 } from 'lucide-react';
 import BeaverAvatar from './BeaverAvatar';
 import { clearToken, getUser } from '../utils/auth';
@@ -18,6 +18,7 @@ const navItems = [
   { path: '/team', label: 'The Crew', icon: Users },
   { path: '/chat', label: 'Director Chat', icon: MessageCircle },
   { path: '/memory', label: 'Memory', icon: Brain },
+  { path: '/import', label: 'Import Leads', icon: Upload },
   { path: '/settings', label: 'Settings', icon: Settings },
 ];
 

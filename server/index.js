@@ -78,6 +78,7 @@ app.use('/api/calendar', authMiddleware, tenantScope, require('./routes/calendar
 app.use('/api/agents', authMiddleware, tenantScope, require('./routes/agents'));
 app.use('/api/integrations', authMiddleware, tenantScope, require('./routes/integrations'));
 app.use('/api/dashboard', authMiddleware, tenantScope, require('./routes/dashboard'));
+app.use('/api/import',   authMiddleware, tenantScope, require('./routes/import'));
 
 // Autonomous routes — internal key auth (no JWT required)
 app.use('/api/autonomous', require('./routes/autonomous'));
