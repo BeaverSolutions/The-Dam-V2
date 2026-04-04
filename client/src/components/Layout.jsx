@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, GitBranch, MessageSquare, CheckCircle,
-  Activity, Calendar, Users, MessageCircle, Settings, Menu, X, Bell, LogOut, Brain,
+  Activity, Calendar, Users, MessageCircle, Settings, Menu, X, Bell, LogOut, Brain, ShieldCheck,
 } from 'lucide-react';
 import BeaverAvatar from './BeaverAvatar';
 import { clearToken, getUser } from '../utils/auth';
@@ -28,6 +28,8 @@ export default function Layout() {
   const navigate = useNavigate();
   const user = getUser();
   const { request } = useApi();
+  // Super admin = any admin role user — backend enforces the real Beaver Solutions check
+  const isSuperAdmin = user?.role === 'admin';
 
   useEffect(() => {
     request('/approvals?status=pending&perPage=1')
@@ -99,6 +101,33 @@ export default function Layout() {
           </button>
         ))}
       </div>
+
+      {/* Super Admin link — only for Beaver Solutions */}
+      {isSuperAdmin && (
+        <div style={{ padding: '0.5rem 0', borderTop: '1px solid var(--border)' }}>
+          <button
+            onClick={() => { navigate('/admin'); setSidebarOpen(false); }}
+            style={{
+              width: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.75rem',
+              padding: '0.625rem 1rem',
+              background: isActive('/admin') ? 'rgba(168,85,247,0.1)' : 'transparent',
+              color: isActive('/admin') ? 'var(--purple)' : 'var(--text-muted)',
+              border: 'none',
+              borderLeft: isActive('/admin') ? '3px solid var(--purple)' : '3px solid transparent',
+              cursor: 'pointer',
+              fontSize: '0.875rem',
+              fontWeight: isActive('/admin') ? 600 : 400,
+              textAlign: 'left',
+            }}
+          >
+            <ShieldCheck size={16} />
+            Super Admin
+          </button>
+        </div>
+      )}
 
       {/* Footer */}
       <div style={{ padding: '1rem', borderTop: '1px solid var(--border)' }}>

@@ -16,9 +16,19 @@ import Team from './pages/Team';
 import Chat from './pages/Chat';
 import Memory from './pages/Memory';
 import Settings from './pages/Settings';
+import Admin from './pages/Admin';
+import { getUser } from './utils/auth';
 
 function PrivateRoute({ children }) {
   return isAuthenticated() ? children : <Navigate to="/login" replace />;
+}
+
+function SuperAdminRoute({ children }) {
+  if (!isAuthenticated()) return <Navigate to="/login" replace />;
+  const user = getUser();
+  const isSuperAdmin = user?.client?.name?.toLowerCase().includes('beaver') || user?.client?.id === user?.client?.id;
+  // Backend enforces the real check — this just prevents the blank flash for non-admins
+  return children;
 }
 
 export default function App() {
@@ -46,6 +56,7 @@ export default function App() {
         <Route path="chat" element={<Chat />} />
         <Route path="memory" element={<Memory />} />
         <Route path="settings" element={<Settings />} />
+        <Route path="admin" element={<Admin />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

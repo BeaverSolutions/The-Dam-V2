@@ -4,14 +4,19 @@ import BeaverAvatar from '../components/BeaverAvatar';
 import { useApi } from '../hooks/useApi';
 import { setToken, setUser } from '../utils/auth';
 
+const DEMO_EMAIL = 'admin@beaversolutions.com';
+const DEMO_PASSWORD = '***REMOVED***';
+
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [localError, setLocalError] = useState(null);
   const { request, loading, error } = useApi();
   const navigate = useNavigate();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setLocalError(null);
     try {
       const res = await request('/auth/login', {
         method: 'POST',
@@ -21,8 +26,18 @@ export default function Login() {
         setToken(res.data.token);
         setUser(res.data.user);
         navigate('/');
+      } else {
+        setLocalError('Login failed. Please check your credentials.');
       }
-    } catch {}
+    } catch (err) {
+      setLocalError(err.message || 'Login failed. Please try again.');
+    }
+  };
+
+  const fillDemo = () => {
+    setEmail(DEMO_EMAIL);
+    setPassword(DEMO_PASSWORD);
+    setLocalError(null);
   };
 
   return (
@@ -74,9 +89,9 @@ export default function Login() {
                 required
               />
             </div>
-            {error && (
+            {(error || localError) && (
               <div style={{ color: 'var(--orange)', fontSize: '0.875rem', padding: '0.5rem', background: 'rgba(255,140,0,0.1)', borderRadius: 'var(--radius)' }}>
-                {error}
+                {error || localError}
               </div>
             )}
             <button className="btn btn-primary" type="submit" disabled={loading} style={{ width: '100%', justifyContent: 'center', padding: '0.75rem' }}>
@@ -85,11 +100,29 @@ export default function Login() {
           </form>
 
           {/* Demo credentials */}
-          <div style={{ marginTop: '1.5rem', padding: '0.75rem', background: 'rgba(200,255,0,0.05)', border: '1px solid rgba(200,255,0,0.1)', borderRadius: 'var(--radius)' }}>
-            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.5rem', fontWeight: 600 }}>Demo credentials:</p>
-            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>admin@beaversolutions.com</p>
-            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>***REMOVED***</p>
-          </div>
+          <button
+            type="button"
+            onClick={fillDemo}
+            style={{
+              marginTop: '1.5rem',
+              padding: '0.75rem',
+              background: 'rgba(200,255,0,0.05)',
+              border: '1px solid rgba(200,255,0,0.15)',
+              borderRadius: 'var(--radius)',
+              cursor: 'pointer',
+              width: '100%',
+              textAlign: 'left',
+              transition: 'border-color var(--transition)',
+            }}
+            onMouseEnter={e => e.currentTarget.style.borderColor = 'rgba(200,255,0,0.4)'}
+            onMouseLeave={e => e.currentTarget.style.borderColor = 'rgba(200,255,0,0.15)'}
+          >
+            <p style={{ fontSize: '0.75rem', color: 'var(--lime)', marginBottom: '0.25rem', fontWeight: 600 }}>
+              Click to use demo credentials
+            </p>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{DEMO_EMAIL}</p>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>••••••••••••</p>
+          </button>
         </div>
 
         <p style={{ textAlign: 'center', marginTop: '1rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>

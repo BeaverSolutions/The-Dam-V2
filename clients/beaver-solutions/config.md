@@ -7,7 +7,7 @@ _This is the internal Beaver Solutions account. Use this as the reference config
 ## Company Overview
 
 Beaver Solutions is a B2B outbound sales automation agency based in Kuala Lumpur, Malaysia.
-We help founder-led businesses build consistent sales pipelines using AI agents — research, outreach, follow-up, and conversion, all automated.
+We build AI-powered sales crews that find ideal clients, write personalised outreach, and follow up automatically — so founders get consistent meetings without hiring a sales team.
 
 **Company:** Beaver Solutions
 **Industry:** AI Sales Agency / B2B Outbound
@@ -16,21 +16,102 @@ We help founder-led businesses build consistent sales pipelines using AI agents 
 
 ---
 
-## ICP — Ideal Customer Profile
+## One-Line ICP
 
-**Target industries:** B2B services — consulting, agencies, SaaS, training, professional services
-**Company size:** 5–20 employees (founder-led, no dedicated sales team)
-**Geographies:** Kuala Lumpur, Selangor (Klang Valley first)
-**Target titles:** Founder, CEO, Managing Director, Head of Sales
-**Deal size:** RM5,000–RM10,000/month retainer
-**Sales cycle:** 2–4 weeks
+Founder-led B2B service companies in Klang Valley who are doing all their own sales, have growth ambition, and no consistent pipeline system — from solo founders up to small teams.
 
-**Pain points we solve:**
-- Founder is doing all the sales themselves — no time, no system
-- Pipeline is inconsistent — either feast or famine, mostly referrals
+---
+
+## ICP 1: Founder-Led B2B Service Companies (PRIMARY)
+
+**Who they are:**
+- Founders or CEOs running a B2B service business
+- Industries: consulting, agency, SaaS, training, professional services
+- Any size from solo founder to small team — no headcount floor or ceiling
+- Pipeline is mostly referrals or founder-driven hustle
+
+**Must-Have Criteria:**
+- Actively selling a B2B product or service (not B2C)
+- Founder or senior leader is personally responsible for bringing in new business
+- Has growth ambition — wants to scale, not stay where they are
+- Based in Klang Valley (KL / Selangor) — at least for Phase 1
+
+**Strong Buying Signals:**
+- Founder posting about business growth, client wins, or scaling challenges on LinkedIn
+- Hiring for sales, business development, or marketing roles
+- Running events, webinars, or content about their expertise (indicates they want pipeline)
+- Growing headcount but no sales infrastructure visible
+
+**Core Problems:**
+- Founder doing all the sales — no time, no system, no predictability
+- Pipeline is inconsistent — feast or famine, mostly referrals
 - Tried ads or hiring salespeople with poor ROI
 - Don't know how to scale outreach without it feeling spammy
-- Referrals are slowing down as they grow
+- Referrals are slowing down as the business grows
+
+**What They Care About:**
+- Consistent, predictable pipeline without doing it themselves
+- Not looking spammy or desperate
+- Spending their time closing, not prospecting
+- A system that works while they sleep
+
+**Positioning Angle:**
+- Lead with the founder-doing-all-sales pain — it resonates immediately
+- "You shouldn't be the one prospecting" is the core hook
+- Frame it as building a system, not hiring someone
+
+**Disqualifiers:**
+- E-commerce or B2C businesses
+- Already has a dedicated sales team or BDR
+- Outside Klang Valley for now
+- Freelancers with no intention to grow beyond themselves
+- Companies that only want inbound and are not open to outbound
+
+---
+
+## ICP 2: B2B Agencies Wanting to Win New Clients (SECONDARY)
+
+**Who they are:**
+- Digital agencies, marketing agencies, PR firms, creative studios
+- Selling services to other businesses
+- 10–50 employees, owner-managed or founder-led
+
+**Must-Have Criteria:**
+- Actively pitching for new business (not purely inbound)
+- Has existing clients to use as social proof
+- Owner or director involved in business development
+
+**Strong Buying Signals:**
+- Posting client case studies or campaign results
+- Hiring for client services or account management (signals growth)
+- Running thought leadership content about their industry
+
+**Core Problems:**
+- New business development is inconsistent or founder-dependent
+- Word-of-mouth is slowing down
+- No systematic outreach to ideal clients
+
+**What They Care About:**
+- Winning more of the right clients
+- Not spending time on cold calls or spray-and-pray emails
+- Having a process that generates qualified conversations
+
+**Positioning Angle:**
+- "Your outreach should be as good as your client work"
+- Lead with the inconsistent pipeline pain
+
+**Disqualifiers:**
+- Fully inbound / only rely on referrals and don't want to change
+- No clear target client profile
+- Fewer than 10 employees
+
+---
+
+## Global ICP Rules
+
+**Signal over job title:** A founder actively posting about scaling beats a CEO with no visible activity.
+**Priority split:** ICP 1: 75% of outreach / ICP 2: 25% of outreach
+**Angle selection order:** Pipeline inconsistency → Founder doing all sales → Failed alternatives (ads/hiring) → Scaling without a system
 
 ---
 
@@ -66,7 +147,7 @@ low-hanging fruit, circle back, touch base, move the needle, best-in-class
 
 ---
 
-## Outreach Playbook Notes
+## Outreach Playbook
 
 **Best performing angles:**
 - Lead with a specific observation about their company (not a generic compliment)
@@ -82,9 +163,8 @@ low-hanging fruit, circle back, touch base, move the needle, best-in-class
 
 **First message structure:**
 1. Specific observation — something real about their company or role
-2. One-line pain bridge — "Most founders I talk to are doing all their own sales"
-3. One-line value prop — what we do in plain English
-4. Soft CTA — "Worth a 20-min chat?"
+2. Pain bridge — one line: "Most founders I talk to are doing all their own sales"
+3. Question — one question that implies the problem without naming it directly
 
 ---
 
