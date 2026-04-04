@@ -143,7 +143,7 @@ function LiveFeed({ logs }) {
 
 function AgentOfficeStrip({ agentLogs, liveLogs }) {
   return (
-    <div className="card" style={{ padding: 0, marginBottom: '1.25rem', display: 'flex', overflow: 'hidden' }}>
+    <div className="card agent-office-strip" style={{ padding: 0, marginBottom: '1.25rem', display: 'flex', overflow: 'hidden' }}>
       {AGENTS.map(({ key }) => (
         <AgentCard key={key} agentKey={key} lastLog={agentLogs[key]} />
       ))}
@@ -166,7 +166,7 @@ function StatCard({ label, value, icon: Icon, color, loading, onClick, sub }) {
         {loading ? (
           <div className="skeleton" style={{ width: 40, height: 28, marginBottom: 4 }} />
         ) : (
-          <div style={{ fontSize: '1.75rem', fontWeight: 700, lineHeight: 1 }}>{value}</div>
+          <div className="stat-value" style={{ fontSize: '1.75rem', fontWeight: 700, lineHeight: 1 }}>{value}</div>
         )}
         <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>{label}</div>
         {sub && !loading && <div style={{ fontSize: '0.7rem', color, marginTop: '0.1rem' }}>{sub}</div>}
@@ -383,7 +383,7 @@ function DirectorBubble({ prefilledCommand, onCommandUsed }) {
     <>
       {/* Chat panel */}
       {open && (
-        <div style={{
+        <div className="director-bubble-panel" style={{
           position: 'fixed', bottom: 90, right: 24,
           width: 320, maxHeight: 420,
           background: 'var(--panel)', border: '1px solid var(--border)',
@@ -654,7 +654,7 @@ function AnalyticsCard() {
       </div>
 
       {/* Funnel metrics */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem', marginBottom: '1rem' }}>
+      <div className="analytics-funnel" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem', marginBottom: '1rem' }}>
         {[
           { label: 'Sent', value: funnel.sent, color: 'var(--text)' },
           { label: 'Replies', value: funnel.replies, color: 'var(--blue)' },

@@ -150,7 +150,9 @@ button { cursor: pointer; font-family: inherit; }
 .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
 
 @media (max-width: 768px) {
-  .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+  .grid-2 { grid-template-columns: 1fr; }
+  .grid-3 { grid-template-columns: 1fr; }
+  .grid-4 { grid-template-columns: repeat(2, 1fr); gap: 0.75rem; }
 }
 
 /* Animations */
@@ -296,5 +298,57 @@ button { cursor: pointer; font-family: inherit; }
 }
 @media (max-width: 600px) {
   .pipeline-cols { grid-template-columns: 1fr !important; }
-  .grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+}
+
+/* === Global Mobile === */
+@media (max-width: 768px) {
+  /* Reduce card padding on mobile */
+  .card { padding: 1rem; }
+
+  /* Page header stacks on small screens */
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .page-header > div:last-child {
+    width: 100%;
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  /* Page title smaller on mobile */
+  .page-title { font-size: 1.2rem; }
+  .page-subtitle { font-size: 0.8rem; }
+
+  /* Main content padding */
+  .main-content { padding: 1rem !important; }
+
+  /* Agent office strip — horizontal scroll on mobile */
+  .agent-office-strip {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .agent-office-strip > div {
+    min-width: 320px;
+  }
+
+  /* Analytics funnel grid 2x2 on mobile */
+  .analytics-funnel {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+
+  /* Approval actions wrap nicely */
+  .approval-actions { flex-wrap: wrap; }
+  .approval-actions .btn { flex: 1; justify-content: center; min-width: 80px; }
+
+  /* Filter tabs scroll horizontally */
+  .filter-tabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 0.25rem; }
+
+  /* Stat cards: smaller value font */
+  .stat-value { font-size: 1.4rem !important; }
+
+  /* Director bubble stays accessible on mobile */
+  .director-bubble-panel { width: calc(100vw - 2rem) !important; right: 1rem !important; }
 }

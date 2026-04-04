@@ -189,7 +189,7 @@ export default function Layout() {
         </header>
 
         {/* Page content */}
-        <main style={{ flex: 1, padding: '1.5rem', overflowY: 'auto' }}>
+        <main className="main-content" style={{ flex: 1, padding: '1.5rem', overflowY: 'auto' }}>
           <Outlet />
         </main>
       </div>
