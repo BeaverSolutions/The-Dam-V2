@@ -300,6 +300,11 @@ button { cursor: pointer; font-family: inherit; }
   .pipeline-cols { grid-template-columns: 1fr !important; }
 }
 
+/* Desktop sidebar nav always visible — override the mobile slide transform */
+.desktop-sidebar .sidebar-nav {
+  transform: translateX(0) !important;
+}
+
 /* === Global Mobile === */
 @media (max-width: 768px) {
   /* Reduce card padding on mobile */

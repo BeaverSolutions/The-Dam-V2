@@ -48,7 +48,7 @@ export default function Layout() {
   };
 
   const sidebar = (
-    <nav style={{
+    <nav className="sidebar-nav" style={{
       width: 'var(--sidebar-width)',
       background: 'var(--panel)',
       borderRight: '1px solid var(--border)',
@@ -58,8 +58,8 @@ export default function Layout() {
       position: 'fixed',
       left: 0, top: 0, bottom: 0,
       zIndex: 100,
-      transform: sidebarOpen ? 'translateX(0)' : undefined,
-      transition: 'transform var(--transition)',
+      transform: sidebarOpen ? 'translateX(0)' : 'translateX(-100%)',
+      transition: 'transform 0.25s ease',
     }}>
       {/* Logo */}
       <div style={{ padding: '1.25rem 1rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
