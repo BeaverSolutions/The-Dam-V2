@@ -189,6 +189,7 @@ router.get('/memory', async (req, res, next) => {
     const result = await pool.query(
       `SELECT id, agent, memory_type, key, content, updated_at
        FROM agent_memory WHERE client_id = $1
+         AND memory_type != 'secret'
        ORDER BY updated_at DESC`,
       [req.clientId]
     );
