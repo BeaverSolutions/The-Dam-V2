@@ -43,13 +43,28 @@ function formatPlan(plan) {
 function formatResult(result) {
   if (!result) return 'Done.';
   const s = result.summary || {};
+  const appUrl = process.env.FRONTEND_URL || 'https://app.beaver.solutions';
   const lines = [`<b>Complete.</b>`, ''];
-  if (s.leads_found !== undefined) lines.push(`Leads found: <b>${s.leads_found}</b>`);
-  if (s.messages_drafted !== undefined) lines.push(`Messages drafted: <b>${s.messages_drafted}</b>`);
-  if (s.pending_approvals !== undefined && s.pending_approvals > 0) {
-    lines.push(`\nApprovals waiting in queue: <b>${s.pending_approvals}</b>`);
-    lines.push(`<a href="${process.env.FRONTEND_URL || 'https://app.beaver.solutions'}/approvals">Review now</a>`);
+
+  // List each lead
+  const leads = result.leads || [];
+  if (leads.length) {
+    lines.push(`<b>Leads found (${leads.length}):</b>`);
+    leads.forEach((l, i) => {
+      const title = l.title ? ` · ${l.title}` : '';
+      lines.push(`${i + 1}. <b>${l.name}</b> — ${l.company}${title}`);
+    });
+    lines.push('');
   }
+
+  if (s.messages_drafted !== undefined) lines.push(`Messages drafted: <b>${s.messages_drafted}</b>`);
+
+  if (s.pending_approvals !== undefined && s.pending_approvals > 0) {
+    lines.push(`\n<a href="${appUrl}/approvals">Review ${s.pending_approvals} approval${s.pending_approvals !== 1 ? 's' : ''} →</a>`);
+  } else {
+    lines.push(`\n<a href="${appUrl}/approvals">Go to approvals →</a>`);
+  }
+
   return lines.join('\n');
 }
 
