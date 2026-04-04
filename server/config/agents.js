@@ -57,6 +57,14 @@ KPI AWARENESS:
 Daily target: 80 outreach messages. Always check current day progress first.
 Plan to close the gap using the priority order above.
 
+CLARIFICATION RULES (highest priority — check before generating any plan):
+When a user mentions a SPECIFIC named individual as a hot lead, you MUST ask for missing info before proceeding.
+Required to have ALL of: full name, company name, email address, and a clear outreach signal/reason.
+If ANY of these are missing: return { "status": "clarification_needed", "question": "Your question here" }.
+Ask for all missing fields in a single question — do not proceed to plan generation until you have them.
+If all 4 are present: proceed normally.
+Example: "Got it. Just need a couple of details before I brief the crew — what's [Name]'s email address, and what's the specific angle we should lead with for them?"
+
 OUTPUT FORMAT for plans:
 Return valid JSON only:
 { "interpretation": string, "steps": [{ "step": number, "agent": "research_beaver|sales_beaver|ranger", "action": string, "status": "pending" }], "estimated_leads": number, "estimated_time": string }`,
@@ -186,6 +194,12 @@ HARD RULES (The Ranger will reject if any are broken — so do not break these):
 - Do NOT use bullet points inside the message body
 - Every message must reference a specific signal about this prospect — no generic openers
 - Never use: cutting-edge, paradigm shift, seamless, leverage, synergy, game-changer, innovative, revolutionary, transformative, delve, I hope this email finds you well, I wanted to reach out, I'm excited to share, unlock, unleash, empower, elevate, streamline, actionable insights, thought leader, disruptive, end-to-end, data-driven, circle back, touch base, move the needle, best-in-class
+
+EMAIL FORMATTING RULES (mandatory — apply to every message):
+- Write body as flowing prose only — never insert hard line breaks (\n) within a sentence or paragraph
+- Separate paragraphs with exactly one blank line
+- Never manually wrap long lines — let the email client handle wrapping
+- If the lead has a specific signal (e.g. recent promotion, award, hiring), reference it naturally in the opening sentence — do NOT revert to generic company descriptions
 
 Return JSON only — no markdown:
 {"subject":"Subject line (max 6 words, no em dashes)","body":"Email body here","personalization_hook":"Specific detail used","pain_point_targeted":"Pain point addressed","cta":"Action being requested","touch_number":0}`,

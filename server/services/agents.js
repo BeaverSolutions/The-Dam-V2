@@ -469,6 +469,16 @@ async function directorPlan(clientId, { command }) {
       const fileContext = buildClientContext(fileConfig);
       const result = await callAgent('director', command + icpContext + personaContext + fileContext + memoryBrief);
 
+      // Director is asking for missing info before it can build a plan
+      if (result?.status === 'clarification_needed') {
+        return {
+          plan_id: planId,
+          command,
+          status: 'clarification_needed',
+          message: result.question || result.message || 'Could you give me a bit more detail so I can brief the crew properly?',
+        };
+      }
+
       if (result?.steps) {
         return {
           plan_id: planId,
@@ -672,10 +682,24 @@ async function directorExecute(clientId, { plan_id, command }) {
 
   for (const lead of leadsToProcess) {
     try {
+      const meta = lead.metadata || {};
+      const contextParts = [
+        `Name: ${lead.name}`,
+        `Company: ${lead.company}`,
+        `Title: ${lead.title || 'N/A'}`,
+      ];
+      const about = lead.short_description || meta.short_description;
+      if (about) contextParts.push(`About: ${about}`);
+      if (meta.signal) contextParts.push(`Signal (why reaching out now): ${meta.signal}`);
+      if (meta.angle) contextParts.push(`Angle to lead with: ${meta.angle}`);
+      if (meta.why_now) contextParts.push(`Why now: ${meta.why_now}`);
+      if (meta.friction) contextParts.push(`Friction point: ${meta.friction}`);
+      if (meta.notes) contextParts.push(`Personalisation hook: ${meta.notes}`);
+
       const salesResult = await salesGenerate(clientId, {
         lead_id: lead.id,
         channel: 'email',
-        context: `Name: ${lead.name}, Company: ${lead.company}, Title: ${lead.title || 'N/A'}, About: ${lead.short_description || ''}`,
+        context: contextParts.join('\n'),
       });
 
       const msgRes = await pool.query(

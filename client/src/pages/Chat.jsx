@@ -250,8 +250,8 @@ export default function Chat() {
       if (res?.data) {
         const plan = res.data;
 
-        // Director flagged this command as out of scope — show explanation, no plan
-        if (plan.status === 'out_of_scope') {
+        // Director flagged this command as out of scope, or needs more info before planning
+        if (plan.status === 'out_of_scope' || plan.status === 'clarification_needed') {
           setMessages(prev => [...prev, {
             id: Date.now() + 1,
             role: 'assistant',
