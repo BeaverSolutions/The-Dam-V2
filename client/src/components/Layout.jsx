@@ -66,7 +66,7 @@ export default function Layout() {
       <div style={{ padding: '1.25rem 1rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
         <BeaverAvatar agent="director" size="xs" />
         <div>
-          <div style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--lime)' }}>The Dam</div>
+          <div style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--brand)' }}>The Dam</div>
           <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>v2 — Autonomous</div>
         </div>
       </div>
@@ -83,10 +83,10 @@ export default function Layout() {
               alignItems: 'center',
               gap: '0.75rem',
               padding: '0.625rem 1rem',
-              background: isActive(path) ? 'rgba(200,255,0,0.08)' : 'transparent',
-              color: isActive(path) ? 'var(--lime)' : 'var(--text-muted)',
+              background: isActive(path) ? 'rgba(255,106,0,0.08)' : 'transparent',
+              color: isActive(path) ? 'var(--brand)' : 'var(--text-muted)',
               border: 'none',
-              borderLeft: isActive(path) ? '3px solid var(--lime)' : '3px solid transparent',
+              borderLeft: isActive(path) ? '3px solid var(--brand)' : '3px solid transparent',
               cursor: 'pointer',
               fontSize: '0.875rem',
               fontWeight: isActive(path) ? 600 : 400,
@@ -181,7 +181,7 @@ export default function Layout() {
             {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
           </button>
           <div style={{ flex: 1 }} />
-          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', background: 'rgba(200,255,0,0.1)', border: '1px solid rgba(200,255,0,0.2)', padding: '0.2rem 0.6rem', borderRadius: 100 }}>
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', background: 'rgba(255,106,0,0.08)', border: '1px solid rgba(255,106,0,0.2)', padding: '0.2rem 0.6rem', borderRadius: 100 }}>
             {user?.client?.name || 'Beaver Solutions'}
           </span>
           <button className="btn btn-ghost" style={{ padding: '0.25rem' }}>

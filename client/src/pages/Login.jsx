@@ -56,10 +56,10 @@ export default function Login() {
             <BeaverAvatar agent="director" size="md" />
           </div>
           <h1 style={{ fontSize: '1.75rem', fontWeight: 700, marginBottom: '0.25rem' }}>
-            The <span style={{ color: 'var(--lime)' }}>Dam</span>
+            The <span style={{ color: 'var(--brand)' }}>Dam</span>
           </h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>
-            Always building. Always working. The whole dam crew.
+            We ARE the whole Dam Crew!
           </p>
         </div>
 
@@ -106,18 +106,18 @@ export default function Login() {
             style={{
               marginTop: '1.5rem',
               padding: '0.75rem',
-              background: 'rgba(200,255,0,0.05)',
-              border: '1px solid rgba(200,255,0,0.15)',
+              background: 'rgba(255,106,0,0.05)',
+              border: '1px solid rgba(255,106,0,0.15)',
               borderRadius: 'var(--radius)',
               cursor: 'pointer',
               width: '100%',
               textAlign: 'left',
               transition: 'border-color var(--transition)',
             }}
-            onMouseEnter={e => e.currentTarget.style.borderColor = 'rgba(200,255,0,0.4)'}
-            onMouseLeave={e => e.currentTarget.style.borderColor = 'rgba(200,255,0,0.15)'}
+            onMouseEnter={e => e.currentTarget.style.borderColor = 'rgba(255,106,0,0.4)'}
+            onMouseLeave={e => e.currentTarget.style.borderColor = 'rgba(255,106,0,0.15)'}
           >
-            <p style={{ fontSize: '0.75rem', color: 'var(--lime)', marginBottom: '0.25rem', fontWeight: 600 }}>
+            <p style={{ fontSize: '0.75rem', color: 'var(--brand)', marginBottom: '0.25rem', fontWeight: 600 }}>
               Click to use demo credentials
             </p>
             <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{DEMO_EMAIL}</p>
@@ -127,7 +127,7 @@ export default function Login() {
 
         <p style={{ textAlign: 'center', marginTop: '1rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
           Don't have an account?{' '}
-          <button onClick={() => navigate('/verify-email')} style={{ background: 'none', border: 'none', color: 'var(--lime)', cursor: 'pointer', fontSize: '0.75rem' }}>
+          <button onClick={() => navigate('/verify-email')} style={{ background: 'none', border: 'none', color: 'var(--brand)', cursor: 'pointer', fontSize: '0.75rem' }}>
             Verify email
           </button>
         </p>

@@ -1,14 +1,16 @@
 :root {
   --bg: #060A0F;
   --panel: #0D1420;
-  --lime: #C8FF00;
-  --blue: #00B4FF;
-  --orange: #FF8C00;
-  --purple: #A855F7;
+  --brand: #FF6A00;        /* Beaver Solutions primary brand orange */
+  --brand-hover: #E65C00;  /* Darker orange for hover states */
+  --lime: #C8FF00;         /* Sales Beaver agent colour */
+  --blue: #00B4FF;         /* Research Beaver agent colour */
+  --orange: #FF8C00;       /* The Ranger agent colour */
+  --purple: #A855F7;       /* The Director agent colour */
   --police-blue: #2563EB;
   --text: #E2E8F0;
   --text-muted: #94A3B8;
-  --radius: 8px;
+  --radius: 10px;
   --transition: 0.2s ease;
   --border: rgba(255, 255, 255, 0.06);
   --sidebar-width: 240px;
@@ -17,7 +19,7 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background: var(--bg);
   color: var(--text);
   line-height: 1.5;
@@ -61,10 +63,10 @@ button { cursor: pointer; font-family: inherit; }
   cursor: pointer;
 }
 .btn-primary {
-  background: var(--lime);
-  color: #060A0F;
+  background: var(--brand);
+  color: #fff;
 }
-.btn-primary:hover { background: #b8ef00; }
+.btn-primary:hover { background: var(--brand-hover); }
 .btn-secondary {
   background: transparent;
   color: var(--text);
@@ -119,7 +121,7 @@ button { cursor: pointer; font-family: inherit; }
   transition: border-color var(--transition);
   width: 100%;
 }
-.form-input:focus { border-color: var(--lime); }
+.form-input:focus { border-color: var(--brand); }
 .form-input::placeholder { color: var(--text-muted); }
 
 /* Skeleton loader */
@@ -196,9 +198,9 @@ button { cursor: pointer; font-family: inherit; }
   transition: all var(--transition);
 }
 .filter-tab:hover { border-color: rgba(255,255,255,0.2); color: var(--text); }
-.filter-tab--active { background: rgba(200,255,0,0.1); border-color: rgba(200,255,0,0.3); color: var(--lime); }
+.filter-tab--active { background: rgba(255,106,0,0.1); border-color: rgba(255,106,0,0.3); color: var(--brand); }
 .filter-tab-count { background: rgba(255,255,255,0.1); border-radius: 100px; padding: 0 0.35rem; font-size: 0.7rem; }
-.filter-tab--active .filter-tab-count { background: rgba(200,255,0,0.2); }
+.filter-tab--active .filter-tab-count { background: rgba(255,106,0,0.2); }
 
 /* Nav badge */
 .nav-badge {
