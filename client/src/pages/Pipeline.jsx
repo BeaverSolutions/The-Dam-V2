@@ -540,6 +540,9 @@ function LeadDetail({ lead, onUpdate }) {
   const [activity, setActivity] = useState([]);
   const [actLoading, setActLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [proposal, setProposal] = useState(null);
+  const [generatingProposal, setGeneratingProposal] = useState(false);
+  const [proposalCopied, setProposalCopied] = useState(false);
   const notesRef = useRef(notes);
 
   useEffect(() => {
@@ -586,6 +589,25 @@ function LeadDetail({ lead, onUpdate }) {
       notesRef.current = notes;
     } catch {}
     setSavingNotes(false);
+  };
+
+  const handleGenerateProposal = async () => {
+    setGeneratingProposal(true);
+    setProposal(null);
+    try {
+      const res = await request(`/agents/sales/proposal/${lead.id}`, { method: 'POST' });
+      if (res?.data) setProposal(res.data);
+    } catch {}
+    setGeneratingProposal(false);
+  };
+
+  const handleCopyProposal = () => {
+    if (!proposal) return;
+    const text = `Subject: ${proposal.subject}\n\n${proposal.body}`;
+    navigator.clipboard.writeText(text).then(() => {
+      setProposalCopied(true);
+      setTimeout(() => setProposalCopied(false), 2000);
+    });
   };
 
   const handleGenerate = async () => {
@@ -758,6 +780,44 @@ function LeadDetail({ lead, onUpdate }) {
           <Zap size={14} />
           {generating ? 'Generating…' : 'Generate Outreach with Sales Beaver'}
         </button>
+
+        {/* 4b. Generate Proposal — shown for leads past initial outreach */}
+        {['meeting_requested', 'meeting_booked', 'proposal', 'negotiating'].includes(lead.pipeline_stage) && (
+          <div>
+            <button
+              className="btn btn-secondary"
+              style={{ width: '100%', justifyContent: 'center', gap: '0.5rem', borderColor: 'rgba(168,85,247,0.4)', color: 'var(--purple)' }}
+              onClick={handleGenerateProposal}
+              disabled={generatingProposal}
+            >
+              <FileText size={14} />
+              {generatingProposal ? 'Writing proposal…' : 'Generate Proposal with Sales Beaver'}
+            </button>
+
+            {proposal && (
+              <div className="fade-in" style={{ marginTop: '0.75rem', background: 'rgba(168,85,247,0.05)', border: '1px solid rgba(168,85,247,0.2)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
+                <div style={{ padding: '0.625rem 0.875rem', borderBottom: '1px solid rgba(168,85,247,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div>
+                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--purple)' }}>{proposal.subject}</div>
+                    {proposal.pain_summary && (
+                      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>{proposal.pain_summary}</div>
+                    )}
+                  </div>
+                  <button
+                    className="btn btn-ghost"
+                    style={{ fontSize: '0.75rem', gap: '0.3rem', color: proposalCopied ? 'var(--lime)' : 'var(--text-muted)', flexShrink: 0 }}
+                    onClick={handleCopyProposal}
+                  >
+                    {proposalCopied ? <><CheckCircle size={12} /> Copied</> : 'Copy'}
+                  </button>
+                </div>
+                <div style={{ padding: '0.875rem', fontSize: '0.8rem', color: 'var(--text)', lineHeight: 1.7, whiteSpace: 'pre-wrap', maxHeight: 320, overflowY: 'auto' }}>
+                  {proposal.body}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* 5. Outreach Sequence */}
         <div>
