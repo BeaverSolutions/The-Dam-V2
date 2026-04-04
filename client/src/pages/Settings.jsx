@@ -55,6 +55,26 @@ export default function Settings() {
   // Gmail disconnect
   const [gmailDisconnecting, setGmailDisconnecting] = useState(false);
 
+  // Profile / display name
+  const [displayName, setDisplayName] = useState(user?.name || '');
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameSaved, setNameSaved] = useState(false);
+
+  const handleSaveName = async () => {
+    setNameSaving(true);
+    setNameSaved(false);
+    try {
+      const res = await request('/auth/profile', { method: 'PUT', body: JSON.stringify({ display_name: displayName }) });
+      if (res?.data) {
+        const stored = JSON.parse(localStorage.getItem('dam_user') || '{}');
+        localStorage.setItem('dam_user', JSON.stringify({ ...stored, name: res.data.display_name }));
+        setNameSaved(true);
+        setTimeout(() => setNameSaved(false), 2500);
+      }
+    } catch {}
+    setNameSaving(false);
+  };
+
   const loadIntegrations = () => {
     request('/integrations/status')
       .then(res => { if (res?.data) setIntegrations(res.data); })
@@ -226,6 +246,31 @@ export default function Settings() {
           <p className="page-subtitle">Manage integrations, ideal customer profile, and account details</p>
         </div>
       </div>
+
+      {/* Profile */}
+      <Section title="Profile">
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', maxWidth: 400 }}>
+          <div className="form-group" style={{ flex: 1 }}>
+            <label className="form-label">Display name</label>
+            <input
+              className="form-input"
+              type="text"
+              placeholder={user?.email?.split('@')[0] || 'Your name'}
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+            />
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Used in dashboard greetings and the activity log</span>
+          </div>
+          <button
+            className="btn btn-primary"
+            onClick={handleSaveName}
+            disabled={nameSaving}
+            style={{ marginBottom: '1.5rem' }}
+          >
+            {nameSaved ? <><CheckCircle size={14} /> Saved</> : <><Save size={14} /> Save</>}
+          </button>
+        </div>
+      </Section>
 
       {/* Integrations */}
       <Section title="Integrations">

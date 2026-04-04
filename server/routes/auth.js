@@ -103,6 +103,20 @@ router.get('/me', authMiddleware, async (req, res, next) => {
   }
 });
 
+// PUT /api/auth/profile — update display name
+router.put('/profile',
+  authMiddleware,
+  [body('display_name').optional({ nullable: true }).trim().isLength({ max: 100 }), validate],
+  async (req, res, next) => {
+    try {
+      const result = await authService.updateProfile(req.user.userId, req.body);
+      res.json({ data: result });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 // POST /api/auth/change-password
 router.post('/change-password',
   authMiddleware,

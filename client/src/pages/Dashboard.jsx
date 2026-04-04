@@ -66,13 +66,14 @@ function stateLabel(s) {
 function GreetingHeader({ onBriefOpen, onRefresh, refreshing }) {
   const { text, Icon } = greeting();
   const user = getUser();
-  const name = user?.name || user?.email?.split('@')[0] || 'there';
+  const rawName = user?.name || user?.email?.split('@')[0] || 'there';
+  const name = rawName.charAt(0).toUpperCase() + rawName.slice(1);
   const today = new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
 
   return (
     <div className="page-header" style={{ marginBottom: '1.25rem' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-        <Icon size={24} style={{ color: 'var(--lime)' }} />
+        <Icon size={24} style={{ color: 'var(--brand)' }} />
         <div>
           <h1 className="page-title">{text}, {name}!</h1>
           <p className="page-subtitle">{today} · The whole dam crew is working for you</p>

@@ -52,8 +52,10 @@ async function signup({ email, password, name }) {
 
 async function login({ email, password }) {
   const result = await pool.query(
-    `SELECT u.id, u.client_id, u.email, u.password_hash, u.role, u.email_verified
-     FROM users u WHERE u.email = $1`,
+    `SELECT u.id, u.client_id, u.email, u.password_hash, u.role, u.email_verified, u.display_name,
+            c.name as client_name
+     FROM users u JOIN clients c ON c.id = u.client_id
+     WHERE u.email = $1`,
     [email]
   );
   if (result.rows.length === 0) {
@@ -72,9 +74,11 @@ async function login({ email, password }) {
     user: {
       id: user.id,
       email: user.email,
+      name: user.display_name || null,
       role: user.role,
       clientId: user.client_id,
       emailVerified: user.email_verified,
+      client: { id: user.client_id, name: user.client_name },
     },
   };
 }
@@ -126,7 +130,7 @@ async function verifyAccessCode({ code, deviceFingerprint, userAgent }) {
 
 async function getMe(userId) {
   const result = await pool.query(
-    `SELECT u.id, u.email, u.role, u.email_verified, u.created_at,
+    `SELECT u.id, u.email, u.role, u.email_verified, u.created_at, u.display_name,
             c.id as client_id, c.name as client_name, c.plan, c.onboarding_completed
      FROM users u JOIN clients c ON c.id = u.client_id
      WHERE u.id = $1`,
@@ -139,6 +143,7 @@ async function getMe(userId) {
   return {
     id: row.id,
     email: row.email,
+    name: row.display_name || null,
     role: row.role,
     emailVerified: row.email_verified,
     createdAt: row.created_at,
@@ -151,4 +156,13 @@ async function getMe(userId) {
   };
 }
 
-module.exports = { signup, login, verifyEmail, verifyAccessCode, getMe, generateToken, generateAccessCode };
+async function updateProfile(userId, { display_name }) {
+  const result = await pool.query(
+    `UPDATE users SET display_name = $1, updated_at = NOW()
+     WHERE id = $2 RETURNING id, email, display_name`,
+    [display_name?.trim() || null, userId]
+  );
+  return result.rows[0];
+}
+
+module.exports = { signup, login, verifyEmail, verifyAccessCode, getMe, updateProfile, generateToken, generateAccessCode };

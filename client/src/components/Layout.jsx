@@ -4,7 +4,6 @@ import {
   LayoutDashboard, GitBranch, MessageSquare, CheckCircle,
   Activity, Calendar, Users, MessageCircle, Settings, Menu, X, Bell, LogOut, Brain, ShieldCheck, Upload,
 } from 'lucide-react';
-import BeaverAvatar from './BeaverAvatar';
 import { clearToken, getUser } from '../utils/auth';
 import { useApi } from '../hooks/useApi';
 
@@ -64,11 +63,27 @@ export default function Layout() {
     }}>
       {/* Logo */}
       <div style={{ padding: '1.25rem 1rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-        <BeaverAvatar agent="director" size="xs" />
-        <div>
-          <div style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--brand)' }}>The Dam</div>
-          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>v2 — Autonomous</div>
-        </div>
+        {(() => {
+          const isBeaverSolutions = user?.client?.name?.toLowerCase().includes('beaver') || (!user?.client?.name && user?.role === 'admin');
+          const clientName = user?.client?.name || 'The Dam';
+          const productName = isBeaverSolutions ? 'BeavR Dam' : clientName;
+          const initials = isBeaverSolutions ? 'BD' : clientName.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+          return (
+            <>
+              <div style={{
+                width: 32, height: 32, borderRadius: 8, background: 'var(--brand)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0, fontWeight: 800, fontSize: '0.75rem', color: '#fff', letterSpacing: '-0.5px',
+              }}>
+                {initials}
+              </div>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--brand)' }}>{productName}</div>
+                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>v2 — Autonomous</div>
+              </div>
+            </>
+          );
+        })()}
       </div>
 
       {/* Nav items */}
