@@ -62,28 +62,14 @@ export default function Layout() {
       transition: 'transform 0.25s ease',
     }}>
       {/* Logo */}
-      <div style={{ padding: '1.25rem 1rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-        {(() => {
-          const isBeaverSolutions = user?.client?.name?.toLowerCase().includes('beaver') || (!user?.client?.name && user?.role === 'admin');
-          const clientName = user?.client?.name || 'The Dam';
-          const productName = isBeaverSolutions ? 'BeavR Dam' : clientName;
-          const initials = isBeaverSolutions ? 'BD' : clientName.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
-          return (
-            <>
-              <div style={{
-                width: 32, height: 32, borderRadius: 8, background: 'var(--brand)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0, fontWeight: 800, fontSize: '0.75rem', color: '#fff', letterSpacing: '-0.5px',
-              }}>
-                {initials}
-              </div>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--brand)' }}>{productName}</div>
-                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>v2 — Autonomous</div>
-              </div>
-            </>
-          );
-        })()}
+      <div style={{ padding: '1rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+        <img src="/assets/logo.png" alt="Beaver Solutions" style={{ width: 36, height: 36, objectFit: 'contain', flexShrink: 0 }} />
+        <div style={{ fontWeight: 700, fontSize: '0.95rem', color: '#fff', fontFamily: "'Nunito', 'Poppins', sans-serif", letterSpacing: '-0.2px' }}>
+          {(() => {
+            const isBeaverSolutions = user?.client?.name?.toLowerCase().includes('beaver') || (!user?.client?.name && user?.role === 'admin');
+            return isBeaverSolutions ? 'BeavR Dam' : (user?.client?.name || 'BeavR Dam');
+          })()}
+        </div>
       </div>
 
       {/* Nav items */}
