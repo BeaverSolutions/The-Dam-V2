@@ -47,6 +47,9 @@ app.use(express.json({ limit: '10kb' }));
 // Rate limiting on all API routes
 app.use('/api', rateLimiter);
 
+// Telegram webhook — no JWT, verified by bot secret token
+app.use('/api/telegram', require('./routes/telegram'));
+
 // Routes - public (no auth)
 app.use('/api/auth', require('./routes/auth'));
 
