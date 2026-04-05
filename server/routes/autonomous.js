@@ -119,7 +119,7 @@ router.post('/approve', requireInternalKey, async (req, res) => {
   }
   try {
     const { rows: [approval] } = await pool.query(
-      `UPDATE approvals SET status = 'approved', reviewed_at = NOW()
+      `UPDATE approvals SET status = 'approved', resolved_at = NOW()
        WHERE id = $1 AND client_id = $2 AND status = 'pending'
        RETURNING id, message_id`,
       [approval_id, client_id]
@@ -151,7 +151,7 @@ router.post('/reject', requireInternalKey, async (req, res) => {
   }
   try {
     const { rows: [approval] } = await pool.query(
-      `UPDATE approvals SET status = 'rejected', reviewed_at = NOW()
+      `UPDATE approvals SET status = 'rejected', resolved_at = NOW()
        WHERE id = $1 AND client_id = $2 AND status = 'pending'
        RETURNING id, message_id`,
       [approval_id, client_id]
