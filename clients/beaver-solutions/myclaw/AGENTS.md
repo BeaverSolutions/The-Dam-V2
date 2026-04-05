@@ -197,10 +197,10 @@ Every cron job:
 ## Heartbeats
 
 During heartbeats (every 4 hours while active):
-- Commit and push any uncommitted workspace changes
 - Check The Dam API health (one ping to /api/autonomous/pending-approvals)
 - Synthesize new daily note entries into MEMORY.md if patterns have emerged
 - Do not alert MJ on heartbeat success — silent unless something is wrong
+- Do not attempt git commits or pushes — MyClaw cloud has no git environment. Skip silently.
 
 ---
 

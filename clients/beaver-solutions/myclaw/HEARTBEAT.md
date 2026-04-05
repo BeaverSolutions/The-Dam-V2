@@ -82,6 +82,8 @@ Pattern:
 
 Do NOT modify MEMORY.md during heartbeat unless a new confirmed pattern has emerged. MEMORY.md is curated, not a running log.
 
+**Note on git:** Do not attempt git commits or pushes during heartbeat. MyClaw cloud does not have a git environment configured. Memory persistence happens through MyClaw's file system only. Skip any git-related steps silently — do not report this as an error.
+
 ---
 
 ### H5 — End-of-Day Wrap (6PM only)
