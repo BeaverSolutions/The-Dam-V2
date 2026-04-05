@@ -43,7 +43,7 @@ export default function Login() {
         {/* Logo */}
         <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
           <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem' }}>
-            <img src="/assets/logo.png" alt="Beaver Solutions" style={{ width: 72, height: 72, objectFit: 'contain' }} />
+            <img src="/assets/logo-new.png" alt="Beaver Solutions" style={{ width: 72, height: 72, objectFit: 'contain' }} />
           </div>
           <h1 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.25rem', fontFamily: "'Nunito', 'Poppins', sans-serif" }}>
             <span style={{ color: 'var(--brand)' }}>Beaver</span>{' '}
@@ -93,8 +93,8 @@ export default function Login() {
 
         <p style={{ textAlign: 'center', marginTop: '1rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
           Need access?{' '}
-          <a href="mailto:hello@beaver.solutions" style={{ color: 'var(--brand)', textDecoration: 'none' }}>
-            Contact Beaver Solutions
+          <a href="mailto:sales@beaver.solutions" style={{ color: 'var(--brand)', textDecoration: 'none' }}>
+            sales@beaver.solutions
           </a>
         </p>
       </div>
