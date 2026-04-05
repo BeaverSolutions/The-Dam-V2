@@ -20,18 +20,12 @@ router.get('/clients', async (req, res, next) => {
     const result = await pool.query(`
       SELECT
         c.id, c.name, c.email, c.slug, c.plan, c.onboarding_completed, c.created_at,
-        COUNT(DISTINCT u.id)::int                                          AS user_count,
-        COUNT(DISTINCT l.id) FILTER (WHERE l.deleted_at IS NULL)::int     AS lead_count,
-        COUNT(DISTINCT m.id)::int                                          AS message_count,
-        COUNT(DISTINCT a.id) FILTER (WHERE a.status = 'pending')::int     AS pending_approvals,
-        MAX(lg.created_at)                                                  AS last_activity
+        (SELECT COUNT(*)::int FROM users u WHERE u.client_id = c.id)                                        AS user_count,
+        (SELECT COUNT(*)::int FROM leads l WHERE l.client_id = c.id AND l.deleted_at IS NULL)               AS lead_count,
+        (SELECT COUNT(*)::int FROM messages m WHERE m.client_id = c.id)                                     AS message_count,
+        (SELECT COUNT(*)::int FROM approvals a WHERE a.client_id = c.id AND a.status = 'pending')           AS pending_approvals,
+        (SELECT MAX(lg.created_at) FROM logs lg WHERE lg.client_id = c.id)                                  AS last_activity
       FROM clients c
-      LEFT JOIN users u   ON u.client_id = c.id
-      LEFT JOIN leads l   ON l.client_id = c.id
-      LEFT JOIN messages m ON m.client_id = c.id
-      LEFT JOIN approvals a ON a.client_id = c.id
-      LEFT JOIN logs lg   ON lg.client_id = c.id
-      GROUP BY c.id
       ORDER BY c.created_at DESC
     `);
     res.json({ data: result.rows, meta: { total: result.rows.length } });
