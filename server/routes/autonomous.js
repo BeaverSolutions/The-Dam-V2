@@ -73,17 +73,136 @@ router.post('/weekly-review', requireInternalKey, async (req, res) => {
 });
 
 /* ─── GET /api/autonomous/pending-approvals ──────────────── */
+// Optional ?client_id=UUID to scope to one tenant.
+// Returns full message + lead context so Claw can present actionable briefs.
 
 router.get('/pending-approvals', requireInternalKey, async (req, res) => {
   try {
+    const clientId = req.query.client_id || null;
     const { rows } = await pool.query(
-      `SELECT id, status, created_at
-       FROM approvals
-       WHERE status = 'pending'
-       ORDER BY created_at DESC
-       LIMIT 100`
+      `SELECT
+         a.id            AS approval_id,
+         a.client_id,
+         a.status,
+         a.created_at,
+         m.id            AS message_id,
+         m.subject,
+         m.body,
+         m.channel,
+         m.metadata      AS message_meta,
+         l.name          AS lead_name,
+         l.company       AS lead_company,
+         l.title         AS lead_title,
+         l.email         AS lead_email,
+         l.metadata->>'industry' AS lead_industry
+       FROM approvals a
+       JOIN messages m ON m.id = a.message_id
+       JOIN leads   l ON l.id = m.lead_id
+       WHERE a.status = 'pending'
+         AND ($1::uuid IS NULL OR a.client_id = $1::uuid)
+       ORDER BY a.created_at DESC
+       LIMIT 20`,
+      [clientId]
     );
     res.json({ data: rows, meta: { total: rows.length } });
+  } catch (err) {
+    res.status(500).json({ error: err.message, code: 'DB_ERROR' });
+  }
+});
+
+/* ─── POST /api/autonomous/approve ──────────────────────── */
+
+router.post('/approve', requireInternalKey, async (req, res) => {
+  const { approval_id, client_id } = req.body;
+  if (!approval_id || !client_id) {
+    return res.status(400).json({ error: 'approval_id and client_id required' });
+  }
+  try {
+    const { rows: [approval] } = await pool.query(
+      `UPDATE approvals SET status = 'approved', reviewed_at = NOW()
+       WHERE id = $1 AND client_id = $2 AND status = 'pending'
+       RETURNING id, message_id`,
+      [approval_id, client_id]
+    );
+    if (!approval) {
+      return res.status(404).json({ error: 'Approval not found or already actioned', code: 'NOT_FOUND' });
+    }
+    await pool.query(
+      `UPDATE messages SET status = 'pending_send' WHERE id = $1`,
+      [approval.message_id]
+    );
+    await pool.query(
+      `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)
+       VALUES ($1, 'claw', 'message_approved', 'message', $2, $3)`,
+      [client_id, approval.message_id, JSON.stringify({ approval_id, source: 'telegram_claw' })]
+    );
+    res.json({ data: { approval_id, message_id: approval.message_id, status: 'approved' } });
+  } catch (err) {
+    res.status(500).json({ error: err.message, code: 'DB_ERROR' });
+  }
+});
+
+/* ─── POST /api/autonomous/reject ───────────────────────── */
+
+router.post('/reject', requireInternalKey, async (req, res) => {
+  const { approval_id, client_id, reason } = req.body;
+  if (!approval_id || !client_id) {
+    return res.status(400).json({ error: 'approval_id and client_id required' });
+  }
+  try {
+    const { rows: [approval] } = await pool.query(
+      `UPDATE approvals SET status = 'rejected', reviewed_at = NOW()
+       WHERE id = $1 AND client_id = $2 AND status = 'pending'
+       RETURNING id, message_id`,
+      [approval_id, client_id]
+    );
+    if (!approval) {
+      return res.status(404).json({ error: 'Approval not found or already actioned', code: 'NOT_FOUND' });
+    }
+    await pool.query(
+      `UPDATE messages SET status = 'rejected' WHERE id = $1`,
+      [approval.message_id]
+    );
+    await pool.query(
+      `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)
+       VALUES ($1, 'claw', 'message_rejected', 'message', $2, $3)`,
+      [client_id, approval.message_id, JSON.stringify({ approval_id, reason: reason || 'rejected_via_telegram', source: 'telegram_claw' })]
+    );
+    res.json({ data: { approval_id, message_id: approval.message_id, status: 'rejected' } });
+  } catch (err) {
+    res.status(500).json({ error: err.message, code: 'DB_ERROR' });
+  }
+});
+
+/* ─── GET /api/autonomous/recent-replies ─────────────────── */
+// Returns leads that replied in the last N hours (default 24).
+
+router.get('/recent-replies', requireInternalKey, async (req, res) => {
+  try {
+    const clientId = req.query.client_id || null;
+    const hours = Math.min(parseInt(req.query.hours) || 24, 168); // cap at 7 days
+    const { rows } = await pool.query(
+      `SELECT
+         l.id            AS lead_id,
+         l.name          AS lead_name,
+         l.company       AS lead_company,
+         l.title         AS lead_title,
+         l.email         AS lead_email,
+         l.status        AS lead_status,
+         m.id            AS message_id,
+         m.body          AS reply_body,
+         m.created_at    AS replied_at,
+         m.metadata->>'classification' AS classification
+       FROM messages m
+       JOIN leads l ON l.id = m.lead_id
+       WHERE m.status = 'replied'
+         AND ($1::uuid IS NULL OR m.client_id = $1::uuid)
+         AND m.created_at >= NOW() - ($2 || ' hours')::interval
+       ORDER BY m.created_at DESC
+       LIMIT 50`,
+      [clientId, hours]
+    );
+    res.json({ data: rows, meta: { total: rows.length, hours } });
   } catch (err) {
     res.status(500).json({ error: err.message, code: 'DB_ERROR' });
   }

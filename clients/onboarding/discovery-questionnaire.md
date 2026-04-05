@@ -1,137 +1,93 @@
 # The Dam — Client Discovery Questionnaire
 
 **Use this on the first call with every new client.**
-Run through it in order. Sections 1–4 are mandatory before any work starts.
-Sections 5–7 complete the config.md and activate the system.
+All 4 sections are mandatory before any work starts.
 
-Estimated time: 45–60 minutes.
+Estimated time: 30–40 minutes.
+
+> The client should have completed the **pre-work form** before this call (see SOP). If they haven't, start with Section 1. If they have, confirm their answers and skip to Section 2.
 
 ---
 
 ## Before the Call
 
-- [ ] Send the client a 1-paragraph overview of The Dam (what it does, what they'll need to provide)
-- [ ] Book 60 minutes — don't rush
-- [ ] Have a blank `config.md` open, ready to fill in live
+- [ ] Pre-work form sent and returned (or plan to cover Section 1 live)
+- [ ] Book 45 minutes — gives breathing room
+- [ ] Have the client's Settings page open in The Dam, ready to fill in live
 
 ---
 
-## Section 1 — Company Basics
+## Section 1 — Company and Customer (5 min)
 
-> Goal: Understand what they do, who they sell to, and why.
+> Goal: Confirm the basics. If the pre-work form is done, verify and move on.
 
-1. Tell me what your company does in one sentence — as if explaining to a stranger.
-2. Who is your customer? Describe the ideal client as specifically as you can.
-3. What problem do you solve for them?
-4. What's the outcome they get from working with you?
-5. What's your average deal size / contract value?
-6. What does a typical sales cycle look like? (Days from first contact to close?)
-7. What's your website URL?
-8. Where are you based? Where are your clients based?
+1. What does your company do in one sentence?
+2. Who is your ideal customer? (Industry, company size, role, location)
+3. What problem do you solve for them — and what's the outcome they get?
+4. What's your average deal size and typical sales cycle length?
 
 ---
 
-## Section 2 — ICP Deep Dive
+## Section 2 — ICP Deep Dive (15 min)
 
-> Goal: Build the ICP section of config.md. This is the most important part — don't rush it.
+> Goal: Build the ICP config. This is the most important section — don't rush it.
 
 ### Targeting
-9. If you could clone your 3 best clients, what would they look like? (Industry, company size, role, location)
-10. What job title do you usually talk to? Who is the actual decision maker?
-11. Is there a company size (revenue, headcount) that's too small or too big for you?
-12. Do you focus on a specific geography? Any regions you don't want to target?
-13. Are there specific industries you want to focus on? Any you want to avoid?
+5. If you could clone your 3 best clients, what do they look like? (Industry, size, role, geography)
+6. What job title do you sell to? Who actually signs?
+7. Is there a company size that's too small or too big for you?
+8. Any industries or regions that are off-limits?
 
 ### Signals
-14. What does a "ready to buy" prospect look like? What are they usually doing when you find them?
-15. Have you noticed any LinkedIn signals that suggest a prospect would be receptive? (Hiring, posting, events?)
-16. Is there a trigger event that often precedes a deal? (New funding, leadership change, reorg, product launch?)
+9. What does a "ready to buy" prospect look like? What are they usually doing when you find them?
+10. Is there a trigger event that often precedes a deal? (Hiring, new funding, leadership change, product launch?)
 
 ### Pain
-17. What's the biggest operational pain your clients have before working with you?
-18. What have they usually tried before coming to you? Why didn't it work?
-19. What's the cost of NOT solving this problem for them? (Time, money, missed opportunity?)
+11. What's the biggest operational pain your clients have before working with you?
+12. What have they usually tried before you? Why didn't it work?
 
 ### Disqualifiers
-20. Who should we NOT reach out to? (Company types, roles, situations that waste time)
-21. Is there a competitor's client list you want to avoid? Any companies specifically off-limits?
+13. Who should we NOT reach out to? (Roles, company types, competitors' clients, specific companies)
 
 ---
 
-## Section 3 — Voice & Tone
+## Section 3 — Voice, Tone, and Messaging (10 min)
 
-> Goal: Build the Agent Persona section. The agents write in the client's voice — this has to be right.
+> Goal: Build the agent persona. The beavers write in the client's voice — this has to be right.
 
-22. How would you describe your communication style? (Formal, casual, direct, warm?)
-23. If your company had a personality, which 3 words would describe it?
-24. Is there a language style you want to use? (e.g. Malaysian English is fine, keep it conversational)
-25. What's your single strongest value proposition in one sentence?
-26. What makes you different from the alternatives? Why would someone choose you over a competitor?
-27. What social proof can we use? (Client names, results, case studies — anything specific and real)
-28. What should the first message CTA be? (A 20-min call? A specific question? Something else?)
-
----
-
-## Section 4 — Outreach Preferences
-
-> Goal: Build the Outreach Playbook section.
-
-29. Have you done cold outreach before? What worked? What completely flopped?
-30. Are there any angles or hooks you've found resonate well with your audience?
-31. Are there things you absolutely do NOT want us to say or do in messages?
-32. Is there a specific email subject line style you prefer? (Question, observation, one-word, etc.)
-33. What's your reaction to humour in B2B outreach? (Love it / avoid it / depends)
-34. Any phrases or words that feel off-brand for you?
+14. How would you describe your communication style? (Formal, casual, direct, warm?)
+15. What's your single strongest value proposition — in one sentence, the way you'd say it at a BBQ?
+16. What makes you different from the obvious alternatives?
+17. What social proof can we reference? (Client names, results, case studies — anything specific and real)
+18. Have you done cold outreach before? What worked well, and what completely flopped?
+19. Any angles, hooks, phrases, or words that are off-brand or off-limits?
 
 ---
 
-## Section 5 — Pipeline & Approval Flow
+## Section 4 — Operations and Preferences (5 min)
 
-> Goal: Understand how the client wants to interact with the system day-to-day.
+> Goal: Set up how they'll interact with The Dam day-to-day.
 
-35. How often do you want to review and approve messages? (Daily? Batched twice a week?)
-36. Who will be the approver? Just you, or someone on your team?
-37. What's your Telegram username? (For approval notifications and alerts)
-38. If a message gets approved, how quickly do you want it sent? (Immediately / next morning only / specific window?)
-39. What's your daily outreach volume target? (Default is 80 — is that right for you, or do you want more/less?)
-
----
-
-## Section 6 — Technical Setup
-
-> Goal: Get everything needed to activate the account.
-
-40. What email domain do you want outreach to come from? (e.g. hello@yourcompany.com)
-    - Note: We set up a dedicated AgentMail inbox — the client does not send from their personal inbox.
-41. Do you have an Apollo.io account? (For lead sourcing — we need API key)
-42. Do you have a Hunter.io account? (For email enrichment — we need API key)
-43. Do you have access to LinkedIn Sales Navigator? (Helpful but not required)
-44. Do you have a Calendly or cal.com link for booking calls? (Used in follow-ups)
-
----
-
-## Section 7 — Goals & Success Metrics
-
-> Goal: Set expectations and define what success looks like.
-
-45. What does success look like for you at 30 days? 90 days?
-46. How many meetings per month would make this worthwhile?
-47. Are you looking for volume (lots of outreach) or precision (fewer, highly targeted)?
-48. Who else on your team should be in the loop on what's happening?
+20. How often do you want to review and approve messages? (Daily batch is default)
+21. Who will be the approver? Just you, or someone on your team?
+22. What's your daily outreach volume target? (Default is 80 — more or less?)
+23. What email domain do you want outreach to come from?
+24. Do you have a Calendly or cal.com link for booking calls?
+25. What's your Telegram username? (For approval notifications)
 
 ---
 
 ## After the Call
 
-- [ ] Fill in `clients/[slug]/config.md` using answers above
-- [ ] Create client account in The Dam (admin panel → New Client)
-- [ ] Set up AgentMail inbox
-- [ ] Add Hunter.io API key
-- [ ] Add Apollo.io API key
+- [ ] Fill in ICP in Settings → ICP
+- [ ] Fill in Agent Persona in Settings → Agent Config
+- [ ] Create AgentMail inbox in Settings → Integrations
+- [ ] Add Apollo.io API key (ask client via follow-up email if not provided)
+- [ ] Add Hunter.io API key (ask client via follow-up email if not provided)
 - [ ] Set up Telegram notification
 - [ ] Run test campaign: 3 leads → full pipeline → share sample messages with client
-- [ ] Client signs off on tone + message quality
-- [ ] Activate autonomous kickoff
+- [ ] Client signs off on tone and message quality
+- [ ] Activate daily autonomous kickoff
 - [ ] Book 2-week check-in call
 
 ---
