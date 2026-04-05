@@ -28,8 +28,9 @@ export default function Layout() {
   const navigate = useNavigate();
   const user = getUser();
   const { request } = useApi();
-  // Super admin = any admin role user — backend enforces the real Beaver Solutions check
-  const isSuperAdmin = user?.role === 'admin';
+  // Super admin = Beaver Solutions admins only
+  const isSuperAdmin = user?.role === 'admin' &&
+    (user?.client?.slug === 'beaver-solutions' || user?.client?.name?.toLowerCase().includes('beaver'));
 
   useEffect(() => {
     request('/approvals?status=pending&perPage=1')
