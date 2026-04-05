@@ -43,8 +43,9 @@ function costForUsage(model, usage = {}) {
 }
 
 /**
- * Today's spend for a client in USD. Day boundary is UTC midnight to match
- * `created_at::date` indexing. Returns 0 if client has no usage yet.
+ * Today's spend for a client in USD. Day boundary is UTC midnight.
+ * Range predicate on created_at lets Postgres use the
+ * idx_llm_usage_client_date btree index via a range scan.
  */
 async function getTodaySpend(clientId) {
   if (!clientId) return 0;
@@ -52,7 +53,7 @@ async function getTodaySpend(clientId) {
     `SELECT COALESCE(SUM(cost_usd), 0)::float AS spend
        FROM llm_usage
       WHERE client_id = $1
-        AND created_at::date = (NOW() AT TIME ZONE 'UTC')::date`,
+        AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')`,
     [clientId]
   );
   return res.rows[0]?.spend || 0;

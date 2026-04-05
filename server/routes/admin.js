@@ -405,7 +405,8 @@ router.get('/usage', async (req, res, next) => {
     const days = Math.min(Math.max(parseInt(req.query.days, 10) || 1, 1), 30);
     const clientFilter = req.query.client_id || null;
 
-    // Today's spend per client + budget + breakdown by agent
+    // Today's spend per client + budget + breakdown by agent.
+    // Range predicate on created_at lets the planner use the btree index.
     const today = await pool.query(
       `SELECT
          c.id          AS client_id,
@@ -424,7 +425,7 @@ router.get('/usage', async (req, res, next) => {
        FROM clients c
        LEFT JOIN llm_usage u
          ON u.client_id = c.id
-        AND u.created_at::date = (NOW() AT TIME ZONE 'UTC')::date
+        AND u.created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
        WHERE ($1::uuid IS NULL OR c.id = $1::uuid)
        GROUP BY c.id, c.slug, c.name, c.daily_budget_usd
        ORDER BY spend_today_usd DESC, c.name ASC`,
@@ -442,22 +443,24 @@ router.get('/usage', async (req, res, next) => {
          SUM(output_tokens)::int AS output_tokens,
          COUNT(*)::int AS calls
        FROM llm_usage
-       WHERE created_at::date = (NOW() AT TIME ZONE 'UTC')::date
+       WHERE created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
          AND ($1::uuid IS NULL OR client_id = $1::uuid)
        GROUP BY client_id, agent, model
        ORDER BY cost_usd DESC`,
       [clientFilter]
     );
 
-    // Historical daily totals
+    // Historical daily totals over the requested window.
+    // date_trunc on the aggregation is fine in the projection — the
+    // IMMUTABLE restriction only applies to index expressions.
     const history = await pool.query(
       `SELECT
          client_id,
-         (created_at AT TIME ZONE 'UTC')::date AS day,
+         date_trunc('day', created_at AT TIME ZONE 'UTC')::date AS day,
          SUM(cost_usd)::float  AS cost_usd,
          COUNT(*)::int         AS calls
        FROM llm_usage
-       WHERE created_at >= (NOW() AT TIME ZONE 'UTC')::date - ($1::int - 1) * INTERVAL '1 day'
+       WHERE created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC') - ($1::int - 1) * INTERVAL '1 day'
          AND ($2::uuid IS NULL OR client_id = $2::uuid)
        GROUP BY client_id, day
        ORDER BY day DESC, cost_usd DESC`,

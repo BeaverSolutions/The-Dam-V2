@@ -23,11 +23,12 @@ CREATE TABLE IF NOT EXISTS llm_usage (
   created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Single composite index supports both "today's spend for client" range
+-- scans and "recent calls for client" ordered reads. An expression index
+-- on (created_at::date) would be rejected by Postgres since that cast is
+-- STABLE, not IMMUTABLE; we use range predicates in the query layer instead.
 CREATE INDEX IF NOT EXISTS idx_llm_usage_client_date
   ON llm_usage(client_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_llm_usage_client_day
-  ON llm_usage(client_id, (created_at::date));
 
 -- ─── 2. Daily budget cap per client ────────────────────────────
 ALTER TABLE clients
