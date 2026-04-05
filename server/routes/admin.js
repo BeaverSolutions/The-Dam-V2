@@ -8,7 +8,7 @@ const { body, param } = require('express-validator');
 const validate = require('../middleware/validate');
 const pool = require('../db/pool');
 const bcrypt = require('bcrypt');
-const { generateAccessCode } = require('../services/auth');
+const { generateAccessCode, createSignupToken } = require('../services/auth');
 
 // ─────────────────────────────────────────────
 // CLIENTS
@@ -332,6 +332,26 @@ router.get('/clients/:id/credentials',
       }
 
       res.json({ data: configured });
+    } catch (err) { next(err); }
+  }
+);
+
+// ─────────────────────────────────────────────
+// SIGNUP LINKS
+// ─────────────────────────────────────────────
+
+// POST /api/admin/clients/:id/signup-link — generate one-time invite link
+router.post('/clients/:id/signup-link',
+  [
+    param('id').isUUID(),
+    body('role').optional().isIn(['admin', 'user']),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      const token = await createSignupToken(req.params.id, req.user.userId, req.body.role || 'admin');
+      const baseUrl = process.env.APP_URL || 'https://dam.beaver.solutions';
+      res.json({ data: { url: `${baseUrl}/join?token=${token}` } });
     } catch (err) { next(err); }
   }
 );

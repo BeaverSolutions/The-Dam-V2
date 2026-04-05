@@ -16,10 +16,14 @@ const secrets = require('../services/secrets');
 router.get('/status', async (req, res, next) => {
   try {
     const agentmailOk = agentmailService.isConnected();
-    const [gmailConnected, apolloKey, hunterKey] = await Promise.all([
+    const [gmailConnected, apolloKey, hunterKey, calendlyRow] = await Promise.all([
       gmailService.isConnected(req.clientId),
       apolloService.getApiKey(req.clientId),
       hunterService.getApiKey(req.clientId),
+      pool.query(
+        `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'system' AND key = 'calendly_url' LIMIT 1`,
+        [req.clientId]
+      ),
     ]);
 
     let gmailEmail = null;
@@ -31,6 +35,11 @@ router.get('/status', async (req, res, next) => {
     if (agentmailOk) {
       agentmailEmail = await agentmailService.getInboxEmail(req.clientId).catch(() => null);
     }
+
+    const calendlyContent = calendlyRow.rows[0]?.content;
+    const calendlyUrl = calendlyContent
+      ? (typeof calendlyContent === 'string' ? JSON.parse(calendlyContent) : calendlyContent)?.url
+      : null;
 
     res.json({
       data: {
@@ -51,6 +60,11 @@ router.get('/status', async (req, res, next) => {
         hunter: {
           connected: !!hunterKey,
           label: hunterKey ? 'Connected' : 'Not configured',
+        },
+        calendly: {
+          connected: !!calendlyUrl,
+          url: calendlyUrl || null,
+          label: calendlyUrl ? calendlyUrl.replace('https://calendly.com/', '@') : 'Not connected',
         },
       },
     });
@@ -293,6 +307,52 @@ router.delete('/hunter/key', async (req, res, next) => {
   try {
     await secrets.deleteClientSecret(req.clientId, 'system', 'hunter_api_key');
     res.json({ data: { status: 'removed' } });
+  } catch (err) { next(err); }
+});
+
+/* ─── Calendly ───────────────────────────────────────────── */
+
+router.get('/calendly', async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT content FROM agent_memory
+       WHERE client_id = $1 AND agent = 'system' AND key = 'calendly_url' LIMIT 1`,
+      [req.clientId]
+    );
+    const row = result.rows[0];
+    const url = row ? (typeof row.content === 'string' ? JSON.parse(row.content) : row.content)?.url : null;
+    res.json({ data: { connected: !!url, url: url || null } });
+  } catch (err) { next(err); }
+});
+
+router.post('/calendly',
+  [body('url').isURL({ protocols: ['https'], require_protocol: true }), validate],
+  async (req, res, next) => {
+    try {
+      const content = JSON.stringify({ url: req.body.url });
+      await pool.query(
+        `INSERT INTO agent_memory (client_id, agent, memory_type, key, content)
+         VALUES ($1, 'system', 'config', 'calendly_url', $2)
+         ON CONFLICT (client_id, agent, key)
+         DO UPDATE SET content = $2, updated_at = NOW()`,
+        [req.clientId, content]
+      );
+      await logsService.createLog(req.clientId, {
+        agent: 'system', action: 'calendly_connected', target_type: 'integration',
+        metadata: { url: req.body.url },
+      });
+      res.json({ data: { connected: true, url: req.body.url } });
+    } catch (err) { next(err); }
+  }
+);
+
+router.delete('/calendly', async (req, res, next) => {
+  try {
+    await pool.query(
+      `DELETE FROM agent_memory WHERE client_id = $1 AND agent = 'system' AND key = 'calendly_url'`,
+      [req.clientId]
+    );
+    res.json({ data: { connected: false, url: null } });
   } catch (err) { next(err); }
 });
 

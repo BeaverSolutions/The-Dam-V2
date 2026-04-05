@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Users, Building2, Activity, Key, Plus, RefreshCw,
   ChevronRight, ChevronLeft, Eye, EyeOff, Copy, Check,
-  ShieldCheck, AlertTriangle, MoreVertical, Loader,
+  ShieldCheck, AlertTriangle, MoreVertical, Loader, Link,
 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 
@@ -234,6 +234,9 @@ function ClientDetail({ clientId, onBack }) {
   const [resettingId, setResettingId] = useState(null);
   const [resetResult, setResetResult] = useState(null);
   const [showAddUser, setShowAddUser] = useState(false);
+  const [signupLink, setSignupLink] = useState(null);
+  const [generatingLink, setGeneratingLink] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -265,6 +268,27 @@ function ClientDetail({ clientId, onBack }) {
     } finally {
       setResettingId(null);
     }
+  };
+
+  const generateSignupLink = async () => {
+    setGeneratingLink(true);
+    setSignupLink(null);
+    try {
+      const res = await request(`/admin/clients/${clientId}/signup-link`, { method: 'POST' });
+      setSignupLink(res.data.url);
+    } catch (err) {
+      alert(err.message || 'Failed to generate link');
+    } finally {
+      setGeneratingLink(false);
+    }
+  };
+
+  const copyLink = () => {
+    if (!signupLink) return;
+    navigator.clipboard.writeText(signupLink).then(() => {
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    });
   };
 
   if (loading) return <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}><Loader size={20} className="spin" /></div>;
@@ -327,12 +351,32 @@ function ClientDetail({ clientId, onBack }) {
       {/* Users tab */}
       {tab === 'users' && (
         <div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.75rem' }}>
+          <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginBottom: '0.75rem' }}>
+            <button className="btn btn-ghost" style={{ fontSize: '0.8rem', padding: '0.4rem 0.9rem', border: '1px solid var(--border)' }}
+              onClick={generateSignupLink} disabled={generatingLink}>
+              {generatingLink ? <Loader size={14} className="spin" /> : <Link size={14} />}
+              Invite Link
+            </button>
             <button className="btn btn-primary" style={{ fontSize: '0.8rem', padding: '0.4rem 0.9rem' }}
               onClick={() => setShowAddUser(true)}>
               <Plus size={14} /> Add User
             </button>
           </div>
+          {signupLink && (
+            <div style={{ background: 'rgba(255,106,0,0.06)', border: '1px solid rgba(255,106,0,0.2)', borderRadius: 8, padding: '0.75rem 1rem', marginBottom: '0.75rem' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.4rem' }}>One-time invite link (expires in 7 days)</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <code style={{ flex: 1, fontSize: '0.72rem', color: 'var(--brand)', background: 'rgba(0,0,0,0.3)', padding: '0.35rem 0.6rem', borderRadius: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>
+                  {signupLink}
+                </code>
+                <button className="btn btn-ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', flexShrink: 0 }} onClick={copyLink}>
+                  {linkCopied ? <Check size={14} /> : <Copy size={14} />}
+                  {linkCopied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+              <button onClick={() => setSignupLink(null)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.7rem', marginTop: '0.4rem', padding: 0 }}>Dismiss</button>
+            </div>
+          )}
           {resetResult && (
             <div style={{ background: 'rgba(200,255,0,0.08)', border: '1px solid rgba(200,255,0,0.2)', borderRadius: 8, padding: '0.75rem 1rem', marginBottom: '0.75rem' }}>
               <div style={{ fontSize: '0.8rem', color: 'var(--lime)', marginBottom: '0.5rem' }}>Password reset for {resetResult.user?.email}</div>

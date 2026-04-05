@@ -1,5 +1,6 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { Plus, ChevronLeft, ChevronRight, Clock, MapPin, X, Ban } from 'lucide-react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { Plus, ChevronLeft, ChevronRight, Clock, MapPin, X, Ban, ExternalLink } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 
 const DAYS_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -217,8 +218,50 @@ function BookingForm({ defaultDate, onSave, onCancel, saving }) {
   );
 }
 
+function CalendlyWidget({ url, prefillDate }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!url || !ref.current) return;
+
+    // Load Calendly embed script once
+    if (!document.getElementById('calendly-script')) {
+      const script = document.createElement('script');
+      script.id = 'calendly-script';
+      script.src = 'https://assets.calendly.com/assets/external/widget.js';
+      script.async = true;
+      document.head.appendChild(script);
+    }
+
+    const tryInit = () => {
+      if (window.Calendly) {
+        window.Calendly.initInlineWidget({
+          url,
+          parentElement: ref.current,
+          prefill: prefillDate ? { date: new Date(prefillDate) } : {},
+        });
+      } else {
+        setTimeout(tryInit, 300);
+      }
+    };
+    tryInit();
+
+    return () => {
+      if (ref.current) ref.current.innerHTML = '';
+    };
+  }, [url, prefillDate]);
+
+  return (
+    <div
+      ref={ref}
+      style={{ minHeight: 650, width: '100%', borderRadius: 'var(--radius)', overflow: 'hidden' }}
+    />
+  );
+}
+
 export default function Calendar() {
   const { request, loading } = useApi();
+  const navigate = useNavigate();
   const today = new Date();
 
   const [year, setYear] = useState(today.getFullYear());
@@ -228,9 +271,14 @@ export default function Calendar() {
   const [selected, setSelected] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [calendly, setCalendly] = useState(null);
+  const [showCalendly, setShowCalendly] = useState(false);
 
   useEffect(() => {
     request('/calendar').then(res => setEvents(res?.data || [])).catch(() => {});
+    request('/integrations/calendly').then(res => {
+      if (res?.data?.connected) setCalendly(res.data);
+    }).catch(() => {});
   }, []);
 
   const cells = getCalendarDays(year, month);
@@ -284,8 +332,17 @@ export default function Calendar() {
             {blockedCount > 0 && <span style={{ color: 'var(--orange)', marginLeft: '0.75rem' }}>· {blockedCount} blocked day{blockedCount !== 1 ? 's' : ''}</span>}
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
           <button className="btn btn-secondary" style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }} onClick={goToday}>Today</button>
+          {calendly?.connected && (
+            <button
+              className="btn btn-secondary"
+              style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem', color: 'var(--lime)', borderColor: 'rgba(200,255,0,0.4)', gap: '0.4rem' }}
+              onClick={() => setShowCalendly(v => !v)}
+            >
+              <ExternalLink size={13} /> {showCalendly ? 'Hide' : 'Open Calendly'}
+            </button>
+          )}
           <button className="btn btn-primary" onClick={() => { setShowForm(true); setSelected(null); }}>
             <Plus size={15} /> Book Meeting
           </button>
@@ -374,6 +431,28 @@ export default function Calendar() {
         onToggleBlock={toggleBlock}
         onBook={() => setShowForm(true)}
       />
+
+      {/* Calendly widget */}
+      {showCalendly && calendly?.url && (
+        <div className="card fade-in" style={{ marginTop: '1rem', padding: '1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>Book via Calendly</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{calendly.url}</div>
+            </div>
+            <button className="btn btn-ghost" style={{ padding: '0.2rem' }} onClick={() => setShowCalendly(false)}><X size={16} /></button>
+          </div>
+          <CalendlyWidget url={calendly.url} prefillDate={selected} />
+        </div>
+      )}
+
+      {!calendly?.connected && (
+        <div style={{ marginTop: '1rem', background: 'rgba(37,99,235,0.06)', border: '1px solid rgba(37,99,235,0.2)', borderRadius: 'var(--radius)', padding: '0.875rem 1rem', display: 'flex', alignItems: 'center', gap: '0.75rem', fontSize: '0.82rem' }}>
+          <ExternalLink size={15} style={{ color: 'var(--police-blue)', flexShrink: 0 }} />
+          <span style={{ color: 'var(--text-muted)', flex: 1 }}>Connect Calendly in Settings to embed your scheduling page here — agents will also use it when suggesting meeting times.</span>
+          <button className="btn btn-secondary" style={{ fontSize: '0.75rem', padding: '0.3rem 0.75rem', flexShrink: 0 }} onClick={() => navigate('/settings')}>Connect →</button>
+        </div>
+      )}
     </div>
   );
 }

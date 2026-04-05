@@ -18,6 +18,7 @@ import Memory from './pages/Memory';
 import Import from './pages/Import';
 import Settings from './pages/Settings';
 import Admin from './pages/Admin';
+import Join from './pages/Join';
 import { getUser } from './utils/auth';
 
 function PrivateRoute({ children }) {
@@ -36,6 +37,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      <Route path="/join" element={<Join />} />
       <Route path="/verify-email" element={<VerifyEmail />} />
       <Route path="/access-code" element={<AccessCode />} />
       <Route path="/onboarding" element={<Onboarding />} />

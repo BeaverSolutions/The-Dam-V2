@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   Users, MessageSquare, CheckCircle, Calendar,
   Zap, Coffee, Sun, Moon, Sunrise, X, FileText,
-  Mail, Search, Send, AtSign, CornerDownRight, RefreshCw,
+  Mail, Search, Send, AtSign, ExternalLink, CornerDownRight, RefreshCw,
   ArrowRight, MessageCircle, Target, TrendingUp, BookOpen, BarChart2,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -179,10 +179,11 @@ function StatCard({ label, value, icon: Icon, color, loading, onClick, sub }) {
 function IntegrationChips({ integrations, loading }) {
   if (loading) return null;
   const chips = [
-    { key: 'gmail',      label: 'Gmail',      icon: Mail,   info: integrations?.gmail },
-    { key: 'agentmail',  label: 'AgentMail',  icon: Send,   info: integrations?.agentmail },
-    { key: 'apollo',     label: 'Apollo',     icon: Search, info: integrations?.apollo },
-    { key: 'hunter',     label: 'Hunter',     icon: AtSign, info: integrations?.hunter },
+    { key: 'gmail',      label: 'Gmail',      icon: Mail,         info: integrations?.gmail },
+    { key: 'agentmail',  label: 'AgentMail',  icon: Send,         info: integrations?.agentmail },
+    { key: 'apollo',     label: 'Apollo',     icon: Search,       info: integrations?.apollo },
+    { key: 'hunter',     label: 'Hunter',     icon: AtSign,       info: integrations?.hunter },
+    { key: 'calendly',   label: 'Calendly',   icon: ExternalLink, info: integrations?.calendly },
   ];
   return (
     <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
@@ -198,7 +199,7 @@ function IntegrationChips({ integrations, loading }) {
             {label}
           </span>
           <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
-            {info?.connected ? (info.email || 'connected') : 'not connected'}
+            {info?.connected ? (info.email || info.label || 'connected') : 'not connected'}
           </span>
         </div>
       ))}

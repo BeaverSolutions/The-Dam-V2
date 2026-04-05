@@ -103,6 +103,33 @@ router.get('/me', authMiddleware, async (req, res, next) => {
   }
 });
 
+// GET /api/auth/join?token=xxx — validate invite link
+router.get('/join', async (req, res, next) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: 'Token required', code: 'MISSING_TOKEN' });
+    const row = await authService.getSignupTokenInfo(token);
+    res.json({ data: { client_name: row.client_name, role: row.role } });
+  } catch (err) { next(err); }
+});
+
+// POST /api/auth/join — complete signup from invite link
+router.post('/join',
+  [
+    body('token').notEmpty(),
+    body('email').isEmail().normalizeEmail(),
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+    body('display_name').optional().trim().isLength({ max: 100 }),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      const result = await authService.joinWithToken(req.body);
+      res.status(201).json({ data: result });
+    } catch (err) { next(err); }
+  }
+);
+
 // PUT /api/auth/profile — update display name
 router.put('/profile',
   authMiddleware,

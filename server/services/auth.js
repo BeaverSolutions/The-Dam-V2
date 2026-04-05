@@ -1,6 +1,7 @@
 'use strict';
 
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
@@ -165,4 +166,60 @@ async function updateProfile(userId, { display_name }) {
   return result.rows[0];
 }
 
-module.exports = { signup, login, verifyEmail, verifyAccessCode, getMe, updateProfile, generateToken, generateAccessCode };
+async function createSignupToken(clientId, createdBy, role = 'admin') {
+  const token = crypto.randomBytes(32).toString('hex');
+  await pool.query(
+    `INSERT INTO signup_tokens (client_id, token, role, created_by) VALUES ($1, $2, $3, $4)`,
+    [clientId, token, role, createdBy]
+  );
+  return token;
+}
+
+async function getSignupTokenInfo(token) {
+  const result = await pool.query(
+    `SELECT st.*, c.name AS client_name
+     FROM signup_tokens st JOIN clients c ON c.id = st.client_id
+     WHERE st.token = $1 AND st.used_at IS NULL AND st.expires_at > NOW()`,
+    [token]
+  );
+  if (result.rows.length === 0) {
+    throw new AppError('This invite link is invalid or has expired', 400, 'INVALID_TOKEN');
+  }
+  return result.rows[0];
+}
+
+async function joinWithToken({ token, email, password, display_name }) {
+  const tokenRow = await getSignupTokenInfo(token);
+
+  const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+  if (existing.rows.length > 0) {
+    throw new AppError('Email already registered', 409, 'EMAIL_EXISTS');
+  }
+
+  const passwordHash = await bcrypt.hash(password, 12);
+  const userResult = await pool.query(
+    `INSERT INTO users (client_id, email, password_hash, role, display_name, email_verified)
+     VALUES ($1, $2, $3, $4, $5, true)
+     RETURNING id, client_id, email, role, display_name`,
+    [tokenRow.client_id, email, passwordHash, tokenRow.role, display_name?.trim() || null]
+  );
+  const user = userResult.rows[0];
+
+  await pool.query(`UPDATE signup_tokens SET used_at = NOW() WHERE id = $1`, [tokenRow.id]);
+
+  const jwtToken = generateToken(user);
+  return {
+    token: jwtToken,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.display_name,
+      role: user.role,
+      clientId: user.client_id,
+      emailVerified: true,
+      client: { id: tokenRow.client_id, name: tokenRow.client_name },
+    },
+  };
+}
+
+module.exports = { signup, login, verifyEmail, verifyAccessCode, getMe, updateProfile, createSignupToken, getSignupTokenInfo, joinWithToken, generateToken, generateAccessCode };

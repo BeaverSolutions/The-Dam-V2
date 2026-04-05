@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Mail, CheckCircle, XCircle, Search, Save, Eye, EyeOff, Send, AtSign } from 'lucide-react';
+import { Mail, CheckCircle, XCircle, Search, Save, Eye, EyeOff, Send, AtSign, Calendar } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { getUser } from '../utils/auth';
 
@@ -55,6 +55,12 @@ export default function Settings() {
   // Gmail disconnect
   const [gmailDisconnecting, setGmailDisconnecting] = useState(false);
 
+  // Calendly
+  const [calendlyUrl, setCalendlyUrl] = useState('');
+  const [calendlyInfo, setCalendlyInfo] = useState({ connected: false, url: null });
+  const [calendlySaving, setCalendlySaving] = useState(false);
+  const [calendlySaved, setCalendlySaved] = useState(false);
+
   // Profile / display name
   const [displayName, setDisplayName] = useState(user?.name || '');
   const [nameSaving, setNameSaving] = useState(false);
@@ -77,9 +83,37 @@ export default function Settings() {
 
   const loadIntegrations = () => {
     request('/integrations/status')
-      .then(res => { if (res?.data) setIntegrations(res.data); })
+      .then(res => {
+        if (res?.data) {
+          setIntegrations(res.data);
+          if (res.data.calendly) setCalendlyInfo(res.data.calendly);
+        }
+      })
       .catch(() => {})
       .finally(() => setIntLoading(false));
+  };
+
+  const handleSaveCalendly = async () => {
+    if (!calendlyUrl.trim()) return;
+    setCalendlySaving(true);
+    try {
+      const url = calendlyUrl.trim().startsWith('https://') ? calendlyUrl.trim() : `https://calendly.com/${calendlyUrl.trim().replace(/^@/, '')}`;
+      const res = await request('/integrations/calendly', { method: 'POST', body: JSON.stringify({ url }) });
+      if (res?.data) {
+        setCalendlyInfo(res.data);
+        setCalendlyUrl('');
+        setCalendlySaved(true);
+        setTimeout(() => setCalendlySaved(false), 2500);
+      }
+    } catch {}
+    setCalendlySaving(false);
+  };
+
+  const handleDisconnectCalendly = async () => {
+    try {
+      await request('/integrations/calendly', { method: 'DELETE' });
+      setCalendlyInfo({ connected: false, url: null });
+    } catch {}
   };
 
   // Check for gmail=connected in URL params
@@ -501,6 +535,65 @@ export default function Settings() {
                     </button>
                   </div>
                   {hunterError && <div style={{ fontSize: '0.75rem', color: 'var(--orange)', marginTop: '0.375rem' }}>{hunterError}</div>}
+                </div>
+              )}
+            </div>
+
+            {/* Calendly */}
+            <div style={{ padding: '0.875rem 0', borderTop: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: calendlyInfo?.connected ? 0 : '0.875rem' }}>
+                <div style={{ width: 36, height: 36, borderRadius: 'var(--radius)', background: 'var(--bg)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <Calendar size={18} style={{ color: calendlyInfo?.connected ? 'var(--lime)' : 'var(--text-muted)' }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 500, fontSize: '0.875rem' }}>Calendly</div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
+                    {calendlyInfo?.connected
+                      ? `Scheduling via ${calendlyInfo.url}`
+                      : 'Let leads book meetings directly — agents use your link when scheduling'}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem' }}>
+                    {calendlyInfo?.connected
+                      ? <><CheckCircle size={13} style={{ color: 'var(--lime)' }} /> <span style={{ color: 'var(--lime)' }}>Connected</span></>
+                      : <><XCircle size={13} style={{ color: 'var(--text-muted)' }} /> <span style={{ color: 'var(--text-muted)' }}>Not connected</span></>
+                    }
+                  </div>
+                  {calendlyInfo?.connected && (
+                    <button
+                      className="btn btn-secondary"
+                      style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem', color: 'var(--orange)', borderColor: 'var(--orange)' }}
+                      onClick={handleDisconnectCalendly}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {!calendlyInfo?.connected && (
+                <div style={{ paddingLeft: 52 }}>
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <input
+                      className="form-input"
+                      placeholder="https://calendly.com/your-name or your-name"
+                      value={calendlyUrl}
+                      onChange={e => setCalendlyUrl(e.target.value)}
+                      style={{ fontSize: '0.875rem', flex: 1 }}
+                    />
+                    <button
+                      className="btn btn-primary"
+                      style={{ fontSize: '0.75rem', padding: '0.45rem 0.875rem', whiteSpace: 'nowrap' }}
+                      onClick={handleSaveCalendly}
+                      disabled={calendlySaving || !calendlyUrl.trim()}
+                    >
+                      {calendlySaving ? 'Saving…' : calendlySaved ? '✓ Saved' : 'Connect'}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
+                    Paste your full Calendly URL or just your username. Agents will use this to suggest booking times.
+                  </div>
                 </div>
               )}
             </div>
