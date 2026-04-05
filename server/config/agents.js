@@ -3,16 +3,33 @@
 // ─── Sprint 9: Agent Intelligence Upgrade ─────────────────────
 // All 4 agent prompts updated with full hard rules, memory system,
 // and pipeline discipline. Last updated: 2026-04-03
+//
+// ─── Sprint 10: Model routing for cost control ─────────────────
+// Each agent declares its own `model` + `maxTokens`. Deal-critical
+// reasoning stays on Sonnet; high-volume / low-stakes tasks drop to
+// Haiku (~4x cheaper input, ~4x cheaper output). Model IDs are
+// overridable via env so you can upgrade without a code change:
+//   MODEL_SONNET=claude-sonnet-4-5-yyyymmdd
+//   MODEL_HAIKU=claude-haiku-4-5-yyyymmdd
+
+const MODELS = {
+  SONNET: process.env.MODEL_SONNET || 'claude-sonnet-4-20250514',
+  HAIKU:  process.env.MODEL_HAIKU  || 'claude-haiku-4-5',
+};
 
 module.exports = {
-  CLAUDE_MODEL: 'claude-sonnet-4-20250514',
-  MAX_TOKENS: 2048,
+  MODELS,
+  CLAUDE_MODEL: MODELS.SONNET,   // kept for backward compat; prefer per-agent model
+  MAX_TOKENS: 2048,              // kept as ceiling; prefer per-agent maxTokens
   AGENTS: {
 
     // ═══════════════════════════════════════════════════════════
     // CAPTAIN BEAVER
     // ═══════════════════════════════════════════════════════════
     director: {
+      // Heavy reasoning: plans workflows, weekly reviews, cross-agent coordination.
+      model: MODELS.SONNET,
+      maxTokens: 2048,
       name: 'Captain Beaver',
       systemPrompt: `You are Captain Beaver at Beaver Solutions — an AI-powered B2B outbound sales agency based in Malaysia.
 
@@ -74,6 +91,11 @@ Return valid JSON only:
     // RESEARCH BEAVER
     // ═══════════════════════════════════════════════════════════
     research_beaver: {
+      // High-volume structured extraction (P1/P2/P3 scoring, friction detection,
+      // angle engine). Haiku handles this cleanly at ~1/4 the cost of Sonnet.
+      // If output quality drops, override MODEL_HAIKU to a stronger model.
+      model: MODELS.HAIKU,
+      maxTokens: 2048,
       name: 'Research Beaver',
       systemPrompt: `You are Research Beaver — the lead sourcing specialist at Beaver Solutions.
 
@@ -147,6 +169,10 @@ OUTPUT FORMAT — return JSON only, no markdown:
     // SALES BEAVER
     // ═══════════════════════════════════════════════════════════
     sales_beaver: {
+      // Deal-critical. Conversation quality = deal quality. Never downgrade.
+      // Messages are short (<= 80 words Day 0) so 1024 is plenty.
+      model: MODELS.SONNET,
+      maxTokens: 1024,
       name: 'Sales Beaver',
       systemPrompt: `You are Sales Beaver — the outreach specialist at Beaver Solutions.
 
@@ -248,6 +274,10 @@ Return JSON only — no markdown:
     // REPLY CLASSIFIER (Director sub-task)
     // ═══════════════════════════════════════════════════════════
     reply_classifier: {
+      // Simple 4-way classification (positive / neutral / objection / no_fit).
+      // Runs on every inbound reply. Haiku is the obvious choice.
+      model: MODELS.HAIKU,
+      maxTokens: 512,
       name: 'Reply Classifier',
       systemPrompt: `You are Captain Beaver at Beaver Solutions, classifying an inbound reply from a prospect.
 
@@ -273,6 +303,11 @@ Return JSON only:
     // ENFORCER BEAVER
     // ═══════════════════════════════════════════════════════════
     ranger: {
+      // Enforcer Beaver — the final quality gate. Needs to judge subtle vendor
+      // pitch smell, em-dashes, follow-up repetition, signal specificity.
+      // This is the single most important call in the pipeline. Sonnet only.
+      model: MODELS.SONNET,
+      maxTokens: 1024,
       name: 'Enforcer Beaver',
       systemPrompt: `You are Enforcer Beaver — the mandatory quality gate at Beaver Solutions.
 
