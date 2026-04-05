@@ -81,7 +81,8 @@ async function resumeSequence(leadId) {
 async function getDueFollowUps(clientId) {
   const today = new Date().toISOString().split('T')[0];
   const { rows } = await pool.query(
-    `SELECT fq.*, l.name, l.company, l.email, l.title, l.industry,
+    `SELECT fq.*, l.name, l.company, l.email, l.title,
+            l.metadata->>'industry' AS industry,
             l.metadata->>'notes' AS notes, l.metadata
      FROM followup_queue fq
      JOIN leads l ON l.id = fq.lead_id
