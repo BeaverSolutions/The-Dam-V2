@@ -41,9 +41,9 @@ export default function Login() {
     }}>
       <div style={{ width: '100%', maxWidth: 400 }}>
         {/* Logo */}
-        <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem' }}>
-            <img src="/assets/logo-new.png" alt="Beaver Solutions" style={{ width: 72, height: 72, objectFit: 'contain' }} />
+        <div style={{ textAlign: 'center', marginBottom: '1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '0.75rem' }}>
+            <img src="/assets/logo-new.png" alt="Beaver Solutions" style={{ width: 288, height: 288, objectFit: 'contain' }} />
           </div>
           <h1 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.25rem', fontFamily: "'Nunito', 'Poppins', sans-serif" }}>
             <span style={{ color: 'var(--brand)' }}>Beaver</span>{' '}

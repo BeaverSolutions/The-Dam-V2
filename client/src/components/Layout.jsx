@@ -62,8 +62,8 @@ export default function Layout() {
       transition: 'transform 0.25s ease',
     }}>
       {/* Logo */}
-      <div style={{ padding: '1rem 0.75rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.6rem' }}>
-        <img src="/assets/logo-new.png" alt="BeavR Dam" style={{ width: 44, height: 44, objectFit: 'contain', flexShrink: 0 }} />
+      <div style={{ padding: '1rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+        <img src="/assets/logo-new.png" alt="BeavR Dam" style={{ width: 36, height: 36, objectFit: 'contain', flexShrink: 0 }} />
         <div style={{ fontWeight: 700, fontSize: '0.95rem', color: 'var(--brand)', fontFamily: "'Nunito', 'Poppins', sans-serif", letterSpacing: '-0.2px' }}>
           {(() => {
             const isBeaverSolutions = user?.client?.name?.toLowerCase().includes('beaver') || (!user?.client?.name && user?.role === 'admin');
