@@ -11,6 +11,7 @@ const logger = require('./utils/logger');
 const errorHandler = require('./middleware/errorHandler');
 const authMiddleware = require('./middleware/auth');
 const tenantScope = require('./middleware/tenantScope');
+const { clientContext } = require('./middleware/clientContext');
 const rateLimiter = require('./middleware/rateLimiter');
 const adminOnly = require('./middleware/adminOnly');
 const superAdminOnly = require('./middleware/superAdminOnly');
@@ -70,21 +71,27 @@ app.get('/api/integrations/gmail/callback', async (req, res) => {
 });
 
 // Routes - protected
-app.use('/api/leads', authMiddleware, tenantScope, require('./routes/leads'));
-app.use('/api/messages', authMiddleware, tenantScope, require('./routes/messages'));
-app.use('/api/approvals', authMiddleware, tenantScope, require('./routes/approvals'));
-app.use('/api/logs', authMiddleware, tenantScope, require('./routes/logs'));
-app.use('/api/calendar', authMiddleware, tenantScope, require('./routes/calendar'));
-app.use('/api/agents', authMiddleware, tenantScope, require('./routes/agents'));
-app.use('/api/integrations', authMiddleware, tenantScope, require('./routes/integrations'));
-app.use('/api/dashboard', authMiddleware, tenantScope, require('./routes/dashboard'));
-app.use('/api/import',   authMiddleware, tenantScope, require('./routes/import'));
+// clientContext must come AFTER tenantScope so req.clientId is populated;
+// it binds an AsyncLocalStorage context so services (e.g. services/claude.js)
+// can attribute work to the correct tenant without threading clientId through
+// every function call.
+app.use('/api/leads',        authMiddleware, tenantScope, clientContext, require('./routes/leads'));
+app.use('/api/messages',     authMiddleware, tenantScope, clientContext, require('./routes/messages'));
+app.use('/api/approvals',    authMiddleware, tenantScope, clientContext, require('./routes/approvals'));
+app.use('/api/logs',         authMiddleware, tenantScope, clientContext, require('./routes/logs'));
+app.use('/api/calendar',     authMiddleware, tenantScope, clientContext, require('./routes/calendar'));
+app.use('/api/agents',       authMiddleware, tenantScope, clientContext, require('./routes/agents'));
+app.use('/api/integrations', authMiddleware, tenantScope, clientContext, require('./routes/integrations'));
+app.use('/api/dashboard',    authMiddleware, tenantScope, clientContext, require('./routes/dashboard'));
+app.use('/api/import',       authMiddleware, tenantScope, clientContext, require('./routes/import'));
 
-// Autonomous routes — internal key auth (no JWT required)
+// Autonomous routes — internal key auth (no JWT required).
+// Background tasks spawned by this router MUST wrap their work in
+// runWithClientContext(clientId, ...) so Claude calls get attributed.
 app.use('/api/autonomous', require('./routes/autonomous'));
 
 // Routes - super admin only (Beaver Solutions)
-app.use('/api/admin', authMiddleware, tenantScope, superAdminOnly, require('./routes/admin'));
+app.use('/api/admin', authMiddleware, tenantScope, clientContext, superAdminOnly, require('./routes/admin'));
 
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.0.0', tag: 'Autonomous', timestamp: new Date().toISOString() }));

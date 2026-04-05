@@ -392,4 +392,105 @@ router.get('/users', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─────────────────────────────────────────────
+// LLM USAGE + BUDGET
+// ─────────────────────────────────────────────
+
+// GET /api/admin/usage — per-client daily spend + budget headroom
+// Query params:
+//   days=N (default 1)  → how many days of history to return
+//   client_id=UUID      → optional filter to one client
+router.get('/usage', async (req, res, next) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 1, 1), 30);
+    const clientFilter = req.query.client_id || null;
+
+    // Today's spend per client + budget + breakdown by agent
+    const today = await pool.query(
+      `SELECT
+         c.id          AS client_id,
+         c.slug,
+         c.name,
+         c.daily_budget_usd::float                                                            AS budget_usd,
+         COALESCE(SUM(u.cost_usd), 0)::float                                                  AS spend_today_usd,
+         COALESCE(SUM(u.input_tokens), 0)::int                                                AS input_tokens,
+         COALESCE(SUM(u.output_tokens), 0)::int                                               AS output_tokens,
+         COALESCE(SUM(u.cache_read_tokens), 0)::int                                           AS cache_read_tokens,
+         COALESCE(SUM(u.cache_write_tokens), 0)::int                                          AS cache_write_tokens,
+         COUNT(u.id)::int                                                                     AS calls_today,
+         CASE WHEN c.daily_budget_usd > 0
+              THEN (COALESCE(SUM(u.cost_usd), 0) / c.daily_budget_usd)::float
+              ELSE 0 END                                                                      AS pct_used
+       FROM clients c
+       LEFT JOIN llm_usage u
+         ON u.client_id = c.id
+        AND u.created_at::date = (NOW() AT TIME ZONE 'UTC')::date
+       WHERE ($1::uuid IS NULL OR c.id = $1::uuid)
+       GROUP BY c.id, c.slug, c.name, c.daily_budget_usd
+       ORDER BY spend_today_usd DESC, c.name ASC`,
+      [clientFilter]
+    );
+
+    // Per-agent breakdown for today
+    const byAgent = await pool.query(
+      `SELECT
+         client_id,
+         agent,
+         model,
+         SUM(cost_usd)::float  AS cost_usd,
+         SUM(input_tokens)::int  AS input_tokens,
+         SUM(output_tokens)::int AS output_tokens,
+         COUNT(*)::int AS calls
+       FROM llm_usage
+       WHERE created_at::date = (NOW() AT TIME ZONE 'UTC')::date
+         AND ($1::uuid IS NULL OR client_id = $1::uuid)
+       GROUP BY client_id, agent, model
+       ORDER BY cost_usd DESC`,
+      [clientFilter]
+    );
+
+    // Historical daily totals
+    const history = await pool.query(
+      `SELECT
+         client_id,
+         (created_at AT TIME ZONE 'UTC')::date AS day,
+         SUM(cost_usd)::float  AS cost_usd,
+         COUNT(*)::int         AS calls
+       FROM llm_usage
+       WHERE created_at >= (NOW() AT TIME ZONE 'UTC')::date - ($1::int - 1) * INTERVAL '1 day'
+         AND ($2::uuid IS NULL OR client_id = $2::uuid)
+       GROUP BY client_id, day
+       ORDER BY day DESC, cost_usd DESC`,
+      [days, clientFilter]
+    );
+
+    res.json({
+      data: {
+        today: today.rows,
+        by_agent: byAgent.rows,
+        history: history.rows,
+      },
+      meta: { days, as_of: new Date().toISOString() },
+    });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/clients/:id/budget — change a client's daily cap
+router.patch('/clients/:id/budget', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { daily_budget_usd } = req.body;
+    const amount = Number(daily_budget_usd);
+    if (!Number.isFinite(amount) || amount < 0 || amount > 1000) {
+      return res.status(400).json({ error: 'daily_budget_usd must be a number between 0 and 1000', code: 'INVALID_BUDGET' });
+    }
+    const result = await pool.query(
+      `UPDATE clients SET daily_budget_usd = $1 WHERE id = $2 RETURNING id, slug, name, daily_budget_usd::float`,
+      [amount, id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Client not found' });
+    res.json({ data: result.rows[0] });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

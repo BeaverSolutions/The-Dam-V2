@@ -118,6 +118,9 @@ async function checkRepliesForClient(clientId) {
  * Run reply detection for all clients with unreplied sent messages.
  */
 async function checkAllClients() {
+  // Lazy-require to avoid circular import between middleware/clientContext
+  // and any service that depends on this one.
+  const { runWithClientContext } = require('../middleware/clientContext');
   try {
     const clientsRes = await pool.query(
       `SELECT DISTINCT client_id
@@ -128,7 +131,11 @@ async function checkAllClients() {
     );
 
     for (const row of clientsRes.rows) {
-      await checkRepliesForClient(row.client_id);
+      // Bind tenant context so reply_classifier Claude calls get attributed
+      // and budget-gated per client.
+      await runWithClientContext(row.client_id, () =>
+        checkRepliesForClient(row.client_id)
+      );
     }
   } catch (err) {
     console.error('[replyDetector] checkAllClients failed:', err.message);

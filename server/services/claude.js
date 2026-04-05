@@ -2,6 +2,8 @@
 
 const Anthropic = require('@anthropic-ai/sdk');
 const { CLAUDE_MODEL, MAX_TOKENS, AGENTS } = require('../config/agents');
+const { checkBudget, logUsage, notifyBudgetExceeded, BudgetExceededError } = require('./budget');
+const { getCurrentClientId } = require('../middleware/clientContext');
 
 // 30s ceiling on any Claude call. If a model is slow, we fail fast
 // rather than leaking a hanging HTTP connection that the background
@@ -61,12 +63,31 @@ async function callAgent(agentKey, userMessage, context = {}) {
   const maxTokens = agent.maxTokens || MAX_TOKENS;
 
   // Strip clientId (used only for usage attribution) out of the context
-  // that gets stringified into the user message.
-  const { clientId, ...passthroughContext } = context;
+  // that gets stringified into the user message. If the caller didn't pass
+  // one explicitly, fall back to the AsyncLocalStorage context set by
+  // middleware/clientContext.js for request-driven callers.
+  const { clientId: ctxClientId, ...passthroughContext } = context;
+  const clientId = ctxClientId || getCurrentClientId() || null;
   const contextStr =
     Object.keys(passthroughContext).length > 0
       ? `\n\nContext:\n${JSON.stringify(passthroughContext, null, 2)}`
       : '';
+
+  // ─── Budget gate ───────────────────────────────────────────
+  // If we know who's paying, enforce their daily cap BEFORE burning tokens.
+  // Unattributed calls (no clientId) pass straight through.
+  if (clientId) {
+    const { allowed, spend, budget, pct } = await checkBudget(clientId);
+    if (!allowed) {
+      console.warn(`[claude:budget] BLOCKED client=${clientId} agent=${agentKey} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);
+      // Fire-and-forget Telegram alert (deduped to once-per-day-per-client)
+      notifyBudgetExceeded({ clientId, spend, budget }).catch(() => {});
+      throw new BudgetExceededError({ clientId, spend, budget });
+    }
+    if (pct >= 0.8) {
+      console.warn(`[claude:budget] WARN client=${clientId} agent=${agentKey} at ${Math.round(pct * 100)}% of daily cap ($${spend.toFixed(4)} / $${budget.toFixed(2)})`);
+    }
+  }
 
   let response;
   const t0 = Date.now();
@@ -99,16 +120,21 @@ async function callAgent(agentKey, userMessage, context = {}) {
     throw err;
   }
 
-  // Fire-and-forget usage telemetry. Persistence is added in the budget-cap commit;
-  // for now we just log so Railway logs show cost attribution per agent/model.
+  // Usage telemetry — stdout for Railway logs, and persisted to llm_usage
+  // for per-client daily spend attribution. Fire-and-forget; a logging
+  // failure must never break the caller.
+  const elapsedMs = Date.now() - t0;
   try {
     const u = response?.usage || {};
     console.log(
       `[claude:usage] client=${clientId || 'n/a'} agent=${agentKey} model=${model} ` +
       `in=${u.input_tokens || 0} out=${u.output_tokens || 0} ` +
       `cache_write=${u.cache_creation_input_tokens || 0} cache_read=${u.cache_read_input_tokens || 0} ` +
-      `elapsed=${Date.now() - t0}ms`
+      `elapsed=${elapsedMs}ms`
     );
+    // Persist to llm_usage (no await inside try — catch handles promise errors)
+    logUsage({ clientId, agent: agentKey, model, usage: u, elapsedMs })
+      .catch(e => console.warn('[claude:usage] persist failed:', e.message));
   } catch { /* never break the caller on a logging failure */ }
 
   try {

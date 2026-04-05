@@ -5,6 +5,7 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
 const { directorExecute } = require('../services/agents');
+const { runWithClientContext } = require('../middleware/clientContext');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
@@ -25,8 +26,13 @@ router.post('/kickoff', requireInternalKey, async (req, res) => {
   // Respond immediately so scheduler doesn't time out
   res.json({ data: { status: 'kickoff_started', client_id } });
 
-  runAutonomousKickoff(client_id).catch(err =>
-    console.error(`[Autonomous] Kickoff failed for ${client_id}:`, err.message)
+  // Background task — bind clientId into AsyncLocalStorage so every deep
+  // `callAgent(...)` inside the kickoff gets budget-checked and usage-logged
+  // against the right tenant.
+  runWithClientContext(client_id, () =>
+    runAutonomousKickoff(client_id).catch(err =>
+      console.error(`[Autonomous] Kickoff failed for ${client_id}:`, err.message)
+    )
   );
 });
 
@@ -40,8 +46,10 @@ router.post('/kickoff-all', requireInternalKey, async (req, res) => {
   res.json({ data: { status: 'kickoff_started', clients: clients.length } });
 
   for (const client of clients) {
-    runAutonomousKickoff(client.id).catch(err =>
-      console.error(`[Autonomous] Kickoff failed for ${client.id}:`, err.message)
+    runWithClientContext(client.id, () =>
+      runAutonomousKickoff(client.id).catch(err =>
+        console.error(`[Autonomous] Kickoff failed for ${client.id}:`, err.message)
+      )
     );
   }
 });
@@ -56,8 +64,10 @@ router.post('/weekly-review', requireInternalKey, async (req, res) => {
   );
 
   for (const client of clients) {
-    runWeeklyReview(client.id).catch(err =>
-      console.error(`[Weekly Review] Failed for ${client.id}:`, err.message)
+    runWithClientContext(client.id, () =>
+      runWeeklyReview(client.id).catch(err =>
+        console.error(`[Weekly Review] Failed for ${client.id}:`, err.message)
+      )
     );
   }
 });
