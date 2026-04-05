@@ -97,7 +97,10 @@ export default function Settings() {
     if (!calendlyUrl.trim()) return;
     setCalendlySaving(true);
     try {
-      const url = calendlyUrl.trim().startsWith('https://') ? calendlyUrl.trim() : `https://calendly.com/${calendlyUrl.trim().replace(/^@/, '')}`;
+      const raw = calendlyUrl.trim().replace(/^@/, '');
+      const url = raw.startsWith('https://') ? raw
+        : raw.startsWith('calendly.com/') ? `https://${raw}`
+        : `https://calendly.com/${raw}`;
       const res = await request('/integrations/calendly', { method: 'POST', body: JSON.stringify({ url }) });
       if (res?.data) {
         setCalendlyInfo(res.data);
