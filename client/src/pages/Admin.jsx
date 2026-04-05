@@ -597,7 +597,7 @@ function Stat({ label, value, color }) {
 }
 
 function agentColor(agent) {
-  const map = { research_beaver: 'var(--blue)', sales_beaver: 'var(--lime)', ranger: 'var(--orange)', director: 'var(--purple)' };
+  const map = { research_beaver: 'var(--blue)', sales_beaver: 'var(--orange)', ranger: 'var(--police-blue)', director: 'var(--purple)' };
   return map[agent] || 'var(--text-muted)';
 }
 
