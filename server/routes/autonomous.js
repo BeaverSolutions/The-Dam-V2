@@ -245,7 +245,7 @@ async function runAutonomousKickoff(clientId) {
 
   // Load today's Ranger rejection patterns (Sprint 7D)
   const { rows: rangerPatterns } = await pool.query(
-    `SELECT content FROM agent_memory WHERE client_id = $1 AND key = 'daily_rejection_patterns' LIMIT 1`,
+    `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'ranger' AND key = 'daily_rejection_patterns' LIMIT 1`,
     [clientId]
   );
   const rejectionPatterns = rangerPatterns[0]?.content || null;

@@ -19,19 +19,17 @@ import Import from './pages/Import';
 import Settings from './pages/Settings';
 import Admin from './pages/Admin';
 import Join from './pages/Join';
-import { getUser } from './utils/auth';
 
 function PrivateRoute({ children }) {
   return isAuthenticated() ? children : <Navigate to="/login" replace />;
 }
 
-function SuperAdminRoute({ children }) {
-  if (!isAuthenticated()) return <Navigate to="/login" replace />;
-  const user = getUser();
-  const isSuperAdmin = user?.client?.name?.toLowerCase().includes('beaver') || user?.client?.id === user?.client?.id;
-  // Backend enforces the real check — this just prevents the blank flash for non-admins
-  return children;
-}
+// Note: super-admin gating is handled in two other places — the sidebar link
+// in Layout.jsx is conditionally rendered, and the backend enforces
+// /api/admin via middleware/superAdminOnly.js. There is no client-side
+// route guard here by design: any non-admin who URL-types their way to
+// /admin will see an empty shell fed by failing 403 API calls, which is
+// acceptable for a multi-tenant internal tool.
 
 export default function App() {
   return (

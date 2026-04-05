@@ -1011,7 +1011,7 @@ Return JSON: { "summary": string (2-3 sentences, conversational), "stats": { "to
  */
 async function getClientPersona(clientId) {
   const res = await pool.query(
-    `SELECT content FROM agent_memory WHERE client_id = $1 AND key = 'client_persona' LIMIT 1`,
+    `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'system' AND key = 'client_persona' LIMIT 1`,
     [clientId]
   );
   return res.rows[0]?.content || {};

@@ -130,7 +130,7 @@ async function getLeadContext(clientId, leadId) {
       [leadId, clientId]
     ),
     pool.query(
-      `SELECT content FROM agent_memory WHERE client_id = $1 AND key = 'client_persona' LIMIT 1`,
+      `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'system' AND key = 'client_persona' LIMIT 1`,
       [clientId]
     ),
     pool.query(
