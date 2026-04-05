@@ -8,9 +8,55 @@ const logger = require('../utils/logger');
 
 const BOT_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET;
 
-// In-memory store of pending plans awaiting approval
-// chatId (string) → { planId, command, steps, interpretation }
-const pendingPlans = new Map();
+// ─── Pending plan storage (DB-backed) ─────────────────────────
+// Previously an in-process Map; lost on every deploy/restart. Now persisted
+// in telegram_pending_plans with a 1-hour expiry so "Approve" buttons
+// survive Railway redeploys. See migration 018.
+
+async function savePendingPlan(chatId, clientId, plan) {
+  await pool.query(
+    `INSERT INTO telegram_pending_plans
+       (chat_id, client_id, plan_id, command, steps, interpretation, expires_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, NOW() + INTERVAL '1 hour')
+     ON CONFLICT (chat_id) DO UPDATE SET
+       client_id = EXCLUDED.client_id,
+       plan_id = EXCLUDED.plan_id,
+       command = EXCLUDED.command,
+       steps = EXCLUDED.steps,
+       interpretation = EXCLUDED.interpretation,
+       created_at = NOW(),
+       expires_at = EXCLUDED.expires_at`,
+    [chatId, clientId, plan.planId, plan.command, JSON.stringify(plan.steps || []), plan.interpretation || null]
+  );
+}
+
+async function getPendingPlan(chatId) {
+  const { rows } = await pool.query(
+    `SELECT plan_id, command, steps, interpretation
+       FROM telegram_pending_plans
+      WHERE chat_id = $1 AND expires_at > NOW()
+      LIMIT 1`,
+    [chatId]
+  );
+  if (rows.length === 0) return null;
+  return {
+    planId: rows[0].plan_id,
+    command: rows[0].command,
+    steps: rows[0].steps,
+    interpretation: rows[0].interpretation,
+  };
+}
+
+async function deletePendingPlan(chatId) {
+  await pool.query(`DELETE FROM telegram_pending_plans WHERE chat_id = $1`, [chatId]);
+}
+
+// Periodic cleanup of expired plans (hourly). Cheap — single DELETE with
+// an index on expires_at. Keeps the table bounded.
+setInterval(() => {
+  pool.query(`DELETE FROM telegram_pending_plans WHERE expires_at < NOW()`)
+    .catch(err => logger.warn({ msg: 'telegram pending plan cleanup failed', err: err.message }));
+}, 60 * 60 * 1000).unref();
 
 // Resolve a Telegram chat ID to a The Dam client ID
 // Mapping is driven by env vars: TELEGRAM_CHAT_ID + TELEGRAM_CLIENT_SLUG
@@ -90,7 +136,7 @@ router.post('/webhook', async (req, res) => {
 
       await telegram.answerCallbackQuery(cq.id);
 
-      const pending = pendingPlans.get(chatId);
+      const pending = await getPendingPlan(chatId);
       if (!pending || pending.planId !== planId) {
         await telegram.editMessageText(cq.message.chat.id, cq.message.message_id,
           'This plan has expired. Send a new command.');
@@ -98,7 +144,7 @@ router.post('/webhook', async (req, res) => {
       }
 
       if (action === 'reject') {
-        pendingPlans.delete(chatId);
+        await deletePendingPlan(chatId);
         await telegram.editMessageText(cq.message.chat.id, cq.message.message_id,
           `${formatPlan(pending)}\n\n<b>Rejected.</b>`);
         return;
@@ -108,7 +154,7 @@ router.post('/webhook', async (req, res) => {
       await telegram.editMessageText(cq.message.chat.id, cq.message.message_id,
         `${formatPlan(pending)}\n\n<i>Running...</i>`);
 
-      pendingPlans.delete(chatId);
+      await deletePendingPlan(chatId);
 
       const clientId = await resolveClient(cq.message.chat.id);
       if (!clientId) {
@@ -154,8 +200,8 @@ router.post('/webhook', async (req, res) => {
         return;
       }
 
-      // Store pending plan for approval
-      pendingPlans.set(chatId, {
+      // Store pending plan for approval (persisted — survives restarts)
+      await savePendingPlan(chatId, clientId, {
         planId: plan.plan_id,
         command: text,
         steps: plan.steps,

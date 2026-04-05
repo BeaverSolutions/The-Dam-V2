@@ -2,9 +2,47 @@
 
 const router = require('express').Router();
 const { body } = require('express-validator');
+const rateLimit = require('express-rate-limit');
 const validate = require('../middleware/validate');
 const authService = require('../services/auth');
 const authMiddleware = require('../middleware/auth');
+
+// ─── Tight rate limiters for credential endpoints ──────────────
+// The global /api rateLimiter keys by (user.clientId || ip) at 100 req/min.
+// That is too loose for auth endpoints — an attacker spraying from one IP
+// gets 100 attempts per minute at different accounts. These per-endpoint
+// limiters are stricter and key by a more specific fingerprint.
+
+// Access code brute-force guard: 5 attempts per 15 minutes per
+// (deviceFingerprint + IP). With BEAVER-XXXX-XXXX format (36^8 ~= 2.8e12
+// combinations) + 5/15min rate limit, expected time to crack is geological.
+const accessCodeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  keyGenerator: (req) => {
+    const fp = req.body?.deviceFingerprint || 'no-fp';
+    return `access-code:${fp}:${req.ip}`;
+  },
+  message: { error: 'Too many access code attempts. Try again in 15 minutes.', code: 'ACCESS_CODE_RATE_LIMIT' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Login brute-force guard: 10 attempts per 15 minutes per (email + IP).
+// Tight enough to defeat credential stuffing, loose enough that a legit
+// user who forgets their password a few times is not locked out.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyGenerator: (req) => {
+    const email = (req.body?.email || 'no-email').toLowerCase().trim();
+    return `login:${email}:${req.ip}`;
+  },
+  message: { error: 'Too many login attempts. Try again in 15 minutes.', code: 'LOGIN_RATE_LIMIT' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true, // successful login doesn't count toward the cap
+});
 
 // POST /api/auth/signup
 router.post('/signup',
@@ -26,6 +64,7 @@ router.post('/signup',
 
 // POST /api/auth/login
 router.post('/login',
+  loginLimiter,
   [
     body('email').isEmail().normalizeEmail(),
     body('password').notEmpty(),
@@ -60,6 +99,7 @@ router.post('/verify-email',
 
 // POST /api/auth/verify-access-code
 router.post('/verify-access-code',
+  accessCodeLimiter,
   [
     body('code').matches(/^BEAVER-[A-Z0-9]{4}-[A-Z0-9]{4}$/),
     body('deviceFingerprint').notEmpty(),
