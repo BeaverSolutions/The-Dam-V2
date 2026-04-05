@@ -241,18 +241,17 @@ function ClientDetail({ clientId, onBack }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [clientRes, usersRes, logsRes, credsRes] = await Promise.all([
+      const [clientRes, usersRes, logsRes, credsRes] = await Promise.allSettled([
         request(`/admin/clients/${clientId}`),
         request(`/admin/clients/${clientId}/users`),
         request(`/admin/clients/${clientId}/logs?limit=30`),
         request(`/admin/clients/${clientId}/credentials`),
       ]);
-      setClient(clientRes.data);
-      setUsers(usersRes.data || []);
-      setLogs(logsRes.data || []);
-      setCreds(credsRes.data);
-    } catch { /* show error state */ }
-    finally { setLoading(false); }
+      if (clientRes.status === 'fulfilled') setClient(clientRes.value.data);
+      if (usersRes.status === 'fulfilled') setUsers(usersRes.value.data || []);
+      if (logsRes.status === 'fulfilled') setLogs(logsRes.value.data || []);
+      if (credsRes.status === 'fulfilled') setCreds(credsRes.value.data);
+    } finally { setLoading(false); }
   }, [clientId]);
 
   useEffect(() => { load(); }, [load]);
