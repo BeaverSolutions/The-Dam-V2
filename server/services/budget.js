@@ -1,6 +1,6 @@
 'use strict';
 
-const { pool } = require('../db/pool');
+const pool = require('../db/pool');
 const logger = require('../utils/logger');
 
 // ─── Model pricing (USD per million tokens) ────────────────────
