@@ -56,10 +56,16 @@ POST /api/autonomous/weekly-review
 
 | Item | Value |
 |------|-------|
+| Bot name | Jarvis |
+| Bot token | Configured in MyClaw as `TELEGRAM_BOT_TOKEN` |
 | Primary channel | Private DM with MJ |
-| MJ's handle | @[MJ's handle — fill in] |
+| MJ's Telegram chat ID | Configured in MyClaw (get from @userinfobot) |
 | Language | English, Malaysian English OK |
 | Timezone for all times | GMT+8 |
+
+**Architecture note:** MyClaw owns Jarvis's incoming messages (polling/webhook).
+The Dam uses Jarvis only to SEND alerts (budget cap, pipeline errors) — it does not receive via webhook anymore.
+This was set up intentionally to avoid conflicts. Do not re-register The Dam's webhook.
 
 ---
 

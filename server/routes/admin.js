@@ -496,4 +496,44 @@ router.patch('/clients/:id/budget', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─────────────────────────────────────────────
+// TELEGRAM
+// ─────────────────────────────────────────────
+
+// POST /api/admin/telegram/unregister-webhook
+// One-time call to hand Telegram control to MyClaw.
+// After this, The Dam only SENDS via Jarvis (no incoming webhook).
+router.post('/telegram/unregister-webhook', async (req, res, next) => {
+  try {
+    const telegramService = require('../services/telegram');
+    const result = await telegramService.deleteWebhook();
+    if (result.ok) {
+      res.json({ data: { status: 'webhook_deleted', description: result.description } });
+    } else {
+      res.status(500).json({ error: result.description || 'Failed to delete webhook', code: 'TELEGRAM_ERROR' });
+    }
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/telegram/webhook-info
+// Check current webhook status — useful to confirm state before/after.
+router.get('/telegram/webhook-info', async (req, res, next) => {
+  try {
+    const https = require('https');
+    const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+    if (!TOKEN) return res.status(500).json({ error: 'TELEGRAM_BOT_TOKEN not set' });
+
+    const result = await new Promise((resolve, reject) => {
+      const req2 = https.get(`https://api.telegram.org/bot${TOKEN}/getWebhookInfo`, (r) => {
+        let buf = '';
+        r.on('data', c => buf += c);
+        r.on('end', () => { try { resolve(JSON.parse(buf)); } catch { resolve({}); } });
+      });
+      req2.on('error', reject);
+    });
+
+    res.json({ data: result });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
