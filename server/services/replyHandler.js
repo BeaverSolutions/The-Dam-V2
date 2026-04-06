@@ -88,8 +88,8 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
     // ── Step 2: Stop follow-up sequence on ANY reply ────────
     // A reply (any sentiment) means the lead is engaged — stop automated follow-ups immediately.
     await pool.query(
-      `UPDATE followup_sequences SET sequence_status = 'replied', updated_at = NOW()
-       WHERE lead_id = $1 AND client_id = $2 AND sequence_status = 'active'`,
+      `UPDATE leads SET sequence_status = 'replied', updated_at = NOW()
+       WHERE id = $1 AND client_id = $2 AND sequence_status = 'active'`,
       [leadId, clientId]
     );
     await pool.query(
@@ -100,7 +100,7 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
 
     if (sentiment === 'no_fit') {
       await pool.query(
-        `UPDATE leads SET pipeline_stage = 'lost', status = 'inactive',
+        `UPDATE leads SET pipeline_stage = 'closed', status = 'closed_lost',
          metadata = COALESCE(metadata, '{}') || $1::jsonb, updated_at = NOW()
          WHERE id = $2 AND client_id = $3`,
         [JSON.stringify({ lost_reason: 'Reply indicated no fit', lost_at: new Date().toISOString() }), leadId, clientId]
@@ -149,7 +149,7 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       message_body: draft.body,
     });
 
-    const rangerApproved = rangerResult.approved !== false;
+    const rangerApproved = rangerResult.approved === true;
     const rangerNotes = rangerResult.notes || rangerResult.reject_reason || null;
 
     // ── Step 5: Save draft message ─────────────────────────
@@ -199,7 +199,7 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
     }
 
     // Update lead stage and store sentiment in metadata for UI display
-    const stageMap = { positive: 'meeting_requested', neutral: 'qualifying', objection: 'qualifying' };
+    const stageMap = { positive: 'booked', neutral: 'qualifying', objection: 'qualifying' };
     const newStage = stageMap[sentiment];
     if (newStage) {
       await pool.query(

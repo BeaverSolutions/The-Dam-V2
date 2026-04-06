@@ -55,9 +55,11 @@ async function stopSequence(leadId, reason = 'replied', clientId = null) {
     `UPDATE leads SET sequence_status = $1, sequence_completed_at = NOW() WHERE id = $2${clientFilter}`,
     params
   );
+  const fqParams = clientId ? [leadId, clientId] : [leadId];
+  const fqFilter = clientId ? ' AND client_id = $2' : '';
   await pool.query(
-    `UPDATE followup_queue SET status = 'cancelled' WHERE lead_id = $1 AND status = 'pending'`,
-    [leadId]
+    `UPDATE followup_queue SET status = 'cancelled' WHERE lead_id = $1 AND status = 'pending'${fqFilter}`,
+    fqParams
   );
   console.log(`[FollowUp] Sequence stopped for lead ${leadId}: ${reason}`);
 }
@@ -155,7 +157,7 @@ async function draftFollowUp(lead, touchNumber, previousMessages) {
   const touchConfig = {
     2: {
       type: 'Value Add Follow-up',
-      instruction: 'Share something genuinely useful or insightful related to their business. Do NOT say "just following up" or "checking in". Lead with value — a relevant observation, a question that shows you did research, or a short insight about their industry.',
+      instruction: 'Share something genuinely useful or insightful related to their business. Do NOT say "just following up" or "checking in". Lead with value - a relevant observation, a question that shows you did research, or a short insight about their industry.',
       tone: 'Helpful, no agenda',
     },
     3: {
@@ -165,8 +167,8 @@ async function draftFollowUp(lead, touchNumber, previousMessages) {
     },
     4: {
       type: 'Break-up Email',
-      instruction: 'This is the final message. Be honest and give them an out. Something like: "Last email from me — if the timing isn\'t right, totally understand. But if [specific pain] is something you\'re thinking about, happy to chat for 15 mins." Short, no pressure, human.',
-      tone: 'Honest, warm, brief — max 50 words',
+      instruction: 'This is the final message. Be honest and give them an out. Something like: "Last email from me - if the timing isn\'t right, totally understand. But if [specific pain] is something you\'re thinking about, happy to chat for 15 mins." Short, no pressure, human.',
+      tone: 'Honest, warm, brief - max 50 words',
     },
   };
 

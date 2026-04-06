@@ -65,8 +65,8 @@ router.post('/agentmail', require('express').raw({ type: '*/*' }), async (req, r
     await pool.query(
       `UPDATE messages
        SET reply_detected_at = NOW(), reply_snippet = $1, updated_at = NOW()
-       WHERE id = $2`,
-      [snippet, msg.id]
+       WHERE id = $2 AND client_id = $3`,
+      [snippet, msg.id, msg.client_id]
     );
 
     // Advance lead: outreach → qualifying
@@ -80,7 +80,7 @@ router.post('/agentmail', require('express').raw({ type: '*/*' }), async (req, r
     // Stop the follow-up sequence — they replied, no more follow-ups needed
     try {
       const { stopSequence } = require('../services/followupSequence');
-      await stopSequence(msg.lead_id, 'replied');
+      await stopSequence(msg.lead_id, 'replied', msg.client_id);
     } catch (err) {
       logger.warn({ msg: 'stopSequence failed', err: err.message });
     }
@@ -96,12 +96,12 @@ router.post('/agentmail', require('express').raw({ type: '*/*' }), async (req, r
 
     if (isUnsubscribe) {
       await pool.query(
-        `UPDATE leads SET sequence_status = 'unsubscribed', updated_at = NOW() WHERE id = $1`,
-        [msg.lead_id]
+        `UPDATE leads SET sequence_status = 'unsubscribed', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
+        [msg.lead_id, msg.client_id]
       );
       await pool.query(
-        `UPDATE followup_queue SET status = 'cancelled' WHERE lead_id = $1 AND status = 'pending'`,
-        [msg.lead_id]
+        `UPDATE followup_queue SET status = 'cancelled' WHERE lead_id = $1 AND client_id = $2 AND status = 'pending'`,
+        [msg.lead_id, msg.client_id]
       );
       await pool.query(
         `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)

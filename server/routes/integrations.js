@@ -207,7 +207,39 @@ async function sendMessageById(clientId, message_id, provider) {
     throw err;
   }
 
-  // Persist result — store IDs in provider-specific columns
+  // Simulated sends — revert to approved, do NOT advance lead or schedule follow-ups
+  if (sendResult.status === 'simulated') {
+    await pool.query(
+      `UPDATE messages SET status = 'approved', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
+      [message_id, clientId]
+    );
+    await logsService.createLog(clientId, {
+      agent: 'system',
+      action: 'email_simulated',
+      target_type: 'message',
+      target_id: message_id,
+      metadata: { to: message.lead_email, lead_name: message.lead_name, provider: 'none', reason: sendResult.reason },
+    });
+    return { status: 'simulated', message_id, provider: 'none', reason: sendResult.reason };
+  }
+
+  // Failed sends — revert to approved so user can retry
+  if (sendResult.status === 'failed') {
+    await pool.query(
+      `UPDATE messages SET status = 'approved', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
+      [message_id, clientId]
+    );
+    await logsService.createLog(clientId, {
+      agent: 'system',
+      action: 'email_failed',
+      target_type: 'message',
+      target_id: message_id,
+      metadata: { to: message.lead_email, lead_name: message.lead_name, provider: usedProvider, reason: sendResult.reason },
+    });
+    return { status: 'failed', message_id, provider: usedProvider, reason: sendResult.reason };
+  }
+
+  // Real send — persist result and advance pipeline
   if (usedProvider === 'agentmail') {
     await pool.query(
       `UPDATE messages
@@ -234,7 +266,7 @@ async function sendMessageById(clientId, message_id, provider) {
 
   await logsService.createLog(clientId, {
     agent: 'system',
-    action: sendResult.status === 'sent' ? 'email_sent' : 'email_simulated',
+    action: 'email_sent',
     target_type: 'message',
     target_id: message_id,
     metadata: { to: message.lead_email, lead_name: message.lead_name, provider: usedProvider, send_result: sendResult },
@@ -248,7 +280,6 @@ async function sendMessageById(clientId, message_id, provider) {
       [message.lead_id]
     );
     if (parseInt(prevSent[0].cnt) === 1) {
-      // This is the first sent message — schedule the follow-up sequence
       const { scheduleFollowUps } = require('../services/followupSequence');
       await scheduleFollowUps(clientId, message.lead_id, new Date());
     }
@@ -256,7 +287,7 @@ async function sendMessageById(clientId, message_id, provider) {
     console.warn('[integrations] Follow-up scheduling failed:', err.message);
   }
 
-  return { status: sendResult.status, message_id, thread_id: sendResult.threadId, provider: usedProvider };
+  return { status: 'sent', message_id, thread_id: sendResult.threadId, provider: usedProvider };
 }
 
 /* ─── AgentMail ──────────────────────────────────────────── */

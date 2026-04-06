@@ -78,12 +78,12 @@ router.post('/weekly-review', requireInternalKey, async (req, res) => {
 });
 
 /* ─── GET /api/autonomous/pending-approvals ──────────────── */
-// Optional ?client_id=UUID to scope to one tenant.
-// Returns full message + lead context so Claw can present actionable briefs.
+// Requires ?client_id=UUID — no cross-tenant queries allowed.
 
 router.get('/pending-approvals', requireInternalKey, async (req, res) => {
   try {
-    const clientId = req.query.client_id || null;
+    const clientId = req.query.client_id;
+    if (!clientId) return res.status(400).json({ error: 'client_id query param required', code: 'MISSING_CLIENT_ID' });
     const { rows } = await pool.query(
       `SELECT
          a.id            AS approval_id,
@@ -107,7 +107,7 @@ router.get('/pending-approvals', requireInternalKey, async (req, res) => {
        JOIN messages m ON m.id = a.message_id
        JOIN leads   l ON l.id = m.lead_id
        WHERE a.status = 'pending'
-         AND ($1::uuid IS NULL OR a.client_id = $1::uuid)
+         AND a.client_id = $1::uuid
        ORDER BY a.created_at DESC
        LIMIT 20`,
       [clientId]
@@ -190,7 +190,8 @@ router.post('/reject', requireInternalKey, async (req, res) => {
 
 router.get('/recent-replies', requireInternalKey, async (req, res) => {
   try {
-    const clientId = req.query.client_id || null;
+    const clientId = req.query.client_id;
+    if (!clientId) return res.status(400).json({ error: 'client_id query param required', code: 'MISSING_CLIENT_ID' });
     const hours = Math.min(parseInt(req.query.hours) || 24, 168); // cap at 7 days
     const { rows } = await pool.query(
       `SELECT
@@ -207,7 +208,7 @@ router.get('/recent-replies', requireInternalKey, async (req, res) => {
        FROM messages m
        JOIN leads l ON l.id = m.lead_id
        WHERE m.status = 'replied'
-         AND ($1::uuid IS NULL OR m.client_id = $1::uuid)
+         AND m.client_id = $1::uuid
          AND m.created_at >= NOW() - make_interval(hours => $2::int)
        ORDER BY m.created_at DESC
        LIMIT 50`,
@@ -226,12 +227,13 @@ router.get('/recent-replies', requireInternalKey, async (req, res) => {
 
 router.get('/agent-status', requireInternalKey, async (req, res) => {
   try {
-    const clientId = req.query.client_id || null;
+    const clientId = req.query.client_id;
+    if (!clientId) return res.status(400).json({ error: 'client_id query param required', code: 'MISSING_CLIENT_ID' });
     const { rows } = await pool.query(
       `SELECT DISTINCT ON (agent)
          agent, action, created_at, metadata
        FROM logs
-       WHERE ($1::uuid IS NULL OR client_id = $1::uuid)
+       WHERE client_id = $1::uuid
          AND created_at >= NOW() - INTERVAL '30 minutes'
          AND agent IN ('director', 'research_beaver', 'sales_beaver', 'ranger')
        ORDER BY agent, created_at DESC`,
@@ -263,10 +265,8 @@ const _runningKickoffs = new Set();
 // MyClaw polls this before firing a kickoff to avoid duplicate runs.
 router.get('/running', requireInternalKey, (req, res) => {
   const { client_id } = req.query;
-  if (client_id) {
-    return res.json({ data: { running: _runningKickoffs.has(client_id), client_id } });
-  }
-  return res.json({ data: { running_clients: [..._runningKickoffs] } });
+  if (!client_id) return res.status(400).json({ error: 'client_id query param required', code: 'MISSING_CLIENT_ID' });
+  return res.json({ data: { running: _runningKickoffs.has(client_id), client_id } });
 });
 
 /* ─── Core: Autonomous kickoff logic ─────────────────────── */
