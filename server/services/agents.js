@@ -189,12 +189,19 @@ async function researchSearch(clientId, { query, filters = {} }) {
         try {
           const enriched = await callAgent(
             'research_beaver',
-            `You have been given real LinkedIn profiles found via Google search. Enrich each one with signal tier, friction point, and outreach angle. Do NOT change the name, linkedin_url, title, or company — these are verified real people. Only add: tier, signal, friction, angle, why_now, notes, industry, company_size.
+            `You have been given real LinkedIn profiles found via Google search for KL/Malaysia-based leads.
 
-Profiles to enrich:
+CRITICAL RULES — violations will cause pipeline failure:
+1. DO NOT change name, linkedin_url, title, or company from what is provided. These are verified fields.
+2. DO NOT invent or guess a company name if it is missing or blank — leave company as-is.
+3. DO NOT copy or reference any company name from previous context (e.g. "Kickoff"). Only use what is in the profile data.
+4. Only enrich with: tier (P1/P2/P3), signal, friction, angle, why_now, notes, industry, company_size.
+5. If you cannot identify a real signal for this person, set tier to "P3" — do not fabricate one.
+
+Profiles to enrich (do not modify the base fields):
 ${JSON.stringify(serperLeads, null, 2)}
 
-Return JSON: {"leads":[...enriched profiles with all original fields preserved plus new fields added]}`,
+Return JSON only: {"leads":[...enriched profiles with all original fields preserved, plus new fields added]}`,
           );
           const enrichedLeads = Array.isArray(enriched?.leads) ? enriched.leads
             : Array.isArray(enriched) ? enriched : serperLeads;
@@ -452,7 +459,8 @@ Last rejected message (do NOT copy — write from scratch):
 ${rejected_body || '(none)'}
 
 Write a Day 0 cold email that passes ALL your own gates:
-- Under 80 words (body only)
+- Open with: Hi [first name only],
+- Under 80 words (body only — do NOT count the "Hi [name]," line or the sign-off in word count)
 - No em dashes (—) anywhere
 - No bullet points
 - Exactly 1 question
@@ -460,9 +468,10 @@ Write a Day 0 cold email that passes ALL your own gates:
 - No soft CTAs (no "worth a quick chat", "happy to jump on")
 - Specific reference to a real signal about this company
 - Reads like a human, not a vendor
-- No banned phrases${personaContext}${fileContext}
+- No banned phrases
+- Close with: Regards, on one line, then sender name on the next line${personaContext}${fileConfig ? '\n\nSender name for sign-off: use sender_name from the client persona above.' : ''}${fileContext}
 
-Return JSON only: {"subject":"Subject line (max 6 words, no em dashes)","body":"Message body here"}`,
+Return JSON only: {"subject":"Subject line (max 6 words, no em dashes)","body":"Full email including Hi [name], greeting and Regards, sign-off"}`,
       { mode: 'ranger_draft', lead_name, lead_company }
     );
 
@@ -677,7 +686,27 @@ async function directorExecute(clientId, { plan_id, command }) {
   // it cannot be verified and must be skipped to prevent hallucinated outreach.
   const researchSource = researchResult?.data?.source || 'claude';
   const isVerifiedSource = researchSource === 'apollo' || researchSource === 'serper';
-  const verifiedLeads = rawLeads.filter(lead => {
+  // ── Captain: ICP title filter ─────────────────────────────
+  // Reject leads whose title clearly doesn't match ICP seniority.
+  // We want decision-makers: Founder, CEO, MD, Director, Co-Founder, Head of, VP, Owner.
+  const ICP_TITLES = /founder|ceo|coo|cmo|cto|managing director|md\b|director|co-founder|head of|vp |vice president|owner|principal|partner/i;
+  const EXCLUDED_TITLES = /intern|junior|assistant|coordinator|executive assistant|test|qa |quality assurance|analyst|associate|trainee|admin|receptionist|support/i;
+
+  const titledLeads = rawLeads.filter(lead => {
+    if (!lead.title) return true; // no title data — let Captain decide later
+    if (EXCLUDED_TITLES.test(lead.title)) {
+      console.warn(`[captain] Rejected non-ICP title: "${lead.title}" (${lead.name} at ${lead.company})`);
+      logsService.createLog(clientId, {
+        agent: 'director',
+        action: 'lead_skipped_title_mismatch',
+        metadata: { name: lead.name, title: lead.title, reason: 'not_decision_maker' },
+      }).catch(() => {});
+      return false;
+    }
+    return true;
+  });
+
+  const verifiedLeads = titledLeads.filter(lead => {
     if (isVerifiedSource) return true; // Apollo/Serper data is trusted
     if (!lead.linkedin_url) {
       console.warn(`[captain] Skipping unverifiable lead: ${lead.name} at ${lead.company} — no linkedin_url from Claude fallback`);
