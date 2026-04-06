@@ -388,8 +388,47 @@ async function runAutonomousKickoff(clientId) {
     gap: remainingGap, sent: sentAfterFollowUps, target, brief: brief.substring(0, 200),
   });
 
-  // Execute the Director plan
-  await directorExecute(clientId, { plan_id: uuidv4(), command: brief });
+  // ── Loop scheduler ────────────────────────────────────────
+  // Captain Beaver keeps batching until the daily target is met.
+  // Each batch sources up to 10 leads. Recalculates gap after each pass.
+  // Safety cap: 8 batches max (~80 leads) to prevent runaway costs.
+  const MAX_BATCHES = 8;
+  const BATCH_SIZE = 10;
+
+  for (let batch = 1; batch <= MAX_BATCHES; batch++) {
+    // Recalculate live gap: count sent + pending_approval today
+    const { rows: liveCount } = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'sent'            AND DATE(COALESCE(sent_at, created_at)) = $2) AS sent,
+         COUNT(*) FILTER (WHERE status = 'pending_approval' AND DATE(created_at) = $2)                   AS pending
+       FROM messages WHERE client_id = $1`,
+      [clientId, today]
+    );
+    const liveSent    = parseInt(liveCount[0].sent)    || 0;
+    const livePending = parseInt(liveCount[0].pending) || 0;
+    const liveGap     = target - liveSent - livePending;
+
+    if (liveGap <= 0) {
+      console.log(`[Autonomous] Client ${clientId} batch ${batch}: target met (${liveSent} sent + ${livePending} pending). Stopping loop.`);
+      await logAction(clientId, 'director', 'kpi_target_met', 'system', null, { batch, liveSent, livePending, target });
+      break;
+    }
+
+    console.log(`[Autonomous] Client ${clientId} batch ${batch}/${MAX_BATCHES}: gap=${liveGap}, sent=${liveSent}, pending=${livePending}`);
+
+    const batchBrief = buildAutonomousBrief({
+      gap: Math.min(liveGap, BATCH_SIZE),
+      icp, lastLearnings, rejectionPatterns,
+      sent: liveSent, target,
+    });
+
+    await directorExecute(clientId, { plan_id: uuidv4(), command: batchBrief });
+
+    // Brief pause between batches — avoids hammering Apollo/Serper/Claude
+    if (batch < MAX_BATCHES) {
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
 }
 
 function buildAutonomousBrief({ gap, icp, lastLearnings, rejectionPatterns, sent, target }) {

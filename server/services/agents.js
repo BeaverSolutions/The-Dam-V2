@@ -608,19 +608,10 @@ async function enrichLeadsWithHunter(clientId, leads) {
         continue;
       }
 
-      // Fallback: domain search — grab whoever Hunter knows at this company
-      const domainResults = await hunterService.domainSearch(clientId, { company: lead.company, limit: 1 });
-      if (domainResults.length > 0) {
-        console.log(`[hunter] Domain fallback: ${domainResults[0].email} at ${lead.company}`);
-        enriched.push({
-          ...lead,
-          email: domainResults[0].email,
-          email_verified: false,
-          email_source: 'hunter_domain',
-        });
-      } else {
-        enriched.push(lead); // no email found — save lead anyway
-      }
+      // Domain fallback DISABLED — grabbing a random email at the domain causes
+      // name-email mismatches (e.g. Rob Go → stephen.lai@nextview.com).
+      // Captain Beaver rule: no email is better than the wrong person's email.
+      enriched.push(lead); // save lead without email — can be enriched manually later
     } catch (err) {
       console.warn(`[hunter] Enrichment failed for ${lead.name}:`, err.message);
       enriched.push(lead); // always save the lead even without email
@@ -694,9 +685,39 @@ async function directorExecute(clientId, { plan_id, command }) {
   // ── Step 1c: Hunter.io email enrichment ──────────────────
   const enrichedLeads = await enrichLeadsWithHunter(clientId, markedLeads);
 
+  // ── Step 1d: Captain Beaver — name/email alignment check ─
+  // Ensures we never send to the wrong person.
+  // Rule: email local part must start with the lead's first name (or be from Apollo).
+  // If mismatch detected → clear the email, keep the lead, log the issue.
+  const cleanedLeads = enrichedLeads.map(lead => {
+    if (!lead.email) return lead;
+    if (lead.email_source === 'apollo') return lead; // Apollo matches are trusted
+
+    const emailLocal = lead.email.split('@')[0].toLowerCase();
+    const emailFirstName = emailLocal.split('.')[0].split('_')[0].split('+')[0];
+    const leadFirstName = (lead.name || '').trim().split(/\s+/)[0].toLowerCase();
+
+    // Only flag if both names are confidently different (not just short/missing)
+    if (emailFirstName.length >= 3 && leadFirstName.length >= 3 && emailFirstName !== leadFirstName) {
+      console.warn(`[captain] Email mismatch — ${lead.name} (${leadFirstName}) got email for "${emailFirstName}" (${lead.email}). Clearing email.`);
+      logsService.createLog(clientId, {
+        agent: 'director',
+        action: 'email_mismatch_cleared',
+        metadata: {
+          lead_name: lead.name,
+          lead_company: lead.company,
+          bad_email: lead.email,
+          reason: `Email belongs to "${emailFirstName}", not "${leadFirstName}"`,
+        },
+      }).catch(() => {});
+      return { ...lead, email: null, email_source: null, email_verified: false };
+    }
+    return lead;
+  });
+
   // ── Step 2: Save leads to DB ─────────────────────────────
   const savedLeads = [];
-  for (const lead of enrichedLeads) {
+  for (const lead of cleanedLeads) {
     // ── Sprint 7B: Deduplication ──────────────────────────
     if (lead.email) {
       const dup = await pool.query(
@@ -774,7 +795,7 @@ async function directorExecute(clientId, { plan_id, command }) {
   });
 
   // ── Step 3: Sales Beaver (cap at 5) ──────────────────────
-  const leadsToProcess = savedLeads.slice(0, 5);
+  const leadsToProcess = savedLeads.slice(0, 10);
   const savedMessages = [];
 
   for (const lead of leadsToProcess) {
