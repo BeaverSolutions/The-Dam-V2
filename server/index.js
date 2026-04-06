@@ -58,7 +58,7 @@ app.use('/api/telegram', require('./routes/telegram'));
 // Routes - public (no auth)
 app.use('/api/auth', require('./routes/auth'));
 
-// Gmail OAuth callback — public (no auth, clientId from state param)
+// Gmail OAuth callback — public (no auth, clientId from HMAC-signed state param)
 app.get('/api/integrations/gmail/callback', async (req, res) => {
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
   try {
@@ -68,7 +68,12 @@ app.get('/api/integrations/gmail/callback', async (req, res) => {
     try {
       const decoded = JSON.parse(Buffer.from(state, 'base64').toString('utf8'));
       clientId = decoded?.clientId;
+      const sig = decoded?.sig;
       if (!clientId || typeof clientId !== 'string' || !/^[0-9a-f-]{36}$/i.test(clientId)) throw new Error('invalid');
+      // Verify HMAC signature to prevent state tampering
+      const crypto = require('crypto');
+      const expectedSig = crypto.createHmac('sha256', config.jwt.secret).update(clientId).digest('hex');
+      if (!sig || sig !== expectedSig) throw new Error('invalid signature');
     } catch {
       return res.redirect(`${frontendUrl}/settings?gmail=error`);
     }

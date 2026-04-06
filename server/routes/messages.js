@@ -1,7 +1,7 @@
 'use strict';
 
 const router = require('express').Router();
-const { body } = require('express-validator');
+const { body, param } = require('express-validator');
 const validate = require('../middleware/validate');
 const messagesService = require('../services/messages');
 
@@ -32,7 +32,7 @@ router.post('/',
   }
 );
 
-router.get('/:id', async (req, res, next) => {
+router.get('/:id', [param('id').isUUID(), validate], async (req, res, next) => {
   try {
     const message = await messagesService.getMessage(req.clientId, req.params.id);
     res.json({ data: message });
@@ -41,7 +41,8 @@ router.get('/:id', async (req, res, next) => {
 
 router.put('/:id',
   [
-    body('status').optional().isIn(['draft', 'pending_ranger', 'ranger_rejected', 'pending_approval', 'approved', 'pending_send', 'sent', 'failed']),
+    param('id').isUUID(),
+    body('status').optional().isIn(['draft', 'pending_ranger', 'ranger_rejected', 'pending_approval', 'failed']),
     body('body').optional().notEmpty(),
     validate,
   ],

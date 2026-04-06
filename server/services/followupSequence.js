@@ -10,9 +10,9 @@ async function scheduleFollowUps(clientId, leadId, firstContactDate) {
   const base = new Date(firstContactDate);
 
   const schedule = [
-    { touch: 2, daysAfter: 3 },
-    { touch: 3, daysAfter: 7 },
-    { touch: 4, daysAfter: 14 },
+    { touch: 2, daysAfter: 2 },
+    { touch: 3, daysAfter: 4 },
+    { touch: 4, daysAfter: 7 },
   ];
 
   for (const { touch, daysAfter } of schedule) {
@@ -29,7 +29,7 @@ async function scheduleFollowUps(clientId, leadId, firstContactDate) {
   }
 
   const touch2Date = new Date(base);
-  touch2Date.setDate(touch2Date.getDate() + 3);
+  touch2Date.setDate(touch2Date.getDate() + 2);
 
   await pool.query(
     `UPDATE leads SET
@@ -46,10 +46,14 @@ async function scheduleFollowUps(clientId, leadId, firstContactDate) {
 /**
  * Stop all pending follow-ups for a lead (on reply, meeting booked, unsubscribe).
  */
-async function stopSequence(leadId, reason = 'replied') {
+async function stopSequence(leadId, reason = 'replied', clientId = null) {
+  const params = clientId
+    ? [reason, leadId, clientId]
+    : [reason, leadId];
+  const clientFilter = clientId ? ' AND client_id = $3' : '';
   await pool.query(
-    `UPDATE leads SET sequence_status = $1, sequence_completed_at = NOW() WHERE id = $2`,
-    [reason, leadId]
+    `UPDATE leads SET sequence_status = $1, sequence_completed_at = NOW() WHERE id = $2${clientFilter}`,
+    params
   );
   await pool.query(
     `UPDATE followup_queue SET status = 'cancelled' WHERE lead_id = $1 AND status = 'pending'`,
@@ -61,17 +65,21 @@ async function stopSequence(leadId, reason = 'replied') {
 /**
  * Pause or resume a sequence.
  */
-async function pauseSequence(leadId) {
+async function pauseSequence(leadId, clientId = null) {
+  const params = clientId ? [leadId, clientId] : [leadId];
+  const clientFilter = clientId ? ' AND client_id = $2' : '';
   await pool.query(
-    `UPDATE leads SET sequence_status = 'paused' WHERE id = $1`,
-    [leadId]
+    `UPDATE leads SET sequence_status = 'paused' WHERE id = $1${clientFilter}`,
+    params
   );
 }
 
-async function resumeSequence(leadId) {
+async function resumeSequence(leadId, clientId = null) {
+  const params = clientId ? [leadId, clientId] : [leadId];
+  const clientFilter = clientId ? ' AND client_id = $2' : '';
   await pool.query(
-    `UPDATE leads SET sequence_status = 'active' WHERE id = $1`,
-    [leadId]
+    `UPDATE leads SET sequence_status = 'active' WHERE id = $1${clientFilter}`,
+    params
   );
 }
 

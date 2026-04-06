@@ -140,6 +140,7 @@ export default function Team() {
   const [members, setMembers] = useState([]);
   const [membersLoading, setMembersLoading] = useState(true);
   const [showInvite, setShowInvite] = useState(false);
+  const [error, setError] = useState(null);
   const currentUser = getUser();
 
   useEffect(() => {
@@ -161,7 +162,7 @@ export default function Team() {
     try {
       const res = await request('/admin/users');
       setMembers(res?.data || []);
-    } catch {}
+    } catch (err) { setError('Failed to load data'); }
     setMembersLoading(false);
   };
 
@@ -171,6 +172,12 @@ export default function Team() {
 
   return (
     <div className="fade-in">
+      {error && (
+        <div style={{ padding: '16px', background: 'rgba(239,68,68,0.1)', borderRadius: 'var(--radius)', color: 'var(--danger)', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{error}</span>
+          <button onClick={() => { setError(null); loadMembers(); }} style={{ background: 'var(--danger)', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 'var(--radius)', cursor: 'pointer' }}>Retry</button>
+        </div>
+      )}
       {/* The Beaver Crew */}
       <div className="page-header">
         <div>

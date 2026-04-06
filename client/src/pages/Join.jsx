@@ -74,7 +74,7 @@ export default function Join() {
         {/* Logo */}
         <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
           <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem' }}>
-            <img src="/assets/logo.png" alt="Beaver Solutions" style={{ width: 64, height: 64, objectFit: 'contain' }} />
+            <img src="/assets/logo-new.png" alt="Beaver Solutions" style={{ width: 64, height: 64, objectFit: 'contain' }} />
           </div>
           <h1 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.25rem', fontFamily: "'Nunito', 'Poppins', sans-serif" }}>
             <span style={{ color: 'var(--brand)' }}>Beaver</span>{' '}

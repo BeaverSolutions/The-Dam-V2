@@ -1,7 +1,7 @@
 'use strict';
 
 const router = require('express').Router();
-const { body } = require('express-validator');
+const { body, param } = require('express-validator');
 const validate = require('../middleware/validate');
 const agentsService = require('../services/agents');
 
@@ -16,6 +16,7 @@ router.post('/research/search',
 );
 
 router.post('/sales/proposal/:leadId',
+  [param('leadId').isUUID(), validate],
   async (req, res, next) => {
     try {
       const result = await agentsService.salesProposal(req.clientId, req.params.leadId);
@@ -135,7 +136,7 @@ router.put('/persona',
 const smartActions = require('../services/smartActions');
 
 // GET /api/agents/smart-actions/:leadId — available actions for this lead's stage
-router.get('/smart-actions/:leadId', async (req, res, next) => {
+router.get('/smart-actions/:leadId', [param('leadId').isUUID(), validate], async (req, res, next) => {
   try {
     const result = await smartActions.getAvailableActions(req.clientId, req.params.leadId);
     res.json({ data: result });
@@ -143,7 +144,7 @@ router.get('/smart-actions/:leadId', async (req, res, next) => {
 });
 
 // GET /api/agents/smart-actions/:leadId/:briefType — fetch a generated brief
-router.get('/smart-actions/:leadId/:briefType', async (req, res, next) => {
+router.get('/smart-actions/:leadId/:briefType', [param('leadId').isUUID(), validate], async (req, res, next) => {
   try {
     const brief = await smartActions.getBrief(req.clientId, req.params.leadId, req.params.briefType);
     if (!brief) return res.status(404).json({ error: 'Brief not generated yet', code: 'NOT_FOUND' });
@@ -153,7 +154,7 @@ router.get('/smart-actions/:leadId/:briefType', async (req, res, next) => {
 
 // POST /api/agents/smart-actions/:leadId/:briefType — generate a brief
 router.post('/smart-actions/:leadId/:briefType',
-  [body('notes').optional().trim(), validate],
+  [param('leadId').isUUID(), body('notes').optional().trim(), validate],
   async (req, res, next) => {
     try {
       const { leadId, briefType } = req.params;
@@ -166,7 +167,7 @@ router.post('/smart-actions/:leadId/:briefType',
 
 // PUT /api/agents/leads/:leadId/meeting-date — set meeting date
 router.put('/leads/:leadId/meeting-date',
-  [body('meeting_date').notEmpty(), validate],
+  [param('leadId').isUUID(), body('meeting_date').notEmpty(), validate],
   async (req, res, next) => {
     try {
       const pool2 = require('../db/pool');
@@ -175,6 +176,15 @@ router.put('/leads/:leadId/meeting-date',
          WHERE id = $2 AND client_id = $3`,
         [req.body.meeting_date, req.params.leadId, req.clientId]
       );
+      // Log meeting_booked event
+      const logsService = require('../services/logs');
+      await logsService.createLog(req.clientId, {
+        agent: 'system',
+        action: 'meeting_booked',
+        target_type: 'lead',
+        target_id: req.params.leadId,
+        metadata: { meeting_date: req.body.meeting_date },
+      });
       res.json({ data: { updated: true } });
     } catch (err) { next(err); }
   }
@@ -216,7 +226,7 @@ router.post('/memory/journal',
   }
 );
 
-router.delete('/memory/:id', async (req, res, next) => {
+router.delete('/memory/:id', [param('id').isUUID(), validate], async (req, res, next) => {
   try {
     await pool.query(
       `DELETE FROM agent_memory WHERE id = $1 AND client_id = $2`,

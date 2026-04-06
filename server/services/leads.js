@@ -86,9 +86,37 @@ async function createLead(clientId, data) {
 }
 
 async function updateLead(clientId, leadId, data) {
-  await getLead(clientId, leadId); // verify exists
+  const existing = await getLead(clientId, leadId); // verify exists
 
-  const fields = ['name', 'email', 'company', 'title', 'linkedin_url', 'source', 'signal_tier', 'status', 'score', 'pipeline_stage', 'metadata'];
+  // ── Reschedule tracking: auto-nurture after 2 reschedules ──
+  if (data.meeting_date && existing.meeting_date && data.meeting_date !== existing.meeting_date) {
+    const existingMeta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
+    const rescheduleCount = (existingMeta.reschedule_count || 0) + 1;
+    // Merge into data.metadata so it persists
+    const dataMeta = typeof data.metadata === 'object' && data.metadata !== null ? data.metadata : {};
+    data.metadata = { ...existingMeta, ...dataMeta, reschedule_count: rescheduleCount };
+    if (rescheduleCount >= 2) {
+      data.pipeline_stage = 'nurture';
+      data.next_action = 'Auto-nurtured: prospect rescheduled 2+ times';
+      await logsService.createLog(clientId, {
+        agent: 'system',
+        action: 'lead_auto_nurtured',
+        target_type: 'lead',
+        target_id: leadId,
+        metadata: { reschedule_count: rescheduleCount, reason: 'two_reschedules' },
+      });
+    }
+  }
+
+  // Pipeline stage change requires non-empty next_action
+  if (data.pipeline_stage && data.pipeline_stage !== existing.pipeline_stage) {
+    if (!data.next_action && !data.metadata?.next_action) {
+      const { AppError } = require('../utils/errors');
+      throw new AppError('Pipeline stage change requires a next_action field', 400, 'MISSING_NEXT_ACTION');
+    }
+  }
+
+  const fields = ['name', 'email', 'company', 'title', 'linkedin_url', 'source', 'signal_tier', 'status', 'score', 'pipeline_stage', 'next_action', 'metadata'];
   const updates = [];
   const values = [clientId, leadId];
   let idx = 3;
@@ -142,4 +170,24 @@ async function deleteLead(clientId, leadId) {
   });
 }
 
-module.exports = { getLeads, getLead, createLead, updateLead, deleteLead };
+async function getStaleLeads(clientId, daysThreshold = 4) {
+  const { rows } = await pool.query(
+    `SELECT l.id, l.name, l.company, l.pipeline_stage, l.updated_at,
+            (SELECT MAX(m.created_at) FROM messages m WHERE m.lead_id = l.id AND m.status = 'sent') AS last_message_at
+     FROM leads l
+     WHERE l.client_id = $1
+       AND l.deleted_at IS NULL
+       AND l.pipeline_stage IN ('outreach', 'qualifying')
+       AND l.updated_at < NOW() - make_interval(days => $2)
+       AND NOT EXISTS (
+         SELECT 1 FROM messages m
+         WHERE m.lead_id = l.id AND m.reply_detected_at IS NOT NULL
+       )
+     ORDER BY l.updated_at ASC
+     LIMIT 50`,
+    [clientId, daysThreshold]
+  );
+  return rows;
+}
+
+module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, getStaleLeads };

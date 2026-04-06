@@ -6,6 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
 const { directorExecute } = require('../services/agents');
 const { runWithClientContext } = require('../middleware/clientContext');
+const logger = require('../utils/logger');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
@@ -23,7 +24,9 @@ function requireInternalKey(req, res, next) {
 
 router.post('/kickoff', requireInternalKey, async (req, res) => {
   const { client_id } = req.body;
-  if (!client_id) return res.status(400).json({ error: 'client_id required' });
+  if (!client_id || (typeof client_id === 'string' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(client_id))) {
+    return res.status(400).json({ error: 'Valid client_id (UUID) required', code: 'INVALID_CLIENT_ID' });
+  }
 
   // Respond immediately so scheduler doesn't time out
   res.json({ data: { status: 'kickoff_started', client_id } });
@@ -111,7 +114,8 @@ router.get('/pending-approvals', requireInternalKey, async (req, res) => {
     );
     res.json({ data: rows, meta: { total: rows.length } });
   } catch (err) {
-    res.status(500).json({ error: err.message, code: 'DB_ERROR' });
+    logger.error({ msg: 'pending-approvals query failed', err: err.message, stack: err.stack });
+    res.status(500).json({ error: 'Failed to fetch pending approvals', code: 'DB_ERROR' });
   }
 });
 
@@ -133,7 +137,7 @@ router.post('/approve', requireInternalKey, async (req, res) => {
       return res.status(404).json({ error: 'Approval not found or already actioned', code: 'NOT_FOUND' });
     }
     await pool.query(
-      `UPDATE messages SET status = 'pending_send' WHERE id = $1`,
+      `UPDATE messages SET status = 'approved' WHERE id = $1`,
       [approval.message_id]
     );
     await pool.query(
@@ -143,7 +147,8 @@ router.post('/approve', requireInternalKey, async (req, res) => {
     );
     res.json({ data: { approval_id, message_id: approval.message_id, status: 'approved' } });
   } catch (err) {
-    res.status(500).json({ error: err.message, code: 'DB_ERROR' });
+    logger.error({ msg: 'autonomous approve failed', err: err.message, stack: err.stack });
+    res.status(500).json({ error: 'Failed to approve message', code: 'DB_ERROR' });
   }
 });
 
@@ -175,7 +180,8 @@ router.post('/reject', requireInternalKey, async (req, res) => {
     );
     res.json({ data: { approval_id, message_id: approval.message_id, status: 'rejected' } });
   } catch (err) {
-    res.status(500).json({ error: err.message, code: 'DB_ERROR' });
+    logger.error({ msg: 'autonomous reject failed', err: err.message, stack: err.stack });
+    res.status(500).json({ error: 'Failed to reject message', code: 'DB_ERROR' });
   }
 });
 
@@ -202,14 +208,15 @@ router.get('/recent-replies', requireInternalKey, async (req, res) => {
        JOIN leads l ON l.id = m.lead_id
        WHERE m.status = 'replied'
          AND ($1::uuid IS NULL OR m.client_id = $1::uuid)
-         AND m.created_at >= NOW() - ($2 || ' hours')::interval
+         AND m.created_at >= NOW() - make_interval(hours => $2::int)
        ORDER BY m.created_at DESC
        LIMIT 50`,
       [clientId, hours]
     );
     res.json({ data: rows, meta: { total: rows.length, hours } });
   } catch (err) {
-    res.status(500).json({ error: err.message, code: 'DB_ERROR' });
+    logger.error({ msg: 'recent-replies query failed', err: err.message, stack: err.stack });
+    res.status(500).json({ error: 'Failed to fetch recent replies', code: 'DB_ERROR' });
   }
 });
 
@@ -244,7 +251,8 @@ router.get('/agent-status', requireInternalKey, async (req, res) => {
 
     res.json({ data: status });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    logger.error({ msg: 'agent-status query failed', err: err.message, stack: err.stack });
+    res.status(500).json({ error: 'Failed to fetch agent status', code: 'DB_ERROR' });
   }
 });
 

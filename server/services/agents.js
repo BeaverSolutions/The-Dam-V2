@@ -327,9 +327,11 @@ ${personaContext}${fileContext}${rangerContext}`,
   return {
     lead_id,
     channel,
-    subject: `Quick question`,
-    body: `Hi [Name],\n\nI noticed your company has been growing steadily. Most founders I speak with at this stage find that sales becomes the bottleneck — not the product.\n\nIs pipeline consistency something you're actively working on right now?\n\nRegards,\nThe Team`,
-    status: 'pending_ranger',
+    error: true,
+    subject: null,
+    body: null,
+    status: 'failed',
+    failure_reason: 'Sales Beaver could not generate a message — Claude API unavailable',
   };
 }
 
@@ -391,11 +393,11 @@ async function rangerReview(clientId, { message_id, message_body }) {
 
   return {
     message_id,
-    approved: true,
-    decision: 'approve',
-    score: 80,
-    notes: 'Fallback approval',
-    issues: [],
+    approved: false,
+    decision: 'error',
+    score: 0,
+    notes: 'Claude unavailable — manual review required',
+    issues: ['Enforcer could not reach Claude API. Message held for manual review.'],
     suggestions: [],
   };
 }
@@ -648,6 +650,22 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
     metadata: { plan_id, batchIndex },
   });
 
+  // Cross-agent memory: Captain reads ALL agent memories at kickoff
+  let memoryContext = '';
+  try {
+    const { rows: memories } = await pool.query(
+      `SELECT agent, key, content FROM agent_memory
+       WHERE client_id = $1 AND memory_type != 'secret'
+       ORDER BY updated_at DESC LIMIT 20`,
+      [clientId]
+    );
+    if (memories.length > 0) {
+      memoryContext = '\n\nAGENT MEMORY CONTEXT:\n' + memories.map(m =>
+        `[${m.agent}/${m.key}]: ${JSON.stringify(m.content).substring(0, 200)}`
+      ).join('\n');
+    }
+  } catch {}
+
   // ── Step 1: Research Beaver ──────────────────────────────
   const researchResult = command
     ? await researchSearch(clientId, { query: command, filters: { batchIndex } })
@@ -857,7 +875,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
       const salesResult = await salesGenerate(clientId, {
         lead_id: lead.id,
         channel: 'email',
-        context: contextParts.join('\n'),
+        context: contextParts.join('\n') + memoryContext,
       });
 
       const msgRes = await pool.query(
@@ -903,10 +921,29 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
         });
         lastRangerResult = rangerResult;
 
-        const rangerApproved = rangerResult.approved !== false;
+        let rangerApproved = rangerResult.approved === true;
         const rangerNotes = Array.isArray(rangerResult.issues) && rangerResult.issues.length > 0
           ? rangerResult.issues.join('; ')
           : (rangerResult.notes || null);
+
+        // ── Server-side Enforcer hard gates (override Ranger if any fail) ──
+        if (rangerApproved && currentBody) {
+          const gateFailures = [];
+          const bodyText = currentBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
+          const wordCount = bodyText.trim().split(/\s+/).length;
+          if (wordCount > 80) gateFailures.push(`Word count ${wordCount} exceeds 80-word limit`);
+          const questionCount = (currentBody.match(/\?/g) || []).length;
+          if (questionCount > 1) gateFailures.push(`${questionCount} questions detected (max 1)`);
+          if (/\u2014/.test(currentBody)) gateFailures.push('Em dash detected');
+          if (/^[\s]*[-•*]\s/m.test(currentBody)) gateFailures.push('Bullet points detected');
+          if (gateFailures.length > 0) {
+            rangerApproved = false;
+            rangerResult.approved = false;
+            rangerResult.decision = 'reject';
+            rangerResult.notes = `Server-side gate failures: ${gateFailures.join('; ')}`;
+            rangerResult.issues = gateFailures;
+          }
+        }
 
         await logsService.createLog(clientId, {
           agent: 'ranger',

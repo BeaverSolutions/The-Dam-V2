@@ -8,15 +8,9 @@ const pool = require('../db/pool');
 function getEncKey() {
   const raw = process.env.ENCRYPTION_KEY || '';
   if (raw.length === 64) {
-    // Hex-encoded 32-byte key (preferred)
     return Buffer.from(raw, 'hex');
   }
-  // In production, refuse to run with a weak derived key
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error('ENCRYPTION_KEY must be a 64-character hex string in production. Generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
-  }
-  // Dev fallback: derive from string using scrypt
-  return crypto.scryptSync(raw || 'dev-key-change-in-prod', 'dam-secrets-salt', 32);
+  throw new Error('ENCRYPTION_KEY must be a 64-character hex string. Generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
 }
 
 function encrypt(plaintext) {

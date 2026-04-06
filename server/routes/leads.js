@@ -6,6 +6,9 @@ const validate = require('../middleware/validate');
 const leadsService = require('../services/leads');
 const { getLeadSequence, pauseSequence, resumeSequence, stopSequence } = require('../services/followupSequence');
 
+// UUID validation middleware for :id param
+const validateId = [param('id').isUUID(), validate];
+
 // GET /api/leads
 router.get('/', async (req, res, next) => {
   try {
@@ -43,7 +46,7 @@ router.post('/',
 );
 
 // GET /api/leads/:id
-router.get('/:id', async (req, res, next) => {
+router.get('/:id', validateId, async (req, res, next) => {
   try {
     const lead = await leadsService.getLead(req.clientId, req.params.id);
     res.json({ data: lead });
@@ -68,7 +71,7 @@ router.put('/:id',
 );
 
 // DELETE /api/leads/:id
-router.delete('/:id', async (req, res, next) => {
+router.delete('/:id', validateId, async (req, res, next) => {
   try {
     await leadsService.deleteLead(req.clientId, req.params.id);
     res.json({ data: { deleted: true } });
@@ -76,7 +79,7 @@ router.delete('/:id', async (req, res, next) => {
 });
 
 // GET /api/leads/:id/sequence
-router.get('/:id/sequence', async (req, res, next) => {
+router.get('/:id/sequence', [param('id').isUUID(), validate], async (req, res, next) => {
   try {
     const sequence = await getLeadSequence(req.clientId, req.params.id);
     res.json({ data: sequence });
@@ -89,9 +92,9 @@ router.put('/:id/sequence',
   async (req, res, next) => {
     try {
       const { action } = req.body;
-      if (action === 'pause') await pauseSequence(req.params.id);
-      else if (action === 'resume') await resumeSequence(req.params.id);
-      else if (action === 'stop') await stopSequence(req.params.id, 'completed');
+      if (action === 'pause') await pauseSequence(req.params.id, req.clientId);
+      else if (action === 'resume') await resumeSequence(req.params.id, req.clientId);
+      else if (action === 'stop') await stopSequence(req.params.id, 'completed', req.clientId);
       res.json({ data: { action, lead_id: req.params.id } });
     } catch (err) { next(err); }
   }

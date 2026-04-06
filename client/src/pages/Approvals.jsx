@@ -83,7 +83,7 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, tab, gmailConnected
               <span style={{ fontSize: '0.72rem', color: 'var(--orange)' }}>⚠ No LinkedIn — verify manually</span>
             )}
             {approval.lead_source === 'ai_generated' && (
-              <span style={{ fontSize: '0.72rem', color: 'var(--orange)', background: 'var(--orange)18', padding: '0.1rem 0.4rem', borderRadius: 4 }}>
+              <span style={{ fontSize: '0.72rem', color: 'var(--orange)', background: 'rgba(255,140,0,0.09)', padding: '0.1rem 0.4rem', borderRadius: 4 }}>
                 AI generated — verify before approving
               </span>
             )}
@@ -91,7 +91,7 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, tab, gmailConnected
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           {approval.ranger_score != null && (
-            <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.75rem', fontWeight: 700, color: scoreColor(approval.ranger_score), background: `${scoreColor(approval.ranger_score)}18`, padding: '0.2rem 0.5rem', borderRadius: 100 }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.75rem', fontWeight: 700, color: scoreColor(approval.ranger_score), background: approval.ranger_score >= 80 ? 'rgba(200,255,0,0.09)' : approval.ranger_score >= 60 ? 'rgba(0,180,255,0.09)' : 'rgba(255,140,0,0.09)', padding: '0.2rem 0.5rem', borderRadius: 100 }}>
               <Shield size={11} /> {approval.ranger_score}
             </span>
           )}
@@ -238,7 +238,7 @@ export default function Approvals() {
   return (
     <div className="fade-in">
       {actionError && (
-        <div style={{ background: 'var(--orange)20', border: '1px solid var(--orange)', borderRadius: 'var(--radius)', padding: '0.6rem 1rem', marginBottom: '1rem', fontSize: '0.85rem', color: 'var(--orange)', display: 'flex', justifyContent: 'space-between' }}>
+        <div style={{ background: 'rgba(255,140,0,0.12)', border: '1px solid var(--orange)', borderRadius: 'var(--radius)', padding: '0.6rem 1rem', marginBottom: '1rem', fontSize: '0.85rem', color: 'var(--orange)', display: 'flex', justifyContent: 'space-between' }}>
           {actionError}
           <span style={{ cursor: 'pointer', opacity: 0.7 }} onClick={() => setActionError(null)}>✕</span>
         </div>

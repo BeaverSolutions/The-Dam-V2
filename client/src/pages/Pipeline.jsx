@@ -20,9 +20,9 @@ const STAGE_COLORS = {
   outreach:    'var(--lime)',
   qualifying:  'var(--orange)',
   booked:      'var(--purple)',
-  closed:      '#64748b',
-  closed_won:  '#10b981',
-  closed_lost: '#64748b',
+  closed:      'var(--muted)',
+  closed_won:  'var(--success)',
+  closed_lost: 'var(--muted)',
 };
 
 const STAGE_OPTIONS = STAGE_TABS.filter(s => s.value !== '');
@@ -45,7 +45,7 @@ function formatTs(ts) {
 function scoreColor(score) {
   if (score >= 70) return 'var(--lime)';
   if (score >= 40) return 'var(--orange)';
-  return '#ef4444';
+  return 'var(--danger)';
 }
 
 /* ─── Lead List Item ─────────────────────────────────────── */
@@ -117,7 +117,7 @@ function SectionLabel({ icon: Icon, label }) {
 /* ─── Message Status Badge ───────────────────────────────── */
 
 function MsgStatusBadge({ status }) {
-  const COLORS = { draft: 'var(--text-muted)', pending_ranger: 'var(--blue)', pending_approval: 'var(--orange)', approved: 'var(--lime)', sent: 'var(--lime)', ranger_rejected: 'var(--orange)', failed: '#ef4444' };
+  const COLORS = { draft: 'var(--text-muted)', pending_ranger: 'var(--blue)', pending_approval: 'var(--orange)', approved: 'var(--lime)', sent: 'var(--lime)', ranger_rejected: 'var(--orange)', failed: 'var(--danger)' };
   const c = COLORS[status] || 'var(--text-muted)';
   return (
     <span style={{ fontSize: '0.6rem', fontWeight: 700, color: c, background: `${c}20`, padding: '0.1rem 0.4rem', borderRadius: 100 }}>
@@ -153,7 +153,7 @@ function BriefContent({ type, content }) {
   if (type === 'account_research') return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
-        <span style={{ fontSize: '1.1rem', fontWeight: 700, color: Number(content.icp_fit_score) >= 70 ? 'var(--lime)' : Number(content.icp_fit_score) >= 40 ? 'var(--orange)' : '#ef4444' }}>{content.icp_fit_score}</span>
+        <span style={{ fontSize: '1.1rem', fontWeight: 700, color: Number(content.icp_fit_score) >= 70 ? 'var(--lime)' : Number(content.icp_fit_score) >= 40 ? 'var(--orange)' : 'var(--danger)' }}>{content.icp_fit_score}</span>
         <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>ICP fit score</span>
         {content.likely_size && <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginLeft: 'auto' }}>{content.likely_size}</span>}
       </div>
@@ -313,7 +313,7 @@ function SmartActionsPanel({ lead }) {
       setExpanded(type);
       setActions(prev => prev.map(a => a.type === type ? { ...a, generated: true } : a));
     } catch (err) {
-      console.error('Brief generation failed:', err);
+      // error handled silently
     }
     setGenerating(null);
   };
@@ -450,7 +450,7 @@ function SequenceSection({ leadId, clientId }) {
   const statusIcon = (t) => {
     const qs = t.queue_status;
     const ms = t.message_status;
-    if (qs === 'cancelled') return <XCircle size={14} style={{ color: '#ef4444' }} />;
+    if (qs === 'cancelled') return <XCircle size={14} style={{ color: 'var(--danger)' }} />;
     if (ms === 'sent' || qs === 'sent') return <CheckCircle size={14} style={{ color: 'var(--lime)' }} />;
     const today = new Date().toISOString().split('T')[0];
     const due = t.scheduled_for ? String(t.scheduled_for).split('T')[0] : null;
@@ -515,7 +515,7 @@ function SequenceSection({ leadId, clientId }) {
             <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', gap: '0.25rem' }} onClick={() => handleAction('pause')} disabled={acting}>
               <PauseCircle size={11} /> Pause
             </button>
-            <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', color: '#ef4444' }} onClick={() => handleAction('stop')} disabled={acting}>
+            <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', color: 'var(--danger)' }} onClick={() => handleAction('stop')} disabled={acting}>
               Stop
             </button>
           </>
@@ -891,6 +891,7 @@ export default function Pipeline() {
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
   const [stageFilter, setStageFilter] = useState('');
   const [search, setSearch] = useState('');
@@ -914,7 +915,7 @@ export default function Pipeline() {
         setTotal(t);
         setHasMore((r?.data?.length || 0) < t);
       })
-      .catch(() => {})
+      .catch(err => setError('Failed to load data'))
       .finally(() => setLoading(false));
   }, [stageFilter, search]);
 
@@ -942,6 +943,12 @@ export default function Pipeline() {
 
   return (
     <div className="fade-in" style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 56px - 3rem)' }}>
+      {error && (
+        <div style={{ padding: '16px', background: 'rgba(239,68,68,0.1)', borderRadius: 'var(--radius)', color: 'var(--danger)', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
+          <span>{error}</span>
+          <button onClick={() => { setError(null); setStageFilter(f => f); setLoading(true); request(buildUrl(1, stageFilter, search)).then(r => { setLeads(r?.data || []); setTotal(r?.meta?.total || 0); setHasMore((r?.data?.length || 0) < (r?.meta?.total || 0)); }).catch(err => setError('Failed to load data')).finally(() => setLoading(false)); }} style={{ background: 'var(--danger)', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 'var(--radius)', cursor: 'pointer' }}>Retry</button>
+        </div>
+      )}
       {/* Header */}
       <div className="page-header" style={{ flexShrink: 0 }}>
         <div>

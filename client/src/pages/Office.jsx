@@ -199,13 +199,14 @@ function formatFeedTime(ts) {
 export default function Office() {
   const { request } = useApi();
   const [logs, setLogs] = useState([]);
+  const [error, setError] = useState(null);
   const feedRef = useRef(null);
 
   const fetchLogs = async () => {
     try {
       const res = await request('/logs?perPage=20');
       setLogs(res?.data || []);
-    } catch {}
+    } catch (err) { setError('Failed to load data'); }
   };
 
   useEffect(() => {
@@ -235,6 +236,12 @@ export default function Office() {
 
   return (
     <div className="fade-in">
+      {error && (
+        <div style={{ padding: '16px', background: 'rgba(239,68,68,0.1)', borderRadius: 'var(--radius)', color: 'var(--danger)', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{error}</span>
+          <button onClick={() => { setError(null); fetchLogs(); }} style={{ background: 'var(--danger)', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 'var(--radius)', cursor: 'pointer' }}>Retry</button>
+        </div>
+      )}
       <div className="page-header">
         <div>
           <h1 className="page-title">The Office</h1>
@@ -265,7 +272,7 @@ export default function Office() {
         <div style={{ padding: '0.875rem 1rem', borderBottom: '1px solid var(--border)', fontWeight: 600, fontSize: '0.875rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--lime)', boxShadow: '0 0 6px var(--lime)' }} />
           Live Activity Feed
-          <span style={{ marginLeft: 'auto', fontSize: '0.7rem', color: 'var(--text-muted)' }}>Auto-refreshes every 10s</span>
+          <span style={{ marginLeft: 'auto', fontSize: '0.7rem', color: 'var(--text-muted)' }}>Auto-refreshes every 5s</span>
         </div>
         <div ref={feedRef} style={{ maxHeight: 280, overflowY: 'auto' }}>
           {logs.length === 0 ? (

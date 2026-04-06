@@ -470,7 +470,7 @@ function DirectorBubble({ prefilledCommand, onCommandUsed }) {
         onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.boxShadow = '0 4px 20px rgba(168,85,247,0.35)'; }}
         title="Quick command to The Director"
       >
-        {open ? <X size={22} color="#fff" /> : <MessageCircle size={22} color="#fff" />}
+        {open ? <X size={22} color="var(--text)" /> : <MessageCircle size={22} color="var(--text)" />}
       </button>
     </>
   );
@@ -726,6 +726,7 @@ export default function Dashboard() {
   const [agentLogs, setAgentLogs] = useState({});
   const [liveLogs, setLiveLogs] = useState([]);
 
+  const [error, setError] = useState(null);
   const [briefOpen, setBriefOpen] = useState(false);
   const [directorCommand, setDirectorCommand] = useState(null);
 
@@ -737,14 +738,14 @@ export default function Dashboard() {
       rows.forEach(log => { if (!byAgent[log.agent]) byAgent[log.agent] = log; });
       setAgentLogs(byAgent);
       setLiveLogs(rows.slice(0, 8));
-    } catch {}
+    } catch (err) { setError('Failed to load data'); }
   }, []);
 
   const loadStats = useCallback(async () => {
     try {
       const res = await request('/dashboard/stats');
       setStats(res?.data || {});
-    } catch {}
+    } catch (err) { setError('Failed to load data'); }
     setStatsLoading(false);
   }, []);
 
@@ -766,6 +767,12 @@ export default function Dashboard() {
 
   return (
     <div className="fade-in">
+      {error && (
+        <div style={{ padding: '16px', background: 'rgba(239,68,68,0.1)', borderRadius: 'var(--radius)', color: 'var(--danger)', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{error}</span>
+          <button onClick={() => { setError(null); loadStats(); loadLogs(); }} style={{ background: 'var(--danger)', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 'var(--radius)', cursor: 'pointer' }}>Retry</button>
+        </div>
+      )}
       <GreetingHeader onBriefOpen={() => setBriefOpen(true)} onRefresh={handleRefresh} refreshing={refreshing} />
 
       {/* KPI Progress */}

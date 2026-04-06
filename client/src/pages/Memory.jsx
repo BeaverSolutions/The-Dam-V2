@@ -81,6 +81,7 @@ export default function Memory() {
   const [noteText, setNoteText] = useState('');
   const [saving, setSaving] = useState(false);
   const [showNoteForm, setShowNoteForm] = useState(false);
+  const [error, setError] = useState(null);
   const [exportFiles, setExportFiles] = useState(null);
   const [exporting, setExporting] = useState(false);
   const [copiedFile, setCopiedFile] = useState(null);
@@ -88,7 +89,7 @@ export default function Memory() {
   useEffect(() => {
     request('/agents/memory')
       .then(res => setEntries(res?.data || []))
-      .catch(() => {});
+      .catch(err => setError('Failed to load data'));
   }, []);
 
   const handleDelete = async (id) => {
@@ -141,6 +142,12 @@ export default function Memory() {
 
   return (
     <div className="fade-in">
+      {error && (
+        <div style={{ padding: '16px', background: 'rgba(239,68,68,0.1)', borderRadius: 'var(--radius)', color: 'var(--danger)', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{error}</span>
+          <button onClick={() => { setError(null); request('/agents/memory').then(res => setEntries(res?.data || [])).catch(err => setError('Failed to load data')); }} style={{ background: 'var(--danger)', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 'var(--radius)', cursor: 'pointer' }}>Retry</button>
+        </div>
+      )}
       <div className="page-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
           <Brain size={22} style={{ color: 'var(--purple)' }} />

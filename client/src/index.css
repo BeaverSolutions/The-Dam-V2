@@ -10,7 +10,10 @@
   --police-blue: #2563EB;  /* Enforcer Beaver agent colour */
   --text: #E2E8F0;
   --text-muted: #94A3B8;
-  --radius: 10px;
+  --danger: #ef4444;
+  --success: #10b981;
+  --muted: #64748b;
+  --radius: 8px;
   --transition: 0.2s ease;
   --border: rgba(255, 255, 255, 0.06);
   --sidebar-width: 240px;

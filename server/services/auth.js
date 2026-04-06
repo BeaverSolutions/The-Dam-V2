@@ -17,11 +17,11 @@ function generateToken(user) {
 }
 
 function generateVerificationCode() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return crypto.randomInt(100000, 999999).toString();
 }
 
 function generateAccessCode() {
-  const segment = () => Math.random().toString(36).substring(2, 6).toUpperCase();
+  const segment = () => crypto.randomBytes(2).toString('hex').toUpperCase();
   return `BEAVER-${segment()}-${segment()}`;
 }
 

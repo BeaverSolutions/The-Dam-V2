@@ -69,14 +69,21 @@ export default function Messages() {
   const { request, loading } = useApi();
   const [messages, setMessages] = useState([]);
   const [statusFilter, setStatusFilter] = useState('');
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     const url = statusFilter ? `/messages?status=${statusFilter}` : '/messages';
-    request(url).then(res => setMessages(res?.data || [])).catch(() => {});
+    request(url).then(res => setMessages(res?.data || [])).catch(err => setError('Failed to load data'));
   }, [statusFilter]);
 
   return (
     <div className="fade-in">
+      {error && (
+        <div style={{ padding: '16px', background: 'rgba(239,68,68,0.1)', borderRadius: 'var(--radius)', color: 'var(--danger)', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{error}</span>
+          <button onClick={() => { setError(null); const url = statusFilter ? `/messages?status=${statusFilter}` : '/messages'; request(url).then(res => setMessages(res?.data || [])).catch(err => setError('Failed to load data')); }} style={{ background: 'var(--danger)', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 'var(--radius)', cursor: 'pointer' }}>Retry</button>
+        </div>
+      )}
       <div className="page-header">
         <div>
           <h1 className="page-title">Messages</h1>

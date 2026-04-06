@@ -60,6 +60,7 @@ export default function Logs() {
   const [agentFilter, setAgentFilter] = useState('');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
+  const [error, setError] = useState(null);
 
   const load = useCallback(async () => {
     const params = new URLSearchParams({ page, perPage: 50 });
@@ -68,7 +69,7 @@ export default function Logs() {
       const res = await request(`/logs?${params}`);
       setLogs(res?.data || []);
       setTotal(res?.meta?.total || 0);
-    } catch {}
+    } catch (err) { setError('Failed to load data'); }
   }, [agentFilter, page]);
 
   useEffect(() => { load(); }, [load]);
@@ -92,6 +93,12 @@ export default function Logs() {
 
   return (
     <div className="fade-in">
+      {error && (
+        <div style={{ padding: '16px', background: 'rgba(239,68,68,0.1)', borderRadius: 'var(--radius)', color: 'var(--danger)', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{error}</span>
+          <button onClick={() => { setError(null); load(); }} style={{ background: 'var(--danger)', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 'var(--radius)', cursor: 'pointer' }}>Retry</button>
+        </div>
+      )}
       <div className="page-header">
         <div>
           <h1 className="page-title">Activity Log</h1>

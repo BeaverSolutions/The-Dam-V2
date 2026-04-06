@@ -1,7 +1,7 @@
 'use strict';
 
 const router = require('express').Router();
-const { body } = require('express-validator');
+const { body, param } = require('express-validator');
 const validate = require('../middleware/validate');
 const approvalsService = require('../services/approvals');
 
@@ -32,6 +32,7 @@ router.post('/',
 
 router.put('/:id',
   [
+    param('id').isUUID(),
     body('status').isIn(['approved', 'rejected']),
     body('notes').optional().trim(),
     validate,

@@ -26,6 +26,8 @@ router.post('/',
     body('start_time').isISO8601(),
     body('end_time').isISO8601(),
     body('lead_id').optional().isUUID(),
+    body('description').optional().trim().isLength({ max: 2000 }),
+    body('meeting_link').optional().trim().isLength({ max: 500 }),
     validate,
   ],
   async (req, res, next) => {

@@ -368,24 +368,35 @@ async function generateBrief(clientId, leadId, briefType, options = {}) {
       throw new Error(`Unknown brief type: ${briefType}`);
   }
 
-  // For post_meeting, also create a follow-up message in the approval queue
+  // For post_meeting, route follow-up through Ranger before approval queue
   if (briefType === 'post_meeting' && content?.follow_up_email) {
     try {
+      const { rangerReview } = require('./agents');
+      const rangerResult = await rangerReview(clientId, {
+        message_id: null,
+        message_body: content.follow_up_email.body,
+      });
+      const status = rangerResult.approved === true ? 'pending_approval' : 'ranger_rejected';
       const { rows: [msg] } = await pool.query(
-        `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, metadata)
-         VALUES ($1, $2, 'email', $3, $4, 'pending_approval', $5)
+        `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, ranger_score, ranger_notes, metadata)
+         VALUES ($1, $2, 'email', $3, $4, $5, $6, $7, $8)
          RETURNING id`,
         [
           clientId, leadId,
           content.follow_up_email.subject,
           content.follow_up_email.body,
-          JSON.stringify({ source: 'post_meeting_brief', auto_generated: true }),
+          status,
+          Math.round(rangerResult.score || 0),
+          rangerResult.notes || null,
+          JSON.stringify({ source: 'post_meeting_brief', auto_generated: true, ranger: rangerResult }),
         ]
       );
-      await pool.query(
-        `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'director')`,
-        [clientId, msg.id]
-      );
+      if (rangerResult.approved === true) {
+        await pool.query(
+          `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'ranger')`,
+          [clientId, msg.id]
+        );
+      }
       content._follow_up_message_id = msg.id;
     } catch (err) {
       console.warn('[smartActions] Failed to create follow-up message:', err.message);

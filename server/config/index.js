@@ -8,7 +8,7 @@ const config = {
     maxConnections: 20,
   },
   jwt: {
-    secret: process.env.JWT_SECRET || 'dev-secret-change-me',
+    secret: process.env.JWT_SECRET,
     expiresIn: '24h',
   },
   encryption: {
@@ -27,10 +27,8 @@ const config = {
   },
 };
 
-if (!config.jwt.secret || config.jwt.secret === 'dev-secret-change-me') {
-  if (config.nodeEnv === 'production') {
-    throw new Error('JWT_SECRET must be set in production');
-  }
+if (!config.jwt.secret) {
+  throw new Error('JWT_SECRET environment variable is required. Generate with: openssl rand -base64 48');
 }
 
 module.exports = config;

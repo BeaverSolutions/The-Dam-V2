@@ -267,6 +267,7 @@ export default function Calendar() {
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth());
   const [events, setEvents] = useState([]);
+  const [error, setError] = useState(null);
   const [blocked, setBlocked] = useState(loadBlocked);
   const [selected, setSelected] = useState(null);
   const [showForm, setShowForm] = useState(false);
@@ -275,7 +276,7 @@ export default function Calendar() {
   const [showCalendly, setShowCalendly] = useState(false);
 
   useEffect(() => {
-    request('/calendar').then(res => setEvents(res?.data || [])).catch(() => {});
+    request('/calendar').then(res => setEvents(res?.data || [])).catch(err => setError('Failed to load data'));
     request('/integrations/calendly').then(res => {
       if (res?.data?.connected) setCalendly(res.data);
     }).catch(() => {});
@@ -311,7 +312,7 @@ export default function Calendar() {
         setShowForm(false);
         setSelected(null);
       }
-    } catch {}
+    } catch (err) { setError('Failed to load data'); }
     setSaving(false);
   };
 
@@ -323,6 +324,12 @@ export default function Calendar() {
 
   return (
     <div className="fade-in">
+      {error && (
+        <div style={{ padding: '16px', background: 'rgba(239,68,68,0.1)', borderRadius: 'var(--radius)', color: 'var(--danger)', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{error}</span>
+          <button onClick={() => { setError(null); request('/calendar').then(res => setEvents(res?.data || [])).catch(err => setError('Failed to load data')); }} style={{ background: 'var(--danger)', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 'var(--radius)', cursor: 'pointer' }}>Retry</button>
+        </div>
+      )}
       {/* Header */}
       <div className="page-header">
         <div>

@@ -61,7 +61,7 @@ router.post('/clients',
       const client = clientRes.rows[0];
 
       // Create admin user with temp password
-      const tempPassword = `Dam${Math.random().toString(36).slice(2, 8).toUpperCase()}!`;
+      const tempPassword = `Dam${require('crypto').randomBytes(8).toString('base64url')}!`;
       const passwordHash = await bcrypt.hash(tempPassword, 12);
 
       const userRes = await pool.query(
@@ -149,7 +149,7 @@ router.patch('/clients/:id',
       if (req.body.plan !== undefined) { fields.push(`plan = $${idx++}`); values.push(req.body.plan); }
       if (req.body.onboarding_completed !== undefined) { fields.push(`onboarding_completed = $${idx++}`); values.push(req.body.onboarding_completed); }
 
-      if (fields.length === 0) return res.status(400).json({ error: 'No fields to update' });
+      if (fields.length === 0) return res.status(400).json({ error: 'No fields to update', code: 'NO_FIELDS' });
 
       fields.push(`updated_at = NOW()`);
       values.push(id);
@@ -200,7 +200,7 @@ router.post('/clients/:id/users',
         return res.status(409).json({ error: 'Email already registered', code: 'EMAIL_TAKEN' });
       }
 
-      const tempPassword = `Dam${Math.random().toString(36).slice(2, 8).toUpperCase()}!`;
+      const tempPassword = `Dam${require('crypto').randomBytes(8).toString('base64url')}!`;
       const passwordHash = await bcrypt.hash(tempPassword, 12);
 
       const userRes = await pool.query(
@@ -231,7 +231,7 @@ router.post('/users/:id/reset-password',
   [param('id').isUUID(), validate],
   async (req, res, next) => {
     try {
-      const newPassword = `Dam${Math.random().toString(36).slice(2, 8).toUpperCase()}!`;
+      const newPassword = `Dam${require('crypto').randomBytes(8).toString('base64url')}!`;
       const passwordHash = await bcrypt.hash(newPassword, 12);
 
       const result = await pool.query(
@@ -263,10 +263,11 @@ router.patch('/users/:id',
       let idx = 1;
 
       if (req.body.role !== undefined) { fields.push(`role = $${idx++}`); values.push(req.body.role); }
-      // Deactivate = set a very old password hash so login fails but record is preserved
-      if (req.body.active === false) { fields.push(`password_hash = $${idx++}`); values.push('DEACTIVATED'); }
+      // Deactivate/reactivate using proper deactivated_at column
+      if (req.body.active === false) { fields.push(`deactivated_at = $${idx++}`); values.push(new Date().toISOString()); }
+      if (req.body.active === true) { fields.push(`deactivated_at = $${idx++}`); values.push(null); }
 
-      if (fields.length === 0) return res.status(400).json({ error: 'No fields to update' });
+      if (fields.length === 0) return res.status(400).json({ error: 'No fields to update', code: 'NO_FIELDS' });
       fields.push(`updated_at = NOW()`);
       values.push(req.params.id);
 
@@ -370,7 +371,7 @@ router.post('/access-codes/generate',
 );
 
 // DELETE /api/admin/access-codes/:id — revoke
-router.delete('/access-codes/:id', async (req, res, next) => {
+router.delete('/access-codes/:id', [param('id').isUUID(), validate], async (req, res, next) => {
   try {
     await pool.query(`UPDATE access_codes SET revoked = true WHERE id = $1`, [req.params.id]);
     res.json({ data: { revoked: true } });

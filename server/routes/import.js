@@ -21,7 +21,11 @@ router.post('/leads', async (req, res, next) => {
       return res.status(400).json({ error: 'Maximum 500 rows per import', code: 'TOO_MANY_ROWS' });
     }
 
-    const get = (row, field) => (field && row[field] ? String(row[field]).trim() : null);
+    const get = (row, field) => {
+      if (!field || !row[field]) return null;
+      const val = String(row[field]).trim();
+      return val.length > 1000 ? val.substring(0, 1000) : val;
+    };
 
     let imported = 0;
     let skipped = 0;

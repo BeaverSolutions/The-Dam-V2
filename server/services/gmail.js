@@ -24,10 +24,12 @@ function getOAuthClient() {
 function getAuthUrl(clientId) {
   const client = getOAuthClient();
   if (!client) return null;
+  const crypto = require('crypto');
+  const sig = crypto.createHmac('sha256', process.env.JWT_SECRET).update(clientId).digest('hex');
   return client.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
-    state: Buffer.from(JSON.stringify({ clientId })).toString('base64'),
+    state: Buffer.from(JSON.stringify({ clientId, sig })).toString('base64'),
     scope: [
       'https://www.googleapis.com/auth/gmail.send',
       'https://www.googleapis.com/auth/gmail.readonly',
@@ -138,7 +140,17 @@ async function sendEmail(clientId, { to, subject, body }) {
     return { status: 'sent', messageId, threadId };
   } catch (err) {
     console.warn('[gmail] Send failed:', err.message);
-    return { status: 'simulated', reason: err.message, messageId: null, threadId: null };
+    // Log the failure
+    try {
+      await logsService.createLog(clientId, {
+        agent: 'system',
+        action: 'email_failed',
+        target_type: 'message',
+        target_id: null,
+        metadata: { to, subject, reason: err.message },
+      });
+    } catch {}
+    return { status: 'failed', reason: err.message, messageId: null, threadId: null };
   }
 }
 

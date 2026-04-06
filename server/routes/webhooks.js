@@ -2,6 +2,7 @@
 
 const router = require('express').Router();
 const pool = require('../db/pool');
+const logger = require('../utils/logger');
 
 /**
  * POST /api/webhooks/agentmail
@@ -13,15 +14,22 @@ const pool = require('../db/pool');
  * It is registered in index.js BEFORE the global express.json() middleware.
  */
 router.post('/agentmail', require('express').raw({ type: '*/*' }), async (req, res) => {
+  // Verify webhook secret
+  const webhookSecret = process.env.AGENTMAIL_WEBHOOK_SECRET;
+  const headerSecret = req.headers['x-webhook-secret'];
+  if (webhookSecret && headerSecret !== webhookSecret) {
+    return res.status(403).json({ error: 'Invalid webhook secret' });
+  }
+
   // Acknowledge immediately — AgentMail expects a fast 200
-  res.status(200).json({ received: true });
+  res.status(200).json({ data: { received: true } });
 
   try {
     let payload;
     try {
       payload = JSON.parse(req.body.toString('utf8'));
     } catch {
-      console.warn('[webhook] Failed to parse AgentMail payload');
+      logger.warn({ msg: 'Failed to parse AgentMail payload' });
       return;
     }
 
@@ -47,7 +55,7 @@ router.post('/agentmail', require('express').raw({ type: '*/*' }), async (req, r
     );
 
     if (!rows.length) {
-      console.log(`[webhook] No sent message found for agentmail thread: ${threadId}`);
+      logger.info({ msg: 'No sent message found for agentmail thread', threadId });
       return;
     }
 
@@ -74,7 +82,7 @@ router.post('/agentmail', require('express').raw({ type: '*/*' }), async (req, r
       const { stopSequence } = require('../services/followupSequence');
       await stopSequence(msg.lead_id, 'replied');
     } catch (err) {
-      console.warn('[webhook] stopSequence failed:', err.message);
+      logger.warn({ msg: 'stopSequence failed', err: err.message });
     }
 
     // Sprint 7C: Detect unsubscribe intent — stop sequence + flag lead
@@ -100,7 +108,7 @@ router.post('/agentmail', require('express').raw({ type: '*/*' }), async (req, r
          VALUES ($1, 'system', 'lead_unsubscribed', 'lead', $2, $3)`,
         [msg.client_id, msg.lead_id, JSON.stringify({ snippet: snippet.slice(0, 200) })]
       );
-      console.log(`[webhook] Lead ${msg.lead_id} unsubscribed.`);
+      logger.info({ msg: 'Lead unsubscribed', lead_id: msg.lead_id });
     }
 
     // Log the event
@@ -114,9 +122,9 @@ router.post('/agentmail', require('express').raw({ type: '*/*' }), async (req, r
       ]
     );
 
-    console.log(`[webhook] Reply detected — lead ${msg.lead_id}, thread ${threadId}${isUnsubscribe ? ' [UNSUBSCRIBED]' : ''}`);
+    logger.info({ msg: 'Reply detected', lead_id: msg.lead_id, threadId, unsubscribed: isUnsubscribe });
   } catch (err) {
-    console.error('[webhook] AgentMail processing error:', err.message);
+    logger.error({ msg: 'AgentMail processing error', err: err.message, stack: err.stack });
   }
 });
 

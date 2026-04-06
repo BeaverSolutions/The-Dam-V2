@@ -44,8 +44,19 @@ const loginLimiter = rateLimit({
   skipSuccessfulRequests: true, // successful login doesn't count toward the cap
 });
 
+// Signup brute-force / spam guard: 5 per hour per IP
+const signupLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  keyGenerator: (req) => `signup:${req.ip}`,
+  message: { error: 'Too many signups. Try again in an hour.', code: 'SIGNUP_RATE_LIMIT' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // POST /api/auth/signup
 router.post('/signup',
+  signupLimiter,
   [
     body('email').isEmail().normalizeEmail(),
     body('password').isLength({ min: 8 }),

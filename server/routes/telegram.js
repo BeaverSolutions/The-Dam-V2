@@ -118,7 +118,7 @@ function formatResult(result) {
 router.post('/webhook', async (req, res) => {
   // Validate Telegram's secret token header
   const secret = req.headers['x-telegram-bot-api-secret-token'];
-  if (BOT_SECRET && secret !== BOT_SECRET) {
+  if (!BOT_SECRET || secret !== BOT_SECRET) {
     return res.sendStatus(403);
   }
 
@@ -221,7 +221,7 @@ router.post('/webhook', async (req, res) => {
     logger.error({ msg: 'Telegram webhook error', err: err.message, stack: err.stack });
     const chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
     if (chatId) {
-      telegram.sendMessage(chatId, `Something went wrong: ${err.message}`).catch(() => {});
+      telegram.sendMessage(chatId, 'Something went wrong. Check The Dam logs for details.').catch(() => {});
     }
   }
 });
@@ -229,7 +229,15 @@ router.post('/webhook', async (req, res) => {
 // ─── One-time webhook setup ────────────────────────────────────────────────────
 // POST /api/telegram/set-webhook
 // Call this once after deploying to register the webhook URL with Telegram.
-router.post('/set-webhook', async (req, res, next) => {
+function requireInternalKey(req, res, next) {
+  const key = req.headers['x-internal-key'];
+  if (!process.env.INTERNAL_API_KEY || !key || key !== process.env.INTERNAL_API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized', code: 'INVALID_KEY' });
+  }
+  next();
+}
+
+router.post('/set-webhook', requireInternalKey, async (req, res, next) => {
   try {
     const domain = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.SERVER_DOMAIN;
     if (!domain) {
@@ -243,7 +251,7 @@ router.post('/set-webhook', async (req, res, next) => {
 });
 
 // DELETE /api/telegram/set-webhook — remove webhook (switch back to polling)
-router.delete('/set-webhook', async (req, res, next) => {
+router.delete('/set-webhook', requireInternalKey, async (req, res, next) => {
   try {
     const result = await telegram.deleteWebhook();
     res.json({ data: result });
