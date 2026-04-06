@@ -63,30 +63,34 @@ async function searchLinkedInProfiles(query, limit = 5) {
       .filter(r => r.link?.includes('linkedin.com/in/'))
       .slice(0, limit)
       .map(r => {
-        // Extract name and title from the Google snippet
-        // LinkedIn titles in Google typically look like: "John Doe - CEO at Acme Corp | LinkedIn"
-        const titleLine = r.title || '';
+        // LinkedIn titles in Google look like: "John Doe - CEO at Acme Corp | LinkedIn"
+        // Sometimes: "John Doe | LinkedIn" (no title/company in snippet)
+        const titleLine = (r.title || '').replace(' | LinkedIn', '').replace('| LinkedIn', '').trim();
         const parts = titleLine.split(' - ');
-        const name = parts[0]?.replace(' | LinkedIn', '').trim() || '';
-        const rest = parts[1]?.replace(' | LinkedIn', '').trim() || '';
+        const name = parts[0]?.trim() || '';
+        const rest = parts[1]?.trim() || '';
 
         // "CEO at Acme Corp" → title + company
-        const atIdx = rest.indexOf(' at ');
+        const atIdx = rest.toLowerCase().indexOf(' at ');
         const title = atIdx > -1 ? rest.substring(0, atIdx).trim() : rest;
         const company = atIdx > -1 ? rest.substring(atIdx + 4).trim() : '';
+
+        // Normalise LinkedIn URL — strip query params and trailing slashes
+        const rawUrl = r.link || '';
+        const linkedinUrl = rawUrl.split('?')[0].replace(/\/$/, '');
 
         return {
           name,
           title,
           company,
-          linkedin_url: r.link,
+          linkedin_url: linkedinUrl,
           email: '',
           snippet: r.snippet || '',
-          verified: true,        // Google confirmed this URL exists
-          data_source: 'serper', // transparent sourcing
+          verified: true,
+          data_source: 'serper',
         };
       })
-      .filter(l => l.name && l.linkedin_url); // drop any that failed to parse
+      .filter(l => l.name && l.linkedin_url && l.name.length > 2); // drop empty or failed parses
   } catch (err) {
     console.error('[serper] Search failed:', err.message);
     return [];

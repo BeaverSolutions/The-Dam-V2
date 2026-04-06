@@ -183,48 +183,14 @@ async function researchSearch(clientId, { query, filters = {} }) {
 
     const serperLeads = await serperService.searchLinkedInProfiles(serperQuery, filters.limit || 5);
     if (serperLeads && serperLeads.length > 0) {
-      console.log(`[research_beaver] Serper returned ${serperLeads.length} real LinkedIn profiles for: "${query}"`);
-      // Hand to Claude to enrich with signal/angle/friction — but URLs are real
-      if (callAgent) {
-        try {
-          const enriched = await callAgent(
-            'research_beaver',
-            `You have been given real LinkedIn profiles found via Google search for KL/Malaysia-based leads.
-
-CRITICAL RULES — violations will cause pipeline failure:
-1. DO NOT change name, linkedin_url, title, or company from what is provided. These are verified fields.
-2. DO NOT invent or guess a company name if it is missing or blank — leave company as-is.
-3. DO NOT copy or reference any company name from previous context (e.g. "Kickoff"). Only use what is in the profile data.
-4. Only enrich with: tier (P1/P2/P3), signal, friction, angle, why_now, notes, industry, company_size.
-5. If you cannot identify a real signal for this person, set tier to "P3" — do not fabricate one.
-
-Profiles to enrich (do not modify the base fields):
-${JSON.stringify(serperLeads, null, 2)}
-
-Return JSON only: {"leads":[...enriched profiles with all original fields preserved, plus new fields added]}`,
-          );
-          const enrichedLeads = Array.isArray(enriched?.leads) ? enriched.leads
-            : Array.isArray(enriched) ? enriched : serperLeads;
-
-          // Always preserve the original verified linkedin_url from Serper
-          const merged = enrichedLeads.map((el, i) => ({
-            ...el,
-            linkedin_url: serperLeads[i]?.linkedin_url || el.linkedin_url,
-            verified: true,
-            data_source: 'serper',
-          }));
-
-          return {
-            success: true,
-            data: { leads: merged, query, filters, source: 'serper' },
-          };
-        } catch (err) {
-          console.warn('[research_beaver] Serper enrichment via Claude failed, returning raw profiles:', err.message);
-        }
-      }
+      console.log(`[research_beaver] Serper returned ${serperLeads.length} real LinkedIn profiles for: "${serperQuery}"`);
+      // Return raw Serper data ONLY — no Claude enrichment.
+      // Claude enrichment was contaminating company names from session context.
+      // Sales Beaver will use the signal/angle from the ICP brief instead.
+      // MJ verifies via the LinkedIn link in the approval queue before approving.
       return {
         success: true,
-        data: { leads: serperLeads, query, filters, source: 'serper' },
+        data: { leads: serperLeads, query: serperQuery, filters, source: 'serper' },
       };
     }
   } catch (err) {
