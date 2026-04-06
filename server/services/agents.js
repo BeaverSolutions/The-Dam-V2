@@ -293,9 +293,15 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         rangerContext = `\n\nRANGER REJECTION HISTORY — these patterns were rejected recently, do NOT repeat them:\n${rangerPatterns.slice(0, 5).join('\n')}`;
       }
 
+      // Extract sender name for the sign-off — from persona or fall back to client name
+      const senderName = persona?.sender_name || persona?.contact_name || persona?.name || 'The Team';
+
       const result = await callAgent(
         'sales_beaver',
-        `Write a ${channel} outreach message for this lead: ${context}${personaContext}${fileContext}${rangerContext}`,
+        `Write a ${channel} outreach message for this lead: ${context}
+
+SENDER NAME (use this in the "Regards," sign-off): ${senderName}
+${personaContext}${fileContext}${rangerContext}`,
         { lead_id, channel }
       );
 
@@ -317,8 +323,8 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
   return {
     lead_id,
     channel,
-    subject: `Reaching out — quick question`,
-    body: `Hi there,\n\nI came across your company and thought there might be a great fit. Would love to connect and share how we've been helping similar companies.\n\nOpen to a quick chat?\n\nBest,\nThe Team`,
+    subject: `Quick question`,
+    body: `Dear [Name],\n\nI noticed your company has been growing steadily. Most founders I speak with at this stage find that sales becomes the bottleneck — not the product.\n\nIs pipeline consistency something you're actively working on right now?\n\nRegards,\nThe Team`,
     status: 'pending_ranger',
   };
 }

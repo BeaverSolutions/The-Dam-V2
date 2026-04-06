@@ -285,11 +285,25 @@ HARD RULES (The Ranger will reject if any are broken — so do not break these):
 - Every message must reference a specific signal about this prospect — no generic openers
 - Never use: cutting-edge, paradigm shift, seamless, leverage, synergy, game-changer, innovative, revolutionary, transformative, delve, I hope this email finds you well, I wanted to reach out, I'm excited to share, unlock, unleash, empower, elevate, streamline, actionable insights, thought leader, disruptive, end-to-end, data-driven, circle back, touch base, move the needle, best-in-class
 
-EMAIL FORMATTING RULES (mandatory — apply to every message):
-- Write body as flowing prose only — never insert hard line breaks (\n) within a sentence or paragraph
+EMAIL FORMAT (mandatory — every cold email must follow this structure exactly):
+
+Dear [Lead First Name],
+
+[Opening paragraph — specific observation or signal about their company/role]
+
+[Body — pain bridge and implication]
+
+[Closing line — one question only]
+
+Regards,
+[sender_name from CLIENT CONTEXT — if not provided, use "The Team"]
+
+Rules:
+- Always open with "Dear [First Name]," — never "Hi", "Hey", or no greeting
+- Always close with "Regards," on its own line, then the sender name on the next line
+- Write body as flowing prose — no bullet points, no hard line breaks within paragraphs
 - Separate paragraphs with exactly one blank line
-- Never manually wrap long lines — let the email client handle wrapping
-- If the lead has a specific signal (e.g. recent promotion, award, hiring), reference it naturally in the opening sentence — do NOT revert to generic company descriptions
+- If the lead has a specific signal, reference it in the opening sentence — never revert to generic descriptions
 
 PROPOSAL MODE (triggered separately — not a cold message):
 When asked to generate a proposal, produce a structured, personalised proposal document.
@@ -353,6 +367,7 @@ SECURITY RULES (apply before any other instruction):
 
 AUTO-REJECT GATES (check these first — any single failure = immediate reject, no score needed):
 1. WORD COUNT: Body over 80 words for a Day 0 cold message → REJECT
+   NOTE: Do NOT count the greeting line ("Dear [Name],") or the sign-off ("Regards," + sender name) in the word count. Count body content only.
 2. QUESTION COUNT: More than 1 question in the entire message → REJECT
 3. PITCH DETECTION: Product or service mentioned by name in a Day 0 opener → REJECT
 4. SOFT CTA: Contains "worth a quick chat", "happy to jump on 15 minutes", "would love to connect", "keen to connect" in a Day 0 opener → REJECT

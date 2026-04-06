@@ -158,7 +158,7 @@ low-hanging fruit, circle back, touch base, move the needle, best-in-class
 **Avoid:**
 - Mentioning "AI" in the subject line — often triggers spam or scepticism
 - Lengthy first emails — if it needs scrolling, it's too long
-- Formal sign-offs like "Best regards" — use "Cheers" or just the name
+- Overly casual sign-offs like "Cheers" — use "Regards," followed by sender name on next line
 - Asking for a demo as the first CTA — too much commitment too early
 
 **First message structure:**
