@@ -37,8 +37,12 @@ async function searchLinkedInProfiles(query, limit = 5) {
     return [];
   }
 
-  // Build a Google query targeting LinkedIn profiles
-  const searchQuery = `site:linkedin.com/in ${query}`;
+  // Build a targeted LinkedIn search query.
+  // Always enforce Malaysian context unless the query already has it,
+  // to prevent returning US/UK/global results.
+  const hasLocation = /malaysia|kuala lumpur|\bkl\b|selangor|klang/i.test(query);
+  const locationSuffix = hasLocation ? '' : ' "Kuala Lumpur" OR "Malaysia"';
+  const searchQuery = `site:linkedin.com/in ${query}${locationSuffix}`;
 
   try {
     const resp = await axios.post(

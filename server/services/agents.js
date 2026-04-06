@@ -158,7 +158,30 @@ async function researchSearch(clientId, { query, filters = {} }) {
   // Returns verified LinkedIn URLs even without Apollo
   try {
     const serperService = require('./serper');
-    const serperLeads = await serperService.searchLinkedInProfiles(query, filters.limit || 5);
+
+    // Build a clean, targeted search query from the ICP — NOT the full brief.
+    // The full brief is 500 words; Google needs 5-8 keywords max.
+    const icpLocation = icpMemory?.location || icpMemory?.geography || 'Kuala Lumpur Malaysia';
+    const icpTitles   = icpMemory?.job_titles || icpMemory?.who || 'Founder CEO Director';
+    const icpIndustry = icpMemory?.industries || '';
+
+    // Distil to a clean LinkedIn search query
+    const locationTag = icpLocation.includes('Klang') || icpLocation.includes('KL') || icpLocation.includes('Malaysia')
+      ? 'Kuala Lumpur Malaysia'
+      : icpLocation;
+
+    const titleTag = typeof icpTitles === 'string'
+      ? icpTitles.split(/[,/]/)[0].trim()   // take first title only
+      : Array.isArray(icpTitles) ? icpTitles[0] : 'Founder';
+
+    const industryTag = typeof icpIndustry === 'string'
+      ? icpIndustry.split(/[,/]/)[0].trim()
+      : Array.isArray(icpIndustry) ? icpIndustry[0] : '';
+
+    const serperQuery = [titleTag, industryTag, locationTag].filter(Boolean).join(' ');
+    console.log(`[research_beaver] Serper clean query: "${serperQuery}" (from ICP)`);
+
+    const serperLeads = await serperService.searchLinkedInProfiles(serperQuery, filters.limit || 5);
     if (serperLeads && serperLeads.length > 0) {
       console.log(`[research_beaver] Serper returned ${serperLeads.length} real LinkedIn profiles for: "${query}"`);
       // Hand to Claude to enrich with signal/angle/friction — but URLs are real
