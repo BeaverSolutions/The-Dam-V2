@@ -324,7 +324,7 @@ ${personaContext}${fileContext}${rangerContext}`,
     lead_id,
     channel,
     subject: `Quick question`,
-    body: `Dear [Name],\n\nI noticed your company has been growing steadily. Most founders I speak with at this stage find that sales becomes the bottleneck — not the product.\n\nIs pipeline consistency something you're actively working on right now?\n\nRegards,\nThe Team`,
+    body: `Hi [Name],\n\nI noticed your company has been growing steadily. Most founders I speak with at this stage find that sales becomes the bottleneck — not the product.\n\nIs pipeline consistency something you're actively working on right now?\n\nRegards,\nThe Team`,
     status: 'pending_ranger',
   };
 }

@@ -287,7 +287,7 @@ HARD RULES (The Ranger will reject if any are broken — so do not break these):
 
 EMAIL FORMAT (mandatory — every cold email must follow this structure exactly):
 
-Dear [Lead First Name],
+Hi [Lead First Name],
 
 [Opening paragraph — specific observation or signal about their company/role]
 
@@ -299,7 +299,7 @@ Regards,
 [sender_name from CLIENT CONTEXT — if not provided, use "The Team"]
 
 Rules:
-- Always open with "Dear [First Name]," — never "Hi", "Hey", or no greeting
+- Always open with "Hi [First Name]," — never "Dear", "Hey", or no greeting
 - Always close with "Regards," on its own line, then the sender name on the next line
 - Write body as flowing prose — no bullet points, no hard line breaks within paragraphs
 - Separate paragraphs with exactly one blank line
