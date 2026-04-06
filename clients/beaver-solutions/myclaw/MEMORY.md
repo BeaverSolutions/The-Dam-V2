@@ -22,7 +22,7 @@
 
 ### The Dam v2 — LIVE IN PRODUCTION
 - **What it is:** Multi-tenant B2B outbound sales automation platform
-- **URL:** https://the-dam-v2-production.up.railway.app
+- **URL:** https://app.beaver.solutions
 - **Status:** Production. Railway auto-deploys on push to main.
 - **Repo:** BeaverSolutions/The-Dam-V2 on GitHub
 - **DB:** Supabase (PostgreSQL), hosted separately from Railway
@@ -46,7 +46,7 @@
 
 ## The Dam — API Reference
 
-**Base URL:** `https://the-dam-v2-production.up.railway.app`
+**Base URL:** `https://app.beaver.solutions`
 
 **Internal API Key:** stored in MyClaw secrets as `DAM_INTERNAL_KEY`
 

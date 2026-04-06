@@ -146,7 +146,7 @@ Always convert before displaying.
 
 The Dam is Claw's primary tool. All sales pipeline work goes through it.
 
-**Base URL:** `https://the-dam-v2-production.up.railway.app`
+**Base URL:** `https://app.beaver.solutions`
 **Auth header:** `x-internal-key: {DAM_INTERNAL_KEY}` (stored in MyClaw secrets)
 
 **Claw's three core skills:**

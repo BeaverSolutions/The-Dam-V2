@@ -8,7 +8,7 @@ Environment-specific references. Skills = how to use tools. This file = the spec
 
 | Item | Value |
 |------|-------|
-| Base URL | `https://the-dam-v2-production.up.railway.app` |
+| Base URL | `https://app.beaver.solutions` |
 | Auth header | `x-internal-key: {DAM_INTERNAL_KEY}` |
 | Content-Type | `application/json` |
 | Secret storage | MyClaw secrets → key name: `DAM_INTERNAL_KEY` |
@@ -35,6 +35,12 @@ POST /api/autonomous/reject
 
 GET  /api/autonomous/recent-replies?client_id=<uuid>&hours=24
      → Returns leads who replied in the last N hours
+
+GET  /api/autonomous/agent-status?client_id=<uuid>
+     → Returns last action per agent in the last 30 minutes
+
+GET  /api/autonomous/running?client_id=<uuid>
+     → Check if a kickoff is currently running for this client
 
 POST /api/autonomous/weekly-review
      Body: {} (no body needed, internal key only)

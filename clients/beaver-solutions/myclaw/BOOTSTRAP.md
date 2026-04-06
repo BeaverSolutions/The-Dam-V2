@@ -38,7 +38,7 @@ Check for `memory/YYYY-MM-DD.md` where YYYY-MM-DD is today's date in GMT+8.
 Ping the pending-approvals endpoint to confirm The Dam is reachable:
 
 ```
-GET https://the-dam-v2-production.up.railway.app/api/autonomous/pending-approvals?client_id=ce2fc8e5-617e-42d5-91fe-4275ceaa0030
+GET https://app.beaver.solutions/api/autonomous/pending-approvals?client_id=ce2fc8e5-617e-42d5-91fe-4275ceaa0030
 Headers:
   x-internal-key: {DAM_INTERNAL_KEY}
 ```
