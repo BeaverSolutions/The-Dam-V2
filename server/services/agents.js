@@ -177,19 +177,28 @@ async function researchSearch(clientId, { query, filters = {} }) {
       : icpLocation;
 
     // Parse title and industry lists for rotation
-    const titleList = typeof icpTitlesRaw === 'string'
+    let titleList = typeof icpTitlesRaw === 'string'
       ? icpTitlesRaw.split(/[,/]/).map(s => s.trim()).filter(Boolean)
-      : Array.isArray(icpTitlesRaw) ? icpTitlesRaw : ['Founder'];
+      : Array.isArray(icpTitlesRaw) ? icpTitlesRaw.filter(Boolean) : [];
+    if (titleList.length === 0) titleList = ['Founder', 'CEO'];
 
-    const industryList = typeof icpIndustryRaw === 'string'
+    let industryList = typeof icpIndustryRaw === 'string'
       ? icpIndustryRaw.split(/[,/]/).map(s => s.trim()).filter(Boolean)
-      : Array.isArray(icpIndustryRaw) ? icpIndustryRaw : [''];
+      : Array.isArray(icpIndustryRaw) ? icpIndustryRaw.filter(Boolean) : [];
+    // industryList can be empty — we just search by title+location
 
     // Rotate by batchIndex so each batch targets a different title+industry combo
-    const titleTag    = titleList[batchIndex % titleList.length] || 'Founder';
-    const industryTag = industryList[batchIndex % Math.max(industryList.length, 1)] || '';
+    const titleTag    = titleList[batchIndex % titleList.length] || 'Founder CEO';
+    const industryTag = industryList.length > 0 ? (industryList[batchIndex % industryList.length] || '') : '';
 
-    const serperQuery = [titleTag, industryTag, locationTag].filter(Boolean).join(' ');
+    let serperQuery = [titleTag, industryTag, locationTag].filter(Boolean).join(' ');
+
+    // Validate query is meaningful — not just a location string
+    if (serperQuery.length < 10) {
+      console.warn(`[research] Serper query too short (${serperQuery.length} chars), defaulting to broader search`);
+      serperQuery = `Founder CEO ${locationTag}`;
+    }
+    console.log('[research] Serper query:', serperQuery);
     console.log(`[research_beaver] Serper query (batch ${batchIndex}): "${serperQuery}"`);
 
     const serperLeads = await serperService.searchLinkedInProfiles(serperQuery, filters.limit || 5);
@@ -208,9 +217,21 @@ async function researchSearch(clientId, { query, filters = {} }) {
     console.warn('[research_beaver] Serper search failed, falling back to Claude:', err.message);
   }
 
+  // Claude fallback disabled — returns fabricated companies
+  // Better to return 0 real leads than 20 fake ones
+  console.log('[research] Serper returned 0 results. Claude fallback disabled for lead sourcing.');
+  await logsService.createLog(clientId, {
+    agent: 'research_beaver',
+    action: 'research_no_results',
+    target_type: 'system',
+    metadata: { query: query?.substring?.(0, 200), source: 'serper', serper_results: 0, note: 'Claude fallback disabled to prevent fake companies' },
+  });
+  return { success: true, data: { leads: [], query, filters, source: 'serper', note: 'No results from Serper. Try different keywords.' } };
+
+  /* ── Claude fallback (DISABLED — fabricates companies) ──────────
+   * Kept for potential re-enablement for enrichment (not sourcing).
   if (callAgent) {
     try {
-      // MEMORY: icpMemory already loaded above; just need weekly learnings
       const weeklyLearnings = await getMemory(clientId, 'director', 'weekly_learnings');
       let memoryContext = '';
       if (icpMemory && Object.keys(icpMemory).length > 0) {
@@ -232,15 +253,13 @@ async function researchSearch(clientId, { query, filters = {} }) {
       } else if (Array.isArray(result?.leads)) {
         leads = result.leads;
       } else if (result?.raw) {
-        // Strip markdown code fences if present
         let raw = result.raw.trim();
-        raw = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
+        raw = raw.replace(/^```json\s*\/i, '').replace(/^```\s*\/i, '').replace(/```\s*$\/i, '');
         try {
           const parsed = JSON.parse(raw);
           if (Array.isArray(parsed)) leads = parsed;
           else if (Array.isArray(parsed?.leads)) leads = parsed.leads;
         } catch {
-          // Try to extract JSON object or array from raw text
           const objMatch = raw.match(/\{[\s\S]*\}/);
           const arrMatch = raw.match(/\[[\s\S]*\]/);
           const matched = arrMatch?.[0] || objMatch?.[0];
@@ -265,6 +284,7 @@ async function researchSearch(clientId, { query, filters = {} }) {
     success: true,
     data: { leads, query, filters },
   };
+  ── end Claude fallback ── */
 }
 
 /**
@@ -650,6 +670,20 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
     metadata: { plan_id, batchIndex },
   });
 
+  // ── Diagnostics: track counts at each filtering stage ──
+  const diagnostics = {
+    research_source: null,
+    serper_query: null,
+    raw_from_research: 0,
+    after_title_filter: 0,
+    after_verification_gate: 0,
+    after_dedup: 0,
+    saved: 0,
+    messages_drafted: 0,
+    messages_failed: 0,
+    reason: null,
+  };
+
   // Cross-agent memory: Captain reads ALL agent memories at kickoff
   let memoryContext = '';
   try {
@@ -672,6 +706,9 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
     : { data: { leads: [] } };
 
   const rawLeads = researchResult?.data?.leads || [];
+  diagnostics.raw_from_research = rawLeads.length;
+  diagnostics.research_source = researchResult?.data?.source || 'unknown';
+  diagnostics.serper_query = researchResult?.data?.query || null;
 
   // ── Step 1b: Captain Beaver verification gate ────────────
   // If a lead came from Claude fallback (not Apollo) and has no linkedin_url,
@@ -698,6 +735,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
     return true;
   });
 
+  diagnostics.after_title_filter = titledLeads.length;
+
   const verifiedLeads = titledLeads.filter(lead => {
     if (isVerifiedSource) return true; // Apollo/Serper data is trusted
     if (!lead.linkedin_url) {
@@ -711,6 +750,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
     }
     return true;
   });
+
+  diagnostics.after_verification_gate = verifiedLeads.length;
 
   // Mark source for transparency in approval queue
   const markedLeads = verifiedLeads.map(lead => ({
@@ -758,6 +799,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
     }
     return lead;
   });
+
+  diagnostics.after_dedup = cleanedLeads.length;
 
   // ── Step 2: Save leads to DB ─────────────────────────────
   const savedLeads = [];
@@ -832,6 +875,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
     }
   }
 
+  diagnostics.saved = savedLeads.length;
+
   await logsService.createLog(clientId, {
     agent: 'research_beaver',
     action: 'leads_saved',
@@ -845,10 +890,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
       action: 'plan_zero_leads',
       metadata: { plan_id, raw_count: rawLeads.length, reason: 'All leads filtered by ICP title, LinkedIn verification, or dedup' },
     });
+    diagnostics.reason = 'All leads filtered by ICP title, LinkedIn verification, or dedup';
     return {
       plan_id, status: 'completed',
       leads_found: 0, messages_drafted: 0,
+      messages_failed: 0,
       summary: `0 leads passed filters (raw: ${rawLeads.length}). Check ICP config and data source.`,
+      diagnostics,
     };
   }
 
@@ -877,6 +925,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
         channel: 'email',
         context: contextParts.join('\n') + memoryContext,
       });
+
+      if (salesResult.error || !salesResult.body) {
+        console.warn('[pipeline] Sales draft failed for lead:', lead.name, salesResult.failure_reason || 'unknown');
+        diagnostics.messages_failed++;
+        continue; // skip to next lead
+      }
+      diagnostics.messages_drafted++;
 
       const msgRes = await pool.query(
         `INSERT INTO messages (client_id, lead_id, channel, subject, body, status)
@@ -1139,8 +1194,12 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
   return {
     plan_id,
     status: 'completed',
-    leads: savedLeads,
+    leads: savedLeads.map(l => ({ name: l.name, company: l.company, title: l.title })),
+    leads_found: savedLeads.length,
+    messages_drafted: diagnostics.messages_drafted,
+    messages_failed: diagnostics.messages_failed,
     summary,
+    diagnostics,
     results: [
       { step: 1, agent: 'research_beaver', status: 'completed', result: `${savedLeads.length} lead${savedLeads.length !== 1 ? 's' : ''} found & saved` },
       { step: 2, agent: 'sales_beaver', status: 'completed', result: `${savedMessages.length} message${savedMessages.length !== 1 ? 's' : ''} drafted` },

@@ -70,9 +70,10 @@ function LeadsCard({ leads }) {
   );
 }
 
-function SummaryCard({ summary, onGoToApprovals }) {
-  if (!summary) return null;
-  const { leads_found = 0, messages_drafted = 0, approved = 0 } = summary;
+function SummaryCard({ summary, diagnostics, onGoToApprovals }) {
+  if (!summary && !diagnostics) return null;
+  const { leads_found = 0, messages_drafted = 0, approved = 0, pending_approvals = 0, messages_failed = 0 } = summary || {};
+  const approvalCount = approved || pending_approvals;
   return (
     <div style={{ marginTop: '0.75rem', background: 'var(--bg)', borderRadius: 'var(--radius)', padding: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
       <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Campaign Summary</div>
@@ -86,18 +87,44 @@ function SummaryCard({ summary, onGoToApprovals }) {
           <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: 2 }}>Drafted</div>
         </div>
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--orange)', lineHeight: 1 }}>{approved}</div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--orange)', lineHeight: 1 }}>{approvalCount}</div>
           <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: 2 }}>Ranger approved</div>
         </div>
       </div>
-      {approved > 0 && (
+
+      {/* Diagnostics — show pipeline funnel when available */}
+      {diagnostics && (
+        <div style={{ marginTop: '0.5rem', padding: '0.5rem', background: 'rgba(200,255,0,0.03)', borderRadius: 'var(--radius)', border: '1px solid rgba(200,255,0,0.08)' }}>
+          <div style={{ fontSize: '0.6rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.35rem' }}>Pipeline Funnel</div>
+          <div style={{ fontSize: '0.7rem', color: 'var(--text)', lineHeight: 1.8 }}>
+            {diagnostics.research_source && <div>Source: <span style={{ color: 'var(--blue)' }}>{diagnostics.research_source}</span></div>}
+            {diagnostics.serper_query && <div>Query: <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>"{diagnostics.serper_query}"</span></div>}
+            <div>Raw results: <b>{diagnostics.raw_from_research ?? '?'}</b>
+              {diagnostics.after_title_filter != null && <> → Title filter: <b>{diagnostics.after_title_filter}</b></>}
+              {diagnostics.after_verification_gate != null && <> → Verified: <b>{diagnostics.after_verification_gate}</b></>}
+              {diagnostics.after_dedup != null && <> → After dedup: <b>{diagnostics.after_dedup}</b></>}
+              {diagnostics.saved != null && <> → Saved: <b>{diagnostics.saved}</b></>}
+            </div>
+            {messages_failed > 0 && <div style={{ color: 'var(--danger)' }}>Draft failures: {messages_failed}</div>}
+            {diagnostics.reason && <div style={{ color: 'var(--orange)', marginTop: '0.25rem' }}>{diagnostics.reason}</div>}
+          </div>
+        </div>
+      )}
+
+      {approvalCount > 0 && (
         <button
           className="btn btn-primary"
           style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem', marginTop: '0.25rem', alignSelf: 'flex-start' }}
           onClick={onGoToApprovals}
         >
-          Review {approved} message{approved !== 1 ? 's' : ''} in Approval Queue <ArrowRight size={12} />
+          Review {approvalCount} message{approvalCount !== 1 ? 's' : ''} in Approval Queue <ArrowRight size={12} />
         </button>
+      )}
+
+      {leads_found === 0 && !diagnostics?.reason && (
+        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+          Try different keywords, broader ICP, or check that your Serper API key is configured.
+        </div>
       )}
     </div>
   );
@@ -169,7 +196,7 @@ function Message({ msg }) {
         {/* Execution results */}
         {msg.results && <ExecutionResults results={msg.results} />}
         {msg.leads && <LeadsCard leads={msg.leads} />}
-        {msg.summary && <SummaryCard summary={msg.summary} onGoToApprovals={() => navigate('/approvals')} />}
+        {msg.summary && <SummaryCard summary={msg.summary} diagnostics={msg.diagnostics} onGoToApprovals={() => navigate('/approvals')} />}
       </div>
     </div>
   );
@@ -273,18 +300,25 @@ export default function Chat() {
               body: JSON.stringify({ plan_id: plan.plan_id, command: cmd }),
             }).then(execRes => {
               if (execRes?.data) {
-                const { results, leads, summary } = execRes.data;
-                const leadsFound = summary?.leads_found ?? leads?.length ?? 0;
-                const approved = summary?.approved ?? 0;
+                const { results, leads, summary, diagnostics, leads_found, messages_drafted, messages_failed } = execRes.data;
+                const mergedSummary = {
+                  ...summary,
+                  leads_found: leads_found ?? summary?.leads_found ?? leads?.length ?? 0,
+                  messages_drafted: messages_drafted ?? summary?.messages_drafted ?? 0,
+                  messages_failed: messages_failed ?? 0,
+                  pending_approvals: summary?.pending_approvals ?? summary?.approved ?? 0,
+                };
+                const leadsFound = mergedSummary.leads_found;
                 setMessages(prev => [...prev, {
                   id: Date.now(),
                   role: 'assistant',
                   content: leadsFound > 0
-                    ? `Research Beaver found ${leadsFound} lead${leadsFound !== 1 ? 's' : ''}. The crew drafted and reviewed messages:`
-                    : 'The crew executed the plan. Here\'s the status:',
+                    ? 'The crew executed the plan. Here\'s the status:'
+                    : diagnostics?.reason || 'The crew executed the plan but found no leads matching your criteria.',
                   results,
                   leads,
-                  summary,
+                  summary: mergedSummary,
+                  diagnostics,
                 }]);
               }
             }).catch(() => {});
