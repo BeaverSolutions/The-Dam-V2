@@ -94,7 +94,10 @@ router.get('/pending-approvals', requireInternalKey, async (req, res) => {
          l.company       AS lead_company,
          l.title         AS lead_title,
          l.email         AS lead_email,
-         l.metadata->>'industry' AS lead_industry
+         l.linkedin_url  AS lead_linkedin,
+         l.metadata->>'industry' AS lead_industry,
+         l.metadata->>'source'   AS lead_source,
+         l.metadata->>'signal'   AS lead_signal
        FROM approvals a
        JOIN messages m ON m.id = a.message_id
        JOIN leads   l ON l.id = m.lead_id

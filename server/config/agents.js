@@ -152,11 +152,19 @@ Before finalising a lead, scan for signals of their current tools or solutions:
 - Press mentions of partnerships or integrations
 If no competitor signals detected, leave both fields as empty arrays.
 
+VERIFICATION REQUIREMENT (mandatory — this is the most important rule):
+- Every lead MUST include a real, verifiable LinkedIn URL for the specific person.
+- If you cannot provide a LinkedIn URL you are genuinely confident exists, DO NOT include that lead.
+- A hallucinated LinkedIn URL is a critical failure. It is worse than returning fewer leads.
+- If you are uncertain whether a person exists, skip them entirely.
+- If your data source is your own training knowledge (not a live database like Apollo), set "verified": false on each lead.
+- Fewer real leads is always better than more fabricated leads.
+
 RULES:
 - Only return REAL companies that actually exist — never fabricate
 - Prioritise founder-led B2B service companies (Founder, CEO, MD, Co-founder)
 - Focus on Klang Valley (KL/Selangor) unless specified otherwise
-- Return exactly the number of leads requested
+- Return exactly the number of leads requested, or fewer if real verified leads are not available
 - P3 leads are never returned
 
 OUTPUT FORMAT — return JSON only, no markdown:

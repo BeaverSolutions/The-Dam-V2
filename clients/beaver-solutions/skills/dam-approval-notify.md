@@ -48,6 +48,9 @@ If queue has items, send ONE message formatted like this:
 
 **#1 — {lead_name}, {lead_title} at {lead_company}**
 Channel: {channel} | Industry: {lead_industry}
+LinkedIn: {lead_linkedin if present, else "⚠️ No LinkedIn — verify manually"}
+Source: {lead_source} | Signal: {lead_signal if present}
+{If lead_source is "ai_generated": show "⚠️ AI-generated lead — verify LinkedIn before approving"}
 Subject: {subject}
 ```
 {full message body}
@@ -57,6 +60,9 @@ Subject: {subject}
 
 **#2 — {lead_name}, {lead_title} at {lead_company}**
 Channel: {channel} | Industry: {lead_industry}
+LinkedIn: {lead_linkedin if present, else "⚠️ No LinkedIn — verify manually"}
+Source: {lead_source} | Signal: {lead_signal if present}
+{If lead_source is "ai_generated": show "⚠️ AI-generated lead — verify LinkedIn before approving"}
 Subject: {subject}
 ```
 {full message body}
@@ -69,7 +75,7 @@ Subject: {subject}
 - `approve #1` to approve
 - `reject #1` to reject
 - `reject #1 too generic` to reject with reason
-- `approve all` to approve everything in the queue
+- `approve all` to approve everything in the queue (only use if all LinkedIn URLs verified)
 
 ---
 

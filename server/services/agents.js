@@ -605,8 +605,40 @@ async function directorExecute(clientId, { plan_id, command }) {
 
   const rawLeads = researchResult?.data?.leads || [];
 
-  // ── Step 1b: Hunter.io email enrichment ──────────────────
-  const enrichedLeads = await enrichLeadsWithHunter(clientId, rawLeads);
+  // ── Step 1b: Captain Beaver verification gate ────────────
+  // If a lead came from Claude fallback (not Apollo) and has no linkedin_url,
+  // it cannot be verified and must be skipped to prevent hallucinated outreach.
+  const isApolloSource = researchResult?.data?.source === 'apollo';
+  const verifiedLeads = rawLeads.filter(lead => {
+    if (isApolloSource) return true; // Apollo data is trusted
+    if (!lead.linkedin_url) {
+      console.warn(`[captain] Skipping unverifiable lead: ${lead.name} at ${lead.company} — no linkedin_url from Claude fallback`);
+      logsService.createLog(clientId, {
+        agent: 'director',
+        action: 'lead_skipped_unverifiable',
+        metadata: { name: lead.name, company: lead.company, reason: 'no_linkedin_url_claude_fallback' },
+      }).catch(() => {});
+      return false;
+    }
+    return true;
+  });
+
+  // Mark non-Apollo leads as ai_generated for transparency in approval queue
+  const markedLeads = verifiedLeads.map(lead => ({
+    ...lead,
+    metadata: {
+      ...(lead.metadata || {}),
+      verified: isApolloSource ? true : (lead.verified !== false),
+      data_source: isApolloSource ? 'apollo' : 'ai_generated',
+    },
+  }));
+
+  if (!isApolloSource && rawLeads.length !== verifiedLeads.length) {
+    console.log(`[captain] Verification gate: ${rawLeads.length} leads from Claude → ${verifiedLeads.length} passed (${rawLeads.length - verifiedLeads.length} skipped, no linkedin_url)`);
+  }
+
+  // ── Step 1c: Hunter.io email enrichment ──────────────────
+  const enrichedLeads = await enrichLeadsWithHunter(clientId, markedLeads);
 
   // ── Step 2: Save leads to DB ─────────────────────────────
   const savedLeads = [];
@@ -649,6 +681,8 @@ async function directorExecute(clientId, { plan_id, command }) {
         meta.apollo_org_id = lead.apollo_org_id;
       }
       meta.source = lead.metadata?.source || 'research_beaver';
+      if (lead.metadata?.data_source) meta.data_source = lead.metadata.data_source;
+      if (lead.metadata?.verified !== undefined) meta.verified = lead.metadata.verified;
 
       const res = await pool.query(
         `INSERT INTO leads (client_id, name, email, company, title, signal_tier, score, source,
