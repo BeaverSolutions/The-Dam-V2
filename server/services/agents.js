@@ -820,7 +820,21 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
     metadata: { count: savedLeads.length, plan_id },
   });
 
-  // ── Step 3: Sales Beaver (cap at 5) ──────────────────────
+  // Early exit — if all leads were filtered out, log why and return cleanly
+  if (savedLeads.length === 0) {
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'plan_zero_leads',
+      metadata: { plan_id, raw_count: rawLeads.length, reason: 'All leads filtered by ICP title, LinkedIn verification, or dedup' },
+    });
+    return {
+      plan_id, status: 'completed',
+      leads_found: 0, messages_drafted: 0,
+      summary: `0 leads passed filters (raw: ${rawLeads.length}). Check ICP config and data source.`,
+    };
+  }
+
+  // ── Step 3: Sales Beaver (cap at 10) ─────────────────────
   const leadsToProcess = savedLeads.slice(0, 10);
   const savedMessages = [];
 

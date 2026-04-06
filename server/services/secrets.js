@@ -11,7 +11,11 @@ function getEncKey() {
     // Hex-encoded 32-byte key (preferred)
     return Buffer.from(raw, 'hex');
   }
-  // Fallback: derive from string using scrypt
+  // In production, refuse to run with a weak derived key
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('ENCRYPTION_KEY must be a 64-character hex string in production. Generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+  }
+  // Dev fallback: derive from string using scrypt
   return crypto.scryptSync(raw || 'dev-key-change-in-prod', 'dam-secrets-salt', 32);
 }
 

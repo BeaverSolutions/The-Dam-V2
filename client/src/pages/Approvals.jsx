@@ -27,18 +27,24 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, tab, gmailConnected
   const resolved = tab !== 'pending';
 
   const handleApproveAndSend = async () => {
+    if (acting) return; // prevent double-click
     setActing(true);
-    await onResolve(approval.id, 'approved');
-    if (gmailConnected) {
-      await onSend(approval.message_id);
+    try {
+      await onResolve(approval.id, 'approved');
+      if (gmailConnected) await onSend(approval.message_id);
+    } finally {
+      setActing(false);
     }
-    setActing(false);
   };
 
   const handleReject = async () => {
+    if (acting) return; // prevent double-click
     setActing(true);
-    await onResolve(approval.id, 'rejected');
-    setActing(false);
+    try {
+      await onResolve(approval.id, 'rejected');
+    } finally {
+      setActing(false);
+    }
   };
 
   const handleSaveEdit = async () => {
@@ -164,6 +170,7 @@ export default function Approvals() {
   const [approvals, setApprovals] = useState([]);
   const [counts, setCounts]     = useState({ pending: 0, approved: 0, rejected: 0 });
   const [gmailConnected, setGmailConnected] = useState(true); // optimistic
+  const [actionError, setActionError] = useState(null);
 
   useEffect(() => {
     request('/integrations/status')
@@ -192,6 +199,7 @@ export default function Approvals() {
   }, []);
 
   const handleResolve = async (id, status) => {
+    setActionError(null);
     try {
       await request(`/approvals/${id}`, { method: 'PUT', body: JSON.stringify({ status }) });
       setApprovals(prev => prev.filter(a => a.id !== id));
@@ -200,20 +208,28 @@ export default function Approvals() {
         [tab]: Math.max(0, prev[tab] - 1),
         [status]: (prev[status] || 0) + 1,
       }));
-    } catch {}
+    } catch (err) {
+      setActionError(err?.message || 'Action failed — please try again');
+    }
   };
 
   const handleSend = async (message_id) => {
+    setActionError(null);
     try {
       await request('/integrations/send', { method: 'POST', body: JSON.stringify({ message_id }) });
-    } catch {}
+    } catch (err) {
+      setActionError(err?.message || 'Send failed — check Gmail connection in Settings');
+    }
   };
 
   const handleEdit = async (message_id, body) => {
+    setActionError(null);
     try {
       await request(`/messages/${message_id}`, { method: 'PUT', body: JSON.stringify({ body }) });
       setApprovals(prev => prev.map(a => a.message_id === message_id ? { ...a, body } : a));
-    } catch {}
+    } catch (err) {
+      setActionError(err?.message || 'Failed to save edit');
+    }
   };
 
   const tabs = TABS.map(t => ({ ...t, count: counts[t.value] }));
@@ -221,6 +237,12 @@ export default function Approvals() {
 
   return (
     <div className="fade-in">
+      {actionError && (
+        <div style={{ background: 'var(--orange)20', border: '1px solid var(--orange)', borderRadius: 'var(--radius)', padding: '0.6rem 1rem', marginBottom: '1rem', fontSize: '0.85rem', color: 'var(--orange)', display: 'flex', justifyContent: 'space-between' }}>
+          {actionError}
+          <span style={{ cursor: 'pointer', opacity: 0.7 }} onClick={() => setActionError(null)}>✕</span>
+        </div>
+      )}
       <div className="page-header">
         <div>
           <h1 className="page-title">

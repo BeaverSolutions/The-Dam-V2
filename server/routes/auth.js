@@ -73,12 +73,24 @@ router.post('/login',
   async (req, res, next) => {
     try {
       const result = await authService.login(req.body);
+      res.cookie('dam_token', result.token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 86400000, // 24h
+      });
       res.json({ data: result });
     } catch (err) {
       next(err);
     }
   }
 );
+
+// POST /api/auth/logout
+router.post('/logout', (req, res) => {
+  res.clearCookie('dam_token', { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax' });
+  res.json({ data: { success: true } });
+});
 
 // POST /api/auth/verify-email
 router.post('/verify-email',

@@ -11,7 +11,9 @@ const { runWithClientContext } = require('../middleware/clientContext');
 
 function requireInternalKey(req, res, next) {
   const key = req.headers['x-internal-key'];
-  if (!key || key !== process.env.INTERNAL_API_KEY) {
+  // Explicitly guard against missing env var — if INTERNAL_API_KEY is undefined,
+  // both key and process.env.INTERNAL_API_KEY would be undefined and comparison would pass.
+  if (!process.env.INTERNAL_API_KEY || !key || key !== process.env.INTERNAL_API_KEY) {
     return res.status(401).json({ error: 'Unauthorized', code: 'INVALID_KEY' });
   }
   next();
@@ -246,9 +248,35 @@ router.get('/agent-status', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── Concurrent-run lock (prevents overlapping kickoffs per client) ─── */
+const _runningKickoffs = new Set();
+
+/* ─── GET /api/autonomous/running ────────────────────────── */
+// MyClaw polls this before firing a kickoff to avoid duplicate runs.
+router.get('/running', requireInternalKey, (req, res) => {
+  const { client_id } = req.query;
+  if (client_id) {
+    return res.json({ data: { running: _runningKickoffs.has(client_id), client_id } });
+  }
+  return res.json({ data: { running_clients: [..._runningKickoffs] } });
+});
+
 /* ─── Core: Autonomous kickoff logic ─────────────────────── */
 
 async function runAutonomousKickoff(clientId) {
+  if (_runningKickoffs.has(clientId)) {
+    console.log(`[Autonomous] Client ${clientId} kickoff already running — skipping concurrent trigger`);
+    return;
+  }
+  _runningKickoffs.add(clientId);
+  try {
+    return await _runAutonomousKickoffInner(clientId);
+  } finally {
+    _runningKickoffs.delete(clientId);
+  }
+}
+
+async function _runAutonomousKickoffInner(clientId) {
   const today = new Date().toISOString().split('T')[0];
 
   // Ensure today's KPI row exists

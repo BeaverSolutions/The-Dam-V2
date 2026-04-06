@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
-import { setToken, setUser } from '../utils/auth';
+import { setUser } from '../utils/auth';
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -19,7 +19,6 @@ export default function Login() {
         body: JSON.stringify({ email, password }),
       });
       if (res?.data) {
-        setToken(res.data.token);
         setUser(res.data.user);
         navigate('/');
       } else {

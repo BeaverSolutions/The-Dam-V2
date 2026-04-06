@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { getToken, clearToken } from '../utils/auth';
+import { clearToken } from '../utils/auth';
 
 export function useApi() {
   const [loading, setLoading] = useState(false);
@@ -9,15 +9,13 @@ export function useApi() {
     setLoading(true);
     setError(null);
 
-    const token = getToken();
     const headers = {
       'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options.headers,
     };
 
     try {
-      const res = await fetch(`/api${url}`, { ...options, headers });
+      const res = await fetch(`/api${url}`, { ...options, headers, credentials: 'include' });
 
       if (res.status === 401) {
         clearToken();

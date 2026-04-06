@@ -11,16 +11,19 @@ const CLIENTS = [
   {
     id: 'ce2fc8e5-617e-42d5-91fe-4275ceaa0030',
     name: 'Beaver Solutions',
+    slug: 'beaver-solutions',
     email: 'admin@beaversolutions.com',
   },
   {
     id: '03dd7c7c-b04e-4c20-a942-2270a57fa440',
     name: 'TRL',
+    slug: 'trl',
     email: 'admin@trl.com',
   },
   {
     id: '7b4f2c8d-436d-4743-83fa-60963c54c593',
-    name: 'GamerExchange',
+    name: 'The Gaming Company',
+    slug: 'the-gaming-company',
     email: 'admin@gamerexchange.com',
   },
 ];
@@ -37,10 +40,10 @@ async function runSeed() {
 
   for (const clientData of CLIENTS) {
     await pool.query(
-      `INSERT INTO clients (id, name, email, onboarding_completed)
-       VALUES ($1, $2, $3, true)
+      `INSERT INTO clients (id, name, slug, email, onboarding_completed)
+       VALUES ($1, $2, $3, $4, true)
        ON CONFLICT (id) DO NOTHING`,
-      [clientData.id, clientData.name, clientData.email]
+      [clientData.id, clientData.name, clientData.slug || null, clientData.email]
     );
 
     await pool.query(

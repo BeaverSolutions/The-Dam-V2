@@ -10,7 +10,7 @@ import { useApi } from '../hooks/useApi';
 const navItems = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
   { path: '/pipeline', label: 'Pipeline', icon: GitBranch },
-  { path: '/messages', label: 'Messages', icon: MessageSquare },
+  { path: '/messages', label: 'Messages', icon: MessageSquare, rangerBadge: true },
   { path: '/approvals', label: 'Approvals', icon: CheckCircle, badge: true },
   { path: '/logs', label: 'Activity Log', icon: Activity },
   { path: '/calendar', label: 'Calendar', icon: Calendar },
@@ -24,6 +24,7 @@ const navItems = [
 export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
+  const [rangerRejectedCount, setRangerRejectedCount] = useState(0);
   const location = useLocation();
   const navigate = useNavigate();
   const user = getUser();
@@ -33,17 +34,21 @@ export default function Layout() {
     (user?.client?.slug === 'beaver-solutions' || user?.client?.name?.toLowerCase().includes('beaver'));
 
   useEffect(() => {
-    const fetchPending = () => {
+    const fetchCounts = () => {
       request('/approvals?status=pending&perPage=1')
         .then(res => setPendingCount(res?.meta?.total || 0))
         .catch(() => {});
+      request('/messages?status=ranger_rejected&perPage=1')
+        .then(res => setRangerRejectedCount(res?.meta?.total || 0))
+        .catch(() => {});
     };
-    fetchPending();
-    const interval = setInterval(fetchPending, 10000); // refresh every 10s
+    fetchCounts();
+    const interval = setInterval(fetchCounts, 10000);
     return () => clearInterval(interval);
   }, [location.pathname]);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try { await request('/auth/logout', { method: 'POST' }); } catch {}
     clearToken();
     navigate('/login');
   };
@@ -80,7 +85,7 @@ export default function Layout() {
 
       {/* Nav items */}
       <div style={{ flex: 1, padding: '0.75rem 0', overflowY: 'auto' }}>
-        {navItems.map(({ path, label, icon: Icon, badge }) => (
+        {navItems.map(({ path, label, icon: Icon, badge, rangerBadge }) => (
           <button
             key={path}
             onClick={() => { navigate(path); setSidebarOpen(false); }}
@@ -105,6 +110,11 @@ export default function Layout() {
             {label}
             {badge && pendingCount > 0 && (
               <span className="nav-badge">{pendingCount > 99 ? '99+' : pendingCount}</span>
+            )}
+            {rangerBadge && rangerRejectedCount > 0 && (
+              <span className="nav-badge" style={{ background: 'var(--orange)', boxShadow: '0 0 6px var(--orange)' }} title="Ranger rejected — needs manual review">
+                {rangerRejectedCount > 99 ? '99+' : rangerRejectedCount}
+              </span>
             )}
           </button>
         ))}

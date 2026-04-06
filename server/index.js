@@ -19,6 +19,9 @@ const config = require('./config');
 
 const app = express();
 
+// Trust Railway / Render / Heroku reverse proxy so rate-limiter sees real client IPs
+app.set('trust proxy', 1);
+
 // Security headers
 app.use(helmet({
   // Allow serving the React app's static assets
@@ -42,8 +45,9 @@ app.use(cors({
 // Webhook routes — registered BEFORE JSON body parser (need raw body)
 app.use('/api/webhooks', require('./routes/webhooks'));
 
-// Body parsing
+// Body parsing + cookies
 app.use(express.json({ limit: '10kb' }));
+app.use(require('cookie-parser')());
 
 // Rate limiting on all API routes
 app.use('/api', rateLimiter);
@@ -60,8 +64,14 @@ app.get('/api/integrations/gmail/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
     if (!code || !state) return res.redirect(`${frontendUrl}/settings?gmail=error`);
-    const { clientId } = JSON.parse(Buffer.from(state, 'base64').toString('utf8'));
-    if (!clientId) return res.redirect(`${frontendUrl}/settings?gmail=error`);
+    let clientId;
+    try {
+      const decoded = JSON.parse(Buffer.from(state, 'base64').toString('utf8'));
+      clientId = decoded?.clientId;
+      if (!clientId || typeof clientId !== 'string' || !/^[0-9a-f-]{36}$/i.test(clientId)) throw new Error('invalid');
+    } catch {
+      return res.redirect(`${frontendUrl}/settings?gmail=error`);
+    }
     const gmailService = require('./services/gmail');
     await gmailService.exchangeCode(clientId, code);
     res.redirect(`${frontendUrl}/settings?gmail=connected`);

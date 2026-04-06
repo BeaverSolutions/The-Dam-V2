@@ -210,8 +210,21 @@ export default function Office() {
 
   useEffect(() => {
     fetchLogs();
-    const interval = setInterval(fetchLogs, 3000); // poll every 3s for live feel
-    return () => clearInterval(interval);
+    let interval = setInterval(fetchLogs, 5000);
+
+    // Pause polling when tab is backgrounded — saves battery and server load
+    const handleVisibility = () => {
+      clearInterval(interval);
+      if (!document.hidden) {
+        fetchLogs();
+        interval = setInterval(fetchLogs, 5000);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, []);
 
   // Get most recent log per agent

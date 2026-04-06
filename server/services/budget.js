@@ -162,7 +162,7 @@ async function notifyBudgetExceeded({ clientId, spend, budget }) {
       `🛑 <b>Budget cap hit — ${name}</b>\n\n` +
       `Spent: <b>$${spend.toFixed(4)}</b> / $${budget.toFixed(2)} USD today.\n` +
       `All Claude calls for <code>${slug}</code> are blocked until UTC midnight.\n\n` +
-      `To unblock now: <code>UPDATE clients SET daily_budget_usd = ${(budget * 2).toFixed(2)} WHERE slug = '${slug}'</code>`
+      `To unblock: raise <code>daily_budget_usd</code> for client <code>${name}</code> in Railway DB or admin panel.`
     );
   } catch (err) {
     logger.warn({ msg: 'budget.notifyBudgetExceeded failed', err: err.message, clientId });

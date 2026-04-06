@@ -881,40 +881,64 @@ function LeadDetail({ lead, onUpdate }) {
 
 /* ─── Main Page ──────────────────────────────────────────── */
 
+const PER_PAGE = 40;
+
 export default function Pipeline() {
   const { request } = useApi();
-  const [allLeads, setAllLeads] = useState([]);
+  const [leads, setLeads] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
   const [stageFilter, setStageFilter] = useState('');
   const [search, setSearch] = useState('');
 
-  useEffect(() => {
-    setLoading(true);
-    request('/leads?perPage=200')
-      .then(r => setAllLeads(r?.data || []))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+  const buildUrl = useCallback((p, stage, q) => {
+    const params = new URLSearchParams({ page: p, perPage: PER_PAGE });
+    if (stage) params.set('pipeline_stage', stage);
+    if (q.trim()) params.set('search', q.trim());
+    return `/leads?${params}`;
   }, []);
 
-  // Client-side filter
-  const filtered = allLeads.filter(l => {
-    if (stageFilter && l.pipeline_stage !== stageFilter) return false;
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      return (
-        l.company?.toLowerCase().includes(q) ||
-        l.name?.toLowerCase().includes(q) ||
-        l.title?.toLowerCase().includes(q)
-      );
+  // Reload when filter/search changes
+  useEffect(() => {
+    setLoading(true);
+    setPage(1);
+    setLeads([]);
+    request(buildUrl(1, stageFilter, search))
+      .then(r => {
+        setLeads(r?.data || []);
+        const t = r?.meta?.total || 0;
+        setTotal(t);
+        setHasMore((r?.data?.length || 0) < t);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [stageFilter, search]);
+
+  const loadMore = async () => {
+    if (loadingMore || !hasMore) return;
+    const nextPage = page + 1;
+    setLoadingMore(true);
+    try {
+      const r = await request(buildUrl(nextPage, stageFilter, search));
+      const newLeads = r?.data || [];
+      setLeads(prev => [...prev, ...newLeads]);
+      setPage(nextPage);
+      setHasMore(leads.length + newLeads.length < (r?.meta?.total || 0));
+    } catch {} finally {
+      setLoadingMore(false);
     }
-    return true;
-  });
+  };
 
   const handleUpdate = (updated) => {
-    setAllLeads(ls => ls.map(l => l.id === updated.id ? updated : l));
+    setLeads(ls => ls.map(l => l.id === updated.id ? updated : l));
     setSelected(updated);
   };
+
+  const filtered = leads;
 
   return (
     <div className="fade-in" style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 56px - 3rem)' }}>
@@ -922,7 +946,7 @@ export default function Pipeline() {
       <div className="page-header" style={{ flexShrink: 0 }}>
         <div>
           <h1 className="page-title">Pipeline</h1>
-          <p className="page-subtitle">{filtered.length} of {allLeads.length} leads</p>
+          <p className="page-subtitle">{leads.length} of {total} leads</p>
         </div>
         {/* Search */}
         <div style={{ position: 'relative', width: 220 }}>
@@ -972,14 +996,25 @@ export default function Pipeline() {
               No leads match your filters.
             </div>
           ) : (
-            filtered.map(lead => (
-              <LeadListItem
-                key={lead.id}
-                lead={lead}
-                selected={selected?.id === lead.id}
-                onClick={() => setSelected(lead)}
-              />
-            ))
+            <>
+              {filtered.map(lead => (
+                <LeadListItem
+                  key={lead.id}
+                  lead={lead}
+                  selected={selected?.id === lead.id}
+                  onClick={() => setSelected(lead)}
+                />
+              ))}
+              {hasMore && (
+                <button
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                  style={{ width: '100%', padding: '0.6rem 1rem', background: 'none', border: 'none', borderTop: '1px solid var(--border)', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.75rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}
+                >
+                  {loadingMore ? 'Loading…' : `Load more (${total - leads.length} remaining)`}
+                </button>
+              )}
+            </>
           )}
         </div>
 

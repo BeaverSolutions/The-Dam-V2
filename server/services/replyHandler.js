@@ -85,7 +85,19 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       metadata: { lead_id: leadId, lead_name: lead.name, sentiment, confidence: classification.confidence, reason: classification.reason },
     });
 
-    // ── Step 2: No-fit → disqualify lead, stop sequence ────
+    // ── Step 2: Stop follow-up sequence on ANY reply ────────
+    // A reply (any sentiment) means the lead is engaged — stop automated follow-ups immediately.
+    await pool.query(
+      `UPDATE followup_sequences SET sequence_status = 'replied', updated_at = NOW()
+       WHERE lead_id = $1 AND client_id = $2 AND sequence_status = 'active'`,
+      [leadId, clientId]
+    );
+    await pool.query(
+      `UPDATE followup_queue SET status = 'cancelled', updated_at = NOW()
+       WHERE lead_id = $1 AND client_id = $2 AND status = 'pending'`,
+      [leadId, clientId]
+    );
+
     if (sentiment === 'no_fit') {
       await pool.query(
         `UPDATE leads SET pipeline_stage = 'lost', status = 'inactive',
