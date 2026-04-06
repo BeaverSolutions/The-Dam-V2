@@ -13,7 +13,8 @@ const APOLLO_BASE = 'https://api.apollo.io/v1';
 
 async function getApiKey(clientId) {
   const data = await secrets.getClientSecret(clientId, 'system', 'apollo_api_key');
-  return data?.key || null;
+  // Fall back to system-level key (shared across all clients, stored in Railway env)
+  return data?.key || process.env.APOLLO_API_KEY || null;
 }
 
 /**

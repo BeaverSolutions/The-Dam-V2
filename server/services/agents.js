@@ -140,7 +140,7 @@ async function researchSearch(clientId, { query, filters = {} }) {
 
   let leads = [];
 
-  // Try Apollo first — real data beats Claude-generated data
+  // Try Apollo first — real verified data
   try {
     const apolloLeads = await apolloService.searchPeople(clientId, { query, limit: filters.limit || 5 });
     if (apolloLeads && apolloLeads.length > 0) {
@@ -151,7 +151,54 @@ async function researchSearch(clientId, { query, filters = {} }) {
       };
     }
   } catch (err) {
-    console.warn('[research_beaver] Apollo search failed, falling back to Claude:', err.message);
+    console.warn('[research_beaver] Apollo search failed, trying Serper:', err.message);
+  }
+
+  // Serper fallback — Google search for real LinkedIn profiles
+  // Returns verified LinkedIn URLs even without Apollo
+  try {
+    const serperService = require('./serper');
+    const serperLeads = await serperService.searchLinkedInProfiles(query, filters.limit || 5);
+    if (serperLeads && serperLeads.length > 0) {
+      console.log(`[research_beaver] Serper returned ${serperLeads.length} real LinkedIn profiles for: "${query}"`);
+      // Hand to Claude to enrich with signal/angle/friction — but URLs are real
+      if (callAgent) {
+        try {
+          const enriched = await callAgent(
+            'research_beaver',
+            `You have been given real LinkedIn profiles found via Google search. Enrich each one with signal tier, friction point, and outreach angle. Do NOT change the name, linkedin_url, title, or company — these are verified real people. Only add: tier, signal, friction, angle, why_now, notes, industry, company_size.
+
+Profiles to enrich:
+${JSON.stringify(serperLeads, null, 2)}
+
+Return JSON: {"leads":[...enriched profiles with all original fields preserved plus new fields added]}`,
+          );
+          const enrichedLeads = Array.isArray(enriched?.leads) ? enriched.leads
+            : Array.isArray(enriched) ? enriched : serperLeads;
+
+          // Always preserve the original verified linkedin_url from Serper
+          const merged = enrichedLeads.map((el, i) => ({
+            ...el,
+            linkedin_url: serperLeads[i]?.linkedin_url || el.linkedin_url,
+            verified: true,
+            data_source: 'serper',
+          }));
+
+          return {
+            success: true,
+            data: { leads: merged, query, filters, source: 'serper' },
+          };
+        } catch (err) {
+          console.warn('[research_beaver] Serper enrichment via Claude failed, returning raw profiles:', err.message);
+        }
+      }
+      return {
+        success: true,
+        data: { leads: serperLeads, query, filters, source: 'serper' },
+      };
+    }
+  } catch (err) {
+    console.warn('[research_beaver] Serper search failed, falling back to Claude:', err.message);
   }
 
   if (callAgent) {
@@ -608,9 +655,10 @@ async function directorExecute(clientId, { plan_id, command }) {
   // ── Step 1b: Captain Beaver verification gate ────────────
   // If a lead came from Claude fallback (not Apollo) and has no linkedin_url,
   // it cannot be verified and must be skipped to prevent hallucinated outreach.
-  const isApolloSource = researchResult?.data?.source === 'apollo';
+  const researchSource = researchResult?.data?.source || 'claude';
+  const isVerifiedSource = researchSource === 'apollo' || researchSource === 'serper';
   const verifiedLeads = rawLeads.filter(lead => {
-    if (isApolloSource) return true; // Apollo data is trusted
+    if (isVerifiedSource) return true; // Apollo/Serper data is trusted
     if (!lead.linkedin_url) {
       console.warn(`[captain] Skipping unverifiable lead: ${lead.name} at ${lead.company} — no linkedin_url from Claude fallback`);
       logsService.createLog(clientId, {
@@ -623,17 +671,17 @@ async function directorExecute(clientId, { plan_id, command }) {
     return true;
   });
 
-  // Mark non-Apollo leads as ai_generated for transparency in approval queue
+  // Mark source for transparency in approval queue
   const markedLeads = verifiedLeads.map(lead => ({
     ...lead,
     metadata: {
       ...(lead.metadata || {}),
-      verified: isApolloSource ? true : (lead.verified !== false),
-      data_source: isApolloSource ? 'apollo' : 'ai_generated',
+      verified: isVerifiedSource ? true : (lead.verified !== false),
+      data_source: lead.data_source || (isVerifiedSource ? researchSource : 'ai_generated'),
     },
   }));
 
-  if (!isApolloSource && rawLeads.length !== verifiedLeads.length) {
+  if (!isVerifiedSource && rawLeads.length !== verifiedLeads.length) {
     console.log(`[captain] Verification gate: ${rawLeads.length} leads from Claude → ${verifiedLeads.length} passed (${rawLeads.length - verifiedLeads.length} skipped, no linkedin_url)`);
   }
 
