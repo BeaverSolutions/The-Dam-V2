@@ -11,7 +11,7 @@ const pool = new Pool(
         ssl: process.env.DATABASE_URL?.includes('.railway.internal')
           ? false
           : process.env.NODE_ENV === 'production'
-            ? { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' }
+            ? { rejectUnauthorized: false }
             : false,
         max: 15,
         idleTimeoutMillis: 60000,
