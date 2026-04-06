@@ -52,10 +52,13 @@
 
 **Key endpoints Claw uses:**
 ```
-POST /api/autonomous/kickoff          → fire daily kickoff for a client
-POST /api/autonomous/kickoff-all      → fire kickoff for ALL clients
-GET  /api/autonomous/pending-approvals → fetch messages awaiting MJ approval
-POST /api/autonomous/weekly-review    → trigger weekly performance review
+POST /api/autonomous/kickoff                    → fire daily kickoff for a client
+POST /api/autonomous/kickoff-all               → fire kickoff for ALL clients
+GET  /api/autonomous/pending-approvals         → fetch messages awaiting MJ approval
+POST /api/autonomous/approve                   → approve a message { approval_id }
+POST /api/autonomous/reject                    → reject a message { approval_id, reason }
+GET  /api/autonomous/recent-replies            → replies in last N hours (default 24h)
+POST /api/autonomous/weekly-review             → trigger weekly performance review
 ```
 Header for all internal calls: `x-internal-key: {DAM_INTERNAL_KEY}`
 
@@ -83,6 +86,7 @@ Header for all internal calls: `x-internal-key: {DAM_INTERNAL_KEY}`
 4. **No message sends without Enforcer + MJ approval** — this is non-negotiable, hard-coded in pipeline
 5. **MyClaw Lite for Beaver Solutions** — upgrade to per-client instances when pilot converts to paid
 6. **Internal API key auth for agent-to-agent calls** — not JWT, not OAuth
+7. **Jarvis webhook belongs to MyClaw** — The Dam is send-only. Never re-register The Dam webhook to Jarvis.
 
 ---
 
@@ -101,6 +105,10 @@ Header for all internal calls: `x-internal-key: {DAM_INTERNAL_KEY}`
    All 25 server files use direct import. Destructuring returns undefined.
 
 5. **TRL is missing from the DB** — there are 4 clients seeded, not 5. TRL needs to be provisioned before pilot.
+
+6. **`messages.metadata` was missing until migration 019** — column added 2026-04-06. Any query referencing `m.metadata` will fail on older DB.
+
+7. **`approvals.resolved_at` NOT `reviewed_at`** — verified against migration 001. Use `resolved_at` in all approve/reject queries.
 
 ---
 

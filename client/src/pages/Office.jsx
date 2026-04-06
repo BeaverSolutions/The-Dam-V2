@@ -54,7 +54,7 @@ function ActivityBubble({ log }) {
   if (!log) return <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>No recent activity</div>;
   return (
     <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>
-      {log.action.replace(/_/g, ' ')}
+      {(log.action || '').replace(/_/g, ' ')}
     </div>
   );
 }
@@ -273,7 +273,7 @@ export default function Office() {
                   <span style={{ color: BEAVER_COLORS[log.agent] || 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 500 }}>
                     {BEAVER_LABELS[log.agent] || log.agent}
                   </span>
-                  <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}> · {log.action.replace(/_/g, ' ')}</span>
+                  <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}> · {(log.action || '').replace(/_/g, ' ')}</span>
                   {log.target_type && <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}> · {log.target_type}</span>}
                 </div>
                 <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', flexShrink: 0 }}>

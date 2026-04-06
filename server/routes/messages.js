@@ -41,7 +41,7 @@ router.get('/:id', async (req, res, next) => {
 
 router.put('/:id',
   [
-    body('status').optional().isIn(['draft', 'pending_ranger', 'ranger_rejected', 'pending_approval', 'approved', 'sent', 'failed']),
+    body('status').optional().isIn(['draft', 'pending_ranger', 'ranger_rejected', 'pending_approval', 'approved', 'pending_send', 'sent', 'failed']),
     body('body').optional().notEmpty(),
     validate,
   ],

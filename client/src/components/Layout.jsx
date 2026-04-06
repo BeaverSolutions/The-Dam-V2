@@ -33,9 +33,14 @@ export default function Layout() {
     (user?.client?.slug === 'beaver-solutions' || user?.client?.name?.toLowerCase().includes('beaver'));
 
   useEffect(() => {
-    request('/approvals?status=pending&perPage=1')
-      .then(res => setPendingCount(res?.meta?.total || 0))
-      .catch(() => {});
+    const fetchPending = () => {
+      request('/approvals?status=pending&perPage=1')
+        .then(res => setPendingCount(res?.meta?.total || 0))
+        .catch(() => {});
+    };
+    fetchPending();
+    const interval = setInterval(fetchPending, 10000); // refresh every 10s
+    return () => clearInterval(interval);
   }, [location.pathname]);
 
   const handleLogout = () => {

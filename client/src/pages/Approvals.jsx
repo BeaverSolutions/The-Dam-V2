@@ -13,7 +13,7 @@ const TABS = [
 ];
 
 function scoreColor(score) {
-  if (!score) return 'var(--text-muted)';
+  if (score == null) return 'var(--text-muted)';
   if (score >= 80) return 'var(--lime)';
   if (score >= 60) return 'var(--blue)';
   return 'var(--orange)';

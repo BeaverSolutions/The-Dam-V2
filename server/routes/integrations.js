@@ -120,49 +120,91 @@ router.post('/send',
 /* ─── Internal send helper ───────────────────────────────── */
 
 async function sendMessageById(clientId, message_id, provider) {
-  const msgRes = await pool.query(
-    `SELECT m.*, l.email as lead_email, l.name as lead_name
-     FROM messages m
-     LEFT JOIN leads l ON l.id = m.lead_id
-     WHERE m.id = $1 AND m.client_id = $2`,
-    [message_id, clientId]
-  );
+  // Use a transaction with FOR UPDATE to prevent duplicate sends under concurrent requests.
+  // The atomic status flip from 'approved' → 'sent' ensures only one request can win.
+  const db = await pool.connect();
+  let message;
+  try {
+    await db.query('BEGIN');
 
-  if (msgRes.rows.length === 0) {
-    const err = new Error('Message not found');
-    err.status = 404;
+    const msgRes = await db.query(
+      `SELECT m.*, l.email as lead_email, l.name as lead_name
+       FROM messages m
+       LEFT JOIN leads l ON l.id = m.lead_id
+       WHERE m.id = $1 AND m.client_id = $2
+       FOR UPDATE OF m`,
+      [message_id, clientId]
+    );
+
+    if (msgRes.rows.length === 0) {
+      await db.query('ROLLBACK');
+      db.release();
+      const err = new Error('Message not found');
+      err.status = 404;
+      throw err;
+    }
+
+    message = msgRes.rows[0];
+    if (message.status === 'sent') {
+      await db.query('ROLLBACK');
+      db.release();
+      const err = new Error('Message already sent');
+      err.status = 409;
+      throw err;
+    }
+    if (message.status !== 'approved') {
+      await db.query('ROLLBACK');
+      db.release();
+      const err = new Error('Message must be approved before sending');
+      err.status = 400;
+      throw err;
+    }
+
+    // Reserve the message atomically — prevents a second concurrent request from also sending
+    await db.query(
+      `UPDATE messages SET status = 'pending_send', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
+      [message_id, clientId]
+    );
+
+    await db.query('COMMIT');
+  } catch (err) {
+    try { await db.query('ROLLBACK'); } catch {}
+    db.release();
     throw err;
   }
-
-  const message = msgRes.rows[0];
-  if (message.status !== 'approved') {
-    const err = new Error('Message must be approved before sending');
-    err.status = 400;
-    throw err;
-  }
+  db.release();
 
   // Pick provider
   let sendResult;
   let usedProvider = provider;
 
-  if (provider === 'auto') {
-    const gmailOk = await gmailService.isConnected(clientId);
-    const agentmailOk = agentmailService.isConnected();
-    usedProvider = gmailOk ? 'gmail' : agentmailOk ? 'agentmail' : 'none';
-  }
+  try {
+    if (provider === 'auto') {
+      const gmailOk = await gmailService.isConnected(clientId);
+      const agentmailOk = agentmailService.isConnected();
+      usedProvider = gmailOk ? 'gmail' : agentmailOk ? 'agentmail' : 'none';
+    }
 
-  const emailPayload = {
-    to: message.lead_email || 'unknown@example.com',
-    subject: message.subject || '(no subject)',
-    body: message.body,
-  };
+    const emailPayload = {
+      to: message.lead_email || 'unknown@example.com',
+      subject: message.subject || '(no subject)',
+      body: message.body,
+    };
 
-  if (usedProvider === 'gmail') {
-    sendResult = await gmailService.sendEmail(clientId, emailPayload);
-  } else if (usedProvider === 'agentmail') {
-    sendResult = await agentmailService.sendEmail(clientId, emailPayload);
-  } else {
-    sendResult = { status: 'simulated', reason: 'no_provider', messageId: null, threadId: null };
+    if (usedProvider === 'gmail') {
+      sendResult = await gmailService.sendEmail(clientId, emailPayload);
+    } else if (usedProvider === 'agentmail') {
+      sendResult = await agentmailService.sendEmail(clientId, emailPayload);
+    } else {
+      sendResult = { status: 'simulated', reason: 'no_provider', messageId: null, threadId: null };
+    }
+  } catch (err) {
+    // Unexpected send error — revert status so the message can be retried
+    await pool.query(
+      `UPDATE messages SET status = 'approved', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
+      [message_id, clientId]
+    );
+    throw err;
   }
 
   // Persist result — store IDs in provider-specific columns

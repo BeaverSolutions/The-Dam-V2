@@ -131,12 +131,17 @@ async function buildDirectorMemoryBrief(clientId) {
  * =========================
  */
 async function researchSearch(clientId, { query, filters = {} }) {
+  const batchIndex = filters.batchIndex || 0;
+
   await logsService.createLog(clientId, {
     agent: 'research_beaver',
     action: 'research_search',
     target_type: 'search',
-    metadata: { query, filters },
+    metadata: { query, filters, batchIndex },
   });
+
+  // Load ICP memory upfront — used by both Serper query builder and Claude fallback
+  const icpMemory = await getMemory(clientId, 'director', 'icp');
 
   let leads = [];
 
@@ -161,25 +166,31 @@ async function researchSearch(clientId, { query, filters = {} }) {
 
     // Build a clean, targeted search query from the ICP — NOT the full brief.
     // The full brief is 500 words; Google needs 5-8 keywords max.
+    // batchIndex rotates the title and industry so each batch returns different people.
     const icpLocation = icpMemory?.location || icpMemory?.geography || 'Kuala Lumpur Malaysia';
-    const icpTitles   = icpMemory?.job_titles || icpMemory?.who || 'Founder CEO Director';
-    const icpIndustry = icpMemory?.industries || '';
+    const icpTitlesRaw = icpMemory?.job_titles || icpMemory?.who || 'Founder,CEO,Director,MD,Owner';
+    const icpIndustryRaw = icpMemory?.industries || '';
 
     // Distil to a clean LinkedIn search query
     const locationTag = icpLocation.includes('Klang') || icpLocation.includes('KL') || icpLocation.includes('Malaysia')
       ? 'Kuala Lumpur Malaysia'
       : icpLocation;
 
-    const titleTag = typeof icpTitles === 'string'
-      ? icpTitles.split(/[,/]/)[0].trim()   // take first title only
-      : Array.isArray(icpTitles) ? icpTitles[0] : 'Founder';
+    // Parse title and industry lists for rotation
+    const titleList = typeof icpTitlesRaw === 'string'
+      ? icpTitlesRaw.split(/[,/]/).map(s => s.trim()).filter(Boolean)
+      : Array.isArray(icpTitlesRaw) ? icpTitlesRaw : ['Founder'];
 
-    const industryTag = typeof icpIndustry === 'string'
-      ? icpIndustry.split(/[,/]/)[0].trim()
-      : Array.isArray(icpIndustry) ? icpIndustry[0] : '';
+    const industryList = typeof icpIndustryRaw === 'string'
+      ? icpIndustryRaw.split(/[,/]/).map(s => s.trim()).filter(Boolean)
+      : Array.isArray(icpIndustryRaw) ? icpIndustryRaw : [''];
+
+    // Rotate by batchIndex so each batch targets a different title+industry combo
+    const titleTag    = titleList[batchIndex % titleList.length] || 'Founder';
+    const industryTag = industryList[batchIndex % Math.max(industryList.length, 1)] || '';
 
     const serperQuery = [titleTag, industryTag, locationTag].filter(Boolean).join(' ');
-    console.log(`[research_beaver] Serper clean query: "${serperQuery}" (from ICP)`);
+    console.log(`[research_beaver] Serper query (batch ${batchIndex}): "${serperQuery}"`);
 
     const serperLeads = await serperService.searchLinkedInProfiles(serperQuery, filters.limit || 5);
     if (serperLeads && serperLeads.length > 0) {
@@ -199,11 +210,8 @@ async function researchSearch(clientId, { query, filters = {} }) {
 
   if (callAgent) {
     try {
-      // MEMORY: Load ICP + weekly learnings before sourcing (Sprint 9)
-      const [icpMemory, weeklyLearnings] = await Promise.all([
-        getMemory(clientId, 'director', 'icp'),
-        getMemory(clientId, 'director', 'weekly_learnings'),
-      ]);
+      // MEMORY: icpMemory already loaded above; just need weekly learnings
+      const weeklyLearnings = await getMemory(clientId, 'director', 'weekly_learnings');
       let memoryContext = '';
       if (icpMemory && Object.keys(icpMemory).length > 0) {
         memoryContext += `\n\nICP TO TARGET:\n${JSON.stringify(icpMemory, null, 2)}`;
@@ -633,16 +641,16 @@ async function enrichLeadsWithHunter(clientId, leads) {
  * DIRECTOR — EXECUTE (full pipeline)
  * =========================
  */
-async function directorExecute(clientId, { plan_id, command }) {
+async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
   await logsService.createLog(clientId, {
     agent: 'director',
     action: 'plan_executing',
-    metadata: { plan_id },
+    metadata: { plan_id, batchIndex },
   });
 
   // ── Step 1: Research Beaver ──────────────────────────────
   const researchResult = command
-    ? await researchSearch(clientId, { query: command })
+    ? await researchSearch(clientId, { query: command, filters: { batchIndex } })
     : { data: { leads: [] } };
 
   const rawLeads = researchResult?.data?.leads || [];

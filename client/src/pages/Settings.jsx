@@ -27,6 +27,7 @@ export default function Settings() {
   const [persona, setPersona] = useState({
     company_name: '', company_description: '', value_proposition: '',
     tone: '', differentiator: '', social_proof: '', banned_phrases: '', cta_preference: '',
+    sender_name: '', sender_title: '',
   });
   const [personaLoading, setPersonaLoading] = useState(true);
   const [personaSaving, setPersonaSaving] = useState(false);
@@ -155,6 +156,8 @@ export default function Settings() {
             social_proof: d.social_proof || '',
             banned_phrases: Array.isArray(d.banned_phrases) ? d.banned_phrases.join(', ') : (d.banned_phrases || ''),
             cta_preference: d.cta_preference || '',
+            sender_name: d.sender_name || '',
+            sender_title: d.sender_title || '',
           });
         }
       })
