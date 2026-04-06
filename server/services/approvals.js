@@ -16,7 +16,9 @@ async function getApprovals(clientId, filters = {}, pagination = {}) {
 
   const result = await pool.query(
     `SELECT a.*, m.subject, m.body, m.channel, m.ranger_score, m.ranger_notes,
-            l.name as lead_name, l.company as lead_company, l.email as lead_email
+            l.name as lead_name, l.company as lead_company, l.email as lead_email,
+            l.linkedin_url as lead_linkedin, l.title as lead_title,
+            l.metadata->>'data_source' as lead_source
      FROM approvals a
      JOIN messages m ON m.id = a.message_id
      LEFT JOIN leads l ON l.id = m.lead_id

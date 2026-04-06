@@ -689,6 +689,26 @@ export default function Settings() {
                 />
               </div>
             </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+              <div className="form-group">
+                <label className="form-label">Sender Name <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(appears in email sign-off)</span></label>
+                <input
+                  className="form-input"
+                  placeholder="e.g. MJ, Adrian, Matthew"
+                  value={persona.sender_name || ''}
+                  onChange={e => setPersona(p => ({ ...p, sender_name: e.target.value }))}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Sender Title <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(optional)</span></label>
+                <input
+                  className="form-input"
+                  placeholder="e.g. Founder, Head of Growth"
+                  value={persona.sender_title || ''}
+                  onChange={e => setPersona(p => ({ ...p, sender_title: e.target.value }))}
+                />
+              </div>
+            </div>
             <div className="form-group">
               <label className="form-label">Company Description <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(2 sentences max)</span></label>
               <textarea

@@ -22,9 +22,9 @@ const INTERACTIONS = [
 function getAgentState(lastLog) {
   if (!lastLog) return 'inactive';
   const age = Date.now() - new Date(lastLog.created_at).getTime();
-  if (lastLog.action?.includes('error') || lastLog.action?.includes('rejected')) return 'alert';
-  if (age < 30 * 1000) return 'working';
-  if (age < 5 * 60 * 1000) return 'idle';
+  if (lastLog.action?.includes('error')) return 'alert';
+  if (age < 3 * 60 * 1000) return 'working';   // active in last 3 min = working
+  if (age < 30 * 60 * 1000) return 'idle';      // active in last 30 min = idle
   return 'inactive';
 }
 
@@ -115,7 +115,7 @@ function Workstation({ agent, lastLog }) {
           <span style={{ fontWeight: 600, fontSize: '0.875rem', color }}>{label}</span>
         </div>
         <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'capitalize' }}>
-          {agentState === 'working' ? 'Working...' : agentState === 'alert' ? 'Needs attention' : agentState === 'idle' ? 'Idle — ready' : 'Standing by'}
+          {agentState === 'working' ? (lastLog?.action?.replace(/_/g, ' ') || 'Working...') : agentState === 'alert' ? 'Needs attention' : agentState === 'idle' ? 'Idle' : 'Standby'}
         </div>
       </div>
     </div>
@@ -210,7 +210,7 @@ export default function Office() {
 
   useEffect(() => {
     fetchLogs();
-    const interval = setInterval(fetchLogs, 10000);
+    const interval = setInterval(fetchLogs, 3000); // poll every 3s for live feel
     return () => clearInterval(interval);
   }, []);
 

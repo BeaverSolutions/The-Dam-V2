@@ -211,6 +211,41 @@ router.get('/recent-replies', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── GET /api/autonomous/agent-status ───────────────────── */
+// Returns last action per agent in the last 30 minutes.
+// Frontend polls this to show live agent activity.
+
+router.get('/agent-status', requireInternalKey, async (req, res) => {
+  try {
+    const clientId = req.query.client_id || null;
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ON (agent)
+         agent, action, created_at, metadata
+       FROM logs
+       WHERE ($1::uuid IS NULL OR client_id = $1::uuid)
+         AND created_at >= NOW() - INTERVAL '30 minutes'
+         AND agent IN ('director', 'research_beaver', 'sales_beaver', 'ranger')
+       ORDER BY agent, created_at DESC`,
+      [clientId]
+    );
+
+    const agents = ['director', 'research_beaver', 'sales_beaver', 'ranger'];
+    const status = agents.map(agent => {
+      const log = rows.find(r => r.agent === agent);
+      return {
+        agent,
+        status: log ? 'active' : 'standby',
+        last_action: log?.action || null,
+        last_active: log?.created_at || null,
+      };
+    });
+
+    res.json({ data: status });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /* ─── Core: Autonomous kickoff logic ─────────────────────── */
 
 async function runAutonomousKickoff(clientId) {

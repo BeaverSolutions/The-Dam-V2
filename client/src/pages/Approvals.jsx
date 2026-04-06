@@ -60,7 +60,27 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, tab, gmailConnected
           <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{approval.lead_name || 'Unknown'}</div>
           <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
             {approval.lead_company || '—'}
-            {approval.lead_email && <span style={{ marginLeft: '0.5rem' }}>· {approval.lead_email}</span>}
+            {approval.lead_title && <span style={{ marginLeft: '0.4rem' }}>· {approval.lead_title}</span>}
+            {approval.lead_email && <span style={{ marginLeft: '0.4rem' }}>· {approval.lead_email}</span>}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginTop: '0.35rem' }}>
+            {approval.lead_linkedin ? (
+              <a
+                href={approval.lead_linkedin}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ fontSize: '0.72rem', color: 'var(--blue)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
+              >
+                ↗ Verify on LinkedIn
+              </a>
+            ) : (
+              <span style={{ fontSize: '0.72rem', color: 'var(--orange)' }}>⚠ No LinkedIn — verify manually</span>
+            )}
+            {approval.lead_source === 'ai_generated' && (
+              <span style={{ fontSize: '0.72rem', color: 'var(--orange)', background: 'var(--orange)18', padding: '0.1rem 0.4rem', borderRadius: 4 }}>
+                AI generated — verify before approving
+              </span>
+            )}
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
