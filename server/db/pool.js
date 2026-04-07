@@ -40,7 +40,7 @@ async function withTenant(clientId, callback) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query('SET LOCAL app.current_client_id = $1', [clientId]);
+    await client.query('SELECT set_config($1, $2, true)', ['app.current_client_id', clientId]);
     const result = await callback(client);
     await client.query('COMMIT');
     return result;

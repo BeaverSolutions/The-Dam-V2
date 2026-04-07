@@ -38,7 +38,7 @@ async function tenantScope(req, res, next) {
   try {
     client = await pool.connect();
     await client.query('BEGIN');
-    await client.query('SET LOCAL app.current_client_id = $1', [req.clientId]);
+    await client.query('SELECT set_config($1, $2, true)', ['app.current_client_id', req.clientId]);
 
     // Expose tenant-scoped query method (optional — routes can use this or pool.query)
     req.tenantDb = {
