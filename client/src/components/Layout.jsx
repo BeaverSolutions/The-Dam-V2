@@ -39,12 +39,30 @@ export default function Layout() {
         .then(res => setPendingCount(res?.meta?.total || 0))
         .catch(() => {});
       request('/messages?status=ranger_rejected&perPage=1')
-        .then(res => setRangerRejectedCount(res?.meta?.total || 0))
+        .then(res => {
+          const total = res?.meta?.total || 0;
+          // Only show badge for rejections that appeared after the user last visited /messages
+          const lastSeen = parseInt(localStorage.getItem('messages_last_seen_rejected') || '0', 10);
+          setRangerRejectedCount(Math.max(0, total - lastSeen));
+        })
         .catch(() => {});
     };
     fetchCounts();
     const interval = setInterval(fetchCounts, 10000);
     return () => clearInterval(interval);
+  }, [location.pathname]);
+
+  // Clear the Messages badge when user visits the Messages page
+  useEffect(() => {
+    if (location.pathname.startsWith('/messages')) {
+      request('/messages?status=ranger_rejected&perPage=1')
+        .then(res => {
+          const total = res?.meta?.total || 0;
+          localStorage.setItem('messages_last_seen_rejected', String(total));
+          setRangerRejectedCount(0);
+        })
+        .catch(() => {});
+    }
   }, [location.pathname]);
 
   const handleLogout = async () => {
