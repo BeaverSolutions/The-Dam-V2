@@ -1,6 +1,6 @@
 'use strict';
 
-const { Client, Events, GatewayIntentBits, Partials } = require('discord.js');
+const { Client, Events, GatewayIntentBits, Partials, ChannelType } = require('discord.js');
 const config = require('../config');
 const logger = require('../utils/logger');
 const pool = require('../db/pool');
@@ -10,40 +10,52 @@ const BEAVER_CLIENT_ID = 'ce2fc8e5-617e-42d5-91fe-4275ceaa0030';
 let client = null;
 let loginPromise = null;
 
+/* ─── Shared data helpers ──────────────────────────────────── */
+
+/**
+ * Fetch recent replies from the DB for BEAVER_CLIENT_ID (last 24 hours).
+ * Returns { rowCount, text } where text is the formatted plain-text summary.
+ * Throws on DB error.
+ */
+async function fetchRecentRepliesSummary() {
+  logger.info({ msg: 'Discord fetchRecentRepliesSummary querying DB', clientId: BEAVER_CLIENT_ID });
+
+  const result = await pool.query(
+    `SELECT m.id, m.reply_snippet, m.reply_detected_at,
+            l.name AS lead_name, l.company AS lead_company
+     FROM messages m
+     LEFT JOIN leads l ON l.id = m.lead_id
+     WHERE m.client_id = $1
+       AND m.reply_detected_at > NOW() - INTERVAL '24 hours'
+     ORDER BY m.reply_detected_at DESC
+     LIMIT 10`,
+    [BEAVER_CLIENT_ID]
+  );
+
+  const rows = result.rows;
+  const rowCount = result.rowCount;
+
+  logger.info({ msg: 'Discord fetchRecentRepliesSummary DB result', rowCount });
+
+  if (rowCount === 0) {
+    return { rowCount, text: 'Recent replies: 0' };
+  }
+
+  const lines = rows.map((r, i) =>
+    `${i + 1}. ${r.lead_name || 'Unknown'} — ${r.lead_company || 'Unknown'}`
+  );
+
+  return { rowCount, text: `Recent replies: ${rowCount}\n${lines.join('\n')}` };
+}
+
 /* ─── Command handlers ─────────────────────────────────────── */
 
 async function handleReplies(message) {
   logger.info({ msg: 'Discord !replies handler entered' });
 
   try {
-    logger.info({ msg: 'Discord !replies querying DB', clientId: BEAVER_CLIENT_ID });
-
-    const result = await pool.query(
-      `SELECT m.id, m.reply_snippet, m.reply_detected_at,
-              l.name AS lead_name, l.company AS lead_company
-       FROM messages m
-       LEFT JOIN leads l ON l.id = m.lead_id
-       WHERE m.client_id = $1
-         AND m.reply_detected_at > NOW() - INTERVAL '24 hours'
-       ORDER BY m.reply_detected_at DESC
-       LIMIT 10`,
-      [BEAVER_CLIENT_ID]
-    );
-
-    const rows = result.rows;
-    const rowCount = result.rowCount;
-
-    logger.info({ msg: 'Discord !replies DB result', rowCount });
-
-    if (rowCount === 0) {
-      await message.reply('Recent replies: 0');
-      return;
-    }
-
-    const lines = rows.map((r, i) =>
-      `${i + 1}. ${r.lead_name || 'Unknown'} — ${r.lead_company || 'Unknown'}`
-    );
-    await message.reply(`Recent replies: ${rowCount}\n${lines.join('\n')}`);
+    const { text } = await fetchRecentRepliesSummary();
+    await message.reply(text);
   } catch (err) {
     logger.error({
       msg: 'Discord !replies failed',
@@ -51,6 +63,36 @@ async function handleReplies(message) {
       stack: err.stack,
     });
     await message.reply('Failed to fetch replies.').catch(() => {});
+  }
+}
+
+async function handlePostReplies(message) {
+  logger.info({ msg: 'Discord !post-replies handler entered' });
+
+  try {
+    const { text } = await fetchRecentRepliesSummary();
+
+    // Find the #replies channel in this guild
+    const repliesChannel = message.guild.channels.cache.find(
+      (ch) => ch.name === 'replies' && ch.type === ChannelType.GuildText
+    );
+
+    if (!repliesChannel) {
+      logger.warn({ msg: 'Discord !post-replies: #replies channel not found', guildId: message.guildId });
+      await message.reply('Could not find #replies channel.');
+      return;
+    }
+
+    await repliesChannel.send(text);
+    logger.info({ msg: 'Discord !post-replies: posted to #replies', channelId: repliesChannel.id });
+    await message.reply('Posted replies to #replies.');
+  } catch (err) {
+    logger.error({
+      msg: 'Discord !post-replies failed',
+      err: err.message,
+      stack: err.stack,
+    });
+    await message.reply('Failed to post replies.').catch(() => {});
   }
 }
 
@@ -97,6 +139,44 @@ async function handleApprovals(message) {
       stack: err.stack,
     });
     await message.reply('Failed to fetch approvals.').catch(() => {});
+  }
+}
+
+/**
+ * Post the recent replies summary to a named channel in a specific guild.
+ * Intended for use by background workflows (e.g. scheduled tasks, replyDetector hooks).
+ *
+ * @param {string} guildId   - Discord guild (server) ID
+ * @param {string} channelName - Target channel name (default: 'replies')
+ */
+async function postRepliesToChannel(guildId, channelName = 'replies') {
+  if (!client) {
+    logger.warn({ msg: 'postRepliesToChannel called but Discord client is not ready' });
+    return;
+  }
+
+  try {
+    const guild = await client.guilds.fetch(guildId);
+    await guild.channels.fetch(); // populate cache
+
+    const channel = guild.channels.cache.find(
+      (ch) => ch.name === channelName && ch.type === ChannelType.GuildText
+    );
+
+    if (!channel) {
+      logger.warn({ msg: 'postRepliesToChannel: channel not found', guildId, channelName });
+      return;
+    }
+
+    const { text } = await fetchRecentRepliesSummary();
+    await channel.send(text);
+    logger.info({ msg: 'postRepliesToChannel: posted', guildId, channelName, channelId: channel.id });
+  } catch (err) {
+    logger.error({
+      msg: 'postRepliesToChannel failed',
+      err: err.message,
+      stack: err.stack,
+    });
   }
 }
 
@@ -152,6 +232,9 @@ async function startDiscordBot() {
         } else if (message.content === '!replies') {
           logger.info({ msg: 'Discord replies command received' });
           await handleReplies(message);
+        } else if (message.content === '!post-replies') {
+          logger.info({ msg: 'Discord post-replies command received' });
+          await handlePostReplies(message);
         } else if (message.content === '!approvals') {
           logger.info({ msg: 'Discord approvals command received' });
           await handleApprovals(message);
@@ -198,4 +281,4 @@ function getDiscordClient() {
   return client;
 }
 
-module.exports = { startDiscordBot, getDiscordClient };
+module.exports = { startDiscordBot, getDiscordClient, postRepliesToChannel };
