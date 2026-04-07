@@ -15,13 +15,11 @@ ALTER TABLE telegram_pending_plans ALTER COLUMN client_id SET NOT NULL;
 UPDATE daily_kpi SET created_at = NOW() WHERE created_at IS NULL;
 UPDATE daily_kpi SET updated_at = NOW() WHERE updated_at IS NULL;
 UPDATE weekly_learnings SET created_at = NOW() WHERE created_at IS NULL;
-UPDATE weekly_learnings SET updated_at = NOW() WHERE updated_at IS NULL;
 UPDATE followup_queue SET created_at = NOW() WHERE created_at IS NULL;
 
 ALTER TABLE daily_kpi ALTER COLUMN created_at SET NOT NULL;
 ALTER TABLE daily_kpi ALTER COLUMN updated_at SET NOT NULL;
 ALTER TABLE weekly_learnings ALTER COLUMN created_at SET NOT NULL;
-ALTER TABLE weekly_learnings ALTER COLUMN updated_at SET NOT NULL;
 ALTER TABLE followup_queue ALTER COLUMN created_at SET NOT NULL;
 
 -- ─── Add missing ON DELETE CASCADE ───────────────────────────
