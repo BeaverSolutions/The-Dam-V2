@@ -1298,286 +1298,75 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
   // ── Ranger review pipeline per message (2-rejection rule + Captain gate) ──
   async function runRangerPipeline(lead, msg) {
-    // Strip em dashes immediately — Sales Beaver output may still contain them despite rules
+    // Strip em dashes immediately — Sales Beaver output may still contain them
     let currentBody = stripEmDashes(msg.body);
     let currentSubject = stripEmDashes(msg.subject);
-    let finalApproved = false;
-    let lastRangerResult = null;
 
     execStatus.beavers.enforcer.status = 'working';
     execStatus.phase = 'enforcer';
-    execStatus.beavers.enforcer.task = `Reviewing ${msg.channel} for ${msg.lead_name}`;
+    execStatus.beavers.enforcer.task = `Checking ${msg.channel} for ${msg.lead_name}`;
     await updateExecStatus(clientId, plan_id, execStatus);
 
-    for (let attempt = 1; attempt <= MAX_RANGER_RETRIES + 1; attempt++) {
-      // Attempt 3 (> MAX_RANGER_RETRIES) = Captain decision, no more Sales rewrites
-      if (attempt > MAX_RANGER_RETRIES) {
-        // Captain intervenes: skip this lead's message or flag for manual review
-        await pool.query(
-          `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'ranger_rejected', updated_at = NOW()
-           WHERE id = $3 AND client_id = $4`,
-          [
-            Math.round(lastRangerResult?.score || 0),
-            `Captain intervention after ${MAX_RANGER_RETRIES} failed QA attempts. Flagged for manual review.`,
-            msg.id,
-            clientId,
-          ]
-        );
-
-        await pool.query(
-          `UPDATE leads SET metadata = jsonb_set(COALESCE(metadata, '{}'), '{needs_manual_message}', 'true'), updated_at = NOW()
-           WHERE id = $1 AND client_id = $2`,
-          [msg.lead_id, clientId]
-        );
-
-        await logsService.createLog(clientId, {
-          agent: 'director',
-          action: 'captain_intervention',
-          target_type: 'message',
-          target_id: msg.id,
-          metadata: {
-            lead_name: msg.lead_name,
-            channel: msg.channel,
-            attempts_failed: MAX_RANGER_RETRIES,
-            decision: 'needs_manual_review',
-            ranger_history: lastRangerResult?.notes || null,
-          },
-        });
-
-        rejectedCount++;
-        execStatus.beavers.enforcer.rejected++;
-        break;
-      }
-
-      try {
-        const rangerResult = await rangerReview(clientId, {
-          message_id: msg.id,
-          message_body: currentBody,
-        });
-        lastRangerResult = rangerResult;
-
-        execStatus.beavers.enforcer.reviewed++;
-        let rangerApproved = rangerResult.approved === true;
-        const rangerNotes = Array.isArray(rangerResult.issues) && rangerResult.issues.length > 0
-          ? rangerResult.issues.join('; ')
-          : (rangerResult.notes || null);
-
-        // ── Server-side Enforcer hard gates (override Ranger if any fail) ──
-        if (rangerApproved && currentBody) {
-          const gateFailures = [];
-          const bodyText = currentBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
-          const wordCount = bodyText.trim().split(/\s+/).length;
-          // Only enforce 80-word limit on email channel
-          if (msg.channel === 'email' && wordCount > 80) gateFailures.push(`Word count ${wordCount} exceeds 80-word limit`);
-          const questionCount = (currentBody.match(/\?/g) || []).length;
-          if (questionCount > 1) gateFailures.push(`${questionCount} questions detected (max 1)`);
-          if (/\u2014/.test(currentBody)) gateFailures.push('Em dash detected');
-          if (/^[\s]*[-•*]\s/m.test(currentBody)) gateFailures.push('Bullet points detected');
-          if (gateFailures.length > 0) {
-            rangerApproved = false;
-            rangerResult.approved = false;
-            rangerResult.decision = 'reject';
-            rangerResult.notes = `Server-side gate failures: ${gateFailures.join('; ')}`;
-            rangerResult.issues = gateFailures;
-          }
-        }
-
-        await logsService.createLog(clientId, {
-          agent: 'ranger',
-          action: rangerApproved ? 'message_approved' : 'message_rejected',
-          target_type: 'message',
-          target_id: msg.id,
-          metadata: { score: rangerResult.score, approved: rangerApproved, attempt, notes: rangerNotes, channel: msg.channel },
-        });
-
-        if (rangerApproved) {
-          // If Ranger returned approve_with_edits, re-validate suggested_edit against hard gates
-          if (rangerResult.decision === 'approve_with_edits' && rangerResult.suggested_edit) {
-            const editBody = rangerResult.suggested_edit;
-            const editGateFailures = [];
-            const editBodyText = editBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
-            if (msg.channel === 'email' && editBodyText.trim().split(/\s+/).length > 80) editGateFailures.push('Word count exceeds 80 after edit');
-            if ((editBody.match(/\?/g) || []).length > 1) editGateFailures.push('Multiple questions after edit');
-            if (/\u2014/.test(editBody)) editGateFailures.push('Em dash in suggested edit');
-            if (/^[\s]*[-•*]\s/m.test(editBody)) editGateFailures.push('Bullet points in suggested edit');
-            if (editGateFailures.length > 0) {
-              rangerApproved = false;
-              rangerResult.approved = false;
-              rangerResult.decision = 'reject';
-              rangerResult.notes = `Suggested edit failed gate re-check: ${editGateFailures.join('; ')}`;
-              rangerResult.issues = editGateFailures;
-            } else {
-              currentBody = editBody;
-            }
-          }
-        }
-
-        if (rangerApproved) {
-          // Safety net: strip em dashes from the final body
-          currentBody = stripEmDashes(currentBody);
-
-          // ── Captain final validation gate ──
-          execStatus.beavers.captain.status = 'working';
-          execStatus.beavers.captain.task = `Final QC for ${msg.lead_name}`;
-          execStatus.phase = 'captain';
-          await updateExecStatus(clientId, plan_id, execStatus);
-
-          const captainResult = await captainValidate(clientId, lead, { ...msg, body: currentBody });
-
-          if (!captainResult.valid) {
-            if (captainResult.fixed_body) {
-              // Captain rewrote it — use the fix
-              currentBody = captainResult.fixed_body;
-              await logsService.createLog(clientId, {
-                agent: 'director',
-                action: 'captain_rewrite',
-                target_type: 'message',
-                target_id: msg.id,
-                metadata: { notes: captainResult.notes, channel: msg.channel },
-              });
-            } else {
-              // Captain couldn't fix it — mark ranger_rejected for manual review
-              await pool.query(
-                `UPDATE messages SET ranger_notes = $1, status = 'ranger_rejected', updated_at = NOW()
-                 WHERE id = $2 AND client_id = $3`,
-                [captainResult.notes, msg.id, clientId]
-              );
-              await logsService.createLog(clientId, {
-                agent: 'director',
-                action: 'captain_validation_failed',
-                target_type: 'message',
-                target_id: msg.id,
-                metadata: { notes: captainResult.notes, channel: msg.channel },
-              });
-              rejectedCount++;
-              execStatus.beavers.enforcer.rejected++;
-              execStatus.beavers.captain.status = 'done';
-              return;
-            }
-          }
-
-          execStatus.beavers.captain.status = 'done';
-          execStatus.beavers.captain.approved++;
-          execStatus.beavers.enforcer.status = 'done';
-
-          // Save final approved body and push to approval queue
-          await pool.query(
-            `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
-             status = 'pending_approval', updated_at = NOW()
-             WHERE id = $5 AND client_id = $6`,
-            [currentBody, currentSubject, Math.round(rangerResult.score || 75), rangerNotes, msg.id, clientId]
-          );
-
-          await pool.query(
-            `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'ranger')`,
-            [clientId, msg.id]
-          );
-
-          await logsService.createLog(clientId, {
-            agent: 'director',
-            action: 'approval_requested',
-            target_type: 'message',
-            target_id: msg.id,
-            metadata: { message_id: msg.id, attempts_taken: attempt, channel: msg.channel },
-          });
-
-          finalApproved = true;
-          approvedCount++;
-          execStatus.beavers.sales.approved++;
-          break; // exit retry loop
-        }
-
-        // ── Skip retry if rejection is for "generic" and lead has no signal data ──
-        // Retrying is pointless when there's no specific data for Sales to reference.
-        const leadMeta2 = lead.metadata || {};
-        const hasSignalData = !!(leadMeta2.signal || leadMeta2.angle || leadMeta2.snippet || leadMeta2.friction);
-        const isGenericRejection = /generic|no specific|no signal|no reference/i.test(rangerNotes);
-        if (isGenericRejection && !hasSignalData && attempt < MAX_RANGER_RETRIES + 1) {
-          console.warn(`[pipeline] Skipping retry for ${msg.lead_name} (${msg.channel}) — generic rejection with no signal data available`);
-          await pool.query(
-            `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'ranger_rejected', updated_at = NOW()
-             WHERE id = $3 AND client_id = $4`,
-            [Math.round(rangerResult.score || 0), `No signal data available for personalisation. ${rangerNotes}`, msg.id, clientId]
-          );
-          rejectedCount++;
-          execStatus.beavers.enforcer.rejected++;
-          break; // exit retry loop — no point retrying without data
-        }
-
-        // Ranger rejected — attempt ≤ MAX_RANGER_RETRIES: Sales Beaver rewrites
-        await pool.query(
-          `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'pending_ranger', updated_at = NOW()
-           WHERE id = $3 AND client_id = $4`,
-          [Math.round(rangerResult.score || 0), rangerNotes, msg.id, clientId]
-        );
-
-        await logsService.createLog(clientId, {
-          agent: 'sales_beaver',
-          action: 'message_rewrite_triggered',
-          target_type: 'message',
-          target_id: msg.id,
-          metadata: { attempt, ranger_feedback: rangerNotes, lead_id: msg.lead_id, channel: msg.channel },
-        });
-
-        // Sales Beaver rewrites using Ranger's specific feedback + full lead context
-        const leadMeta = lead.metadata || {};
-        const rewriteContextParts = [
-          `Name: ${lead.name}`,
-          `Company: ${lead.company}`,
-          `Title: ${lead.title || 'N/A'}`,
-        ];
-        if (leadMeta.signal) rewriteContextParts.push(`Signal: ${leadMeta.signal}`);
-        if (leadMeta.angle) rewriteContextParts.push(`Angle: ${leadMeta.angle}`);
-        if (leadMeta.snippet) rewriteContextParts.push(`LinkedIn snippet: ${leadMeta.snippet}`);
-        if (command) rewriteContextParts.push(`Campaign intent: "${command}"`);
-
-        const rewriteResult = await salesGenerate(clientId, {
-          lead_id: msg.lead_id,
-          channel: msg.channel || 'email',
-          context: `${rewriteContextParts.join('\n')}\n\nREWRITE REQUIRED (attempt ${attempt + 1}/${MAX_RANGER_RETRIES + 1}).\n\nEnforcer rejected the previous message for these specific reasons:\n${rangerNotes}\n\nPrevious rejected message:\n${currentBody}\n\nRewrite the message fixing ALL of the above issues. Reference a SPECIFIC detail about this person or company from the context above. Be concise, no product pitch, no qualification questions, no em dashes${msg.channel === 'email' ? ', under 80 words' : ''}.`,
-        });
-
-        currentBody = rewriteResult.body || currentBody;
-        currentSubject = rewriteResult.subject || currentSubject;
-
-        await logsService.createLog(clientId, {
-          agent: 'sales_beaver',
-          action: 'message_rewritten',
-          target_type: 'message',
-          target_id: msg.id,
-          metadata: { attempt: attempt + 1, rewrite_for_ranger: true, channel: msg.channel },
-        });
-      } catch (err) {
-        console.error('[pipeline] Ranger/rewrite failed for message:', msg.id, `attempt ${attempt}`, err.message);
-        break;
-      }
-    } // end retry loop
-
-    if (!finalApproved) {
-      // All retries + Captain intervention path already handled in attempt > MAX_RANGER_RETRIES block
-      // If we reach here without finalApproved and no captain intervention logged, mark rejected
-      const lastNotes = lastRangerResult
-        ? (Array.isArray(lastRangerResult.issues) && lastRangerResult.issues.length > 0
-            ? lastRangerResult.issues.join('; ')
-            : lastRangerResult.notes || 'Failed QA after max retries')
-        : 'All QA attempts exhausted';
-
-      // Only update if not already finalized (ranger_rejected or pending_approval)
-      const currentStatus = await pool.query(
-        `SELECT status FROM messages WHERE id = $1 AND client_id = $2 LIMIT 1`,
-        [msg.id, clientId]
-      );
-      const msgStatus = currentStatus.rows[0]?.status;
-      if (msgStatus !== 'ranger_rejected' && msgStatus !== 'pending_approval') {
-        await pool.query(
-          `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'ranger_rejected', updated_at = NOW()
-           WHERE id = $3 AND client_id = $4`,
-          [Math.round(lastRangerResult?.score || 0), lastNotes, msg.id, clientId]
-        );
-        rejectedCount++;
-        execStatus.beavers.enforcer.rejected++;
-      }
+    // ── Server-side hard gates ONLY (no AI Enforcer — saves credits, eliminates false rejections) ──
+    const gateFailures = [];
+    if (currentBody) {
+      const bodyText = currentBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
+      const wordCount = bodyText.trim().split(/\s+/).length;
+      if (msg.channel === 'email' && wordCount > 80) gateFailures.push(`Word count ${wordCount} exceeds 80`);
+      const questionCount = (currentBody.match(/\?/g) || []).length;
+      if (questionCount > 1) gateFailures.push(`${questionCount} questions (max 1)`);
+      if (/\u2014/.test(currentBody)) gateFailures.push('Em dash detected');
+      if (/^[\s]*[-\u2022*]\s/m.test(currentBody)) gateFailures.push('Bullet points detected');
     }
+
+    execStatus.beavers.enforcer.reviewed++;
+
+    if (gateFailures.length > 0) {
+      // Hard gate failed — reject immediately, no retries
+      await pool.query(
+        `UPDATE messages SET ranger_score = 0, ranger_notes = $1, status = 'ranger_rejected', updated_at = NOW()
+         WHERE id = $2 AND client_id = $3`,
+        [`Server gate failures: ${gateFailures.join('; ')}`, msg.id, clientId]
+      );
+      await logsService.createLog(clientId, {
+        agent: 'ranger',
+        action: 'message_rejected',
+        target_type: 'message',
+        target_id: msg.id,
+        metadata: { gates: gateFailures, channel: msg.channel },
+      });
+      rejectedCount++;
+      execStatus.beavers.enforcer.rejected++;
+      execStatus.beavers.enforcer.status = 'done';
+      return;
+    }
+
+    // ── Gates passed — push straight to approval queue ──
+    await pool.query(
+      `UPDATE messages SET body = $1, subject = $2, ranger_score = 80, ranger_notes = 'Server gates passed',
+       status = 'pending_approval', updated_at = NOW()
+       WHERE id = $3 AND client_id = $4`,
+      [currentBody, currentSubject, msg.id, clientId]
+    );
+
+    await pool.query(
+      `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`,
+      [clientId, msg.id]
+    );
+
+    await logsService.createLog(clientId, {
+      agent: 'ranger',
+      action: 'message_approved',
+      target_type: 'message',
+      target_id: msg.id,
+      metadata: { channel: msg.channel, gates: 'passed', method: 'server_side_only' },
+    });
+
+    approvedCount++;
+    execStatus.beavers.sales.approved++;
+    execStatus.beavers.enforcer.status = 'done';
+    execStatus.beavers.captain.status = 'done';
+    execStatus.beavers.captain.approved++;
   }
 
   // ── Run pipeline: process leads sequentially (each lead triggers parallel channel drafts) ──
