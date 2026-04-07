@@ -503,6 +503,10 @@ async function directorPlan(clientId, { command }) {
     };
   }
 
+  // Extract requested lead count from command — e.g. "Find 3 leads" → 3
+  const countMatch = command.match(/\b(\d+)\b/);
+  const requestedCount = countMatch ? parseInt(countMatch[1], 10) : 5;
+
   const planId = uuidv4();
   const [icp, persona, fileConfig, memoryBrief] = await Promise.all([
     directorGetICP(clientId),
@@ -538,7 +542,7 @@ async function directorPlan(clientId, { command }) {
           interpretation: result.interpretation || command,
           steps: result.steps,
           status: 'pending_approval',
-          estimated_leads: result.estimated_leads || 20,
+          estimated_leads: result.estimated_leads || requestedCount,
           estimated_time: result.estimated_time || '~5 min',
         };
       }
@@ -559,7 +563,7 @@ async function directorPlan(clientId, { command }) {
       { step: 4, agent: 'director', action: 'Queue approved messages for user review', status: 'pending' },
     ],
     status: 'pending_approval',
-    estimated_leads: 20,
+    estimated_leads: requestedCount,
     estimated_time: '~5 min',
   };
 }
@@ -634,7 +638,7 @@ async function enrichLeadsWithHunter(clientId, leads) {
  * DIRECTOR — EXECUTE (full pipeline)
  * =========================
  */
-async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
+async function directorExecute(clientId, { plan_id, command, batchIndex = 0, limit }) {
   await logsService.createLog(clientId, {
     agent: 'director',
     action: 'plan_executing',
@@ -678,8 +682,12 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
   }
 
   // ── Step 1: Research Beaver ──────────────────────────────
+  // Extract requested count from command if not passed explicitly
+  const cmdCountMatch = command && command.match(/\b(\d+)\b/);
+  const targetLimit = limit || (cmdCountMatch ? parseInt(cmdCountMatch[1], 10) : 5);
+
   const researchResult = command
-    ? await researchSearch(clientId, { query: command, filters: { batchIndex } })
+    ? await researchSearch(clientId, { query: command, filters: { batchIndex, limit: targetLimit } })
     : { data: { leads: [] } };
 
   const rawLeads = researchResult?.data?.leads || [];

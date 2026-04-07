@@ -297,7 +297,7 @@ export default function Chat() {
           if (resolution === 'approved') {
             request('/agents/director/execute', {
               method: 'POST',
-              body: JSON.stringify({ plan_id: plan.plan_id, command: cmd }),
+              body: JSON.stringify({ plan_id: plan.plan_id, command: cmd, limit: plan.estimated_leads }),
             }).then(execRes => {
               if (execRes?.data) {
                 const { results, leads, summary, diagnostics, leads_found, messages_drafted, messages_failed } = execRes.data;
