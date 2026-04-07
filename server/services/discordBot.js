@@ -48,6 +48,41 @@ async function fetchRecentRepliesSummary() {
   return { rowCount, text: `Recent replies: ${rowCount}\n${lines.join('\n')}` };
 }
 
+/**
+ * Fetch pending approvals from the DB for BEAVER_CLIENT_ID.
+ * Returns { rowCount, text } where text is the formatted plain-text summary.
+ * Throws on DB error.
+ */
+async function fetchApprovalsSummary() {
+  logger.info({ msg: 'Discord fetchApprovalsSummary querying DB', clientId: BEAVER_CLIENT_ID });
+
+  const result = await pool.query(
+    `SELECT a.id, l.name AS lead_name, l.company AS lead_company
+     FROM approvals a
+     JOIN messages m ON m.id = a.message_id
+     LEFT JOIN leads l ON l.id = m.lead_id
+     WHERE a.client_id = $1 AND a.status = 'pending'
+     ORDER BY a.created_at DESC
+     LIMIT 10`,
+    [BEAVER_CLIENT_ID]
+  );
+
+  const rows = result.rows;
+  const rowCount = result.rowCount;
+
+  logger.info({ msg: 'Discord fetchApprovalsSummary DB result', rowCount });
+
+  if (rowCount === 0) {
+    return { rowCount, text: 'Pending approvals: 0' };
+  }
+
+  const lines = rows.map((r, i) =>
+    `${i + 1}. ${r.lead_name || 'Unknown'} — ${r.lead_company || 'Unknown'}`
+  );
+
+  return { rowCount, text: `Pending approvals: ${rowCount}\n${lines.join('\n')}` };
+}
+
 /* ─── Command handlers ─────────────────────────────────────── */
 
 async function handleReplies(message) {
@@ -135,38 +170,8 @@ async function handleApprovals(message) {
   logger.info({ msg: 'Discord !approvals handler entered' });
 
   try {
-    logger.info({ msg: 'Discord !approvals querying DB', clientId: BEAVER_CLIENT_ID });
-
-    const result = await pool.query(
-      `SELECT a.id, l.name AS lead_name, l.company AS lead_company
-       FROM approvals a
-       JOIN messages m ON m.id = a.message_id
-       LEFT JOIN leads l ON l.id = m.lead_id
-       WHERE a.client_id = $1 AND a.status = 'pending'
-       ORDER BY a.created_at DESC
-       LIMIT 10`,
-      [BEAVER_CLIENT_ID]
-    );
-
-    const rows = result.rows;
-    const rowCount = result.rowCount;
-
-    logger.info({ msg: 'Discord !approvals DB result', rowCount, rows: JSON.stringify(rows) });
-
-    if (rowCount === 0) {
-      await message.reply('Pending approvals: 0');
-      return;
-    }
-
-    if (!rows || rows.length === 0) {
-      await message.reply('Approvals command ran, but no valid data was returned.');
-      return;
-    }
-
-    const lines = rows.map((r, i) =>
-      `${i + 1}. ${r.lead_name || 'Unknown'} — ${r.lead_company || 'Unknown'}`
-    );
-    await message.reply(`Pending approvals: ${rowCount}\n${lines.join('\n')}`);
+    const { text } = await fetchApprovalsSummary();
+    await message.reply(text);
   } catch (err) {
     logger.error({
       msg: 'Discord !approvals failed',
@@ -174,6 +179,60 @@ async function handleApprovals(message) {
       stack: err.stack,
     });
     await message.reply('Failed to fetch approvals.').catch(() => {});
+  }
+}
+
+async function handlePostApprovals(message) {
+  logger.info({ msg: 'Discord !post-approvals handler entered', guildId: message.guildId });
+
+  try {
+    const { text } = await fetchApprovalsSummary();
+
+    // Force-fetch all channels so the cache is fully populated
+    await message.guild.channels.fetch();
+
+    // Find the channel named exactly 'approvals'
+    const approvalsChannel = message.guild.channels.cache.find(
+      (ch) => ch.name === 'approvals' && ch.type === ChannelType.GuildText
+    );
+
+    if (!approvalsChannel) {
+      logger.warn({
+        msg: 'Discord !post-approvals: #approvals channel not found',
+        guildId: message.guildId,
+      });
+      await message.reply('Could not find #approvals channel.');
+      return;
+    }
+
+    logger.info({
+      msg: 'Discord !post-approvals: target channel resolved',
+      channelName: approvalsChannel.name,
+      channelId: approvalsChannel.id,
+      guildId: message.guildId,
+    });
+
+    logger.info({
+      msg: 'Discord !post-approvals: sending message',
+      content: text,
+    });
+
+    // Only confirm success after the send actually resolves
+    await approvalsChannel.send(text);
+
+    logger.info({
+      msg: 'Discord !post-approvals: send succeeded',
+      channelId: approvalsChannel.id,
+    });
+
+    await message.reply('Posted approvals to #approvals.');
+  } catch (err) {
+    logger.error({
+      msg: 'Discord !post-approvals failed',
+      err: err.message,
+      stack: err.stack,
+    });
+    await message.reply('Failed to post approvals.').catch(() => {});
   }
 }
 
@@ -273,6 +332,9 @@ async function startDiscordBot() {
         } else if (message.content === '!approvals') {
           logger.info({ msg: 'Discord approvals command received' });
           await handleApprovals(message);
+        } else if (message.content === '!post-approvals') {
+          logger.info({ msg: 'Discord post-approvals command received' });
+          await handlePostApprovals(message);
         } else if (message.content === '!status') {
           const env = process.env.NODE_ENV || 'development';
           const token = config.discord.token ? 'loaded' : 'missing';
