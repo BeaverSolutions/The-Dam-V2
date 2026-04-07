@@ -13,8 +13,12 @@ let loginPromise = null;
 /* ─── Command handlers ─────────────────────────────────────── */
 
 async function handleApprovals(message) {
+  logger.info({ msg: 'Discord !approvals handler entered' });
+
   try {
-    const { rows, rowCount } = await pool.query(
+    logger.info({ msg: 'Discord !approvals querying DB', clientId: BEAVER_CLIENT_ID });
+
+    const result = await pool.query(
       `SELECT a.id, l.name AS lead_name, l.company AS lead_company
        FROM approvals a
        JOIN messages m ON m.id = a.message_id
@@ -25,8 +29,18 @@ async function handleApprovals(message) {
       [BEAVER_CLIENT_ID]
     );
 
+    const rows = result.rows;
+    const rowCount = result.rowCount;
+
+    logger.info({ msg: 'Discord !approvals DB result', rowCount, rows: JSON.stringify(rows) });
+
     if (rowCount === 0) {
       await message.reply('Pending approvals: 0');
+      return;
+    }
+
+    if (!rows || rows.length === 0) {
+      await message.reply('Approvals command ran, but no valid data was returned.');
       return;
     }
 
@@ -35,7 +49,11 @@ async function handleApprovals(message) {
     );
     await message.reply(`Pending approvals: ${rowCount}\n${lines.join('\n')}`);
   } catch (err) {
-    logger.error({ msg: 'Discord !approvals failed', err: err.message });
+    logger.error({
+      msg: 'Discord !approvals failed',
+      err: err.message,
+      stack: err.stack,
+    });
     await message.reply('Failed to fetch approvals.').catch(() => {});
   }
 }
@@ -75,11 +93,22 @@ async function startDiscordBot() {
     // ── Message handler ───────────────────────────────────────
     client.on(Events.MessageCreate, async (message) => {
       try {
-        if (message.author.bot) return;           // ignore bots
-        if (!message.guild) return;                // ignore DMs
+        if (message.author.bot) return;  // ignore bots
+        if (!message.guild) return;       // ignore DMs
+
+        // Log every non-bot guild message
+        logger.info({
+          msg: 'Discord message received',
+          content: message.content,
+          channelId: message.channelId,
+          guildId: message.guildId,
+          author: message.author.tag || message.author.username,
+        });
+
         if (message.content === '!ping') {
           await message.reply('pong');
         } else if (message.content === '!approvals') {
+          logger.info({ msg: 'Discord approvals command received' });
           await handleApprovals(message);
         } else if (message.content === '!status') {
           const env = process.env.NODE_ENV || 'development';
