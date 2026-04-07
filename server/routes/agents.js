@@ -238,8 +238,6 @@ router.put('/leads/:leadId/meeting-date',
 
 /* ─── Memory ─────────────────────────────────────────────── */
 
-const pool = require('../db/pool');
-
 router.get('/memory', async (req, res, next) => {
   try {
     const result = await pool.query(
