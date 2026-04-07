@@ -3,9 +3,42 @@
 const { Client, Events, GatewayIntentBits, Partials } = require('discord.js');
 const config = require('../config');
 const logger = require('../utils/logger');
+const pool = require('../db/pool');
+
+const BEAVER_CLIENT_ID = 'ce2fc8e5-617e-42d5-91fe-4275ceaa0030';
 
 let client = null;
 let loginPromise = null;
+
+/* ─── Command handlers ─────────────────────────────────────── */
+
+async function handleApprovals(message) {
+  try {
+    const { rows, rowCount } = await pool.query(
+      `SELECT a.id, l.name AS lead_name, l.company AS lead_company
+       FROM approvals a
+       JOIN messages m ON m.id = a.message_id
+       LEFT JOIN leads l ON l.id = m.lead_id
+       WHERE a.client_id = $1 AND a.status = 'pending'
+       ORDER BY a.created_at DESC
+       LIMIT 10`,
+      [BEAVER_CLIENT_ID]
+    );
+
+    if (rowCount === 0) {
+      await message.reply('Pending approvals: 0');
+      return;
+    }
+
+    const lines = rows.map((r, i) =>
+      `${i + 1}. ${r.lead_name || 'Unknown'} — ${r.lead_company || 'Unknown'}`
+    );
+    await message.reply(`Pending approvals: ${rowCount}\n${lines.join('\n')}`);
+  } catch (err) {
+    logger.error({ msg: 'Discord !approvals failed', err: err.message });
+    await message.reply('Failed to fetch approvals.').catch(() => {});
+  }
+}
 
 /**
  * Start the Discord bot.
@@ -46,6 +79,8 @@ async function startDiscordBot() {
         if (!message.guild) return;                // ignore DMs
         if (message.content === '!ping') {
           await message.reply('pong');
+        } else if (message.content === '!approvals') {
+          await handleApprovals(message);
         } else if (message.content === '!status') {
           const env = process.env.NODE_ENV || 'development';
           const token = config.discord.token ? 'loaded' : 'missing';
