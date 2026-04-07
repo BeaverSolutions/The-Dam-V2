@@ -105,7 +105,7 @@ router.post('/director/execute',
       // Store executing state immediately
       await pool.query(
         `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
-         VALUES ($1, 'director', $2, $3::jsonb, 'operational')
+         VALUES ($1, 'director', $2, $3::jsonb, 'config')
          ON CONFLICT (client_id, agent, key)
          DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
         [clientId, execKey, JSON.stringify({ status: 'executing', started_at: new Date().toISOString() })]
@@ -118,14 +118,14 @@ router.post('/director/execute',
       agentsService.directorExecute(clientId, req.body)
         .then(result => pool.query(
           `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
-           VALUES ($1, 'director', $2, $3::jsonb, 'operational')
+           VALUES ($1, 'director', $2, $3::jsonb, 'config')
            ON CONFLICT (client_id, agent, key)
            DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
           [clientId, execKey, JSON.stringify({ status: 'completed', result, completed_at: new Date().toISOString() })]
         ))
         .catch(err => pool.query(
           `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
-           VALUES ($1, 'director', $2, $3::jsonb, 'operational')
+           VALUES ($1, 'director', $2, $3::jsonb, 'config')
            ON CONFLICT (client_id, agent, key)
            DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
           [clientId, execKey, JSON.stringify({ status: 'failed', error: err.message, failed_at: new Date().toISOString() })]

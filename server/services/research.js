@@ -157,7 +157,7 @@ async function saveUsedQueries(clientId, usedSet) {
     const arr = Array.from(usedSet);
     await pool.query(
       `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
-       VALUES ($1, 'research_beaver', 'used_queries', $2::jsonb, 'operational', NOW())
+       VALUES ($1, 'research_beaver', 'used_queries', $2::jsonb, 'config', NOW())
        ON CONFLICT (client_id, agent, key)
        DO UPDATE SET content = $2::jsonb, updated_at = NOW()`,
       [clientId, JSON.stringify(arr)]
