@@ -167,16 +167,24 @@ async function start() {
     require('./services/clientConfig').warmCache().catch(() => {});
 
     // Discord bot
-    const { startDiscordBot, notifyDiscordPendingApprovals } = require('./services/discordBot');
+    const { startDiscordBot, notifyDiscordPendingApprovals, postDiscordAlert } = require('./services/discordBot');
     await startDiscordBot().catch(err => {
       logger.error({ msg: 'Discord bot startup failed', err: err.message, stack: err.stack });
+      // bot may be partially up on retry — best-effort alert, silently no-ops if client is null
+      postDiscordAlert('Discord bot startup', err.message).catch(() => {});
     });
 
     // Reply detection + Discord approvals notify — poll every 5 minutes
     const { checkAllClients } = require('./services/replyDetector');
     setInterval(() => {
-      checkAllClients().catch(err => logger.warn({ msg: 'Reply detector error', err: err.message }));
-      notifyDiscordPendingApprovals().catch(err => logger.warn({ msg: 'Discord approvals notify error', err: err.message }));
+      checkAllClients().catch(err => {
+        logger.warn({ msg: 'Reply detector error', err: err.message });
+        postDiscordAlert('reply polling', err.message).catch(() => {});
+      });
+      notifyDiscordPendingApprovals().catch(err => {
+        logger.warn({ msg: 'Discord approvals notify error', err: err.message });
+        postDiscordAlert('approvals polling', err.message).catch(() => {});
+      });
     }, 5 * 60 * 1000);
     logger.info({ msg: 'Reply detector + Discord approvals polling started (5 min interval)' });
   } catch (err) {

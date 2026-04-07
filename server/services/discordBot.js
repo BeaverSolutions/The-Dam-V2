@@ -14,6 +14,11 @@ let loginPromise = null;
 let lastRepliesSignature = null;
 let lastApprovalsSignature = null;
 
+// Alert cooldown: maps error label → timestamp of last Discord post.
+// Prevents the same failure category from spamming #alerts.
+const alertCooldowns = new Map();
+const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
+
 /* ─── Shared data helpers ──────────────────────────────────── */
 
 /**
@@ -237,6 +242,61 @@ async function handlePostApprovals(message) {
       stack: err.stack,
     });
     await message.reply('Failed to post approvals.').catch(() => {});
+  }
+}
+
+/**
+ * Post a short failure alert into the guild's #alerts channel.
+ * Suppresses repeated posting of the same label for ALERT_COOLDOWN_MS (30 min).
+ * Safe to call from anywhere — no-ops silently if the bot is not ready.
+ *
+ * @param {string} label        - Short failure category, e.g. "reply polling"
+ * @param {string} errorMessage - The exact error message to include
+ */
+async function postDiscordAlert(label, errorMessage) {
+  if (!client) return;
+  if (!config.discord.guildId) return;
+
+  // Cooldown check — suppress repeat alerts for the same category
+  const now = Date.now();
+  const lastPosted = alertCooldowns.get(label);
+  if (lastPosted && now - lastPosted < ALERT_COOLDOWN_MS) {
+    const remainingMin = Math.round((ALERT_COOLDOWN_MS - (now - lastPosted)) / 60000);
+    logger.info({ msg: 'Discord alert skipped (cooldown)', label, remainingMin });
+    return;
+  }
+  alertCooldowns.set(label, now);
+
+  const text = `Failed: ${label}\nError: ${errorMessage}`;
+
+  try {
+    const guild = await client.guilds.fetch(config.discord.guildId);
+    await guild.channels.fetch();
+
+    const channel = guild.channels.cache.find(
+      (ch) => ch.name === 'alerts' && ch.type === ChannelType.GuildText
+    );
+
+    if (!channel) {
+      logger.info({
+        msg: 'Discord alert: #alerts channel not found, skipping',
+        guildId: config.discord.guildId,
+        label,
+      });
+      return;
+    }
+
+    logger.info({ msg: 'Discord alert: posting', label, channelId: channel.id });
+    await channel.send(text);
+    logger.info({ msg: 'Discord alert: posted', label, channelId: channel.id });
+  } catch (err) {
+    // Do not crash or recurse — just log locally
+    logger.error({
+      msg: 'Discord alert post failed',
+      label,
+      err: err.message,
+      stack: err.stack,
+    });
   }
 }
 
@@ -550,4 +610,4 @@ function getDiscordClient() {
   return client;
 }
 
-module.exports = { startDiscordBot, getDiscordClient, postRepliesToChannel, notifyDiscordNewReplies, notifyDiscordPendingApprovals };
+module.exports = { startDiscordBot, getDiscordClient, postRepliesToChannel, notifyDiscordNewReplies, notifyDiscordPendingApprovals, postDiscordAlert };
