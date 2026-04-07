@@ -1227,54 +1227,48 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     execStatus.phase = 'sales';
     await updateExecStatus(clientId, plan_id, execStatus);
 
-    // ── Multi-channel drafting: email, linkedin, instagram ──
-    // All three channels drafted in parallel — each unique angle/tone.
-    const CHANNELS = [
-      {
-        channel: 'email',
-        hint: 'Write a cold email following the MANDATORY DAY 0 TEMPLATE exactly. Must have: subject line "{company_name} x {lead_company}", "Hi {first_name}," greeting, congratulation/hook paragraph, pain bridge paragraph, one question, "Regards," sign-off. Under 80 words body.',
-      },
-      {
-        channel: 'linkedin',
-        hint: 'Write a SHORT LinkedIn DM (NOT an email). 2-3 sentences max, under 50 words total. No subject line. No greeting like "Hi Name,". No sign-off (no "Regards,", no name at end). Just a casual peer-to-peer message ending with one question. Different angle from email.',
-      },
-      {
-        channel: 'instagram',
-        hint: 'Write a casual Instagram DM. 1-2 sentences, under 30 words. No greeting, no sign-off. Reference something about their company. End with a casual question. Most informal of all channels.',
-      },
-    ];
+    // ── Single-channel selection: pick the BEST channel for this prospect ──
+    // Rule: Day 0 goes on ONE channel only. Follow-ups stay on same channel.
+    // After FU2 with no reply → escalate to next channel (handled in follow-up phase).
+    const CHANNEL_HINTS = {
+      email: 'Write a cold email following the MANDATORY DAY 0 TEMPLATE exactly. Must have: subject line "{company_name} x {lead_company}", "Hi {first_name}," greeting, congratulation/hook paragraph, pain bridge paragraph, one question, "Regards," sign-off. Under 80 words body.',
+      linkedin: 'Write a SHORT LinkedIn DM (NOT an email). 2-3 sentences max, under 50 words total. No subject line. No greeting like "Hi Name,". No sign-off (no "Regards,", no name at end). Just a casual peer-to-peer message ending with one question.',
+      instagram: 'Write a casual Instagram DM. 1-2 sentences, under 30 words. No greeting, no sign-off. Reference something about their company. End with a casual question. Most informal channel.',
+    };
 
-    const channelDrafts = await Promise.allSettled(
-      CHANNELS.map(({ channel, hint }) =>
-        salesGenerate(clientId, {
-          lead_id: lead.id,
-          channel,
-          context: contextParts.join('\n') + memoryContext + `\n\nCHANNEL INSTRUCTIONS: ${hint}`,
-        })
-      )
-    );
+    // Channel priority: email (if we have it) > LinkedIn (if URL exists) > Instagram (last resort)
+    let selectedChannel;
+    if (lead.email) {
+      selectedChannel = 'email';
+    } else if (lead.linkedin_url) {
+      selectedChannel = 'linkedin';
+    } else {
+      selectedChannel = 'instagram';
+    }
 
-    // Process each channel result
-    for (let ci = 0; ci < CHANNELS.length; ci++) {
-      const { channel } = CHANNELS[ci];
-      const draftResult = channelDrafts[ci];
+    console.log(`[pipeline] Selected channel for ${lead.name}: ${selectedChannel} (email: ${!!lead.email}, linkedin: ${!!lead.linkedin_url})`);
 
-      if (draftResult.status === 'rejected' || !draftResult.value?.body) {
-        console.warn(`[pipeline] Sales draft failed for ${lead.name} (${channel}):`, draftResult.reason?.message || 'no body');
+    const hint = CHANNEL_HINTS[selectedChannel];
+
+    try {
+      const salesResult = await salesGenerate(clientId, {
+        lead_id: lead.id,
+        channel: selectedChannel,
+        context: contextParts.join('\n') + memoryContext + `\n\nCHANNEL INSTRUCTIONS: ${hint}`,
+      });
+
+      if (!salesResult?.body) {
+        console.warn(`[pipeline] Sales draft failed for ${lead.name} (${selectedChannel}): no body`);
         diagnostics.messages_failed++;
-        continue;
-      }
+      } else {
+        diagnostics.messages_drafted++;
+        execStatus.beavers.sales.drafted++;
 
-      const salesResult = draftResult.value;
-      diagnostics.messages_drafted++;
-      execStatus.beavers.sales.drafted++;
-
-      try {
         const msgRes = await pool.query(
           `INSERT INTO messages (client_id, lead_id, channel, subject, body, status)
            VALUES ($1, $2, $3, $4, $5, 'pending_ranger')
            RETURNING *`,
-          [clientId, lead.id, channel, salesResult.subject || null, salesResult.body]
+          [clientId, lead.id, selectedChannel, salesResult.subject || null, salesResult.body]
         );
 
         const message = msgRes.rows[0];
@@ -1286,14 +1280,15 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           action: 'message_created',
           target_type: 'message',
           target_id: message.id,
-          metadata: { lead_id: lead.id, lead_name: lead.name, channel },
+          metadata: { lead_id: lead.id, lead_name: lead.name, channel: selectedChannel, reason: `Best channel: ${selectedChannel}` },
         });
 
-        // ── Ranger review for this message ──
+        // ── Server-side gates check ──
         await runRangerPipeline(lead, msgWithMeta);
-      } catch (err) {
-        console.error('[pipeline] Sales insert/ranger failed for lead:', lead.name, channel, err.message);
       }
+    } catch (err) {
+      console.error('[pipeline] Sales draft/save failed for lead:', lead.name, selectedChannel, err.message);
+      diagnostics.messages_failed++;
     }
 
     execStatus.progress.complete++;
