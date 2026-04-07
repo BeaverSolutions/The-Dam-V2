@@ -10,6 +10,10 @@ const BEAVER_CLIENT_ID = 'ce2fc8e5-617e-42d5-91fe-4275ceaa0030';
 let client = null;
 let loginPromise = null;
 
+// Dedupe cache: tracks the last signature posted to #replies automatically.
+// Prevents the same reply batch being reposted every polling cycle.
+let lastRepliesSignature = null;
+
 /* ─── Shared data helpers ──────────────────────────────────── */
 
 /**
@@ -237,6 +241,91 @@ async function handlePostApprovals(message) {
 }
 
 /**
+ * Called by replyDetector after new replies are marked for a client.
+ * For Beaver Solutions only: computes a dedupe signature from the new message IDs,
+ * queries lead names, and posts a compact summary into the guild's #replies channel.
+ *
+ * @param {string}   clientId   - The client that just had replies detected
+ * @param {string[]} messageIds - IDs of messages newly marked as replied
+ */
+async function notifyDiscordNewReplies(clientId, messageIds) {
+  // Only Beaver Solutions gets automatic Discord notifications
+  if (clientId !== BEAVER_CLIENT_ID) return;
+  if (!client) return;
+  if (!config.discord.guildId) {
+    logger.warn({ msg: 'notifyDiscordNewReplies: DISCORD_GUILD_ID not set, skipping' });
+    return;
+  }
+  if (!messageIds || messageIds.length === 0) return;
+
+  // Dedupe: signature = sorted message IDs joined
+  const sig = [...messageIds].sort().join(',');
+  if (sig === lastRepliesSignature) {
+    logger.info({ msg: 'Discord auto-post replies: skipped (dedupe)', sig });
+    return;
+  }
+  lastRepliesSignature = sig;
+
+  logger.info({ msg: 'Discord auto-post replies: triggered', count: messageIds.length });
+
+  try {
+    // Fetch lead names/companies for these specific newly-detected replies
+    const result = await pool.query(
+      `SELECT m.id, l.name AS lead_name, l.company AS lead_company
+       FROM messages m
+       LEFT JOIN leads l ON l.id = m.lead_id
+       WHERE m.id = ANY($1::uuid[])
+       ORDER BY m.reply_detected_at DESC`,
+      [messageIds]
+    );
+
+    const rows = result.rows;
+    const count = rows.length;
+
+    const lines = rows.map((r, i) =>
+      `${i + 1}. ${r.lead_name || 'Unknown'} — ${r.lead_company || 'Unknown'}`
+    );
+    const text = `Recent replies: ${count}\n${lines.join('\n')}`;
+
+    // Resolve the guild and #replies channel
+    const guild = await client.guilds.fetch(config.discord.guildId);
+    await guild.channels.fetch();
+
+    const channel = guild.channels.cache.find(
+      (ch) => ch.name === 'replies' && ch.type === ChannelType.GuildText
+    );
+
+    if (!channel) {
+      logger.warn({
+        msg: 'Discord auto-post replies: #replies channel not found',
+        guildId: config.discord.guildId,
+      });
+      return;
+    }
+
+    logger.info({
+      msg: 'Discord auto-post replies: posting',
+      count,
+      channelName: channel.name,
+      channelId: channel.id,
+    });
+
+    await channel.send(text);
+
+    logger.info({
+      msg: 'Discord auto-post replies: posted successfully',
+      channelId: channel.id,
+    });
+  } catch (err) {
+    logger.error({
+      msg: 'Discord auto-post replies failed',
+      err: err.message,
+      stack: err.stack,
+    });
+  }
+}
+
+/**
  * Post the recent replies summary to a named channel in a specific guild.
  * Intended for use by background workflows (e.g. scheduled tasks, replyDetector hooks).
  *
@@ -378,4 +467,4 @@ function getDiscordClient() {
   return client;
 }
 
-module.exports = { startDiscordBot, getDiscordClient, postRepliesToChannel };
+module.exports = { startDiscordBot, getDiscordClient, postRepliesToChannel, notifyDiscordNewReplies };

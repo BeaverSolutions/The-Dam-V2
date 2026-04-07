@@ -26,6 +26,7 @@ async function checkRepliesForClient(clientId) {
   if (messagesRes.rows.length === 0) return 0;
 
   let repliesFound = 0;
+  const newReplyIds = [];
 
   for (const msg of messagesRes.rows) {
     try {
@@ -93,6 +94,7 @@ async function checkRepliesForClient(clientId) {
       });
 
       repliesFound++;
+      newReplyIds.push(msg.id);
 
       // Phase 2: Trigger reply intelligence — classify + auto-draft response
       if (msg.lead_id) {
@@ -110,6 +112,13 @@ async function checkRepliesForClient(clientId) {
 
   if (repliesFound > 0) {
     console.log(`[replyDetector] Found ${repliesFound} new replies for client ${clientId}`);
+
+    // Notify Discord — lazy-require to avoid circular dependency risk.
+    // Fire-and-forget: detection result is not blocked by Discord availability.
+    const { notifyDiscordNewReplies } = require('./discordBot');
+    notifyDiscordNewReplies(clientId, newReplyIds).catch((err) =>
+      console.warn('[replyDetector] Discord notify error:', err.message)
+    );
   }
   return repliesFound;
 }
