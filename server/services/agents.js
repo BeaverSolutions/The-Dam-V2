@@ -1148,19 +1148,31 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     metadata: { count: savedLeads.length, plan_id },
   });
 
+  // ── Dedup awareness: detect when most results are already in pipeline ──
+  const dupCount = diagnostics.after_dedup - savedLeads.length;
+  const dupRate = diagnostics.after_dedup > 0 ? dupCount / diagnostics.after_dedup : 0;
+  if (dupRate > 0.7 && diagnostics.after_dedup >= 5) {
+    diagnostics.dedup_warning = `${dupCount} of ${diagnostics.after_dedup} leads already in your pipeline. Try different keywords, a new industry, or a broader location to find fresh prospects.`;
+    console.warn(`[captain] High dedup rate: ${Math.round(dupRate * 100)}% — ${dupCount}/${diagnostics.after_dedup} already exist`);
+  }
+
   // Early exit — if all leads were filtered out, log why and return cleanly
   if (savedLeads.length === 0) {
+    const dupReason = dupCount > 0
+      ? `${dupCount} leads already in pipeline (try different keywords). ${diagnostics.after_dedup - dupCount} filtered by ICP/verification.`
+      : 'All leads filtered by ICP title, LinkedIn verification, or dedup';
+
     await logsService.createLog(clientId, {
       agent: 'director',
       action: 'plan_zero_leads',
-      metadata: { plan_id, raw_count: rawLeads.length, reason: 'All leads filtered by ICP title, LinkedIn verification, or dedup' },
+      metadata: { plan_id, raw_count: rawLeads.length, dup_count: dupCount, reason: dupReason },
     });
-    diagnostics.reason = 'All leads filtered by ICP title, LinkedIn verification, or dedup';
+    diagnostics.reason = dupReason;
     return {
       plan_id, status: 'completed',
       leads_found: 0, messages_drafted: 0,
       messages_failed: 0,
-      summary: `0 leads passed filters (raw: ${rawLeads.length}). Check ICP config and data source.`,
+      summary: `0 new leads (raw: ${rawLeads.length}, already in pipeline: ${dupCount}). ${dupCount > rawLeads.length * 0.5 ? 'Most results are duplicates — try different keywords or a new industry.' : 'Check ICP config and data source.'}`,
       diagnostics,
     };
   }
@@ -1236,17 +1248,28 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       instagram: 'Write a casual Instagram DM. 1-2 sentences, under 30 words. No greeting, no sign-off. Reference something about their company. End with a casual question. Most informal channel.',
     };
 
-    // Channel priority: email (if we have it) > LinkedIn (if URL exists) > Instagram (last resort)
+    // Smart channel selection based on data quality + availability
+    // Priority: verified email > LinkedIn (if no email) > unverified email (risky) > Instagram
     let selectedChannel;
-    if (lead.email) {
+    let channelReason;
+    const hasVerifiedEmail = lead.email && (lead.email_verified === true || lead.email_source === 'hunter' || lead.email_source === 'apollo');
+    const hasUnverifiedEmail = lead.email && !hasVerifiedEmail;
+
+    if (hasVerifiedEmail) {
       selectedChannel = 'email';
+      channelReason = `Verified email (${lead.email_source || 'known'})`;
     } else if (lead.linkedin_url) {
       selectedChannel = 'linkedin';
+      channelReason = hasUnverifiedEmail ? 'LinkedIn preferred over unverified email (bounce risk)' : 'No email, LinkedIn available';
+    } else if (hasUnverifiedEmail) {
+      selectedChannel = 'email';
+      channelReason = 'Unverified email (only option)';
     } else {
       selectedChannel = 'instagram';
+      channelReason = 'No email or LinkedIn available';
     }
 
-    console.log(`[pipeline] Selected channel for ${lead.name}: ${selectedChannel} (email: ${!!lead.email}, linkedin: ${!!lead.linkedin_url})`);
+    console.log(`[pipeline] Channel for ${lead.name}: ${selectedChannel} — ${channelReason}`);
 
     const hint = CHANNEL_HINTS[selectedChannel];
 

@@ -354,6 +354,12 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     const unusedQueries = queryPool.filter(q => !usedSet.has(q.query));
     const usedQueries   = queryPool.filter(q =>  usedSet.has(q.query));
 
+    // Pool exhaustion detection — warn when most queries have been used
+    const exhaustionRate = queryPool.length > 0 ? usedQueries.length / queryPool.length : 0;
+    if (exhaustionRate > 0.8) {
+      console.warn(`[research] Query pool ${Math.round(exhaustionRate * 100)}% exhausted (${usedQueries.length}/${queryPool.length}). Consider different ICP keywords.`);
+    }
+
     // Prefer unused; fall back to used if pool is exhausted
     const combined = [...unusedQueries, ...usedQueries];
 
@@ -486,6 +492,12 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       leads:       deduped,
       queriesUsed,
       source:      'multi',
+      pool_stats: {
+        total_queries: queryPool.length,
+        unused: unusedQueries.length,
+        used: usedQueries.length,
+        exhaustion_pct: Math.round(exhaustionRate * 100),
+      },
     };
   } catch (err) {
     console.warn('[research] researchLeads total failure:', err.message);
