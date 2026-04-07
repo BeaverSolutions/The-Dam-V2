@@ -13,10 +13,11 @@ const pool = new Pool(
           : process.env.NODE_ENV === 'production'
             ? { rejectUnauthorized: false }
             : false,
-        max: 15,
-        idleTimeoutMillis: 60000,
-        connectionTimeoutMillis: 30000,
+        max: 5,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
         statement_timeout: 30000,
+        allowExitOnIdle: true,
       }
     : {
         host: process.env.DB_HOST || 'localhost',
@@ -24,9 +25,9 @@ const pool = new Pool(
         database: process.env.DB_NAME || 'the_dam',
         user: process.env.DB_USER || 'postgres',
         password: process.env.DB_PASSWORD || 'postgres',
-        max: 15,
-        idleTimeoutMillis: 60000,
-        connectionTimeoutMillis: 30000,
+        max: 10,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
         statement_timeout: 30000,
       }
 );
@@ -51,6 +52,13 @@ async function withTenant(clientId, callback) {
     client.release();
   }
 }
+
+// Graceful shutdown: release all connections on process exit
+async function drainPool() {
+  try { await pool.end(); } catch {}
+}
+process.on('SIGTERM', drainPool);
+process.on('SIGINT', drainPool);
 
 module.exports = pool;
 module.exports.withTenant = withTenant;

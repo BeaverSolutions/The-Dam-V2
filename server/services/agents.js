@@ -1094,6 +1094,9 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       if (lead.friction)     meta.friction     = lead.friction;
       if (lead.why_now)      meta.why_now      = lead.why_now;
       if (lead.notes)        meta.notes        = lead.notes;
+      // Preserve Serper snippet + search query as fallback context for Sales Beaver
+      if (lead.snippet)      meta.snippet      = lead.snippet;
+      if (diagnostics.serper_query) meta.search_query = diagnostics.serper_query;
       if (lead.current_tools?.length)  meta.current_tools = lead.current_tools;
       if (lead.evaluating?.length)     meta.evaluating    = lead.evaluating;
       if (lead.apollo_person_id) {
@@ -1201,6 +1204,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       `Company: ${lead.company}`,
       `Title: ${lead.title || 'N/A'}`,
     ];
+    if (lead.linkedin_url) contextParts.push(`LinkedIn: ${lead.linkedin_url}`);
     const about = lead.short_description || meta.short_description;
     if (about) contextParts.push(`About: ${about}`);
     if (meta.signal) contextParts.push(`Signal (why reaching out now): ${meta.signal}`);
@@ -1208,6 +1212,11 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     if (meta.why_now) contextParts.push(`Why now: ${meta.why_now}`);
     if (meta.friction) contextParts.push(`Friction point: ${meta.friction}`);
     if (meta.notes) contextParts.push(`Personalisation hook: ${meta.notes}`);
+    // Serper context fallback: if no signal, use the Google snippet + search query
+    if (!meta.signal && meta.snippet) contextParts.push(`LinkedIn profile snippet: ${meta.snippet}`);
+    if (meta.search_query) contextParts.push(`Search context: ${meta.search_query}`);
+    // Campaign command gives Sales Beaver the targeting intent
+    if (command) contextParts.push(`Campaign intent: "${command}"`);
 
     // Sales Beaver status update
     execStatus.beavers.sales.task = `Drafting for ${lead.name} @ ${lead.company}`;
@@ -1478,6 +1487,23 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           break; // exit retry loop
         }
 
+        // ── Skip retry if rejection is for "generic" and lead has no signal data ──
+        // Retrying is pointless when there's no specific data for Sales to reference.
+        const leadMeta2 = lead.metadata || {};
+        const hasSignalData = !!(leadMeta2.signal || leadMeta2.angle || leadMeta2.snippet || leadMeta2.friction);
+        const isGenericRejection = /generic|no specific|no signal|no reference/i.test(rangerNotes);
+        if (isGenericRejection && !hasSignalData && attempt < MAX_RANGER_RETRIES + 1) {
+          console.warn(`[pipeline] Skipping retry for ${msg.lead_name} (${msg.channel}) — generic rejection with no signal data available`);
+          await pool.query(
+            `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'ranger_rejected', updated_at = NOW()
+             WHERE id = $3 AND client_id = $4`,
+            [Math.round(rangerResult.score || 0), `No signal data available for personalisation. ${rangerNotes}`, msg.id, clientId]
+          );
+          rejectedCount++;
+          execStatus.beavers.enforcer.rejected++;
+          break; // exit retry loop — no point retrying without data
+        }
+
         // Ranger rejected — attempt ≤ MAX_RANGER_RETRIES: Sales Beaver rewrites
         await pool.query(
           `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'pending_ranger', updated_at = NOW()
@@ -1493,12 +1519,22 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           metadata: { attempt, ranger_feedback: rangerNotes, lead_id: msg.lead_id, channel: msg.channel },
         });
 
-        // Sales Beaver rewrites using Ranger's specific feedback
-        const leadContext = `Name: ${msg.lead_name || 'Unknown'}, Company: ${msg.lead_company || 'Unknown'}`;
+        // Sales Beaver rewrites using Ranger's specific feedback + full lead context
+        const leadMeta = lead.metadata || {};
+        const rewriteContextParts = [
+          `Name: ${lead.name}`,
+          `Company: ${lead.company}`,
+          `Title: ${lead.title || 'N/A'}`,
+        ];
+        if (leadMeta.signal) rewriteContextParts.push(`Signal: ${leadMeta.signal}`);
+        if (leadMeta.angle) rewriteContextParts.push(`Angle: ${leadMeta.angle}`);
+        if (leadMeta.snippet) rewriteContextParts.push(`LinkedIn snippet: ${leadMeta.snippet}`);
+        if (command) rewriteContextParts.push(`Campaign intent: "${command}"`);
+
         const rewriteResult = await salesGenerate(clientId, {
           lead_id: msg.lead_id,
           channel: msg.channel || 'email',
-          context: `${leadContext}\n\nREWRITE REQUIRED (attempt ${attempt + 1}/${MAX_RANGER_RETRIES + 1}).\n\nEnforcer rejected the previous message for these specific reasons:\n${rangerNotes}\n\nPrevious rejected message:\n${currentBody}\n\nRewrite the message fixing ALL of the above issues. Be specific, concise, no product pitch, no qualification questions${msg.channel === 'email' ? ', under 80 words' : ''}.`,
+          context: `${rewriteContextParts.join('\n')}\n\nREWRITE REQUIRED (attempt ${attempt + 1}/${MAX_RANGER_RETRIES + 1}).\n\nEnforcer rejected the previous message for these specific reasons:\n${rangerNotes}\n\nPrevious rejected message:\n${currentBody}\n\nRewrite the message fixing ALL of the above issues. Reference a SPECIFIC detail about this person or company from the context above. Be concise, no product pitch, no qualification questions, no em dashes${msg.channel === 'email' ? ', under 80 words' : ''}.`,
         });
 
         currentBody = rewriteResult.body || currentBody;
