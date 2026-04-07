@@ -280,6 +280,35 @@ router.delete('/memory/:id', [param('id').isUUID(), validate], async (req, res, 
   } catch (err) { next(err); }
 });
 
+/* ─── Win/Loss Capture ──────────────────────────────────── */
+
+router.post('/director/win-loss',
+  [
+    body('lead_id').isUUID(),
+    body('outcome').isIn(['won', 'lost', 'cold']),
+    body('notes').optional().trim(),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      const result = await agentsService.captureWinLoss(req.clientId, req.body);
+      res.json({ data: result });
+    } catch (err) { next(err); }
+  }
+);
+
+/* ─── Hook Performance ──────────────────────────────────── */
+
+const hookTracking = require('../services/hookTracking');
+
+// GET /api/agents/hook-stats — hook performance leaderboard
+router.get('/hook-stats', async (req, res, next) => {
+  try {
+    const result = await hookTracking.getHookStats(req.clientId);
+    res.json({ data: result });
+  } catch (err) { next(err); }
+});
+
 /* ─── KPIs ───────────────────────────────────────────────── */
 
 router.get('/kpis', async (req, res, next) => {

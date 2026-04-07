@@ -210,4 +210,45 @@ Return JSON only — no other text:
   return await callAgent('sales_beaver', prompt);
 }
 
-module.exports = { scheduleFollowUps, stopSequence, pauseSequence, resumeSequence, getDueFollowUps, getLeadSequence, draftFollowUp };
+/**
+ * Find stale leads: active sequence, no reply, first contacted > 5 days ago.
+ * Returns leads with their last message info for n8n daily surfacing.
+ */
+async function getStaleLeads(clientId) {
+  const { rows } = await pool.query(
+    `SELECT
+       l.id            AS lead_id,
+       l.name          AS lead_name,
+       l.company       AS lead_company,
+       l.title         AS lead_title,
+       l.email         AS lead_email,
+       l.status        AS lead_status,
+       l.sequence_touch,
+       l.first_contacted_at,
+       l.metadata->>'industry' AS industry,
+       l.metadata->>'signal'   AS signal,
+       m.id            AS last_message_id,
+       m.subject       AS last_message_subject,
+       m.body          AS last_message_body,
+       m.sent_at       AS last_message_sent_at,
+       m.channel       AS last_message_channel
+     FROM leads l
+     LEFT JOIN LATERAL (
+       SELECT id, subject, body, sent_at, channel
+       FROM messages
+       WHERE messages.lead_id = l.id AND messages.client_id = $1
+       ORDER BY created_at DESC
+       LIMIT 1
+     ) m ON true
+     WHERE l.client_id = $1
+       AND l.sequence_status = 'active'
+       AND l.last_reply_at IS NULL
+       AND l.first_contacted_at < NOW() - INTERVAL '5 days'
+       AND l.deleted_at IS NULL
+     ORDER BY l.first_contacted_at ASC`,
+    [clientId]
+  );
+  return rows;
+}
+
+module.exports = { scheduleFollowUps, stopSequence, pauseSequence, resumeSequence, getDueFollowUps, getLeadSequence, draftFollowUp, getStaleLeads };

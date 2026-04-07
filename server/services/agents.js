@@ -1615,6 +1615,100 @@ Return JSON only:
   };
 }
 
+/**
+ * =========================
+ * WIN/LOSS LEARNING CAPTURE
+ * =========================
+ * Captures outcome data when a deal is won, lost, or goes cold.
+ * Builds a learning object and appends it to the director's weekly_learnings memory.
+ * Per CLAUDE.md: "After every deal outcome (won/lost/cold), extract what signals
+ * were missed and feed into weekly_learnings."
+ */
+async function captureWinLoss(clientId, { lead_id, outcome, notes }) {
+  if (!['won', 'lost', 'cold'].includes(outcome)) {
+    throw Object.assign(new Error('outcome must be won, lost, or cold'), { status: 400 });
+  }
+
+  // 1. Load lead
+  const { rows: [lead] } = await pool.query(
+    `SELECT id, name, company, status, pipeline_stage, created_at, metadata
+     FROM leads WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL`,
+    [lead_id, clientId]
+  );
+  if (!lead) {
+    throw Object.assign(new Error('Lead not found'), { status: 404 });
+  }
+
+  // 2. Load all messages for this lead
+  const { rows: messages } = await pool.query(
+    `SELECT id, subject, body, channel, status, created_at, sent_at, metadata
+     FROM messages WHERE lead_id = $1 AND client_id = $2
+     ORDER BY created_at ASC`,
+    [lead_id, clientId]
+  );
+
+  // 3. Build learning object
+  const firstMessage = messages[0] || {};
+  const lastMessage = messages[messages.length - 1] || {};
+  const pipelineStart = lead.created_at ? new Date(lead.created_at) : null;
+  const pipelineEnd = lastMessage.sent_at ? new Date(lastMessage.sent_at) : new Date();
+  const daysInPipeline = pipelineStart
+    ? Math.max(0, Math.round((pipelineEnd - pipelineStart) / (1000 * 60 * 60 * 24)))
+    : 0;
+
+  const learning = {
+    outcome,
+    lead_name: lead.name,
+    company: lead.company,
+    channel_used: firstMessage.channel || null,
+    hook_used: firstMessage.subject || null,
+    messages_sent: messages.filter(m => m.status === 'sent').length,
+    days_in_pipeline: daysInPipeline,
+    signal_that_triggered: lead.metadata?.signal || lead.metadata?.source || null,
+    notes: notes || null,
+    captured_at: new Date().toISOString(),
+  };
+
+  // 4. Append to agent_memory key 'weekly_learnings' for agent 'director' (max 50)
+  const existing = await pool.query(
+    `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'director' AND key = 'weekly_learnings' LIMIT 1`,
+    [clientId]
+  );
+  let learnings = [];
+  if (existing.rows.length > 0) {
+    const prev = existing.rows[0].content;
+    learnings = Array.isArray(prev) ? prev : [];
+  }
+  learnings.unshift(learning);
+  learnings = learnings.slice(0, 50); // cap at 50 entries
+
+  await pool.query(
+    `INSERT INTO agent_memory (client_id, agent, memory_type, key, content)
+     VALUES ($1, 'director', 'learnings', 'weekly_learnings', $2)
+     ON CONFLICT (client_id, agent, key) DO UPDATE SET content = $2, updated_at = NOW()`,
+    [clientId, JSON.stringify(learnings)]
+  );
+
+  // 5. Update lead status to reflect outcome
+  const stageMap = { won: 'closed_won', lost: 'closed_lost', cold: 'cold' };
+  await pool.query(
+    `UPDATE leads SET status = $1, pipeline_stage = $2, updated_at = NOW()
+     WHERE id = $3 AND client_id = $4`,
+    [outcome, stageMap[outcome], lead_id, clientId]
+  );
+
+  // 6. Log to activity log
+  await logsService.createLog(clientId, {
+    agent: 'director',
+    action: 'win_loss_captured',
+    target_type: 'lead',
+    target_id: lead_id,
+    metadata: learning,
+  });
+
+  return learning;
+}
+
 module.exports = {
   researchSearch,
   salesGenerate,
@@ -1635,4 +1729,6 @@ module.exports = {
   // Pipeline helpers
   updateExecStatus,
   captainValidate,
+  // Win/Loss capture
+  captureWinLoss,
 };

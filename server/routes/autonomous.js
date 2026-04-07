@@ -258,6 +258,23 @@ router.get('/agent-status', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── GET /api/autonomous/stale-leads ───────────────────── */
+// Returns leads with active sequences, no reply, contacted > 5 days ago.
+// Called by n8n daily to surface stale leads for re-engagement or nurture.
+
+router.get('/stale-leads', requireInternalKey, async (req, res) => {
+  try {
+    const clientId = req.query.client_id;
+    if (!clientId) return res.status(400).json({ error: 'client_id query param required', code: 'MISSING_CLIENT_ID' });
+    const { getStaleLeads } = require('../services/followupSequence');
+    const rows = await getStaleLeads(clientId);
+    res.json({ data: rows, meta: { total: rows.length } });
+  } catch (err) {
+    logger.error({ msg: 'stale-leads query failed', err: err.message, stack: err.stack });
+    res.status(500).json({ error: 'Failed to fetch stale leads', code: 'DB_ERROR' });
+  }
+});
+
 /* ─── Concurrent-run lock (prevents overlapping kickoffs per client) ─── */
 const _runningKickoffs = new Set();
 
