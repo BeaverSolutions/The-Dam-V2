@@ -329,9 +329,12 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     const combined = [...unusedQueries, ...usedQueries];
 
     // Apply batchIndex offset so repeated calls rotate through the pool
-    const offset = (batchIndex * pickCount) % Math.max(combined.length, 1);
+    // Cap pick count to available unique queries to prevent duplicates
+    const safeLength = Math.max(combined.length, 1);
+    const safePick = Math.min(pickCount, combined.length);
+    const offset = safePick > 0 ? (batchIndex * safePick) % safeLength : 0;
     const rotated = [...combined.slice(offset), ...combined.slice(0, offset)];
-    const picked  = rotated.slice(0, pickCount);
+    const picked  = rotated.slice(0, safePick);
 
     // 4. Split by strategy
     const directQueries  = picked.filter(q => q.strategy === 'direct');

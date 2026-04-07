@@ -19,7 +19,7 @@ function scoreColor(score) {
   return 'var(--orange)';
 }
 
-function ApprovalCard({ approval, onResolve, onSend, onEdit, tab, gmailConnected }) {
+function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, tab, gmailConnected }) {
   const [editing, setEditing]     = useState(false);
   const [editBody, setEditBody]   = useState(approval.body || '');
   const [saving, setSaving]       = useState(false);
@@ -28,6 +28,11 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, tab, gmailConnected
 
   const handleApproveAndSend = async () => {
     if (acting) return; // prevent double-click
+    // Block if Gmail connected but no email — send would fail silently after approval
+    if (gmailConnected && (!approval.lead_email || approval.lead_email === 'unknown@example.com')) {
+      onError('No email address for this lead. Add their email before approving.');
+      return;
+    }
     setActing(true);
     try {
       await onResolve(approval.id, 'approved');
@@ -310,6 +315,7 @@ export default function Approvals() {
             onResolve={handleResolve}
             onSend={handleSend}
             onEdit={handleEdit}
+            onError={setActionError}
           />
         ))
       )}

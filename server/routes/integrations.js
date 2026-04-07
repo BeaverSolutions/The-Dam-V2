@@ -174,6 +174,23 @@ async function sendMessageById(clientId, message_id, provider) {
       throw err;
     }
 
+    // Block send if no real email — check INSIDE transaction before status flip
+    if (!message.lead_email || message.lead_email === 'unknown@example.com') {
+      await db.query('ROLLBACK');
+      db.release();
+      await logsService.createLog(clientId, {
+        agent: 'system',
+        action: 'email_blocked',
+        target_type: 'message',
+        target_id: message_id,
+        metadata: { lead_name: message.lead_name, reason: 'no_email' },
+      });
+      const err = new Error('No email address for this lead. Find their email before sending.');
+      err.status = 400;
+      err.code = 'NO_EMAIL';
+      throw err;
+    }
+
     // Reserve the message atomically — prevents a second concurrent request from also sending
     await db.query(
       `UPDATE messages SET status = 'pending_send', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
@@ -200,7 +217,7 @@ async function sendMessageById(clientId, message_id, provider) {
     }
 
     const emailPayload = {
-      to: message.lead_email || 'unknown@example.com',
+      to: message.lead_email,
       subject: message.subject || '(no subject)',
       body: message.body,
     };

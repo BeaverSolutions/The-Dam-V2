@@ -191,7 +191,13 @@ async function researchSearch(clientId, { query, filters = {} }) {
     target_type: 'system',
     metadata: { query: query?.substring?.(0, 200), source: 'multi', note: 'All sources returned 0 results' },
   });
-  return { success: true, data: { leads: [], query, filters, source: 'multi', note: 'No results from any source. Check API keys and ICP config.' } };
+  const serperConfigured = !!process.env.SERPER_API_KEY;
+  const missingKeys = [];
+  if (!serperConfigured) missingKeys.push('SERPER_API_KEY');
+  const keyDiagnostic = missingKeys.length > 0
+    ? ` Missing API keys: ${missingKeys.join(', ')}.`
+    : ' API keys present — try different ICP keywords or a broader location.';
+  return { success: true, data: { leads: [], query, filters, source: 'multi', note: `No results from any source.${keyDiagnostic}`, missing_keys: missingKeys } };
 
   /* ── Claude fallback (DISABLED — fabricates companies) ──────────
    * Kept for potential re-enablement for enrichment (not sourcing).
@@ -660,11 +666,16 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
       [clientId]
     );
     if (memories.length > 0) {
-      memoryContext = '\n\nAGENT MEMORY CONTEXT:\n' + memories.map(m =>
-        `[${m.agent}/${m.key}]: ${JSON.stringify(m.content).substring(0, 200)}`
-      ).join('\n');
+      const memLines = memories.slice(0, 5).map(m =>
+        `[${m.agent}/${m.key}]: ${JSON.stringify(m.content).substring(0, 300)}`
+      );
+      const rawMemory = '\n\nAGENT MEMORY CONTEXT:\n' + memLines.join('\n');
+      memoryContext = rawMemory.substring(0, 2000);
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[director] Failed to load agent memory context:', err.message);
+    memoryContext = '\n\n[MEMORY UNAVAILABLE — previous context could not be loaded]';
+  }
 
   // ── Step 1: Research Beaver ──────────────────────────────
   const researchResult = command
@@ -735,15 +746,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
   const LARGE_CORPS = /\bwpp\b|publicis|omnicom|interpublic|\bbbdo\b|ogilvy|mccann|\bvml\b|dentsu|havas|grey group|leo burnett|saatchi|ddb\b|tbwa|jwt\b|deloitte|mckinsey|pwc\b|kpmg\b|ey\b|accenture|boston consulting|bain\b|shell\b|petronas|tenaga|maybank|cimb|rhb\b|public bank|hong leong|sime darby|axiata|celcom|maxis\b|digi\b|unilever|nestle|procter|p&g\b|samsung|lg\b|sony\b|panasonic/i;
 
   const icpGatedLeads = verifiedLeads.filter(lead => {
-    const searchText = [
-      lead.company || '',
-      lead.title || '',
-      lead.snippet || '',
-      lead.location || '',
-    ].join(' ');
+    // Split into separate fields — geo check on location/snippet only, to avoid false positives
+    // e.g. "Singapore Airlines" in company name should NOT reject a KL-based founder
+    const locationText = [lead.location || '', lead.snippet || ''].join(' ');
+    const companyText = [lead.company || '', lead.title || ''].join(' ');
 
     // Geography check (only enforce if ICP is KL-focused)
-    if (isKLFocused && NON_TARGET_GEO.test(searchText)) {
+    if (isKLFocused && NON_TARGET_GEO.test(locationText)) {
       console.warn(`[captain] ICP geo reject: ${lead.name} at ${lead.company} — non-KL indicator found`);
       logsService.createLog(clientId, {
         agent: 'director',
@@ -754,7 +763,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
     }
 
     // Industry exclusion
-    if (EXCLUDED_INDUSTRIES.test(searchText)) {
+    if (EXCLUDED_INDUSTRIES.test(companyText)) {
       console.warn(`[captain] ICP industry reject: ${lead.name} at ${lead.company} — excluded industry`);
       logsService.createLog(clientId, {
         agent: 'director',
@@ -765,7 +774,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
     }
 
     // Large multinational check
-    if (LARGE_CORPS.test(searchText)) {
+    if (LARGE_CORPS.test(companyText)) {
       console.warn(`[captain] ICP size reject: ${lead.name} at ${lead.company} — large multinational`);
       logsService.createLog(clientId, {
         agent: 'director',
@@ -857,6 +866,22 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
       }
     }
 
+    // Fallback dedup: leads with no email and no LinkedIn — check name+company match
+    if (!lead.email && !lead.linkedin_url && lead.name && lead.company) {
+      const nameKey = lead.name.toLowerCase().trim();
+      const companyKey = lead.company.toLowerCase().trim();
+      if (nameKey !== 'unknown contact' && companyKey !== 'unknown company') {
+        const dup = await pool.query(
+          `SELECT id FROM leads WHERE client_id = $1 AND LOWER(name) = $2 AND LOWER(company) = $3 AND deleted_at IS NULL LIMIT 1`,
+          [clientId, nameKey, companyKey]
+        );
+        if (dup.rows.length > 0) {
+          console.log(`[dedup] Skipping ${lead.name} at ${lead.company} — already in pipeline (name+company match)`);
+          continue;
+        }
+      }
+    }
+
     try {
       const meta = lead.metadata || {};
       // Map Research Beaver's flat output fields into metadata so they
@@ -935,6 +960,12 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
   const savedMessages = [];
 
   for (const lead of leadsToProcess) {
+    // Skip leads with no usable identity
+    if (!lead.id || !lead.name || lead.name === 'Unknown Contact') {
+      console.warn('[pipeline] Skipping lead with no identity:', lead.id, lead.name);
+      diagnostics.messages_failed++;
+      continue;
+    }
     try {
       const meta = lead.metadata || {};
       const contextParts = [
@@ -1039,11 +1070,28 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
         });
 
         if (rangerApproved) {
-          // If Ranger returned approve_with_edits, use its suggested_edit (the cleaned version)
-          // This is critical — the suggested_edit has em dashes and other issues already fixed by Ranger
+          // If Ranger returned approve_with_edits, re-validate its suggested_edit against hard gates
           if (rangerResult.decision === 'approve_with_edits' && rangerResult.suggested_edit) {
-            currentBody = rangerResult.suggested_edit;
+            const editBody = rangerResult.suggested_edit;
+            const editGateFailures = [];
+            const editBodyText = editBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
+            if (editBodyText.trim().split(/\s+/).length > 80) editGateFailures.push('Word count exceeds 80 after edit');
+            if ((editBody.match(/\?/g) || []).length > 1) editGateFailures.push('Multiple questions after edit');
+            if (/\u2014/.test(editBody)) editGateFailures.push('Em dash in suggested edit');
+            if (/^[\s]*[-•*]\s/m.test(editBody)) editGateFailures.push('Bullet points in suggested edit');
+            if (editGateFailures.length > 0) {
+              // Suggested edit still fails — reject and continue retry loop
+              rangerApproved = false;
+              rangerResult.approved = false;
+              rangerResult.decision = 'reject';
+              rangerResult.notes = `Suggested edit failed gate re-check: ${editGateFailures.join('; ')}`;
+              rangerResult.issues = editGateFailures;
+            } else {
+              currentBody = editBody;
+            }
           }
+        }
+        if (rangerApproved) {
           // Safety net: strip em dashes from the final body no matter what
           currentBody = stripEmDashes(currentBody);
 
