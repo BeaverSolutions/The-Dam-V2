@@ -67,24 +67,59 @@ async function handleReplies(message) {
 }
 
 async function handlePostReplies(message) {
-  logger.info({ msg: 'Discord !post-replies handler entered' });
+  logger.info({ msg: 'Discord !post-replies handler entered', guildId: message.guildId });
 
   try {
     const { text } = await fetchRecentRepliesSummary();
 
-    // Find the #replies channel in this guild
+    // Force-fetch all channels so the cache is fully populated.
+    // Without this, channels the bot hasn't seen since startup won't appear.
+    await message.guild.channels.fetch();
+
+    // Log every text channel visible to the bot for diagnostics
+    const allTextChannels = message.guild.channels.cache
+      .filter((ch) => ch.type === ChannelType.GuildText)
+      .map((ch) => ({ name: ch.name, id: ch.id }));
+    logger.info({
+      msg: 'Discord !post-replies: visible text channels',
+      guildId: message.guildId,
+      channels: JSON.stringify(allTextChannels),
+    });
+
+    // Find the channel named exactly 'replies'
     const repliesChannel = message.guild.channels.cache.find(
       (ch) => ch.name === 'replies' && ch.type === ChannelType.GuildText
     );
 
     if (!repliesChannel) {
-      logger.warn({ msg: 'Discord !post-replies: #replies channel not found', guildId: message.guildId });
+      logger.warn({
+        msg: 'Discord !post-replies: #replies channel not found',
+        guildId: message.guildId,
+      });
       await message.reply('Could not find #replies channel.');
       return;
     }
 
+    logger.info({
+      msg: 'Discord !post-replies: target channel resolved',
+      channelName: repliesChannel.name,
+      channelId: repliesChannel.id,
+      guildId: message.guildId,
+    });
+
+    logger.info({
+      msg: 'Discord !post-replies: sending message',
+      content: text,
+    });
+
+    // Only mark success after the send actually resolves
     await repliesChannel.send(text);
-    logger.info({ msg: 'Discord !post-replies: posted to #replies', channelId: repliesChannel.id });
+
+    logger.info({
+      msg: 'Discord !post-replies: send succeeded',
+      channelId: repliesChannel.id,
+    });
+
     await message.reply('Posted replies to #replies.');
   } catch (err) {
     logger.error({
