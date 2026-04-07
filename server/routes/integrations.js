@@ -16,10 +16,20 @@ const secrets = require('../services/secrets');
 router.get('/status', async (req, res, next) => {
   try {
     const agentmailOk = agentmailService.isConnected();
+    const serperOk = !!process.env.SERPER_API_KEY;
+
+    // Check if ENCRYPTION_KEY is valid (needed for Apollo/Hunter/Gmail)
+    let encKeyOk = true;
+    try {
+      secrets.testEncKey();
+    } catch {
+      encKeyOk = false;
+    }
+
     const [gmailConnected, apolloKey, hunterKey, calendlyRow] = await Promise.all([
       gmailService.isConnected(req.clientId),
-      apolloService.getApiKey(req.clientId),
-      hunterService.getApiKey(req.clientId),
+      encKeyOk ? apolloService.getApiKey(req.clientId) : Promise.resolve(null),
+      encKeyOk ? hunterService.getApiKey(req.clientId) : Promise.resolve(null),
       pool.query(
         `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'system' AND key = 'calendly_url' LIMIT 1`,
         [req.clientId]
@@ -55,11 +65,15 @@ router.get('/status', async (req, res, next) => {
         },
         apollo: {
           connected: !!apolloKey,
-          label: apolloKey ? 'Connected' : 'Not configured',
+          label: !encKeyOk ? 'Encryption key error' : apolloKey ? 'Connected' : 'Not configured',
         },
         hunter: {
           connected: !!hunterKey,
-          label: hunterKey ? 'Connected' : 'Not configured',
+          label: !encKeyOk ? 'Encryption key error' : hunterKey ? 'Connected' : 'Not configured',
+        },
+        serper: {
+          connected: serperOk,
+          label: serperOk ? 'Connected (env var)' : 'SERPER_API_KEY not set',
         },
         calendly: {
           connected: !!calendlyUrl,
@@ -336,7 +350,12 @@ router.post('/apollo/key',
         agent: 'system', action: 'apollo_key_saved', target_type: 'integration', metadata: {},
       });
       res.json({ data: { status: 'saved' } });
-    } catch (err) { next(err); }
+    } catch (err) {
+      if (err.message?.includes('ENCRYPTION_KEY')) {
+        return res.status(500).json({ error: 'Server encryption key is misconfigured. Check ENCRYPTION_KEY env var.', code: 'ENCRYPTION_KEY_INVALID' });
+      }
+      next(err);
+    }
   }
 );
 
@@ -365,7 +384,12 @@ router.post('/hunter/key',
         agent: 'system', action: 'hunter_key_saved', target_type: 'integration', metadata: {},
       });
       res.json({ data: { status: 'saved' } });
-    } catch (err) { next(err); }
+    } catch (err) {
+      if (err.message?.includes('ENCRYPTION_KEY')) {
+        return res.status(500).json({ error: 'Server encryption key is misconfigured. Check ENCRYPTION_KEY env var.', code: 'ENCRYPTION_KEY_INVALID' });
+      }
+      next(err);
+    }
   }
 );
 

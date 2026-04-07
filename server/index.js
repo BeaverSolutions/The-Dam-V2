@@ -108,8 +108,23 @@ app.use('/api/autonomous', require('./routes/autonomous'));
 // Routes - super admin only (Beaver Solutions)
 app.use('/api/admin', authMiddleware, tenantScope, clientContext, superAdminOnly, require('./routes/admin'));
 
-// Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '2.0.0', tag: 'Autonomous', timestamp: new Date().toISOString() }));
+// Health check — includes env diagnostics so Railway logs show what's misconfigured
+app.get('/health', (req, res) => {
+  let encKeyOk = false;
+  try { require('./services/secrets').testEncKey(); encKeyOk = true; } catch {}
+  res.json({
+    status: 'ok',
+    version: '2.0.0',
+    tag: 'Autonomous',
+    timestamp: new Date().toISOString(),
+    env: {
+      encryption_key: encKeyOk ? 'valid' : 'INVALID',
+      serper: process.env.SERPER_API_KEY ? 'set' : 'missing',
+      anthropic: process.env.ANTHROPIC_API_KEY ? 'set' : 'missing',
+      gmail_oauth: process.env.GMAIL_CLIENT_ID ? 'set' : 'missing',
+    },
+  });
+});
 
 // Serve React frontend in production (must come AFTER all API routes)
 if (process.env.NODE_ENV === 'production') {
@@ -134,6 +149,15 @@ async function start() {
     await runMigrations();
     logger.info({ msg: 'Running seed data...' });
     await runSeed();
+
+    // Validate ENCRYPTION_KEY at startup (non-fatal but logs clearly)
+    try {
+      require('./services/secrets').testEncKey();
+      logger.info({ msg: 'ENCRYPTION_KEY validated OK' });
+    } catch (err) {
+      logger.error({ msg: `ENCRYPTION_KEY INVALID: ${err.message}` });
+      logger.error({ msg: 'Hunter/Apollo/Gmail integrations will NOT work until this is fixed' });
+    }
 
     app.listen(config.port, () => {
       logger.info({ msg: `The Dam v2 API running on port ${config.port}`, env: config.nodeEnv });

@@ -6,11 +6,17 @@ const pool = require('../db/pool');
 /* ─── AES-256-GCM helpers ────────────────────────────────── */
 
 function getEncKey() {
-  const raw = process.env.ENCRYPTION_KEY || '';
-  if (raw.length === 64) {
+  // Trim whitespace and strip surrounding quotes (common Railway copy-paste issue)
+  const raw = (process.env.ENCRYPTION_KEY || '').trim().replace(/^["']|["']$/g, '');
+  if (raw.length === 64 && /^[0-9a-f]+$/i.test(raw)) {
     return Buffer.from(raw, 'hex');
   }
-  throw new Error('ENCRYPTION_KEY must be a 64-character hex string. Generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+  const hint = raw.length === 0
+    ? 'ENCRYPTION_KEY is not set'
+    : raw.length !== 64
+      ? `ENCRYPTION_KEY is ${raw.length} chars (need exactly 64)`
+      : 'ENCRYPTION_KEY contains non-hex characters';
+  throw new Error(`${hint}. Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`);
 }
 
 function encrypt(plaintext) {
@@ -65,4 +71,9 @@ async function deleteClientSecret(clientId, agent, key) {
   );
 }
 
-module.exports = { getClientSecret, setClientSecret, deleteClientSecret };
+/** Test if ENCRYPTION_KEY is valid — throws if not */
+function testEncKey() {
+  getEncKey();
+}
+
+module.exports = { getClientSecret, setClientSecret, deleteClientSecret, testEncKey };

@@ -277,6 +277,7 @@ export default function Settings() {
   const agentmailInfo = integrations.agentmail;
   const apolloInfo = integrations.apollo;
   const hunterInfo = integrations.hunter;
+  const serperInfo = integrations.serper;
 
   return (
     <div className="fade-in">
@@ -423,7 +424,7 @@ export default function Settings() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem' }}>
                     {apolloInfo?.connected
                       ? <><CheckCircle size={13} style={{ color: 'var(--lime)' }} /> <span style={{ color: 'var(--lime)' }}>Connected</span></>
-                      : <><XCircle size={13} style={{ color: 'var(--text-muted)' }} /> <span style={{ color: 'var(--text-muted)' }}>Not configured</span></>
+                      : <><XCircle size={13} style={{ color: apolloInfo?.label?.includes('error') ? 'var(--orange)' : 'var(--text-muted)' }} /> <span style={{ color: apolloInfo?.label?.includes('error') ? 'var(--orange)' : 'var(--text-muted)' }}>{apolloInfo?.label || 'Not configured'}</span></>
                     }
                   </div>
                   {apolloInfo?.connected && (
@@ -496,7 +497,7 @@ export default function Settings() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem' }}>
                     {hunterInfo?.connected
                       ? <><CheckCircle size={13} style={{ color: 'var(--lime)' }} /> <span style={{ color: 'var(--lime)' }}>Connected</span></>
-                      : <><XCircle size={13} style={{ color: 'var(--text-muted)' }} /> <span style={{ color: 'var(--text-muted)' }}>Not configured</span></>
+                      : <><XCircle size={13} style={{ color: hunterInfo?.label?.includes('error') ? 'var(--orange)' : 'var(--text-muted)' }} /> <span style={{ color: hunterInfo?.label?.includes('error') ? 'var(--orange)' : 'var(--text-muted)' }}>{hunterInfo?.label || 'Not configured'}</span></>
                     }
                   </div>
                   {hunterInfo?.connected && (
@@ -543,6 +544,25 @@ export default function Settings() {
                   {hunterError && <div style={{ fontSize: '0.75rem', color: 'var(--orange)', marginTop: '0.375rem' }}>{hunterError}</div>}
                 </div>
               )}
+            </div>
+
+            {/* Serper (Google Search) */}
+            <div style={{ padding: '0.875rem 0', borderTop: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                <div style={{ width: 36, height: 36, borderRadius: 'var(--radius)', background: 'var(--bg)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <Search size={18} style={{ color: serperInfo?.connected ? 'var(--lime)' : 'var(--text-muted)' }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 500, fontSize: '0.875rem' }}>Serper.dev (Google Search)</div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>LinkedIn profile discovery via Google search (server env var)</div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem' }}>
+                  {serperInfo?.connected
+                    ? <><CheckCircle size={13} style={{ color: 'var(--lime)' }} /> <span style={{ color: 'var(--lime)' }}>{serperInfo.label}</span></>
+                    : <><XCircle size={13} style={{ color: 'var(--orange)' }} /> <span style={{ color: 'var(--orange)' }}>{serperInfo?.label || 'Not configured'}</span></>
+                  }
+                </div>
+              </div>
             </div>
 
             {/* Calendly */}
