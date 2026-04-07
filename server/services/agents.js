@@ -1160,7 +1160,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
   // ── Step 3 + 4: Sales Beaver + Ranger — streaming parallel handoff ─────────
   // Each lead that passes Research gates immediately triggers Sales draft + Ranger review.
-  // Channels: email, linkedin_dm, instagram_dm — all unique per lead.
+  // Channels: email, linkedin, instagram — all unique per lead.
   // Ranger retry: max 2 Sales rewrites. On 3rd attempt → Captain decides (skip or manual).
 
   const leadsToProcess = savedLeads.slice(0, 10);
@@ -1214,7 +1214,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     execStatus.phase = 'sales';
     await updateExecStatus(clientId, plan_id, execStatus);
 
-    // ── Multi-channel drafting: email, linkedin_dm, instagram_dm ──
+    // ── Multi-channel drafting: email, linkedin, instagram ──
     // All three channels drafted in parallel — each unique angle/tone.
     const CHANNELS = [
       {
@@ -1222,11 +1222,11 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         hint: 'Write a formal-ish cold email with a subject line. Full message structure including Hi [first name], greeting and Regards, sign-off. Specific observation + one question implying a problem. Under 80 words (body only).',
       },
       {
-        channel: 'linkedin_dm',
+        channel: 'linkedin',
         hint: 'Write a short conversational LinkedIn DM. No subject needed. Shorter than email — 2-3 sentences max. Different angle from email. Casual but professional tone. One question at the end.',
       },
       {
-        channel: 'instagram_dm',
+        channel: 'instagram',
         hint: 'Write a casual Instagram DM. Reference something public they likely post about (their industry, their company wins, their role). Most casual of the three channels. Keep it under 40 words. Conversational. No hard sell.',
       },
     ];
@@ -1304,7 +1304,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       if (attempt > MAX_RANGER_RETRIES) {
         // Captain intervenes: skip this lead's message or flag for manual review
         await pool.query(
-          `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'needs_manual_review', updated_at = NOW()
+          `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'ranger_rejected', updated_at = NOW()
            WHERE id = $3 AND client_id = $4`,
           [
             Math.round(lastRangerResult?.score || 0),
@@ -1426,9 +1426,9 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
                 metadata: { notes: captainResult.notes, channel: msg.channel },
               });
             } else {
-              // Captain couldn't fix it — flag for manual review
+              // Captain couldn't fix it — mark ranger_rejected for manual review
               await pool.query(
-                `UPDATE messages SET ranger_notes = $1, status = 'needs_manual_review', updated_at = NOW()
+                `UPDATE messages SET ranger_notes = $1, status = 'ranger_rejected', updated_at = NOW()
                  WHERE id = $2 AND client_id = $3`,
                 [captainResult.notes, msg.id, clientId]
               );
@@ -1525,13 +1525,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
             : lastRangerResult.notes || 'Failed QA after max retries')
         : 'All QA attempts exhausted';
 
-      // Only update if not already set to needs_manual_review or ranger_rejected
+      // Only update if not already finalized (ranger_rejected or pending_approval)
       const currentStatus = await pool.query(
         `SELECT status FROM messages WHERE id = $1 AND client_id = $2 LIMIT 1`,
         [msg.id, clientId]
       );
       const msgStatus = currentStatus.rows[0]?.status;
-      if (msgStatus !== 'needs_manual_review' && msgStatus !== 'ranger_rejected' && msgStatus !== 'pending_approval') {
+      if (msgStatus !== 'ranger_rejected' && msgStatus !== 'pending_approval') {
         await pool.query(
           `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'ranger_rejected', updated_at = NOW()
            WHERE id = $3 AND client_id = $4`,
@@ -1586,7 +1586,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     diagnostics,
     results: [
       { step: 1, agent: 'research_beaver', status: 'completed', result: `${savedLeads.length} lead${savedLeads.length !== 1 ? 's' : ''} found & saved` },
-      { step: 2, agent: 'sales_beaver', status: 'completed', result: `${savedMessages.length} message${savedMessages.length !== 1 ? 's' : ''} drafted (email + linkedin_dm + instagram_dm per lead)` },
+      { step: 2, agent: 'sales_beaver', status: 'completed', result: `${savedMessages.length} message${savedMessages.length !== 1 ? 's' : ''} drafted (email + linkedin + instagram per lead)` },
       { step: 3, agent: 'ranger', status: 'completed', result: `${approvedCount} approved${rejectedCount > 0 ? `, ${rejectedCount} flagged (manual review or rejected after ${MAX_RANGER_RETRIES} rewrites)` : ''}` },
       { step: 4, agent: 'director', status: approvedCount > 0 ? 'completed' : 'pending', result: approvedCount > 0 ? `${approvedCount} message${approvedCount !== 1 ? 's' : ''} in approval queue` : 'All messages failed Ranger QA — check Memory for rejection patterns' },
     ],
