@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import BeaverAvatar, { BEAVER_COLORS, BEAVER_LABELS } from '../components/BeaverAvatar';
+import BeaverStatusBoard from '../components/BeaverStatusBoard';
 import { useApi } from '../hooks/useApi';
 import { getUser } from '../utils/auth';
 
@@ -780,6 +781,9 @@ export default function Dashboard() {
 
       {/* Integration chips */}
       <IntegrationChips integrations={stats.integrations} loading={statsLoading} />
+
+      {/* Crew Status — KPI cards per beaver */}
+      <BeaverStatusBoard execStatus={null} />
 
       {/* Agent Office Strip */}
       <AgentOfficeStrip agentLogs={agentLogs} liveLogs={liveLogs} />
