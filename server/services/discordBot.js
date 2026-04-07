@@ -12,6 +12,48 @@ let loginPromise = null;
 
 /* ─── Command handlers ─────────────────────────────────────── */
 
+async function handleReplies(message) {
+  logger.info({ msg: 'Discord !replies handler entered' });
+
+  try {
+    logger.info({ msg: 'Discord !replies querying DB', clientId: BEAVER_CLIENT_ID });
+
+    const result = await pool.query(
+      `SELECT m.id, m.reply_snippet, m.reply_detected_at,
+              l.name AS lead_name, l.company AS lead_company
+       FROM messages m
+       LEFT JOIN leads l ON l.id = m.lead_id
+       WHERE m.client_id = $1
+         AND m.reply_detected_at > NOW() - INTERVAL '24 hours'
+       ORDER BY m.reply_detected_at DESC
+       LIMIT 10`,
+      [BEAVER_CLIENT_ID]
+    );
+
+    const rows = result.rows;
+    const rowCount = result.rowCount;
+
+    logger.info({ msg: 'Discord !replies DB result', rowCount });
+
+    if (rowCount === 0) {
+      await message.reply('Recent replies: 0');
+      return;
+    }
+
+    const lines = rows.map((r, i) =>
+      `${i + 1}. ${r.lead_name || 'Unknown'} — ${r.lead_company || 'Unknown'}`
+    );
+    await message.reply(`Recent replies: ${rowCount}\n${lines.join('\n')}`);
+  } catch (err) {
+    logger.error({
+      msg: 'Discord !replies failed',
+      err: err.message,
+      stack: err.stack,
+    });
+    await message.reply('Failed to fetch replies.').catch(() => {});
+  }
+}
+
 async function handleApprovals(message) {
   logger.info({ msg: 'Discord !approvals handler entered' });
 
@@ -107,6 +149,9 @@ async function startDiscordBot() {
 
         if (message.content === '!ping') {
           await message.reply('pong');
+        } else if (message.content === '!replies') {
+          logger.info({ msg: 'Discord replies command received' });
+          await handleReplies(message);
         } else if (message.content === '!approvals') {
           logger.info({ msg: 'Discord approvals command received' });
           await handleApprovals(message);
