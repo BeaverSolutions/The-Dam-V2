@@ -146,21 +146,7 @@ async function researchSearch(clientId, { query, filters = {} }) {
 
   let leads = [];
 
-  // Try Apollo first — real verified data with 275M contacts
-  try {
-    const apolloLeads = await apolloService.searchPeople(clientId, { query, limit: filters.limit || 5 });
-    if (apolloLeads && apolloLeads.length > 0) {
-      console.log(`[research_beaver] Apollo returned ${apolloLeads.length} leads for: "${query}"`);
-      return {
-        success: true,
-        data: { leads: apolloLeads, query, filters, source: 'apollo' },
-      };
-    }
-  } catch (err) {
-    console.warn('[research_beaver] Apollo unavailable, using multi-source research:', err.message);
-  }
-
-  // Multi-source research — Serper (people, signal, company) + Hunter domain search
+  // Primary: Multi-source research — Serper (people, signal, company) + Hunter domain search
   // Rotates through 300+ query variations so dedup never exhausts the pool
   try {
     console.log(`[research_beaver] Running multi-source research (batch ${batchIndex})`);
@@ -180,9 +166,23 @@ async function researchSearch(clientId, { query, filters = {} }) {
       };
     }
 
-    console.warn('[research_beaver] Multi-source returned 0 leads — all queries may be exhausted or APIs unavailable');
+    console.warn('[research_beaver] Multi-source returned 0 leads — trying Apollo fallback');
   } catch (err) {
-    console.warn('[research_beaver] Multi-source research failed:', err.message);
+    console.warn('[research_beaver] Multi-source research failed, trying Apollo:', err.message);
+  }
+
+  // Fallback: Apollo (when configured — 275M verified contacts)
+  try {
+    const apolloLeads = await apolloService.searchPeople(clientId, { query, limit: filters.limit || 5 });
+    if (apolloLeads && apolloLeads.length > 0) {
+      console.log(`[research_beaver] Apollo fallback returned ${apolloLeads.length} leads`);
+      return {
+        success: true,
+        data: { leads: apolloLeads, query, filters, source: 'apollo' },
+      };
+    }
+  } catch (err) {
+    console.warn('[research_beaver] Apollo fallback also unavailable:', err.message);
   }
 
   await logsService.createLog(clientId, {
