@@ -313,11 +313,15 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
       // Extract sender name for the sign-off — from persona or fall back to client name
       const senderName = persona?.sender_name || persona?.contact_name || persona?.name || 'The Team';
 
+      // Channel-specific sign-off instructions
+      const signOffInstruction = channel === 'email'
+        ? `\nSENDER NAME (use "Regards," then this name on the next line): ${senderName}`
+        : `\nDO NOT include any sign-off like "Regards," or "Best," — this is a ${channel} DM, not an email. No sign-off at all. Just end with the question.`;
+
       const result = await callAgent(
         'sales_beaver',
         `Write a ${channel} outreach message for this lead: ${context}
-
-SENDER NAME (use this in the "Regards," sign-off): ${senderName}
+${signOffInstruction}
 ${personaContext}${fileContext}${rangerContext}`,
         { lead_id, channel }
       );
@@ -1228,15 +1232,15 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     const CHANNELS = [
       {
         channel: 'email',
-        hint: 'Write a formal-ish cold email with a subject line. Full message structure including Hi [first name], greeting and Regards, sign-off. Specific observation + one question implying a problem. Under 80 words (body only).',
+        hint: 'Write a cold email following the MANDATORY DAY 0 TEMPLATE exactly. Must have: subject line "{company_name} x {lead_company}", "Hi {first_name}," greeting, congratulation/hook paragraph, pain bridge paragraph, one question, "Regards," sign-off. Under 80 words body.',
       },
       {
         channel: 'linkedin',
-        hint: 'Write a short conversational LinkedIn DM. No subject needed. Shorter than email — 2-3 sentences max. Different angle from email. Casual but professional tone. One question at the end.',
+        hint: 'Write a SHORT LinkedIn DM (NOT an email). 2-3 sentences max, under 50 words total. No subject line. No greeting like "Hi Name,". No sign-off (no "Regards,", no name at end). Just a casual peer-to-peer message ending with one question. Different angle from email.',
       },
       {
         channel: 'instagram',
-        hint: 'Write a casual Instagram DM. Reference something public they likely post about (their industry, their company wins, their role). Most casual of the three channels. Keep it under 40 words. Conversational. No hard sell.',
+        hint: 'Write a casual Instagram DM. 1-2 sentences, under 30 words. No greeting, no sign-off. Reference something about their company. End with a casual question. Most informal of all channels.',
       },
     ];
 
