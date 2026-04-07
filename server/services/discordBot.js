@@ -39,6 +39,19 @@ async function startDiscordBot() {
       logger.warn({ msg: 'Discord client warning', warning });
     });
 
+    // ── Message handler ───────────────────────────────────────
+    client.on(Events.MessageCreate, async (message) => {
+      try {
+        if (message.author.bot) return;           // ignore bots
+        if (!message.guild) return;                // ignore DMs
+        if (message.content === '!ping') {
+          await message.reply('pong');
+        }
+      } catch (err) {
+        logger.error({ msg: 'Discord message handler error', err: err.message });
+      }
+    });
+
     loginPromise = new Promise((resolve, reject) => {
       client.once(Events.ClientReady, (readyClient) => {
         logger.info({
