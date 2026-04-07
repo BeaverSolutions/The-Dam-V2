@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Send, Check, X, ChevronRight, Building2, User, ArrowRight } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import BeaverAvatar, { BEAVER_COLORS, BEAVER_LABELS } from '../components/BeaverAvatar';
+import BeaverStatusBoard from '../components/BeaverStatusBoard';
 import { useApi } from '../hooks/useApi';
 
 function PlanSteps({ steps }) {
@@ -253,6 +254,7 @@ export default function Chat() {
   const navigate = useNavigate();
   const [messages, setMessages] = useState(loadMessages);
   const [input, setInput] = useState('');
+  const [execStatus, setExecStatus] = useState(null);
   const bottomRef = useRef(null);
   const activePolls = useRef(new Map()); // plan_id → interval id
 
@@ -340,14 +342,18 @@ export default function Chat() {
                   try {
                     const pollRes = await fetch(`/api/agents/director/execute/${planId}`, { credentials: 'include' });
                     const pollData = await pollRes.json();
-                    const execStatus = pollData?.data?.status;
-                    if (execStatus === 'completed') {
+                    const pollStatus = pollData?.data?.status;
+                    // Update beaver status board with live state
+                    if (pollData?.data) setExecStatus(pollData.data);
+                    if (pollStatus === 'completed') {
                       clearInterval(pollId);
                       activePolls.current.delete(planId);
+                      setExecStatus(null);
                       showResult(pollData.data.result);
-                    } else if (execStatus === 'failed') {
+                    } else if (pollStatus === 'failed') {
                       clearInterval(pollId);
                       activePolls.current.delete(planId);
+                      setExecStatus(null);
                       setMessages(prev => [...prev, {
                         id: Date.now(), role: 'assistant',
                         content: pollData.data.error || 'Pipeline failed. Check Activity Log for details.',
@@ -417,6 +423,9 @@ export default function Chat() {
           Clear chat
         </button>
       </div>
+
+      {/* Crew Status Board */}
+      <BeaverStatusBoard execStatus={execStatus} />
 
       {/* Messages */}
       <div style={{ flex: 1, overflowY: 'auto', paddingBottom: '1rem' }}>

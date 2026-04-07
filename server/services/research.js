@@ -101,6 +101,24 @@ function buildQueryPool(icpMemory) {
         industry,
         location: baseLocation,
       });
+
+      // Strategy: buying signal — job postings (indicates growth/hiring intent)
+      pool.push({
+        query:    `site:linkedin.com/jobs "Head of Sales" "${industry}" "${baseLocation}"`,
+        strategy: 'signal_jobs',
+        title,
+        industry,
+        location: baseLocation,
+      });
+
+      // Strategy: buying signal — news (hiring/raised/launched)
+      pool.push({
+        query:    `"${industry}" "${baseLocation}" hiring OR raised OR launched 2024 OR 2025`,
+        strategy: 'signal_news',
+        title:    '',
+        industry,
+        location: baseLocation,
+      });
     }
 
     for (const signal of SIGNALS) {
@@ -110,6 +128,17 @@ function buildQueryPool(icpMemory) {
         strategy: 'signal',
         title,
         industry: '',
+        location: baseLocation,
+      });
+    }
+
+    // Strategy: buying signal — LinkedIn company growth
+    for (const industry of industries.slice(0, 3)) { // cap to avoid too many queries
+      pool.push({
+        query:    `site:linkedin.com/company "${industry}" "${baseLocation}" employees`,
+        strategy: 'signal_growth',
+        title:    '',
+        industry,
         location: baseLocation,
       });
     }
@@ -337,12 +366,16 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     const picked  = rotated.slice(0, safePick);
 
     // 4. Split by strategy
-    const directQueries  = picked.filter(q => q.strategy === 'direct');
-    const signalQueries  = picked.filter(q => q.strategy === 'signal');
+    const directQueries      = picked.filter(q => q.strategy === 'direct');
+    const signalQueries      = picked.filter(q => q.strategy === 'signal');
+    const signalJobsQueries  = picked.filter(q => q.strategy === 'signal_jobs');
+    const signalNewsQueries  = picked.filter(q => q.strategy === 'signal_news');
+    const signalGrowthQueries = picked.filter(q => q.strategy === 'signal_growth');
     // Company queries are handled inside strategyCompanyFirst via buildQueryPool
 
     // 5 & 6. Run all strategies in parallel
-    const perQueryLimit = Math.max(Math.ceil(targetCount / Math.max(directQueries.length + signalQueries.length, 1)), 2);
+    const allSignalCount = signalQueries.length + signalJobsQueries.length + signalNewsQueries.length + signalGrowthQueries.length;
+    const perQueryLimit = Math.max(Math.ceil(targetCount / Math.max(directQueries.length + allSignalCount, 1)), 2);
 
     const directPromises = directQueries.map(q =>
       strategyDirectPeople(q.query, perQueryLimit)
@@ -360,20 +393,74 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         })
     );
 
+    // Buying signal queries — tag matched leads with signal + why_now
+    const signalJobsPromises = signalJobsQueries.map(q =>
+      strategySignalBased(q.query, perQueryLimit)
+        .then(leads => leads.map(l => ({
+          ...l,
+          signal: l.signal || `Hiring signal: ${q.industry} company in ${q.location} is actively hiring`,
+          why_now: l.why_now || `Hiring activity detected via job posting for "${q.industry}" in ${q.location} — likely scaling team now`,
+          data_source: 'serper_signal_jobs',
+        })))
+        .catch(err => {
+          console.warn('[research] Signal-jobs query failed:', err.message);
+          return [];
+        })
+    );
+
+    const signalNewsPromises = signalNewsQueries.map(q =>
+      strategySignalBased(q.query, perQueryLimit)
+        .then(leads => leads.map(l => ({
+          ...l,
+          signal: l.signal || `Growth signal: ${q.industry} company in ${q.location} recently hired, raised, or launched`,
+          why_now: l.why_now || `Recent growth event detected for "${q.industry}" company in ${q.location} — timing is right for outreach`,
+          data_source: 'serper_signal_news',
+        })))
+        .catch(err => {
+          console.warn('[research] Signal-news query failed:', err.message);
+          return [];
+        })
+    );
+
+    const signalGrowthPromises = signalGrowthQueries.map(q =>
+      strategyCompanyFirst(clientId, { ...icpMemory, industries: q.industry }, 3)
+        .then(leads => leads.map(l => ({
+          ...l,
+          signal: l.signal || `Growth signal: ${q.industry} company in ${q.location} showing employee growth`,
+          why_now: l.why_now || `Team expansion detected for "${q.industry}" company in ${q.location}`,
+          data_source: l.data_source || 'serper_signal_growth',
+        })))
+        .catch(err => {
+          console.warn('[research] Signal-growth query failed:', err.message);
+          return [];
+        })
+    );
+
     const companyPromise = strategyCompanyFirst(clientId, icpMemory, targetCount)
       .catch(err => {
         console.warn('[research] Company-first strategy failed:', err.message);
         return [];
       });
 
-    const [directResults, signalResults, companyLeads] = await Promise.all([
+    const [directResults, signalResults, signalJobsResults, signalNewsResults, signalGrowthResults, companyLeads] = await Promise.all([
       Promise.all(directPromises).then(arrays => arrays.flat()),
       Promise.all(signalPromises).then(arrays => arrays.flat()),
+      Promise.all(signalJobsPromises).then(arrays => arrays.flat()),
+      Promise.all(signalNewsPromises).then(arrays => arrays.flat()),
+      Promise.all(signalGrowthPromises).then(arrays => arrays.flat()),
       companyPromise,
     ]);
 
     // 7. Merge and deduplicate by linkedin_url
-    const allLeads = [...directResults, ...signalResults, ...companyLeads];
+    // Signal-tagged leads are prioritised (they come first, dedup keeps first occurrence)
+    const allLeads = [
+      ...signalJobsResults,   // P1: active hiring signal
+      ...signalNewsResults,   // P1: growth event signal
+      ...signalGrowthResults, // P2: growth signal
+      ...signalResults,       // P2: signal-based
+      ...directResults,       // P3: direct people
+      ...companyLeads,        // P3: company-first
+    ];
 
     const seen = new Set();
     const deduped = allLeads.filter(lead => {

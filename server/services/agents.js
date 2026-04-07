@@ -71,6 +71,28 @@ async function logMistake(clientId, agent, mistake, cause, newRule) {
 }
 
 /**
+ * =========================
+ * EXEC STATUS HELPER
+ * =========================
+ * Writes intermediate pipeline state to agent_memory so the frontend
+ * can show live beaver status via the poll endpoint.
+ * key: exec_${plan_id}, type: 'config'
+ */
+async function updateExecStatus(clientId, planId, statusObj) {
+  try {
+    await pool.query(
+      `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
+       VALUES ($1, 'director', $2, $3::jsonb, 'config', NOW())
+       ON CONFLICT (client_id, agent, key)
+       DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
+      [clientId, `exec_${planId}`, JSON.stringify(statusObj)]
+    );
+  } catch (err) {
+    console.warn('[pipeline] updateExecStatus failed:', err.message);
+  }
+}
+
+/**
  * Pull the last 10 Ranger rejection reasons from the messages table.
  * Used to brief Sales Beaver on patterns to avoid.
  */
@@ -635,6 +657,80 @@ async function enrichLeadsWithHunter(clientId, leads) {
 
 /**
  * =========================
+ * CAPTAIN — FINAL VALIDATION GATE
+ * =========================
+ * Hard checks before pushing a message to the approval queue.
+ * Returns { valid: true } or { valid: false, fixed_body, notes }
+ */
+async function captainValidate(clientId, lead, message) {
+  const PLACEHOLDER_RE = /\[NAME\]|\[COMPANY\]|\{\{|\}\}/i;
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  const issues = [];
+
+  // Hard check: lead name
+  if (!lead.name || lead.name === 'Unknown Contact') issues.push('Lead name is missing or Unknown Contact');
+
+  // Hard check: lead company
+  if (!lead.company || lead.company === 'Unknown Company') issues.push('Lead company is missing or Unknown Company');
+
+  // Hard check: at least one contact method
+  const hasEmail = lead.email && EMAIL_RE.test(lead.email);
+  const hasLinkedIn = !!lead.linkedin_url;
+  if (!hasEmail && !hasLinkedIn) issues.push('No valid email or linkedin_url for this lead');
+
+  // Hard check: message body
+  if (!message.body || !message.body.trim()) issues.push('Message body is empty');
+
+  // Hard check: placeholder text
+  if (message.body && PLACEHOLDER_RE.test(message.body)) issues.push('Message body contains unfilled placeholders');
+
+  if (issues.length === 0) return { valid: true };
+
+  // Try to fix with Claude if available
+  if (callAgent && message.body) {
+    try {
+      const fixResult = await callAgent(
+        'director',
+        `A message for ${lead.name || 'a prospect'} at ${lead.company || 'a company'} has these issues that must be fixed before it can be sent:
+${issues.map((i, n) => `${n + 1}. ${i}`).join('\n')}
+
+Original message:
+${message.body}
+
+Rules:
+- Replace any [NAME], [COMPANY], {{, }} placeholders with real values from the lead info above
+- Ensure personalisation is specific and real, not generic
+- Keep under 80 words (body excluding greeting and sign-off)
+- No em dashes, no bullet points, exactly 1 question
+
+Lead info: Name=${lead.name || 'unknown'}, Company=${lead.company || 'unknown'}, Title=${lead.title || 'unknown'}
+
+Return JSON only: {"body":"fixed message body including greeting and sign-off","notes":"what was fixed"}`,
+        { mode: 'captain_fix', lead_id: lead.id }
+      );
+
+      if (fixResult?.body) {
+        return {
+          valid: false,
+          fixed_body: stripEmDashes(fixResult.body),
+          notes: fixResult.notes || `Captain fixed: ${issues.join('; ')}`,
+        };
+      }
+    } catch (err) {
+      console.warn('[captain] captainValidate rewrite failed:', err.message);
+    }
+  }
+
+  return {
+    valid: false,
+    fixed_body: null,
+    notes: `Captain validation failed: ${issues.join('; ')}`,
+  };
+}
+
+/**
+ * =========================
  * DIRECTOR — EXECUTE (full pipeline)
  * =========================
  */
@@ -680,6 +776,91 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     console.warn('[director] Failed to load agent memory context:', err.message);
     memoryContext = '\n\n[MEMORY UNAVAILABLE — previous context could not be loaded]';
   }
+
+  // Load ICP memory for the ICP gate below — must be in directorExecute scope
+  const icpMemory = await getMemory(clientId, 'director', 'icp') || {};
+
+  // ── ICP Pre-flight check ─────────────────────────────────
+  // Captain Beaver rule: before ANY kickoff, confirm ICP is defined.
+  // If critical fields are missing AND command doesn't cover them → ask user first.
+  const missingIcpFields = [];
+  if (!icpMemory.industries && !/industry|sector|niche/i.test(command || '')) missingIcpFields.push('industries');
+  if (!icpMemory.geographies && !icpMemory.location && !/location|city|country|region|kuala lumpur|kl\b|malaysia/i.test(command || '')) missingIcpFields.push('geographies');
+  if (!icpMemory.job_titles && !icpMemory.who && !/ceo|founder|director|title|role|head of/i.test(command || '')) missingIcpFields.push('job_titles');
+
+  if (missingIcpFields.length > 0) {
+    const icpQuestion = `Before I brief the crew, I need a bit more context. Your ICP is missing: ${missingIcpFields.join(', ')}. Could you tell me: who exactly are we targeting (title/role), what industry/sector, and which geography? This helps Research Beaver find the right leads.`;
+
+    // Store question in agent_memory so frontend can surface it
+    await pool.query(
+      `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
+       VALUES ($1, 'director', $2, $3::jsonb, 'config', NOW())
+       ON CONFLICT (client_id, agent, key)
+       DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
+      [clientId, `icp_question_${plan_id}`, JSON.stringify({ question: icpQuestion, missing: missingIcpFields, asked_at: new Date().toISOString() })]
+    );
+
+    await updateExecStatus(clientId, plan_id, {
+      status: 'needs_input',
+      phase: 'captain',
+      question: icpQuestion,
+      missing_fields: missingIcpFields,
+      started_at: new Date().toISOString(),
+      beavers: {
+        research: { status: 'idle', task: 'Waiting for ICP', found: 0, passed: 0 },
+        sales:    { status: 'idle', task: 'Waiting', drafted: 0, approved: 0 },
+        enforcer: { status: 'idle', task: 'Waiting', reviewed: 0, rejected: 0 },
+        captain:  { status: 'working', task: 'Checking ICP pre-flight', approved: 0 },
+      },
+      progress: { total: 0, complete: 0 },
+    });
+
+    // Poll for user answer up to 15 minutes (30 attempts × 30s)
+    const MAX_POLL_ATTEMPTS = 30;
+    let icpAnswered = false;
+    for (let poll = 0; poll < MAX_POLL_ATTEMPTS; poll++) {
+      await new Promise(resolve => setTimeout(resolve, 30000));
+      const answerRow = await getMemory(clientId, 'director', `icp_answer_${plan_id}`);
+      if (answerRow && answerRow.answer) {
+        // Merge answer into icpMemory and proceed
+        if (answerRow.industries) icpMemory.industries = answerRow.industries;
+        if (answerRow.geographies) icpMemory.geographies = answerRow.geographies;
+        if (answerRow.job_titles) icpMemory.job_titles = answerRow.job_titles;
+        icpAnswered = true;
+        await logsService.createLog(clientId, {
+          agent: 'director',
+          action: 'icp_answer_received',
+          metadata: { plan_id, answer: answerRow },
+        });
+        break;
+      }
+    }
+
+    if (!icpAnswered) {
+      // Timeout: Captain proceeds with best judgment, logs assumption
+      const assumption = `ICP answer not received within 15 min. Proceeding with command context and defaults. Command: "${command || 'none'}"`;
+      await logsService.createLog(clientId, {
+        agent: 'director',
+        action: 'icp_preflight_timeout',
+        metadata: { plan_id, missing: missingIcpFields, assumption },
+      });
+      console.warn('[captain] ICP pre-flight timeout — proceeding with best judgment:', assumption);
+    }
+  }
+
+  // Post-ICP-check status update
+  await updateExecStatus(clientId, plan_id, {
+    status: 'executing',
+    phase: 'research',
+    beavers: {
+      research: { status: 'working', task: 'Starting lead search', found: 0, passed: 0 },
+      sales:    { status: 'idle', task: 'Waiting for leads', drafted: 0, approved: 0 },
+      enforcer: { status: 'idle', task: 'Waiting', reviewed: 0, rejected: 0 },
+      captain:  { status: 'done', task: 'ICP pre-flight complete', approved: 0 },
+    },
+    progress: { total: 0, complete: 0 },
+    started_at: new Date().toISOString(),
+  });
 
   // ── Step 1: Research Beaver ──────────────────────────────
   // Extract requested count from command if not passed explicitly
@@ -799,6 +980,20 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   if (verifiedLeads.length !== icpGatedLeads.length) {
     console.log(`[captain] ICP gate removed ${verifiedLeads.length - icpGatedLeads.length} leads (wrong geo/industry/size)`);
   }
+
+  // Update status: research phase counts
+  await updateExecStatus(clientId, plan_id, {
+    status: 'executing',
+    phase: 'research',
+    beavers: {
+      research: { status: 'working', task: `ICP gate: ${icpGatedLeads.length} leads passed`, found: rawLeads.length, passed: icpGatedLeads.length },
+      sales:    { status: 'idle', task: 'Waiting for leads', drafted: 0, approved: 0 },
+      enforcer: { status: 'idle', task: 'Waiting', reviewed: 0, rejected: 0 },
+      captain:  { status: 'working', task: 'Enriching leads', approved: 0 },
+    },
+    progress: { total: icpGatedLeads.length, complete: 0 },
+    started_at: new Date().toISOString(),
+  });
 
   // Mark source for transparency in approval queue
   const markedLeads = icpGatedLeads.map(lead => ({
@@ -963,81 +1158,187 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     };
   }
 
-  // ── Step 3: Sales Beaver (cap at 10) ─────────────────────
+  // ── Step 3 + 4: Sales Beaver + Ranger — streaming parallel handoff ─────────
+  // Each lead that passes Research gates immediately triggers Sales draft + Ranger review.
+  // Channels: email, linkedin_dm, instagram_dm — all unique per lead.
+  // Ranger retry: max 2 Sales rewrites. On 3rd attempt → Captain decides (skip or manual).
+
   const leadsToProcess = savedLeads.slice(0, 10);
   const savedMessages = [];
+  const MAX_RANGER_RETRIES = 2; // 2 Sales rewrites max; 3rd attempt = Captain decision
 
-  for (const lead of leadsToProcess) {
-    // Skip leads with no usable identity
-    if (!lead.id || !lead.name || lead.name === 'Unknown Contact') {
-      console.warn('[pipeline] Skipping lead with no identity:', lead.id, lead.name);
-      diagnostics.messages_failed++;
-      continue;
-    }
-    try {
-      const meta = lead.metadata || {};
-      const contextParts = [
-        `Name: ${lead.name}`,
-        `Company: ${lead.company}`,
-        `Title: ${lead.title || 'N/A'}`,
-      ];
-      const about = lead.short_description || meta.short_description;
-      if (about) contextParts.push(`About: ${about}`);
-      if (meta.signal) contextParts.push(`Signal (why reaching out now): ${meta.signal}`);
-      if (meta.angle) contextParts.push(`Angle to lead with: ${meta.angle}`);
-      if (meta.why_now) contextParts.push(`Why now: ${meta.why_now}`);
-      if (meta.friction) contextParts.push(`Friction point: ${meta.friction}`);
-      if (meta.notes) contextParts.push(`Personalisation hook: ${meta.notes}`);
-
-      const salesResult = await salesGenerate(clientId, {
-        lead_id: lead.id,
-        channel: 'email',
-        context: contextParts.join('\n') + memoryContext,
-      });
-
-      if (salesResult.error || !salesResult.body) {
-        console.warn('[pipeline] Sales draft failed for lead:', lead.name, salesResult.failure_reason || 'unknown');
-        diagnostics.messages_failed++;
-        continue; // skip to next lead
-      }
-      diagnostics.messages_drafted++;
-
-      const msgRes = await pool.query(
-        `INSERT INTO messages (client_id, lead_id, channel, subject, body, status)
-         VALUES ($1, $2, 'email', $3, $4, 'pending_ranger')
-         RETURNING *`,
-        [clientId, lead.id, salesResult.subject, salesResult.body]
-      );
-
-      const message = msgRes.rows[0];
-      savedMessages.push({ ...message, lead_name: lead.name, lead_company: lead.company });
-
-      await logsService.createLog(clientId, {
-        agent: 'sales_beaver',
-        action: 'message_created',
-        target_type: 'message',
-        target_id: message.id,
-        metadata: { lead_id: lead.id, lead_name: lead.name },
-      });
-    } catch (err) {
-      console.error('[pipeline] Sales failed for lead:', lead.name, err.message, err.detail || '');
-    }
-  }
-
-  // ── Step 4: Ranger review with Sales Beaver retry loop ───────
-  // If Ranger rejects, Sales Beaver rewrites using the feedback.
-  // Max 3 attempts per message before marking as ranger_rejected.
-  const MAX_RANGER_RETRIES = 3;
   let approvedCount = 0;
   let rejectedCount = 0;
 
-  for (const msg of savedMessages) {
+  // Tracker for live status updates
+  const execStatus = {
+    status: 'executing',
+    phase: 'sales',
+    beavers: {
+      research: { status: 'done', task: `${savedLeads.length} leads saved`, found: rawLeads.length, passed: savedLeads.length },
+      sales:    { status: 'working', task: 'Starting drafts', drafted: 0, approved: 0 },
+      enforcer: { status: 'idle', task: 'Waiting', reviewed: 0, rejected: 0 },
+      captain:  { status: 'idle', task: 'Waiting for Enforcer', approved: 0 },
+    },
+    progress: { total: leadsToProcess.length, complete: 0 },
+    started_at: new Date().toISOString(),
+  };
+  await updateExecStatus(clientId, plan_id, execStatus);
+
+  // ── Per-lead pipeline function (Sales draft + multi-channel + Ranger + Captain) ──
+  async function processLeadPipeline(lead) {
+    if (!lead.id || !lead.name || lead.name === 'Unknown Contact') {
+      console.warn('[pipeline] Skipping lead with no identity:', lead.id, lead.name);
+      diagnostics.messages_failed++;
+      execStatus.progress.complete++;
+      await updateExecStatus(clientId, plan_id, execStatus);
+      return;
+    }
+
+    const meta = lead.metadata || {};
+    const contextParts = [
+      `Name: ${lead.name}`,
+      `Company: ${lead.company}`,
+      `Title: ${lead.title || 'N/A'}`,
+    ];
+    const about = lead.short_description || meta.short_description;
+    if (about) contextParts.push(`About: ${about}`);
+    if (meta.signal) contextParts.push(`Signal (why reaching out now): ${meta.signal}`);
+    if (meta.angle) contextParts.push(`Angle to lead with: ${meta.angle}`);
+    if (meta.why_now) contextParts.push(`Why now: ${meta.why_now}`);
+    if (meta.friction) contextParts.push(`Friction point: ${meta.friction}`);
+    if (meta.notes) contextParts.push(`Personalisation hook: ${meta.notes}`);
+
+    // Sales Beaver status update
+    execStatus.beavers.sales.task = `Drafting for ${lead.name} @ ${lead.company}`;
+    execStatus.phase = 'sales';
+    await updateExecStatus(clientId, plan_id, execStatus);
+
+    // ── Multi-channel drafting: email, linkedin_dm, instagram_dm ──
+    // All three channels drafted in parallel — each unique angle/tone.
+    const CHANNELS = [
+      {
+        channel: 'email',
+        hint: 'Write a formal-ish cold email with a subject line. Full message structure including Hi [first name], greeting and Regards, sign-off. Specific observation + one question implying a problem. Under 80 words (body only).',
+      },
+      {
+        channel: 'linkedin_dm',
+        hint: 'Write a short conversational LinkedIn DM. No subject needed. Shorter than email — 2-3 sentences max. Different angle from email. Casual but professional tone. One question at the end.',
+      },
+      {
+        channel: 'instagram_dm',
+        hint: 'Write a casual Instagram DM. Reference something public they likely post about (their industry, their company wins, their role). Most casual of the three channels. Keep it under 40 words. Conversational. No hard sell.',
+      },
+    ];
+
+    const channelDrafts = await Promise.allSettled(
+      CHANNELS.map(({ channel, hint }) =>
+        salesGenerate(clientId, {
+          lead_id: lead.id,
+          channel,
+          context: contextParts.join('\n') + memoryContext + `\n\nCHANNEL INSTRUCTIONS: ${hint}`,
+        })
+      )
+    );
+
+    // Process each channel result
+    for (let ci = 0; ci < CHANNELS.length; ci++) {
+      const { channel } = CHANNELS[ci];
+      const draftResult = channelDrafts[ci];
+
+      if (draftResult.status === 'rejected' || !draftResult.value?.body) {
+        console.warn(`[pipeline] Sales draft failed for ${lead.name} (${channel}):`, draftResult.reason?.message || 'no body');
+        diagnostics.messages_failed++;
+        continue;
+      }
+
+      const salesResult = draftResult.value;
+      diagnostics.messages_drafted++;
+      execStatus.beavers.sales.drafted++;
+
+      try {
+        const msgRes = await pool.query(
+          `INSERT INTO messages (client_id, lead_id, channel, subject, body, status)
+           VALUES ($1, $2, $3, $4, $5, 'pending_ranger')
+           RETURNING *`,
+          [clientId, lead.id, channel, salesResult.subject || null, salesResult.body]
+        );
+
+        const message = msgRes.rows[0];
+        const msgWithMeta = { ...message, lead_name: lead.name, lead_company: lead.company };
+        savedMessages.push(msgWithMeta);
+
+        await logsService.createLog(clientId, {
+          agent: 'sales_beaver',
+          action: 'message_created',
+          target_type: 'message',
+          target_id: message.id,
+          metadata: { lead_id: lead.id, lead_name: lead.name, channel },
+        });
+
+        // ── Ranger review for this message ──
+        await runRangerPipeline(lead, msgWithMeta);
+      } catch (err) {
+        console.error('[pipeline] Sales insert/ranger failed for lead:', lead.name, channel, err.message);
+      }
+    }
+
+    execStatus.progress.complete++;
+    await updateExecStatus(clientId, plan_id, execStatus);
+  }
+
+  // ── Ranger review pipeline per message (2-rejection rule + Captain gate) ──
+  async function runRangerPipeline(lead, msg) {
     let currentBody = msg.body;
     let currentSubject = msg.subject;
     let finalApproved = false;
     let lastRangerResult = null;
 
-    for (let attempt = 1; attempt <= MAX_RANGER_RETRIES; attempt++) {
+    execStatus.beavers.enforcer.status = 'working';
+    execStatus.phase = 'enforcer';
+    execStatus.beavers.enforcer.task = `Reviewing ${msg.channel} for ${msg.lead_name}`;
+    await updateExecStatus(clientId, plan_id, execStatus);
+
+    for (let attempt = 1; attempt <= MAX_RANGER_RETRIES + 1; attempt++) {
+      // Attempt 3 (> MAX_RANGER_RETRIES) = Captain decision, no more Sales rewrites
+      if (attempt > MAX_RANGER_RETRIES) {
+        // Captain intervenes: skip this lead's message or flag for manual review
+        await pool.query(
+          `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'needs_manual_review', updated_at = NOW()
+           WHERE id = $3 AND client_id = $4`,
+          [
+            Math.round(lastRangerResult?.score || 0),
+            `Captain intervention after ${MAX_RANGER_RETRIES} failed QA attempts. Flagged for manual review.`,
+            msg.id,
+            clientId,
+          ]
+        );
+
+        await pool.query(
+          `UPDATE leads SET metadata = jsonb_set(COALESCE(metadata, '{}'), '{needs_manual_message}', 'true'), updated_at = NOW()
+           WHERE id = $1 AND client_id = $2`,
+          [msg.lead_id, clientId]
+        );
+
+        await logsService.createLog(clientId, {
+          agent: 'director',
+          action: 'captain_intervention',
+          target_type: 'message',
+          target_id: msg.id,
+          metadata: {
+            lead_name: msg.lead_name,
+            channel: msg.channel,
+            attempts_failed: MAX_RANGER_RETRIES,
+            decision: 'needs_manual_review',
+            ranger_history: lastRangerResult?.notes || null,
+          },
+        });
+
+        rejectedCount++;
+        execStatus.beavers.enforcer.rejected++;
+        break;
+      }
+
       try {
         const rangerResult = await rangerReview(clientId, {
           message_id: msg.id,
@@ -1045,6 +1346,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         });
         lastRangerResult = rangerResult;
 
+        execStatus.beavers.enforcer.reviewed++;
         let rangerApproved = rangerResult.approved === true;
         const rangerNotes = Array.isArray(rangerResult.issues) && rangerResult.issues.length > 0
           ? rangerResult.issues.join('; ')
@@ -1055,7 +1357,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           const gateFailures = [];
           const bodyText = currentBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
           const wordCount = bodyText.trim().split(/\s+/).length;
-          if (wordCount > 80) gateFailures.push(`Word count ${wordCount} exceeds 80-word limit`);
+          // Only enforce 80-word limit on email channel
+          if (msg.channel === 'email' && wordCount > 80) gateFailures.push(`Word count ${wordCount} exceeds 80-word limit`);
           const questionCount = (currentBody.match(/\?/g) || []).length;
           if (questionCount > 1) gateFailures.push(`${questionCount} questions detected (max 1)`);
           if (/\u2014/.test(currentBody)) gateFailures.push('Em dash detected');
@@ -1074,21 +1377,20 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           action: rangerApproved ? 'message_approved' : 'message_rejected',
           target_type: 'message',
           target_id: msg.id,
-          metadata: { score: rangerResult.score, approved: rangerApproved, attempt, notes: rangerNotes },
+          metadata: { score: rangerResult.score, approved: rangerApproved, attempt, notes: rangerNotes, channel: msg.channel },
         });
 
         if (rangerApproved) {
-          // If Ranger returned approve_with_edits, re-validate its suggested_edit against hard gates
+          // If Ranger returned approve_with_edits, re-validate suggested_edit against hard gates
           if (rangerResult.decision === 'approve_with_edits' && rangerResult.suggested_edit) {
             const editBody = rangerResult.suggested_edit;
             const editGateFailures = [];
             const editBodyText = editBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
-            if (editBodyText.trim().split(/\s+/).length > 80) editGateFailures.push('Word count exceeds 80 after edit');
+            if (msg.channel === 'email' && editBodyText.trim().split(/\s+/).length > 80) editGateFailures.push('Word count exceeds 80 after edit');
             if ((editBody.match(/\?/g) || []).length > 1) editGateFailures.push('Multiple questions after edit');
             if (/\u2014/.test(editBody)) editGateFailures.push('Em dash in suggested edit');
             if (/^[\s]*[-•*]\s/m.test(editBody)) editGateFailures.push('Bullet points in suggested edit');
             if (editGateFailures.length > 0) {
-              // Suggested edit still fails — reject and continue retry loop
               rangerApproved = false;
               rangerResult.approved = false;
               rangerResult.decision = 'reject';
@@ -1099,9 +1401,54 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
             }
           }
         }
+
         if (rangerApproved) {
-          // Safety net: strip em dashes from the final body no matter what
+          // Safety net: strip em dashes from the final body
           currentBody = stripEmDashes(currentBody);
+
+          // ── Captain final validation gate ──
+          execStatus.beavers.captain.status = 'working';
+          execStatus.beavers.captain.task = `Final QC for ${msg.lead_name}`;
+          execStatus.phase = 'captain';
+          await updateExecStatus(clientId, plan_id, execStatus);
+
+          const captainResult = await captainValidate(clientId, lead, { ...msg, body: currentBody });
+
+          if (!captainResult.valid) {
+            if (captainResult.fixed_body) {
+              // Captain rewrote it — use the fix
+              currentBody = captainResult.fixed_body;
+              await logsService.createLog(clientId, {
+                agent: 'director',
+                action: 'captain_rewrite',
+                target_type: 'message',
+                target_id: msg.id,
+                metadata: { notes: captainResult.notes, channel: msg.channel },
+              });
+            } else {
+              // Captain couldn't fix it — flag for manual review
+              await pool.query(
+                `UPDATE messages SET ranger_notes = $1, status = 'needs_manual_review', updated_at = NOW()
+                 WHERE id = $2 AND client_id = $3`,
+                [captainResult.notes, msg.id, clientId]
+              );
+              await logsService.createLog(clientId, {
+                agent: 'director',
+                action: 'captain_validation_failed',
+                target_type: 'message',
+                target_id: msg.id,
+                metadata: { notes: captainResult.notes, channel: msg.channel },
+              });
+              rejectedCount++;
+              execStatus.beavers.enforcer.rejected++;
+              execStatus.beavers.captain.status = 'done';
+              return;
+            }
+          }
+
+          execStatus.beavers.captain.status = 'done';
+          execStatus.beavers.captain.approved++;
+          execStatus.beavers.enforcer.status = 'done';
 
           // Save final approved body and push to approval queue
           await pool.query(
@@ -1121,148 +1468,99 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
             action: 'approval_requested',
             target_type: 'message',
             target_id: msg.id,
-            metadata: { message_id: msg.id, attempts_taken: attempt },
+            metadata: { message_id: msg.id, attempts_taken: attempt, channel: msg.channel },
           });
 
           finalApproved = true;
           approvedCount++;
-          break; // exit retry loop — message approved
+          execStatus.beavers.sales.approved++;
+          break; // exit retry loop
         }
 
-        // Ranger rejected — should Sales Beaver rewrite?
-        if (attempt < MAX_RANGER_RETRIES) {
-          // Update message status so logs reflect the rejection
-          await pool.query(
-            `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'pending_ranger', updated_at = NOW()
-             WHERE id = $3 AND client_id = $4`,
-            [Math.round(rangerResult.score || 0), rangerNotes, msg.id, clientId]
-          );
+        // Ranger rejected — attempt ≤ MAX_RANGER_RETRIES: Sales Beaver rewrites
+        await pool.query(
+          `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'pending_ranger', updated_at = NOW()
+           WHERE id = $3 AND client_id = $4`,
+          [Math.round(rangerResult.score || 0), rangerNotes, msg.id, clientId]
+        );
 
-          await logsService.createLog(clientId, {
-            agent: 'sales_beaver',
-            action: 'message_rewrite_triggered',
-            target_type: 'message',
-            target_id: msg.id,
-            metadata: { attempt, ranger_feedback: rangerNotes, lead_id: msg.lead_id },
-          });
+        await logsService.createLog(clientId, {
+          agent: 'sales_beaver',
+          action: 'message_rewrite_triggered',
+          target_type: 'message',
+          target_id: msg.id,
+          metadata: { attempt, ranger_feedback: rangerNotes, lead_id: msg.lead_id, channel: msg.channel },
+        });
 
-          // Sales Beaver rewrites using Ranger's rejection feedback
-          const leadContext = `Name: ${msg.lead_name || 'Unknown'}, Company: ${msg.lead_company || 'Unknown'}`;
-          const rewriteResult = await salesGenerate(clientId, {
-            lead_id: msg.lead_id,
-            channel: msg.channel || 'email',
-            context: `${leadContext}\n\nREWRITE REQUIRED (attempt ${attempt + 1}/${MAX_RANGER_RETRIES}).\n\nRanger rejected the previous message for these reasons:\n${rangerNotes}\n\nPrevious rejected message:\n${currentBody}\n\nRewrite the message fixing ALL of the above issues. Be specific, concise, no product pitch, no qualification questions, under 80 words.`,
-          });
+        // Sales Beaver rewrites using Ranger's specific feedback
+        const leadContext = `Name: ${msg.lead_name || 'Unknown'}, Company: ${msg.lead_company || 'Unknown'}`;
+        const rewriteResult = await salesGenerate(clientId, {
+          lead_id: msg.lead_id,
+          channel: msg.channel || 'email',
+          context: `${leadContext}\n\nREWRITE REQUIRED (attempt ${attempt + 1}/${MAX_RANGER_RETRIES + 1}).\n\nEnforcer rejected the previous message for these specific reasons:\n${rangerNotes}\n\nPrevious rejected message:\n${currentBody}\n\nRewrite the message fixing ALL of the above issues. Be specific, concise, no product pitch, no qualification questions${msg.channel === 'email' ? ', under 80 words' : ''}.`,
+        });
 
-          currentBody = rewriteResult.body || currentBody;
-          currentSubject = rewriteResult.subject || currentSubject;
+        currentBody = rewriteResult.body || currentBody;
+        currentSubject = rewriteResult.subject || currentSubject;
 
-          await logsService.createLog(clientId, {
-            agent: 'sales_beaver',
-            action: 'message_rewritten',
-            target_type: 'message',
-            target_id: msg.id,
-            metadata: { attempt: attempt + 1, rewrite_for_ranger: true },
-          });
-        }
+        await logsService.createLog(clientId, {
+          agent: 'sales_beaver',
+          action: 'message_rewritten',
+          target_type: 'message',
+          target_id: msg.id,
+          metadata: { attempt: attempt + 1, rewrite_for_ranger: true, channel: msg.channel },
+        });
       } catch (err) {
         console.error('[pipeline] Ranger/rewrite failed for message:', msg.id, `attempt ${attempt}`, err.message);
-        break; // don't loop on unexpected errors
+        break;
       }
     } // end retry loop
 
     if (!finalApproved) {
-      // All Sales Beaver attempts exhausted — Ranger now writes it from scratch
-      await logsService.createLog(clientId, {
-        agent: 'ranger',
-        action: 'ranger_draft_triggered',
-        target_type: 'message',
-        target_id: msg.id,
-        metadata: { attempts_failed: MAX_RANGER_RETRIES, lead_name: msg.lead_name },
-      });
+      // All retries + Captain intervention path already handled in attempt > MAX_RANGER_RETRIES block
+      // If we reach here without finalApproved and no captain intervention logged, mark rejected
+      const lastNotes = lastRangerResult
+        ? (Array.isArray(lastRangerResult.issues) && lastRangerResult.issues.length > 0
+            ? lastRangerResult.issues.join('; ')
+            : lastRangerResult.notes || 'Failed QA after max retries')
+        : 'All QA attempts exhausted';
 
-      // Pull lead details for context
-      let leadRow = null;
-      try {
-        const leadRes = await pool.query(
-          `SELECT title, metadata FROM leads WHERE id = $1 AND client_id = $2 LIMIT 1`,
-          [msg.lead_id, clientId]
-        );
-        leadRow = leadRes.rows[0] || null;
-      } catch {}
-
-      const rangerDraftResult = await rangerDraft(clientId, {
-        lead_name: msg.lead_name,
-        lead_company: msg.lead_company,
-        lead_title: leadRow?.title || null,
-        lead_angle: leadRow?.metadata?.angle || null,
-        lead_friction: leadRow?.metadata?.friction || null,
-        rejected_body: currentBody,
-      });
-
-      if (rangerDraftResult?.body) {
-        // Ranger's own draft — save and send to approval queue
-        await pool.query(
-          `UPDATE messages SET body = $1, subject = $2, ranger_score = 80, ranger_notes = $3,
-           status = 'pending_approval', updated_at = NOW()
-           WHERE id = $4 AND client_id = $5`,
-          [
-            rangerDraftResult.body,
-            rangerDraftResult.subject || currentSubject,
-            'Drafted by Ranger after 3 Sales Beaver attempts failed QA',
-            msg.id,
-            clientId,
-          ]
-        );
-
-        await pool.query(
-          `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'ranger')`,
-          [clientId, msg.id]
-        );
-
-        await logsService.createLog(clientId, {
-          agent: 'ranger',
-          action: 'ranger_draft_approved',
-          target_type: 'message',
-          target_id: msg.id,
-          metadata: { note: 'Ranger wrote this message after Sales Beaver failed 3 QA checks' },
-        });
-
-        finalApproved = true;
-        approvedCount++;
-      } else {
-        // Even Ranger's draft failed — mark lead for manual message
-        const finalNotes = lastRangerResult
-          ? (Array.isArray(lastRangerResult.issues) && lastRangerResult.issues.length > 0
-              ? lastRangerResult.issues.join('; ')
-              : lastRangerResult.notes || 'Failed QA after max retries + Ranger draft')
-          : 'All QA attempts exhausted';
-
+      // Only update if not already set to needs_manual_review or ranger_rejected
+      const currentStatus = await pool.query(
+        `SELECT status FROM messages WHERE id = $1 AND client_id = $2 LIMIT 1`,
+        [msg.id, clientId]
+      );
+      const msgStatus = currentStatus.rows[0]?.status;
+      if (msgStatus !== 'needs_manual_review' && msgStatus !== 'ranger_rejected' && msgStatus !== 'pending_approval') {
         await pool.query(
           `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'ranger_rejected', updated_at = NOW()
            WHERE id = $3 AND client_id = $4`,
-          [Math.round(lastRangerResult?.score || 0), finalNotes, msg.id, clientId]
+          [Math.round(lastRangerResult?.score || 0), lastNotes, msg.id, clientId]
         );
-
-        // Flag the lead so user knows it needs a manual message
-        await pool.query(
-          `UPDATE leads SET metadata = jsonb_set(COALESCE(metadata, '{}'), '{needs_manual_message}', 'true'), updated_at = NOW()
-           WHERE id = $1 AND client_id = $2`,
-          [msg.lead_id, clientId]
-        );
-
-        await logsService.createLog(clientId, {
-          agent: 'ranger',
-          action: 'message_rejected_final',
-          target_type: 'message',
-          target_id: msg.id,
-          metadata: { attempts: MAX_RANGER_RETRIES, ranger_draft_failed: true, final_notes: finalNotes, lead_needs_manual: true },
-        });
-
         rejectedCount++;
+        execStatus.beavers.enforcer.rejected++;
       }
     }
   }
+
+  // ── Run pipeline: process leads sequentially (each lead triggers parallel channel drafts) ──
+  for (const lead of leadsToProcess) {
+    await processLeadPipeline(lead);
+  }
+
+  // Final status update: pipeline complete
+  await updateExecStatus(clientId, plan_id, {
+    status: 'completed',
+    phase: 'captain',
+    beavers: {
+      research: { status: 'done', task: `${savedLeads.length} leads found`, found: rawLeads.length, passed: savedLeads.length },
+      sales:    { status: 'done', task: `${diagnostics.messages_drafted} messages drafted`, drafted: diagnostics.messages_drafted, approved: approvedCount },
+      enforcer: { status: 'done', task: `${approvedCount} approved, ${rejectedCount} rejected`, reviewed: diagnostics.messages_drafted, rejected: rejectedCount },
+      captain:  { status: 'done', task: `${approvedCount} queued for your approval`, approved: approvedCount },
+    },
+    progress: { total: leadsToProcess.length, complete: leadsToProcess.length },
+    started_at: new Date().toISOString(),
+  });
 
   await logsService.createLog(clientId, {
     agent: 'director',
@@ -1288,8 +1586,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     diagnostics,
     results: [
       { step: 1, agent: 'research_beaver', status: 'completed', result: `${savedLeads.length} lead${savedLeads.length !== 1 ? 's' : ''} found & saved` },
-      { step: 2, agent: 'sales_beaver', status: 'completed', result: `${savedMessages.length} message${savedMessages.length !== 1 ? 's' : ''} drafted` },
-      { step: 3, agent: 'ranger', status: 'completed', result: `${approvedCount} approved${rejectedCount > 0 ? `, ${rejectedCount} failed after ${MAX_RANGER_RETRIES} rewrites` : ''}` },
+      { step: 2, agent: 'sales_beaver', status: 'completed', result: `${savedMessages.length} message${savedMessages.length !== 1 ? 's' : ''} drafted (email + linkedin_dm + instagram_dm per lead)` },
+      { step: 3, agent: 'ranger', status: 'completed', result: `${approvedCount} approved${rejectedCount > 0 ? `, ${rejectedCount} flagged (manual review or rejected after ${MAX_RANGER_RETRIES} rewrites)` : ''}` },
       { step: 4, agent: 'director', status: approvedCount > 0 ? 'completed' : 'pending', result: approvedCount > 0 ? `${approvedCount} message${approvedCount !== 1 ? 's' : ''} in approval queue` : 'All messages failed Ranger QA — check Memory for rejection patterns' },
     ],
   };
@@ -1486,4 +1784,7 @@ module.exports = {
   getMemory,
   logMistake,
   getRangerRejectionPatterns,
+  // Pipeline helpers
+  updateExecStatus,
+  captainValidate,
 };
