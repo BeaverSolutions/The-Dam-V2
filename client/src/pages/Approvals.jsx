@@ -65,7 +65,7 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, tab, gmailConnected
         <div>
           <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{approval.lead_name || 'Unknown'}</div>
           <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
-            {approval.lead_company || '—'}
+            {(approval.lead_company && approval.lead_company !== 'Unknown') ? approval.lead_company : '—'}
             {approval.lead_title && <span style={{ marginLeft: '0.4rem' }}>· {approval.lead_title}</span>}
             {approval.lead_email && <span style={{ marginLeft: '0.4rem' }}>· {approval.lead_email}</span>}
           </div>

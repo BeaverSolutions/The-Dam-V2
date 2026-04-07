@@ -642,6 +642,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
     raw_from_research: 0,
     after_title_filter: 0,
     after_verification_gate: 0,
+    after_icp_gate: 0,
     after_dedup: 0,
     saved: 0,
     messages_drafted: 0,
@@ -718,8 +719,72 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
 
   diagnostics.after_verification_gate = verifiedLeads.length;
 
+  // ── Step 1b-ii: Captain — ICP geography + industry gate ──
+  // Rejects leads that clearly violate ICP disqualifiers:
+  // wrong geography (outside Klang Valley) or wrong industry.
+  const icpLocation = (icpMemory?.location || icpMemory?.geography || '').toLowerCase();
+  const isKLFocused = !icpLocation || /klang|kuala lumpur|kl|selangor|malaysia/i.test(icpLocation);
+
+  // Non-KL geographies — reject if any appear in company/title/snippet/location
+  const NON_TARGET_GEO = /\bsingapore\b|\bsg\b|jakarta|indonesia|bangkok|thailand|\blondon\b|sydney|australia|manila|philippines|vietnam|myanmar|cambodia|india\b|hong kong|\bhk\b/i;
+
+  // Excluded industries from ICP disqualifiers
+  const EXCLUDED_INDUSTRIES = /hospital|clinic|medical centre|healthcare|pharmacy|polyclinic|hotel|resort|restaurant|hospitality|retail|e-commerce|ecommerce|supermarket|hypermarket|ministry|government|jabatan|polis|army|military/i;
+
+  // Large multinationals — too big, already have sales teams
+  const LARGE_CORPS = /\bwpp\b|publicis|omnicom|interpublic|\bbbdo\b|ogilvy|mccann|\bvml\b|dentsu|havas|grey group|leo burnett|saatchi|ddb\b|tbwa|jwt\b|deloitte|mckinsey|pwc\b|kpmg\b|ey\b|accenture|boston consulting|bain\b|shell\b|petronas|tenaga|maybank|cimb|rhb\b|public bank|hong leong|sime darby|axiata|celcom|maxis\b|digi\b|unilever|nestle|procter|p&g\b|samsung|lg\b|sony\b|panasonic/i;
+
+  const icpGatedLeads = verifiedLeads.filter(lead => {
+    const searchText = [
+      lead.company || '',
+      lead.title || '',
+      lead.snippet || '',
+      lead.location || '',
+    ].join(' ');
+
+    // Geography check (only enforce if ICP is KL-focused)
+    if (isKLFocused && NON_TARGET_GEO.test(searchText)) {
+      console.warn(`[captain] ICP geo reject: ${lead.name} at ${lead.company} — non-KL indicator found`);
+      logsService.createLog(clientId, {
+        agent: 'director',
+        action: 'lead_skipped_icp',
+        metadata: { name: lead.name, company: lead.company, reason: 'outside_target_geography' },
+      }).catch(() => {});
+      return false;
+    }
+
+    // Industry exclusion
+    if (EXCLUDED_INDUSTRIES.test(searchText)) {
+      console.warn(`[captain] ICP industry reject: ${lead.name} at ${lead.company} — excluded industry`);
+      logsService.createLog(clientId, {
+        agent: 'director',
+        action: 'lead_skipped_icp',
+        metadata: { name: lead.name, company: lead.company, reason: 'excluded_industry' },
+      }).catch(() => {});
+      return false;
+    }
+
+    // Large multinational check
+    if (LARGE_CORPS.test(searchText)) {
+      console.warn(`[captain] ICP size reject: ${lead.name} at ${lead.company} — large multinational`);
+      logsService.createLog(clientId, {
+        agent: 'director',
+        action: 'lead_skipped_icp',
+        metadata: { name: lead.name, company: lead.company, reason: 'large_multinational' },
+      }).catch(() => {});
+      return false;
+    }
+
+    return true;
+  });
+
+  diagnostics.after_icp_gate = icpGatedLeads.length;
+  if (verifiedLeads.length !== icpGatedLeads.length) {
+    console.log(`[captain] ICP gate removed ${verifiedLeads.length - icpGatedLeads.length} leads (wrong geo/industry/size)`);
+  }
+
   // Mark source for transparency in approval queue
-  const markedLeads = verifiedLeads.map(lead => ({
+  const markedLeads = icpGatedLeads.map(lead => ({
     ...lead,
     metadata: {
       ...(lead.metadata || {}),
