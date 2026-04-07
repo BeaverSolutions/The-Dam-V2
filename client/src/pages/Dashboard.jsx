@@ -782,11 +782,8 @@ export default function Dashboard() {
       {/* Integration chips */}
       <IntegrationChips integrations={stats.integrations} loading={statsLoading} />
 
-      {/* Crew Status — KPI cards per beaver */}
-      <BeaverStatusBoard execStatus={null} />
-
-      {/* Agent Office Strip */}
-      <AgentOfficeStrip agentLogs={agentLogs} liveLogs={liveLogs} />
+      {/* Crew Status — KPI cards + live feed */}
+      <BeaverStatusBoard execStatus={null} agentLogs={agentLogs} liveLogs={liveLogs} />
 
       {/* Stats Row */}
       <div className="grid-4" style={{ marginBottom: '1.25rem' }}>
