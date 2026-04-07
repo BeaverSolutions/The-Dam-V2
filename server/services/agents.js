@@ -9,6 +9,7 @@ const logsService = require('./logs');
 const pool = require('../db/pool');
 const apolloService = require('./apollo');
 const hunterService = require('./hunter');
+const researchModule = require('./research');
 const { getClientConfig, buildClientContext } = require('./clientConfig');
 
 let callAgent;
@@ -145,7 +146,7 @@ async function researchSearch(clientId, { query, filters = {} }) {
 
   let leads = [];
 
-  // Try Apollo first — real verified data
+  // Try Apollo first — real verified data with 275M contacts
   try {
     const apolloLeads = await apolloService.searchPeople(clientId, { query, limit: filters.limit || 5 });
     if (apolloLeads && apolloLeads.length > 0) {
@@ -156,77 +157,41 @@ async function researchSearch(clientId, { query, filters = {} }) {
       };
     }
   } catch (err) {
-    console.warn('[research_beaver] Apollo search failed, trying Serper:', err.message);
+    console.warn('[research_beaver] Apollo unavailable, using multi-source research:', err.message);
   }
 
-  // Serper fallback — Google search for real LinkedIn profiles
-  // Returns verified LinkedIn URLs even without Apollo
+  // Multi-source research — Serper (people, signal, company) + Hunter domain search
+  // Rotates through 300+ query variations so dedup never exhausts the pool
   try {
-    const serperService = require('./serper');
+    console.log(`[research_beaver] Running multi-source research (batch ${batchIndex})`);
+    const result = await researchModule.researchLeads(clientId, {
+      icpMemory,
+      targetCount: filters.limit || 5,
+      batchIndex,
+    });
 
-    // Build a clean, targeted search query from the ICP — NOT the full brief.
-    // The full brief is 500 words; Google needs 5-8 keywords max.
-    // batchIndex rotates the title and industry so each batch returns different people.
-    const icpLocation = icpMemory?.location || icpMemory?.geography || 'Kuala Lumpur Malaysia';
-    const icpTitlesRaw = icpMemory?.job_titles || icpMemory?.who || 'Founder,CEO,Director,MD,Owner';
-    const icpIndustryRaw = icpMemory?.industries || '';
+    const leads = result.leads || [];
+    console.log(`[research_beaver] Multi-source returned ${leads.length} leads via ${result.queriesUsed?.length || 0} queries`);
 
-    // Distil to a clean LinkedIn search query
-    const locationTag = icpLocation.includes('Klang') || icpLocation.includes('KL') || icpLocation.includes('Malaysia')
-      ? 'Kuala Lumpur Malaysia'
-      : icpLocation;
-
-    // Parse title and industry lists for rotation
-    let titleList = typeof icpTitlesRaw === 'string'
-      ? icpTitlesRaw.split(/[,/]/).map(s => s.trim()).filter(Boolean)
-      : Array.isArray(icpTitlesRaw) ? icpTitlesRaw.filter(Boolean) : [];
-    if (titleList.length === 0) titleList = ['Founder', 'CEO'];
-
-    let industryList = typeof icpIndustryRaw === 'string'
-      ? icpIndustryRaw.split(/[,/]/).map(s => s.trim()).filter(Boolean)
-      : Array.isArray(icpIndustryRaw) ? icpIndustryRaw.filter(Boolean) : [];
-    // industryList can be empty — we just search by title+location
-
-    // Rotate by batchIndex so each batch targets a different title+industry combo
-    const titleTag    = titleList[batchIndex % titleList.length] || 'Founder CEO';
-    const industryTag = industryList.length > 0 ? (industryList[batchIndex % industryList.length] || '') : '';
-
-    let serperQuery = [titleTag, industryTag, locationTag].filter(Boolean).join(' ');
-
-    // Validate query is meaningful — not just a location string
-    if (serperQuery.length < 10) {
-      console.warn(`[research] Serper query too short (${serperQuery.length} chars), defaulting to broader search`);
-      serperQuery = `Founder CEO ${locationTag}`;
-    }
-    console.log('[research] Serper query:', serperQuery);
-    console.log(`[research_beaver] Serper query (batch ${batchIndex}): "${serperQuery}"`);
-
-    const serperLeads = await serperService.searchLinkedInProfiles(serperQuery, filters.limit || 5);
-    if (serperLeads && serperLeads.length > 0) {
-      console.log(`[research_beaver] Serper returned ${serperLeads.length} real LinkedIn profiles for: "${serperQuery}"`);
-      // Return raw Serper data ONLY — no Claude enrichment.
-      // Claude enrichment was contaminating company names from session context.
-      // Sales Beaver will use the signal/angle from the ICP brief instead.
-      // MJ verifies via the LinkedIn link in the approval queue before approving.
+    if (leads.length > 0) {
       return {
         success: true,
-        data: { leads: serperLeads, query: serperQuery, filters, source: 'serper' },
+        data: { leads, query: result.queriesUsed?.join(' | ') || query, filters, source: 'multi' },
       };
     }
+
+    console.warn('[research_beaver] Multi-source returned 0 leads — all queries may be exhausted or APIs unavailable');
   } catch (err) {
-    console.warn('[research_beaver] Serper search failed, falling back to Claude:', err.message);
+    console.warn('[research_beaver] Multi-source research failed:', err.message);
   }
 
-  // Claude fallback disabled — returns fabricated companies
-  // Better to return 0 real leads than 20 fake ones
-  console.log('[research] Serper returned 0 results. Claude fallback disabled for lead sourcing.');
   await logsService.createLog(clientId, {
     agent: 'research_beaver',
     action: 'research_no_results',
     target_type: 'system',
-    metadata: { query: query?.substring?.(0, 200), source: 'serper', serper_results: 0, note: 'Claude fallback disabled to prevent fake companies' },
+    metadata: { query: query?.substring?.(0, 200), source: 'multi', note: 'All sources returned 0 results' },
   });
-  return { success: true, data: { leads: [], query, filters, source: 'serper', note: 'No results from Serper. Try different keywords.' } };
+  return { success: true, data: { leads: [], query, filters, source: 'multi', note: 'No results from any source. Check API keys and ICP config.' } };
 
   /* ── Claude fallback (DISABLED — fabricates companies) ──────────
    * Kept for potential re-enablement for enrichment (not sourcing).
@@ -714,7 +679,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0 }) {
   // If a lead came from Claude fallback (not Apollo) and has no linkedin_url,
   // it cannot be verified and must be skipped to prevent hallucinated outreach.
   const researchSource = researchResult?.data?.source || 'claude';
-  const isVerifiedSource = researchSource === 'apollo' || researchSource === 'serper';
+  const isVerifiedSource = researchSource === 'apollo' || researchSource === 'serper' || researchSource === 'multi';
   // ── Captain: ICP title filter ─────────────────────────────
   // Reject leads whose title clearly doesn't match ICP seniority.
   // We want decision-makers: Founder, CEO, MD, Director, Co-Founder, Head of, VP, Owner.

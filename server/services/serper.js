@@ -142,4 +142,155 @@ async function searchLinkedInProfiles(query, limit = 5) {
   }
 }
 
-module.exports = { searchLinkedInProfiles };
+/**
+ * Search Google for LinkedIn company pages matching an industry + location.
+ * Used by Strategy 2 (company-first) in research.js.
+ *
+ * @param {string} query   - e.g. "digital agency Kuala Lumpur"
+ * @param {number} limit   - how many companies to return
+ * @returns {Array}        - array of { company, website, snippet }
+ */
+async function searchLinkedInCompanies(query, limit = 5) {
+  if (!axios) return [];
+  const apiKey = process.env.SERPER_API_KEY;
+  if (!apiKey) {
+    console.warn('[serper] SERPER_API_KEY not set — skipping company search');
+    return [];
+  }
+
+  const hasLocation = /malaysia|kuala lumpur|\bkl\b|selangor|klang/i.test(query);
+  const locationSuffix = hasLocation ? '' : ' "Kuala Lumpur" OR "Malaysia"';
+  const searchQuery = `site:linkedin.com/company ${query}${locationSuffix}`;
+
+  console.log('[serper] Company search query:', searchQuery);
+
+  try {
+    const resp = await axios.post(
+      SERPER_URL,
+      { q: searchQuery, num: Math.min(limit * 2, 10), gl: 'my', hl: 'en' },
+      {
+        headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+        timeout: 10000,
+      }
+    );
+
+    const results = resp.data?.organic || [];
+
+    return results
+      .filter(r => r.link?.includes('linkedin.com/company/'))
+      .slice(0, limit)
+      .map(r => {
+        // Title format: "Company Name | LinkedIn" or "Company Name - Industry | LinkedIn"
+        const raw = (r.title || '').replace(/\s*\|?\s*LinkedIn\s*$/, '').trim();
+        const parts = raw.split(' - ');
+        const company = parts[0]?.trim() || raw;
+
+        // Try to extract website from snippet
+        const websiteMatch = (r.snippet || '').match(/(?:www\.)?([\w-]+\.(com|my|io|co))/i);
+        const website = websiteMatch ? websiteMatch[0].replace(/^www\./, '') : null;
+
+        return {
+          company,
+          website,
+          linkedin_company_url: (r.link || '').split('?')[0].replace(/\/$/, ''),
+          snippet: r.snippet || '',
+        };
+      })
+      .filter(c => c.company && c.company.length > 1);
+  } catch (err) {
+    console.error('[serper] Company search failed:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Signal-based LinkedIn search — finds people by activity/trigger keywords.
+ * e.g. site:linkedin.com/in "Kuala Lumpur" "Founder" "hiring"
+ *
+ * @param {string} query   - e.g. '"Founder" "Kuala Lumpur" "hiring"'
+ * @param {number} limit
+ * @returns {Array}        - same shape as searchLinkedInProfiles
+ */
+async function searchBySignal(query, limit = 5) {
+  if (!axios) return [];
+  const apiKey = process.env.SERPER_API_KEY;
+  if (!apiKey) {
+    console.warn('[serper] SERPER_API_KEY not set — skipping signal search');
+    return [];
+  }
+
+  const searchQuery = `site:linkedin.com/in ${query}`;
+  console.log('[serper] Signal search query:', searchQuery);
+
+  try {
+    const resp = await axios.post(
+      SERPER_URL,
+      { q: searchQuery, num: Math.min(limit * 2, 10), gl: 'my', hl: 'en' },
+      {
+        headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+        timeout: 10000,
+      }
+    );
+
+    const results = resp.data?.organic || [];
+
+    const parsed = results
+      .filter(r => r.link?.includes('linkedin.com/in/'))
+      .slice(0, limit * 2)
+      .map(r => {
+        const titleLine = (r.title || '')
+          .replace(/\s*\|?\s*LinkedIn\s*$/, '')
+          .trim();
+
+        let parts = titleLine.split(' - ');
+        let name = parts[0]?.trim() || '';
+        let rest = parts.length > 1 ? parts.slice(1).join(' - ').trim() : '';
+
+        if (!rest && titleLine.includes(' - ')) {
+          const lastDash = titleLine.lastIndexOf(' - ');
+          name = titleLine.substring(0, lastDash).trim();
+          rest = titleLine.substring(lastDash + 3).trim();
+        }
+
+        if (!name) name = titleLine;
+
+        const atIdx = rest.toLowerCase().indexOf(' at ');
+        const title = atIdx > -1 ? rest.substring(0, atIdx).trim() : rest;
+        let company = atIdx > -1 ? rest.substring(atIdx + 4).trim() : 'Unknown';
+        if (!company) company = 'Unknown';
+
+        const linkedinUrl = (r.link || '').split('?')[0].replace(/\/$/, '');
+
+        return {
+          name,
+          title,
+          company,
+          linkedin_url: linkedinUrl,
+          email: '',
+          snippet: r.snippet || '',
+          verified: true,
+          data_source: 'serper_signal',
+        };
+      })
+      .filter(l => {
+        if (!l.name || l.name.length < 2) return false;
+        if (!/^https?:\/\/([a-z]{2,}\.)?linkedin\.com\/in\//.test(l.linkedin_url)) return false;
+        if (/View the profiles of people named/i.test(l.snippet)) return false;
+        return true;
+      });
+
+    const seen = new Set();
+    return parsed
+      .filter(l => {
+        if (seen.has(l.linkedin_url)) return false;
+        seen.add(l.linkedin_url);
+        return true;
+      })
+      .slice(0, limit);
+  } catch (err) {
+    console.error('[serper] Signal search failed:', err.message);
+    return [];
+  }
+}
+
+module.exports = { searchLinkedInProfiles, searchLinkedInCompanies, searchBySignal };
