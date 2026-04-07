@@ -542,6 +542,56 @@ async function directorPlan(clientId, { command }) {
     buildDirectorMemoryBrief(clientId),
   ]);
 
+  // ── MyClaw as Captain Beaver (Option B) ──────────────────
+  // When MYCLAW_WEBHOOK_URL is configured, MyClaw handles planning
+  // with full strategic context. Falls back to Claude if unavailable.
+  const myclaw = require('./myclaw');
+
+  if (myclaw.isConfigured()) {
+    try {
+      const result = await myclaw.myClawPlan({
+        command,
+        clientId,
+        icp,
+        persona,
+        memory_brief: memoryBrief,
+        requested_count: requestedCount,
+      });
+
+      if (result?.status === 'clarification_needed') {
+        return {
+          plan_id: planId,
+          command,
+          status: 'clarification_needed',
+          message: result.question || result.message || 'Need more context before briefing the crew.',
+        };
+      }
+
+      if (result?.steps || result?.interpretation) {
+        return {
+          plan_id: planId,
+          command,
+          interpretation: result.interpretation || command,
+          steps: result.steps || [
+            { step: 1, agent: 'research_beaver', action: 'Search for leads', status: 'pending' },
+            { step: 2, agent: 'sales_beaver', action: 'Generate outreach', status: 'pending' },
+            { step: 3, agent: 'ranger', action: 'Quality check', status: 'pending' },
+            { step: 4, agent: 'director', action: 'Queue for approval', status: 'pending' },
+          ],
+          status: 'pending_approval',
+          estimated_leads: result.estimated_leads || requestedCount,
+          estimated_time: result.estimated_time || '~5 min',
+          source: 'myclaw',
+        };
+      }
+
+      console.warn('[myclaw] Plan response missing steps/interpretation, falling back to Claude');
+    } catch (err) {
+      console.warn('[myclaw] Plan failed, falling back to Claude:', err.message);
+    }
+  }
+
+  // ── Claude fallback (original Captain Beaver) ─────────────
   if (callAgent) {
     try {
       const icpContext = Object.keys(icp).length > 0
@@ -551,7 +601,6 @@ async function directorPlan(clientId, { command }) {
       const fileContext = buildClientContext(fileConfig);
       const result = await callAgent('director', command + icpContext + personaContext + fileContext + memoryBrief);
 
-      // Director is asking for missing info before it can build a plan
       if (result?.status === 'clarification_needed') {
         return {
           plan_id: planId,
@@ -1464,7 +1513,16 @@ async function directorBrief(clientId) {
 
   let summary = `You have ${stats.total_leads} leads in the pipeline, ${stats.messages_sent} messages generated, and ${stats.pending_approvals} approval${stats.pending_approvals !== 1 ? 's' : ''} waiting for your review.`;
 
-  if (callAgent) {
+  // MyClaw brief (strategic context) → Claude fallback
+  const myClawSvc = require('./myclaw');
+  if (myClawSvc.isConfigured()) {
+    try {
+      const result = await myClawSvc.myClawBrief({ clientId, stats, recent_activity: logsRes.rows });
+      if (result?.summary) { summary = result.summary; }
+    } catch { /* fall through to Claude */ }
+  }
+
+  if (summary === `You have ${stats.total_leads} leads in the pipeline, ${stats.messages_sent} messages generated, and ${stats.pending_approvals} approval${stats.pending_approvals !== 1 ? 's' : ''} waiting for your review.` && callAgent) {
     try {
       const result = await callAgent(
         'director',
