@@ -46,6 +46,13 @@ async function startDiscordBot() {
         if (!message.guild) return;                // ignore DMs
         if (message.content === '!ping') {
           await message.reply('pong');
+        } else if (message.content === '!status') {
+          const env = process.env.NODE_ENV || 'development';
+          const token = config.discord.token ? 'loaded' : 'missing';
+          const guild = process.env.DISCORD_GUILD_ID || 'not set';
+          await message.reply(
+            `Bot: online\nApp: The Dam v2\nEnvironment: ${env}\nDiscord token: ${token}\nGuild ID: ${guild}`
+          );
         }
       } catch (err) {
         logger.error({ msg: 'Discord message handler error', err: err.message });
