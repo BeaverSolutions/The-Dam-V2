@@ -356,14 +356,15 @@ export default function BeaverStatusBoard({ execStatus, kpis: kpisProp, agentLog
 
       <div className="bsb-wrap">
         {/* 4 beaver cards */}
-        <div>
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
           <div style={{
             fontSize: '0.6rem', fontWeight: 700, color: 'var(--text-muted)',
             textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.5rem',
+            flexShrink: 0,
           }}>
             Crew Status
           </div>
-          <div className="bsb-grid">
+          <div className="bsb-grid" style={{ flex: 1 }}>
             {BEAVERS.map(beaver => (
               <BeaverCard
                 key={beaver.key}
@@ -377,9 +378,17 @@ export default function BeaverStatusBoard({ execStatus, kpis: kpisProp, agentLog
           </div>
         </div>
 
-        {/* Live feed panel */}
-        <div className="card" style={{ padding: '0.875rem', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          <LiveFeed logs={liveLogs} />
+        {/* Live feed panel — invisible spacer matches label height so card aligns with cards */}
+        <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+          <div style={{
+            fontSize: '0.6rem', fontWeight: 700, marginBottom: '0.5rem',
+            flexShrink: 0, visibility: 'hidden', userSelect: 'none',
+          }}>
+            Crew Status
+          </div>
+          <div className="card" style={{ padding: '0.875rem', display: 'flex', flexDirection: 'column', flex: 1 }}>
+            <LiveFeed logs={liveLogs} />
+          </div>
         </div>
       </div>
     </>
