@@ -4,6 +4,7 @@ const router = require('express').Router();
 const { body, param } = require('express-validator');
 const validate = require('../middleware/validate');
 const agentsService = require('../services/agents');
+const pool = require('../db/pool');
 
 router.post('/research/search',
   [body('query').notEmpty().trim(), validate],
@@ -97,8 +98,53 @@ router.post('/director/execute',
   [body('plan_id').isUUID(), body('command').optional().trim(), validate],
   async (req, res, next) => {
     try {
-      const result = await agentsService.directorExecute(req.clientId, req.body);
-      res.json({ data: result });
+      const clientId = req.clientId;
+      const { plan_id } = req.body;
+      const execKey = `exec_${plan_id}`;
+
+      // Store executing state immediately
+      await pool.query(
+        `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+         VALUES ($1, 'director', $2, $3::jsonb, 'operational')
+         ON CONFLICT (client_id, agent, key)
+         DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
+        [clientId, execKey, JSON.stringify({ status: 'executing', started_at: new Date().toISOString() })]
+      );
+
+      // Return immediately — don't block the HTTP request
+      res.json({ data: { status: 'executing', plan_id } });
+
+      // Run pipeline in background, store result when done
+      agentsService.directorExecute(clientId, req.body)
+        .then(result => pool.query(
+          `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+           VALUES ($1, 'director', $2, $3::jsonb, 'operational')
+           ON CONFLICT (client_id, agent, key)
+           DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
+          [clientId, execKey, JSON.stringify({ status: 'completed', result, completed_at: new Date().toISOString() })]
+        ))
+        .catch(err => pool.query(
+          `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+           VALUES ($1, 'director', $2, $3::jsonb, 'operational')
+           ON CONFLICT (client_id, agent, key)
+           DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
+          [clientId, execKey, JSON.stringify({ status: 'failed', error: err.message, failed_at: new Date().toISOString() })]
+        ).catch(() => {}));
+    } catch (err) { next(err); }
+  }
+);
+
+// Poll endpoint — frontend calls every 3s to check execution status
+router.get('/director/execute/:plan_id',
+  [param('plan_id').isUUID(), validate],
+  async (req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'director' AND key = $2 LIMIT 1`,
+        [req.clientId, `exec_${req.params.plan_id}`]
+      );
+      if (!result.rows.length) return res.json({ data: { status: 'not_found' } });
+      res.json({ data: result.rows[0].content });
     } catch (err) { next(err); }
   }
 );

@@ -180,8 +180,13 @@ function Message({ msg }) {
           </div>
         )}
         {msg.plan?.resolved === 'approved' && (
-          <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: 'var(--lime)' }}>
-            <Check size={10} style={{ display: 'inline', marginRight: 4 }} />Plan approved — crew is executing
+          <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: 'var(--lime)', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+            <div style={{ display: 'flex', gap: 3 }}>
+              {[0,1,2].map(i => (
+                <div key={i} className="skeleton" style={{ width: 5, height: 5, borderRadius: '50%', animationDelay: `${i * 0.15}s`, background: 'var(--lime)' }} />
+              ))}
+            </div>
+            Crew is working — results will appear below when done
           </div>
         )}
         {msg.plan?.resolved === 'rejected' && (
@@ -249,6 +254,12 @@ export default function Chat() {
   const [messages, setMessages] = useState(loadMessages);
   const [input, setInput] = useState('');
   const bottomRef = useRef(null);
+  const activePolls = useRef(new Map()); // plan_id → interval id
+
+  // Clean up all polling intervals on unmount
+  useEffect(() => {
+    return () => { activePolls.current.forEach(id => clearInterval(id)); };
+  }, []);
 
   // Persist messages to sessionStorage whenever they change
   useEffect(() => {
@@ -295,33 +306,66 @@ export default function Chat() {
           ));
 
           if (resolution === 'approved') {
+            const showResult = (data) => {
+              const { results, leads, summary, diagnostics, leads_found, messages_drafted, messages_failed } = data;
+              const mergedSummary = {
+                ...summary,
+                leads_found: leads_found ?? summary?.leads_found ?? leads?.length ?? 0,
+                messages_drafted: messages_drafted ?? summary?.messages_drafted ?? 0,
+                messages_failed: messages_failed ?? 0,
+                pending_approvals: summary?.pending_approvals ?? summary?.approved ?? 0,
+              };
+              setMessages(prev => [...prev, {
+                id: Date.now(),
+                role: 'assistant',
+                content: (mergedSummary.leads_found > 0)
+                  ? 'The crew executed the plan. Here\'s the status:'
+                  : diagnostics?.reason || 'The crew executed the plan but found no leads matching your criteria.',
+                results,
+                leads,
+                summary: mergedSummary,
+                diagnostics,
+              }]);
+            };
+
             request('/agents/director/execute', {
               method: 'POST',
               body: JSON.stringify({ plan_id: plan.plan_id, command: cmd, limit: plan.estimated_leads }),
             }).then(execRes => {
-              if (execRes?.data) {
-                const { results, leads, summary, diagnostics, leads_found, messages_drafted, messages_failed } = execRes.data;
-                const mergedSummary = {
-                  ...summary,
-                  leads_found: leads_found ?? summary?.leads_found ?? leads?.length ?? 0,
-                  messages_drafted: messages_drafted ?? summary?.messages_drafted ?? 0,
-                  messages_failed: messages_failed ?? 0,
-                  pending_approvals: summary?.pending_approvals ?? summary?.approved ?? 0,
-                };
-                const leadsFound = mergedSummary.leads_found;
-                setMessages(prev => [...prev, {
-                  id: Date.now(),
-                  role: 'assistant',
-                  content: leadsFound > 0
-                    ? 'The crew executed the plan. Here\'s the status:'
-                    : diagnostics?.reason || 'The crew executed the plan but found no leads matching your criteria.',
-                  results,
-                  leads,
-                  summary: mergedSummary,
-                  diagnostics,
-                }]);
+              if (execRes?.data?.status === 'executing') {
+                // Non-blocking — poll for result every 3 seconds
+                const planId = plan.plan_id;
+                const token = document.cookie.match(/token=([^;]+)/)?.[1];
+                const pollId = setInterval(async () => {
+                  try {
+                    const pollRes = await fetch(`/api/agents/director/execute/${planId}`, { credentials: 'include' });
+                    const pollData = await pollRes.json();
+                    const execStatus = pollData?.data?.status;
+                    if (execStatus === 'completed') {
+                      clearInterval(pollId);
+                      activePolls.current.delete(planId);
+                      showResult(pollData.data.result);
+                    } else if (execStatus === 'failed') {
+                      clearInterval(pollId);
+                      activePolls.current.delete(planId);
+                      setMessages(prev => [...prev, {
+                        id: Date.now(), role: 'assistant',
+                        content: pollData.data.error || 'Pipeline failed. Check Activity Log for details.',
+                      }]);
+                    }
+                  } catch { clearInterval(pollId); activePolls.current.delete(planId); }
+                }, 3000);
+                activePolls.current.set(planId, pollId);
+              } else if (execRes?.data) {
+                // Sync fallback (if backend ever returns result directly)
+                showResult(execRes.data);
               }
-            }).catch(() => {});
+            }).catch(err => {
+              setMessages(prev => [...prev, {
+                id: Date.now(), role: 'assistant',
+                content: `Execution failed: ${err.message}. Check Activity Log for details.`,
+              }]);
+            });
           }
         };
 
