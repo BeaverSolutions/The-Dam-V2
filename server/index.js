@@ -166,6 +166,12 @@ async function start() {
     // Pre-warm client config cache (reads clients/<slug>/config.md for each client)
     require('./services/clientConfig').warmCache().catch(() => {});
 
+    // Discord bot
+    const { startDiscordBot } = require('./services/discordBot');
+    await startDiscordBot().catch(err => {
+      logger.error({ msg: 'Discord bot startup failed', err: err.message, stack: err.stack });
+    });
+
     // Reply detection — poll every 5 minutes
     const { checkAllClients } = require('./services/replyDetector');
     setInterval(() => {
