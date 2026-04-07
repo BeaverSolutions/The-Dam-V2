@@ -326,8 +326,8 @@ ${personaContext}${fileContext}${rangerContext}`,
         return {
           lead_id,
           channel,
-          subject: result.subject || null,
-          body: result.body,
+          subject: stripEmDashes(result.subject) || null,
+          body: stripEmDashes(result.body),
           status: 'pending_ranger',
         };
       }
@@ -1289,8 +1289,9 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
   // ── Ranger review pipeline per message (2-rejection rule + Captain gate) ──
   async function runRangerPipeline(lead, msg) {
-    let currentBody = msg.body;
-    let currentSubject = msg.subject;
+    // Strip em dashes immediately — Sales Beaver output may still contain them despite rules
+    let currentBody = stripEmDashes(msg.body);
+    let currentSubject = stripEmDashes(msg.subject);
     let finalApproved = false;
     let lastRangerResult = null;
 
