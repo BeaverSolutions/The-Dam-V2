@@ -10,9 +10,9 @@ const BEAVER_CLIENT_ID = 'ce2fc8e5-617e-42d5-91fe-4275ceaa0030';
 let client = null;
 let loginPromise = null;
 
-// Dedupe cache: tracks the last signature posted to #replies automatically.
-// Prevents the same reply batch being reposted every polling cycle.
+// Dedupe caches: prevent the same batch being reposted every polling cycle.
 let lastRepliesSignature = null;
+let lastApprovalsSignature = null;
 
 /* ─── Shared data helpers ──────────────────────────────────── */
 
@@ -326,6 +326,89 @@ async function notifyDiscordNewReplies(clientId, messageIds) {
 }
 
 /**
+ * Polled every 5 minutes by the main interval in index.js.
+ * For Beaver Solutions only: checks for pending approvals, dedupes by signature of
+ * approval IDs, and posts a compact summary into the guild's #approvals channel.
+ */
+async function notifyDiscordPendingApprovals() {
+  if (!client) return;
+  if (!config.discord.guildId) {
+    logger.warn({ msg: 'notifyDiscordPendingApprovals: DISCORD_GUILD_ID not set, skipping' });
+    return;
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT a.id, l.name AS lead_name, l.company AS lead_company
+       FROM approvals a
+       JOIN messages m ON m.id = a.message_id
+       LEFT JOIN leads l ON l.id = m.lead_id
+       WHERE a.client_id = $1 AND a.status = 'pending'
+       ORDER BY a.created_at DESC
+       LIMIT 10`,
+      [BEAVER_CLIENT_ID]
+    );
+
+    const rows = result.rows;
+    const rowCount = result.rowCount;
+
+    // Nothing pending — nothing to post
+    if (rowCount === 0) return;
+
+    // Dedupe: signature = sorted approval IDs joined
+    const sig = rows.map((r) => r.id).sort().join(',');
+    if (sig === lastApprovalsSignature) {
+      logger.info({ msg: 'Discord auto-post approvals: skipped (dedupe)', count: rowCount });
+      return;
+    }
+    lastApprovalsSignature = sig;
+
+    logger.info({ msg: 'Discord auto-post approvals: triggered', count: rowCount });
+
+    const lines = rows.map((r, i) =>
+      `${i + 1}. ${r.lead_name || 'Unknown'} — ${r.lead_company || 'Unknown'}`
+    );
+    const text = `Pending approvals: ${rowCount}\n${lines.join('\n')}`;
+
+    // Resolve the guild and #approvals channel
+    const guild = await client.guilds.fetch(config.discord.guildId);
+    await guild.channels.fetch();
+
+    const channel = guild.channels.cache.find(
+      (ch) => ch.name === 'approvals' && ch.type === ChannelType.GuildText
+    );
+
+    if (!channel) {
+      logger.warn({
+        msg: 'Discord auto-post approvals: #approvals channel not found',
+        guildId: config.discord.guildId,
+      });
+      return;
+    }
+
+    logger.info({
+      msg: 'Discord auto-post approvals: posting',
+      count: rowCount,
+      channelName: channel.name,
+      channelId: channel.id,
+    });
+
+    await channel.send(text);
+
+    logger.info({
+      msg: 'Discord auto-post approvals: posted successfully',
+      channelId: channel.id,
+    });
+  } catch (err) {
+    logger.error({
+      msg: 'Discord auto-post approvals failed',
+      err: err.message,
+      stack: err.stack,
+    });
+  }
+}
+
+/**
  * Post the recent replies summary to a named channel in a specific guild.
  * Intended for use by background workflows (e.g. scheduled tasks, replyDetector hooks).
  *
@@ -467,4 +550,4 @@ function getDiscordClient() {
   return client;
 }
 
-module.exports = { startDiscordBot, getDiscordClient, postRepliesToChannel, notifyDiscordNewReplies };
+module.exports = { startDiscordBot, getDiscordClient, postRepliesToChannel, notifyDiscordNewReplies, notifyDiscordPendingApprovals };
