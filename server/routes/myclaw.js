@@ -135,9 +135,9 @@ router.post('/approve', async (req, res, next) => {
     const { message_id } = existing.rows[0];
 
     await pool.query(
-      `UPDATE approvals SET status = 'approved', notes = $1, approved_by = 'myclaw', resolved_at = NOW()
+      `UPDATE approvals SET status = 'approved', notes = $1, approved_by = NULL, resolved_at = NOW()
        WHERE id = $2 AND client_id = $3`,
-      [feedback || 'Approved by MyClaw', approval_id, client_id]
+      [`[MyClaw] ${feedback || 'Approved by MyClaw'}`, approval_id, client_id]
     );
     await pool.query(
       `UPDATE messages SET status = 'approved', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
@@ -185,9 +185,9 @@ router.post('/reject', async (req, res, next) => {
     const { message_id } = existing.rows[0];
 
     await pool.query(
-      `UPDATE approvals SET status = 'rejected', notes = $1, approved_by = 'myclaw', resolved_at = NOW()
+      `UPDATE approvals SET status = 'rejected', notes = $1, approved_by = NULL, resolved_at = NOW()
        WHERE id = $2 AND client_id = $3`,
-      [reason || 'Rejected by MyClaw', approval_id, client_id]
+      [`[MyClaw] ${reason || 'Rejected by MyClaw'}`, approval_id, client_id]
     );
     await pool.query(
       `UPDATE messages SET status = 'rejected', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
