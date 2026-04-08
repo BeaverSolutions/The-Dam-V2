@@ -176,6 +176,7 @@ async function researchSearch(clientId, { query, filters = {} }) {
       icpMemory,
       targetCount: filters.limit || 5,
       batchIndex,
+      commandOverride: query, // user's actual command — takes priority over ICP for query building
     });
 
     const leads = result.leads || [];
@@ -1483,8 +1484,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     diagnostics,
     results: [
       { step: 1, agent: 'research_beaver', status: 'completed', result: `${savedLeads.length} lead${savedLeads.length !== 1 ? 's' : ''} found & saved` },
-      { step: 2, agent: 'sales_beaver', status: 'completed', result: `${savedMessages.length} message${savedMessages.length !== 1 ? 's' : ''} drafted (email + linkedin + instagram per lead)` },
-      { step: 3, agent: 'ranger', status: 'completed', result: `${approvedCount} approved${rejectedCount > 0 ? `, ${rejectedCount} flagged (manual review or rejected after ${MAX_RANGER_RETRIES} rewrites)` : ''}` },
+      { step: 2, agent: 'sales_beaver', status: 'completed', result: `${savedMessages.length} message${savedMessages.length !== 1 ? 's' : ''} drafted (1 message per lead, best channel)` },
+      { step: 3, agent: 'ranger', status: 'completed', result: `${approvedCount} approved${rejectedCount > 0 ? `, ${rejectedCount} rejected by server gates` : ''}` },
       { step: 4, agent: 'director', status: approvedCount > 0 ? 'completed' : 'pending', result: approvedCount > 0 ? `${approvedCount} message${approvedCount !== 1 ? 's' : ''} in approval queue` : 'All messages failed Ranger QA — check Memory for rejection patterns' },
     ],
   };
