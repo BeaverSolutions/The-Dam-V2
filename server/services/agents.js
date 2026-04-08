@@ -1086,16 +1086,18 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     }
     const locationText = [lead.location || '', lead.snippet || ''].join(' ');
 
-    // Geography check (KL-focused: reject foreign OR require Malaysia confirmation)
+    // Geography check (KL-focused: reject foreign, soft-check Malaysia confirmation)
     if (isKLFocused) {
-      // If we detect a foreign location → reject
+      // Hard reject: if we detect a clearly foreign location → reject
       if (NON_TARGET_GEO.test(allText)) {
         console.warn(`[captain] REJECT geo: ${lead.name} at ${lead.company} — foreign location detected`);
         logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_geo', metadata: { name: lead.name, company: lead.company, reason: 'foreign_location' } }).catch(() => {});
         return false;
       }
-      // If no Malaysia confirmation at all in any field → reject (pass-by-default is dead)
-      if (!MALAYSIA_CONFIRM.test(allText)) {
+      // Soft check: if command already targets Malaysia (e.g. "founders in KL"), trust the search
+      // Only hard-reject for no-Malaysia-confirmation when the command doesn't specify geography
+      const commandMentionsMY = MALAYSIA_CONFIRM.test(command || '');
+      if (!commandMentionsMY && !MALAYSIA_CONFIRM.test(allText)) {
         console.warn(`[captain] REJECT geo: ${lead.name} at ${lead.company} — no Malaysia confirmation in any field`);
         logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_geo', metadata: { name: lead.name, company: lead.company, reason: 'no_malaysia_confirmation' } }).catch(() => {});
         return false;

@@ -537,4 +537,27 @@ router.get('/telegram/webhook-info', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─────────────────────────────────────────────
+// SQL — execute raw SQL (super admin only, read + write)
+// ─────────────────────────────────────────────
+
+router.post('/sql', async (req, res, next) => {
+  try {
+    const { query, params = [] } = req.body;
+    if (!query || typeof query !== 'string') {
+      return res.status(400).json({ error: 'query required', code: 'MISSING_QUERY' });
+    }
+    const result = await pool.query(query, params);
+    res.json({
+      data: result.rows || [],
+      meta: {
+        rowCount: result.rowCount,
+        command: result.command,
+      },
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message, code: err.code || 'SQL_ERROR' });
+  }
+});
+
 module.exports = router;
