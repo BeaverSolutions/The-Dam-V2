@@ -134,21 +134,28 @@ function SummaryCard({ summary, diagnostics, onGoToApprovals }) {
 function Message({ msg }) {
   const navigate = useNavigate();
   const isUser = msg.role === 'user';
+  const isMyClaw = msg.source === 'myclaw';
+  const agentType = isMyClaw ? 'myclaw' : 'director';
+  const bgColor = isMyClaw ? 'rgba(200,255,0,0.05)' : 'var(--panel)';
+  const borderColor = isMyClaw ? 'rgba(200,255,0,0.15)' : 'var(--border)';
   return (
     <div style={{
       display: 'flex', gap: '0.75rem', alignItems: 'flex-start',
       justifyContent: isUser ? 'flex-end' : 'flex-start', marginBottom: '1rem',
     }}>
-      {!isUser && <BeaverAvatar agent="director" size="xs" />}
+      {!isUser && <BeaverAvatar agent={agentType} size="xs" />}
       <div style={{
         maxWidth: '75%',
-        background: isUser ? 'rgba(200,255,0,0.08)' : 'var(--panel)',
-        border: `1px solid ${isUser ? 'rgba(200,255,0,0.2)' : 'var(--border)'}`,
+        background: isUser ? 'rgba(200,255,0,0.08)' : bgColor,
+        border: `1px solid ${isUser ? 'rgba(200,255,0,0.2)' : borderColor}`,
         borderRadius: 'var(--radius)',
         padding: '0.75rem 1rem',
         fontSize: '0.875rem',
         lineHeight: 1.6,
       }}>
+        {isMyClaw && (
+          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--lime)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.35rem' }}>MyClaw</div>
+        )}
         <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
 
         {/* Plan approval */}
@@ -289,6 +296,17 @@ export default function Chat() {
 
       if (res?.data) {
         const plan = res.data;
+
+        // MyClaw response — show with MyClaw avatar
+        if (plan.status === 'myclaw_response') {
+          setMessages(prev => [...prev, {
+            id: Date.now() + 1,
+            role: 'assistant',
+            source: 'myclaw',
+            content: plan.message,
+          }]);
+          return;
+        }
 
         // Director flagged this command as out of scope, or needs more info before planning
         if (plan.status === 'out_of_scope' || plan.status === 'clarification_needed') {

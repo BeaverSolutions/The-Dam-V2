@@ -5,6 +5,7 @@ const BEAVER_IMAGES = {
   sales_beaver: '/assets/beavers/sales-beaver.png',
   ranger: '/assets/beavers/ranger-beaver.png',
   director: '/assets/beavers/director-beaver.png',
+  myclaw: '/assets/beavers/myclaw-beaver.png',
 };
 
 const BEAVER_COLORS = {
@@ -12,6 +13,7 @@ const BEAVER_COLORS = {
   sales_beaver: 'var(--orange)',
   ranger: 'var(--police-blue)',
   director: 'var(--purple)',
+  myclaw: 'var(--lime)',
 };
 
 const BEAVER_LABELS = {
@@ -19,6 +21,7 @@ const BEAVER_LABELS = {
   sales_beaver: 'Sales Beaver',
   ranger: 'Enforcer Beaver',
   director: 'Captain Beaver',
+  myclaw: 'MyClaw',
 };
 
 const BEAVER_INITIALS = {
@@ -26,6 +29,7 @@ const BEAVER_INITIALS = {
   sales_beaver: 'S',
   ranger: 'R',
   director: 'D',
+  myclaw: 'C',
 };
 
 const SIZE_MAP = {

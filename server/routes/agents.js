@@ -90,10 +90,30 @@ router.post('/ranger/review',
   }
 );
 
+// ── MyClaw chat prefix detection ──────────────────────────────────────────
+const MYCLAW_PREFIX_RE = /^(?:@?(?:my)?claw|hey\s+claw)[,:\s]*/i;
+
+function isMyClawMessage(command) {
+  return MYCLAW_PREFIX_RE.test(command.trim());
+}
+
+function stripMyClawPrefix(command) {
+  return command.trim().replace(MYCLAW_PREFIX_RE, '').trim();
+}
+
 router.post('/director/plan',
   [body('command').notEmpty().trim(), validate],
   async (req, res, next) => {
     try {
+      const { command } = req.body;
+
+      // ── Route MyClaw-directed messages ──────────────────────
+      if (isMyClawMessage(command)) {
+        const myClawChat = require('../services/myClawChat');
+        const result = await myClawChat.handleChat(req.clientId, stripMyClawPrefix(command));
+        return res.json({ data: result });
+      }
+
       const result = await agentsService.directorPlan(req.clientId, req.body);
       res.json({ data: result });
     } catch (err) { next(err); }

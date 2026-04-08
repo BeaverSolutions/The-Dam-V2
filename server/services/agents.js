@@ -1598,6 +1598,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           `\nPREVIOUS ATTEMPT REJECTED: ${rejectionFeedback}`,
           `Previous message that was rejected:\n${currentBody}`,
           `\nRewrite the message fixing the issue above. Do NOT repeat the same structure.`,
+          `\nCRITICAL REMINDER: Day 0 email body must be 50-60 words MAX (hard reject at 81+). Count your words. Exclude greeting and sign-off from the count. Use ONE sentence per section (hook, pain bridge, question). Shorter is better.`,
         ].filter(Boolean).join('\n');
 
         try {
