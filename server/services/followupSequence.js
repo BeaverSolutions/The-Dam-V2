@@ -4,6 +4,54 @@ const pool = require('../db/pool');
 const { callAgent } = require('./claude');
 
 /**
+ * Malaysian public holidays 2026 (YYYY-MM-DD).
+ * Islamic dates are estimates — update when gazette is published.
+ */
+const MY_HOLIDAYS_2026 = [
+  '2026-01-01', // New Year
+  '2026-01-29', // Thaipusam
+  '2026-02-17', // Chinese New Year
+  '2026-02-18', // Chinese New Year Day 2
+  '2026-03-17', // Nuzul Al-Quran (estimate)
+  '2026-03-29', // Hari Raya Aidilfitri (estimate)
+  '2026-03-30', // Hari Raya Aidilfitri Day 2 (estimate)
+  '2026-05-01', // Labour Day
+  '2026-05-13', // Vesak Day
+  '2026-06-05', // Hari Raya Haji (estimate)
+  '2026-06-06', // Agong Birthday
+  '2026-06-26', // Awal Muharram (estimate)
+  '2026-08-31', // Merdeka Day
+  '2026-09-04', // Mawlid (estimate)
+  '2026-09-16', // Malaysia Day
+  '2026-10-20', // Deepavali (estimate)
+  '2026-12-25', // Christmas
+];
+
+const holidaySet = new Set(MY_HOLIDAYS_2026);
+
+/**
+ * Advance a date to the next business day (skips weekends + MY public holidays).
+ * Mutates nothing — returns a new Date.
+ */
+function nextBusinessDay(date) {
+  const d = new Date(date);
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const day = d.getDay();
+    if (day === 6) d.setDate(d.getDate() + 2);      // Saturday → Monday
+    else if (day === 0) d.setDate(d.getDate() + 1);  // Sunday  → Monday
+
+    const iso = d.toISOString().split('T')[0];
+    if (holidaySet.has(iso)) {
+      d.setDate(d.getDate() + 1); // skip holiday, re-check
+      continue;
+    }
+    break;
+  }
+  return d;
+}
+
+/**
  * Schedule follow-up touches 2, 3, 4 when a lead is first contacted.
  */
 async function scheduleFollowUps(clientId, leadId, firstContactDate) {
@@ -18,7 +66,8 @@ async function scheduleFollowUps(clientId, leadId, firstContactDate) {
   for (const { touch, daysAfter } of schedule) {
     const scheduledFor = new Date(base);
     scheduledFor.setDate(scheduledFor.getDate() + daysAfter);
-    const dateStr = scheduledFor.toISOString().split('T')[0];
+    const adjusted = nextBusinessDay(scheduledFor);
+    const dateStr = adjusted.toISOString().split('T')[0];
 
     await pool.query(
       `INSERT INTO followup_queue (client_id, lead_id, touch_number, scheduled_for)
@@ -28,8 +77,9 @@ async function scheduleFollowUps(clientId, leadId, firstContactDate) {
     );
   }
 
-  const touch2Date = new Date(base);
-  touch2Date.setDate(touch2Date.getDate() + 2);
+  const touch2Date = nextBusinessDay(
+    new Date(base.getTime() + 2 * 86400000)
+  );
 
   await pool.query(
     `UPDATE leads SET
@@ -154,21 +204,24 @@ async function getLeadSequence(clientId, leadId) {
  * Draft a follow-up message for a specific touch.
  */
 async function draftFollowUp(lead, touchNumber, previousMessages) {
+  // Determine channel from first message in the sequence
+  const channel = previousMessages?.[0]?.channel || 'email';
+
   const touchConfig = {
     2: {
-      type: 'Value Add Follow-up',
-      instruction: 'Share something genuinely useful or insightful related to their business. Do NOT say "just following up" or "checking in". Lead with value - a relevant observation, a question that shows you did research, or a short insight about their industry.',
-      tone: 'Helpful, no agenda',
+      type: 'FU1 — Different angle on same pain',
+      instruction: 'Write from a completely different angle than the Day 0 message. Do NOT say "just following up" or "checking in". Lead with a new observation or insight about their business. One question at the end.',
+      maxWords: 80,
     },
     3: {
-      type: 'New Angle Follow-up',
-      instruction: 'Take a completely different angle from the first two messages. Use a different pain point, mention social proof ("we helped a similar company..."), or reframe the value proposition. Never repeat any hook or opening from previous messages.',
-      tone: 'Confident, specific',
+      type: 'FU2 — One-line social proof',
+      instruction: 'One specific result or social proof. Under 20 words for the core line. Example: "We helped a similar property company go from 0 to 12 meetings in 3 weeks." Then one soft question.',
+      maxWords: 40,
     },
     4: {
-      type: 'Break-up Email',
-      instruction: 'This is the final message. Be honest and give them an out. Something like: "Last email from me - if the timing isn\'t right, totally understand. But if [specific pain] is something you\'re thinking about, happy to chat for 15 mins." Short, no pressure, human.',
-      tone: 'Honest, warm, brief - max 50 words',
+      type: 'FU3 — Easy out (final)',
+      instruction: 'This is the last message. Give them an easy out. Something like: "Happy to leave this here if the timing is off." Short, honest, human. No pressure.',
+      maxWords: 40,
     },
   };
 
@@ -178,34 +231,44 @@ async function draftFollowUp(lead, touchNumber, previousMessages) {
   const previousSummary = (previousMessages || [])
     .map((m, i) => {
       const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata || '{}') : (m.metadata || {});
-      return `Message ${i + 1}:\nSubject: ${m.subject}\nHook used: ${meta.personalization_hook || 'unknown'}\nPain targeted: ${meta.pain_point_targeted || 'unknown'}`;
+      return `Message ${i + 1} (${m.channel || 'email'}):\nSubject: ${m.subject || 'N/A'}\nBody preview: ${(m.body || '').substring(0, 150)}`;
     })
     .join('\n---\n');
 
-  const prompt = `You are Sales Beaver writing Touch ${touchNumber} of 4 in a follow-up sequence.
+  // Channel-specific format instructions
+  const channelFormat = channel === 'email'
+    ? `FORMAT (email follow-up):
+Hi ${lead.name?.split(' ')[0] || 'there'},
 
-LEAD PROFILE:
+{body — max ${config.maxWords} words}
+
+Regards,
+{use sender name from previous messages or "The Team"}
+
+HARD RULES: No em dashes (—). Max 1 question mark. No bullets.`
+    : `FORMAT (${channel} DM follow-up):
+{body — max ${config.maxWords} words. No greeting, no sign-off. Casual tone.}
+
+HARD RULES: No em dashes (—). Max 1 question mark. No bullets. No "Regards,".`;
+
+  const prompt = `You are Sales Beaver writing Touch ${touchNumber} of 4 in a follow-up sequence on ${channel}.
+
+LEAD:
 Name: ${lead.name}
 Title: ${lead.title || 'Unknown'}
 Company: ${lead.company}
-Industry: ${lead.industry || 'Unknown'}
-Notes: ${lead.notes || 'No notes'}
+Industry: ${lead.industry || lead.metadata?.industry || 'Unknown'}
 
-PREVIOUS MESSAGES SENT TO THIS LEAD (do NOT repeat any hook, opening, or pain point from these):
+PREVIOUS MESSAGES (do NOT repeat any hook, angle, or pain point):
 ${previousSummary || 'No previous messages'}
 
-TOUCH ${touchNumber} TYPE: ${config.type}
+TOUCH TYPE: ${config.type}
 INSTRUCTION: ${config.instruction}
-TONE: ${config.tone}
 
-Rules:
-- Maximum 80 words for the email body (max 50 words for touch 4)
-- NEVER repeat any hook, opening line, or pain point from previous messages
-- No "just following up", "checking in", "hope this finds you well"
-- Malaysian English is fine
+${channelFormat}
 
-Return JSON only — no other text:
-{"subject":"...","body":"...","personalization_hook":"...","pain_point_targeted":"...","cta":"...","touch_number":${touchNumber}}`;
+Return JSON only:
+{"subject":${channel === 'email' ? '"..."' : 'null'},"body":"...","touch_number":${touchNumber}}`;
 
   return await callAgent('sales_beaver', prompt);
 }
@@ -251,4 +314,64 @@ async function getStaleLeads(clientId) {
   return rows;
 }
 
-module.exports = { scheduleFollowUps, stopSequence, pauseSequence, resumeSequence, getDueFollowUps, getLeadSequence, draftFollowUp, getStaleLeads };
+/**
+ * Channel escalation: after FU2 (Day 4) with no reply, recommend a different channel.
+ * Returns escalation info or null if not ready / no alternate channel available.
+ */
+async function escalateChannel(clientId, leadId) {
+  // 1. Check lead has active sequence, no reply, and FU2 is done (touch >= 3)
+  const { rows: [lead] } = await pool.query(
+    `SELECT id, name, company, email, sequence_status, sequence_touch, last_reply_at, metadata
+     FROM leads
+     WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL`,
+    [leadId, clientId]
+  );
+
+  if (!lead) return null;
+  if (lead.sequence_touch < 3) return null;
+  if (lead.last_reply_at !== null) return null;
+  if (lead.sequence_status !== 'active') return null;
+
+  // 2. Find original channel from first message
+  const { rows: [firstMsg] } = await pool.query(
+    `SELECT channel FROM messages
+     WHERE lead_id = $1 AND client_id = $2
+     ORDER BY created_at ASC LIMIT 1`,
+    [leadId, clientId]
+  );
+
+  if (!firstMsg || !firstMsg.channel) return null;
+  const originalChannel = firstMsg.channel;
+
+  // 3. Pick next channel
+  const hasEmail = !!(lead.email && lead.email.trim());
+  const meta = typeof lead.metadata === 'string' ? JSON.parse(lead.metadata || '{}') : (lead.metadata || {});
+  const hasLinkedin = !!(meta.linkedin_url || meta.linkedin);
+  const hasInstagram = !!(meta.instagram_url || meta.instagram);
+
+  let newChannel = null;
+
+  if (originalChannel === 'email') {
+    if (hasLinkedin) newChannel = 'linkedin';
+  } else if (originalChannel === 'linkedin') {
+    if (hasEmail) newChannel = 'email';
+    else if (hasInstagram) newChannel = 'instagram';
+  } else if (originalChannel === 'instagram') {
+    if (hasEmail) newChannel = 'email';
+    else if (hasLinkedin) newChannel = 'linkedin';
+  }
+
+  if (!newChannel) return null;
+
+  // 4. Return escalation recommendation (caller handles drafting)
+  return {
+    lead_id: lead.id,
+    original_channel: originalChannel,
+    new_channel: newChannel,
+    lead_name: lead.name,
+    lead_company: lead.company,
+    lead,
+  };
+}
+
+module.exports = { scheduleFollowUps, stopSequence, pauseSequence, resumeSequence, getDueFollowUps, getLeadSequence, draftFollowUp, getStaleLeads, nextBusinessDay, MY_HOLIDAYS_2026, escalateChannel };

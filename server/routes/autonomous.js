@@ -275,6 +275,55 @@ router.get('/stale-leads', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── POST /api/autonomous/send-approved ─────────────────── */
+// n8n calls this every 5 minutes to send all approved messages.
+// Bridge between approval queue and actual email/LinkedIn send.
+
+router.post('/send-approved', requireInternalKey, async (req, res) => {
+  const { client_id } = req.body;
+  if (!client_id) return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+
+  try {
+    const { sendMessageById } = require('./integrations');
+
+    // Get all approved messages ready to send
+    const { rows: approved } = await pool.query(
+      `SELECT id, channel, lead_id FROM messages
+       WHERE client_id = $1 AND status = 'approved'
+       ORDER BY created_at ASC
+       LIMIT 20`,
+      [client_id]
+    );
+
+    if (approved.length === 0) {
+      return res.json({ data: { sent: 0, failed: 0, total: 0 } });
+    }
+
+    let sent = 0, failed = 0;
+
+    for (const msg of approved) {
+      try {
+        const result = await sendMessageById(client_id, msg.id, 'auto');
+        if (result.status === 'sent') {
+          sent++;
+          logger.info({ msg: `[auto-send] Sent message ${msg.id} (${msg.channel})`, client_id });
+        } else {
+          // simulated or other — don't count as sent
+          logger.info({ msg: `[auto-send] Message ${msg.id} result: ${result.status}`, client_id });
+        }
+      } catch (err) {
+        failed++;
+        logger.error({ msg: `[auto-send] Failed to send message ${msg.id}`, err: err.message, client_id });
+      }
+    }
+
+    return res.json({ data: { sent, failed, total: approved.length } });
+  } catch (err) {
+    logger.error({ msg: '[auto-send] Batch send failed', err: err.message, client_id });
+    return res.status(500).json({ error: err.message, code: 'SEND_FAILED' });
+  }
+});
+
 /* ─── Concurrent-run lock (prevents overlapping kickoffs per client) ─── */
 const _runningKickoffs = new Set();
 
@@ -344,66 +393,94 @@ async function _runAutonomousKickoffInner(clientId) {
   // Process due follow-ups first (before new outreach)
   try {
     const { getDueFollowUps, draftFollowUp } = require('../services/followupSequence');
-    const { rangerReview } = require('../services/agents');
 
     const dueFollowUps = await getDueFollowUps(clientId);
     console.log(`[FollowUp] ${dueFollowUps.length} follow-ups due for client ${clientId}`);
 
     for (const followUp of dueFollowUps) {
       try {
+        // Get previous messages for this lead (so follow-up uses different angle)
         const { rows: prevMessages } = await pool.query(
-          `SELECT subject, body, metadata FROM messages
-           WHERE lead_id = $1 AND status IN ('sent', 'pending_send')
+          `SELECT subject, body, metadata, channel FROM messages
+           WHERE lead_id = $1 AND client_id = $2 AND status IN ('sent', 'pending_send', 'approved')
            ORDER BY created_at ASC`,
-          [followUp.lead_id]
+          [followUp.lead_id, clientId]
         );
 
+        // Determine channel from first message (follow-ups stay on same channel)
+        const originalChannel = prevMessages[0]?.channel || 'email';
+
         const draft = await draftFollowUp(followUp, followUp.touch_number, prevMessages);
-        const rangerResult = await rangerReview(clientId, {
-          message_id: null,
-          message_body: draft.body,
-        });
+        if (!draft?.body) {
+          console.warn(`[FollowUp] No draft body for lead ${followUp.lead_id} touch ${followUp.touch_number}`);
+          continue;
+        }
+
+        // Strip em dashes from follow-up body
+        const cleanBody = draft.body.replace(/\s*\u2014\s*/g, ', ').replace(/\u2014/g, ' ');
+
+        // Server-side hard gates only (no AI Enforcer)
+        const gateFailures = [];
+        const bodyText = cleanBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
+        const wordCount = bodyText.trim().split(/\s+/).length;
+        if (originalChannel === 'email' && wordCount > 80) gateFailures.push(`Word count ${wordCount}`);
+        const questionCount = (cleanBody.match(/\?/g) || []).length;
+        if (questionCount > 1) gateFailures.push(`${questionCount} questions`);
+        if (/\u2014/.test(cleanBody)) gateFailures.push('Em dash');
+        if (/^[\s]*[-\u2022*]\s/m.test(cleanBody)) gateFailures.push('Bullets');
+
+        const passedGates = gateFailures.length === 0;
 
         const { rows: [savedMsg] } = await pool.query(
-          `INSERT INTO messages (client_id, lead_id, subject, body, status, metadata, channel)
-           VALUES ($1, $2, $3, $4, $5, $6, 'email')
+          `INSERT INTO messages (client_id, lead_id, subject, body, status, metadata, channel, follow_up_day)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING id`,
           [
             clientId,
             followUp.lead_id,
-            draft.subject,
-            draft.body,
-            rangerResult.approved ? 'pending_approval' : 'ranger_rejected',
-            JSON.stringify({ ...draft, ranger: rangerResult, is_followup: true, touch_number: followUp.touch_number }),
+            draft.subject || null,
+            cleanBody,
+            passedGates ? 'pending_approval' : 'ranger_rejected',
+            JSON.stringify({ ...draft, is_followup: true, touch_number: followUp.touch_number, gate_failures: gateFailures }),
+            originalChannel,
+            followUp.touch_number === 2 ? 2 : followUp.touch_number === 3 ? 4 : 7,
           ]
         );
 
-        if (rangerResult.approved) {
+        if (passedGates) {
           await pool.query(
-            `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'ranger')`,
+            `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`,
             [clientId, savedMsg.id]
           );
         }
 
         await pool.query(
-          `UPDATE followup_queue SET status = 'sent', message_id = $1 WHERE id = $2`,
-          [savedMsg.id, followUp.id]
+          `UPDATE followup_queue SET status = $1, message_id = $2 WHERE id = $3`,
+          [passedGates ? 'sent' : 'skipped', savedMsg.id, followUp.id]
         );
 
+        // Calculate next follow-up date
+        const nextTouch = followUp.touch_number + 1;
+        const nextDate = nextTouch <= 4
+          ? (await pool.query(`SELECT scheduled_for FROM followup_queue WHERE lead_id=$1 AND touch_number=$2 AND client_id=$3`, [followUp.lead_id, nextTouch, clientId])).rows[0]?.scheduled_for
+          : null;
+
         await pool.query(
-          `UPDATE leads SET sequence_touch = $1, next_followup_at = NULL WHERE id = $2`,
-          [followUp.touch_number, followUp.lead_id]
+          `UPDATE leads SET sequence_touch = $1, next_followup_at = $2 WHERE id = $3 AND client_id = $4`,
+          [followUp.touch_number, nextDate || null, followUp.lead_id, clientId]
         );
 
         await logAction(clientId, 'sales_beaver', 'followup_drafted', 'lead', followUp.lead_id, {
-          touch: followUp.touch_number, ranger: rangerResult.decision || (rangerResult.approved ? 'approve' : 'reject'),
+          touch: followUp.touch_number, channel: originalChannel, passed_gates: passedGates,
+          gate_failures: gateFailures.length > 0 ? gateFailures : undefined,
         });
+
+        console.log(`[FollowUp] Touch ${followUp.touch_number} for ${followUp.name} (${originalChannel}): ${passedGates ? 'approved' : 'rejected: ' + gateFailures.join(', ')}`);
       } catch (err) {
         console.error(`[FollowUp] Error drafting follow-up for lead ${followUp.lead_id}:`, err.message);
       }
     }
   } catch (err) {
-    // Follow-up service might not exist yet — graceful skip
     console.warn('[Autonomous] Follow-up processing skipped:', err.message);
   }
 

@@ -477,3 +477,4 @@ router.post('/calendar/create-event', (req, res) => {
 });
 
 module.exports = router;
+module.exports.sendMessageById = sendMessageById;
