@@ -333,6 +333,135 @@ router.post('/send-approved', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── POST /api/autonomous/morning-kickoff ──────────────── */
+// Daily sales kickoff: selects qualified leads for today's outreach batch.
+// Captain Beaver picks up to 16 leads, marks them outreach_ready, logs selection.
+
+router.post('/morning-kickoff', requireInternalKey, async (req, res) => {
+  const { client_id } = req.body;
+  if (!client_id) {
+    return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+  }
+
+  const DAILY_BATCH_LIMIT = 16;
+  const today = new Date().toISOString().split('T')[0];
+
+  try {
+    // 1. Count total available qualified leads (not yet contacted)
+    const { rows: [countRow] } = await pool.query(
+      `SELECT COUNT(*) AS total
+       FROM leads
+       WHERE client_id = $1
+         AND pipeline_stage = 'qualified'
+         AND deleted_at IS NULL
+         AND first_contacted_at IS NULL`,
+      [client_id]
+    );
+    const leadsAvailable = parseInt(countRow.total) || 0;
+
+    // 2. Fetch top candidates ordered by signal_tier ASC (P1 first), created_at DESC
+    const { rows: candidates } = await pool.query(
+      `SELECT id, name, company, title, email, linkedin_url, signal_tier, metadata
+       FROM leads
+       WHERE client_id = $1
+         AND pipeline_stage = 'qualified'
+         AND deleted_at IS NULL
+         AND first_contacted_at IS NULL
+       ORDER BY signal_tier ASC, created_at DESC
+       LIMIT $2`,
+      [client_id, DAILY_BATCH_LIMIT]
+    );
+
+    if (candidates.length === 0) {
+      return res.json({
+        data: {
+          date: today,
+          client_id,
+          batch_size: 0,
+          leads_selected: [],
+          leads_available: leadsAvailable,
+          message: 'No qualified leads available for outreach.',
+        },
+        meta: { timestamp: new Date().toISOString() },
+      });
+    }
+
+    // 3. Update each lead to outreach_ready + log selection
+    const selectedIds = candidates.map(c => c.id);
+
+    await pool.query(
+      `UPDATE leads
+       SET pipeline_stage = 'outreach_ready', updated_at = NOW()
+       WHERE client_id = $1 AND id = ANY($2::uuid[])`,
+      [client_id, selectedIds]
+    );
+
+    // Batch-insert log entries
+    const logValues = [];
+    const logParams = [client_id];
+    let paramIdx = 2;
+
+    for (const lead of candidates) {
+      logValues.push(
+        `($1, 'captain_beaver', 'daily_batch_selected', 'lead', $${paramIdx}, $${paramIdx + 1})`
+      );
+      logParams.push(lead.id);
+      logParams.push(JSON.stringify({
+        date: today,
+        signal_tier: lead.signal_tier,
+        company: lead.company,
+      }));
+      paramIdx += 2;
+    }
+
+    await pool.query(
+      `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)
+       VALUES ${logValues.join(', ')}`,
+      logParams
+    );
+
+    // 4. Build tier summary
+    const tierCounts = { P1: 0, P2: 0, P3: 0 };
+    for (const lead of candidates) {
+      const tier = lead.signal_tier || 'P3';
+      tierCounts[tier] = (tierCounts[tier] || 0) + 1;
+    }
+    const tierSummary = Object.entries(tierCounts)
+      .filter(([, count]) => count > 0)
+      .map(([tier, count]) => `${tier}: ${count}`)
+      .join(', ');
+
+    // 5. Build response with full lead context
+    const leadsSelected = candidates.map(c => ({
+      id: c.id,
+      name: c.name,
+      company: c.company,
+      title: c.title,
+      email: c.email,
+      linkedin_url: c.linkedin_url,
+      signal_tier: c.signal_tier,
+      signal: c.metadata?.signal || null,
+      angle: c.metadata?.angle || null,
+      friction: c.metadata?.friction || null,
+    }));
+
+    res.json({
+      data: {
+        date: today,
+        client_id,
+        batch_size: candidates.length,
+        leads_selected: leadsSelected,
+        leads_available: leadsAvailable,
+        message: `${candidates.length} leads ready for outreach. ${tierSummary}`,
+      },
+      meta: { timestamp: new Date().toISOString() },
+    });
+  } catch (err) {
+    logger.error({ msg: 'morning-kickoff failed', err: err.message, stack: err.stack });
+    res.status(500).json({ error: 'Morning kickoff failed', code: 'KICKOFF_ERROR' });
+  }
+});
+
 /* ─── Concurrent-run lock (prevents overlapping kickoffs per client) ─── */
 const _runningKickoffs = new Set();
 
