@@ -935,37 +935,43 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // it cannot be verified and must be skipped to prevent hallucinated outreach.
   const researchSource = researchResult?.data?.source || 'claude';
   const isVerifiedSource = researchSource === 'apollo' || researchSource === 'serper' || researchSource === 'multi';
-  // ── Captain: ICP title filter ─────────────────────────────
-  // Reject leads whose title clearly doesn't match ICP seniority.
-  // We want decision-makers: Founder, CEO, MD, Director, Co-Founder, Head of, VP, Owner.
-  const ICP_TITLES = /founder|ceo|coo|cmo|cto|managing director|md\b|director|co-founder|head of|vp |vice president|owner|principal|partner/i;
-  const EXCLUDED_TITLES = /intern|junior|assistant|coordinator|executive assistant|test|qa |quality assurance|analyst|associate|trainee|admin|receptionist|support/i;
+  // ══════════════════════════════════════════════════════════════
+  // CAPTAIN'S QUALITY GATE — strict filtering, fewer but real leads
+  // Philosophy: 3 verified leads > 20 garbage leads
+  // ══════════════════════════════════════════════════════════════
+
+  // ── Gate 1: Title must match ICP (strict, not permissive) ──
+  const ICP_TITLES = /founder|ceo|coo|cmo|cto|managing director|\bmd\b|co-founder|cofounder|head of|vp |vice president|owner|principal|partner/i;
+  const EXCLUDED_TITLES = /intern|junior|assistant|coordinator|executive assistant|test|qa |quality assurance|analyst|associate|trainee|admin|receptionist|support|talent acquisition|recruiter|recruitment|human resource|\bhr\b|procurement|clerk|officer|executive(?!\s*(director|officer|chairman))/i;
 
   const titledLeads = rawLeads.filter(lead => {
-    if (!lead.title) return true; // no title data — let Captain decide later
-    if (EXCLUDED_TITLES.test(lead.title)) {
-      console.warn(`[captain] Rejected non-ICP title: "${lead.title}" (${lead.name} at ${lead.company})`);
-      logsService.createLog(clientId, {
-        agent: 'director',
-        action: 'lead_skipped_title_mismatch',
-        metadata: { name: lead.name, title: lead.title, reason: 'not_decision_maker' },
-      }).catch(() => {});
+    const title = lead.title || '';
+    // Also check the name field — Serper sometimes puts title info in the name
+    const allText = `${title} ${lead.name || ''}`;
+
+    // Reject explicitly excluded titles
+    if (EXCLUDED_TITLES.test(allText)) {
+      console.warn(`[captain] REJECT title: "${title}" (${lead.name} at ${lead.company}) — excluded role`);
+      logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_title', metadata: { name: lead.name, title, reason: 'excluded_role' } }).catch(() => {});
       return false;
     }
+
+    // Require ICP title match — no title or non-matching title = reject
+    if (!ICP_TITLES.test(allText)) {
+      console.warn(`[captain] REJECT title: "${title}" (${lead.name}) — not a decision-maker`);
+      logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_title', metadata: { name: lead.name, title, reason: 'not_decision_maker' } }).catch(() => {});
+      return false;
+    }
+
     return true;
   });
 
   diagnostics.after_title_filter = titledLeads.length;
 
+  // ── Gate 2: Must have a LinkedIn URL ──
   const verifiedLeads = titledLeads.filter(lead => {
-    if (isVerifiedSource) return true; // Apollo/Serper data is trusted
     if (!lead.linkedin_url) {
-      console.warn(`[captain] Skipping unverifiable lead: ${lead.name} at ${lead.company} — no linkedin_url from Claude fallback`);
-      logsService.createLog(clientId, {
-        agent: 'director',
-        action: 'lead_skipped_unverifiable',
-        metadata: { name: lead.name, company: lead.company, reason: 'no_linkedin_url_claude_fallback' },
-      }).catch(() => {});
+      console.warn(`[captain] REJECT: ${lead.name} — no LinkedIn URL`);
       return false;
     }
     return true;
@@ -973,57 +979,64 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
   diagnostics.after_verification_gate = verifiedLeads.length;
 
-  // ── Step 1b-ii: Captain — ICP geography + industry gate ──
-  // Rejects leads that clearly violate ICP disqualifiers:
-  // wrong geography (outside Klang Valley) or wrong industry.
+  // ── Gate 3: Company must be real (not "Unknown") ──
+  const namedLeads = verifiedLeads.filter(lead => {
+    if (!lead.company || lead.company === 'Unknown' || lead.company === 'Unknown Company' || lead.company.length < 3) {
+      console.warn(`[captain] REJECT: ${lead.name} — company is unknown or too short ("${lead.company}")`);
+      logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_company', metadata: { name: lead.name, company: lead.company, reason: 'unknown_company' } }).catch(() => {});
+      return false;
+    }
+    return true;
+  });
+
+  // ── Gate 4: Geography + Industry + Company Size ──
   const icpLocation = (icpMemory?.location || icpMemory?.geography || '').toLowerCase();
   const isKLFocused = !icpLocation || /klang|kuala lumpur|kl|selangor|malaysia/i.test(icpLocation);
 
-  // Non-KL geographies — reject if any appear in company/title/snippet/location
-  const NON_TARGET_GEO = /\bsingapore\b|\bsg\b|jakarta|indonesia|bangkok|thailand|\blondon\b|sydney|australia|manila|philippines|vietnam|myanmar|cambodia|india\b|hong kong|\bhk\b/i;
+  // Non-target geographies — expanded list
+  const NON_TARGET_GEO = /\bsingapore\b|\bsg\b|jakarta|indonesia|bangkok|thailand|\blondon\b|sydney|australia|manila|philippines|vietnam|myanmar|cambodia|india\b|hong kong|\bhk\b|\bdubai\b|\buae\b|abu dhabi|saudi|qatar|bahrain|pakistan|bangladesh|\busa\b|united states|new york|california|san francisco|chicago|toronto|canada|united kingdom|\buk\b/i;
 
-  // Excluded industries from ICP disqualifiers
+  // Malaysia confirmation — if we can confirm they're in MY, they pass geo check
+  const MALAYSIA_CONFIRM = /malaysia|kuala lumpur|\bkl\b|selangor|klang|penang|johor|melaka|sabah|sarawak|perak|kedah|kelantan|pahang|putrajaya|cyberjaya|petaling jaya|\bpj\b|subang|shah alam|bangsar|mont kiara|damansara|\bsdn bhd\b|\bbhd\b/i;
+
+  // Excluded industries
   const EXCLUDED_INDUSTRIES = /hospital|clinic|medical centre|healthcare|pharmacy|polyclinic|hotel|resort|restaurant|hospitality|retail|e-commerce|ecommerce|supermarket|hypermarket|ministry|government|jabatan|polis|army|military/i;
 
-  // Large multinationals — too big, already have sales teams
-  const LARGE_CORPS = /\bwpp\b|publicis|omnicom|interpublic|\bbbdo\b|ogilvy|mccann|\bvml\b|dentsu|havas|grey group|leo burnett|saatchi|ddb\b|tbwa|jwt\b|deloitte|mckinsey|pwc\b|kpmg\b|ey\b|accenture|boston consulting|bain\b|shell\b|petronas|tenaga|maybank|cimb|rhb\b|public bank|hong leong|sime darby|axiata|celcom|maxis\b|digi\b|unilever|nestle|procter|p&g\b|samsung|lg\b|sony\b|panasonic/i;
+  // Large multinationals — check ALL text fields including name
+  const LARGE_CORPS = /\bwpp\b|publicis|omnicom|interpublic|\bbbdo\b|ogilvy|mccann|\bvml\b|dentsu|havas|grey group|leo burnett|saatchi|ddb\b|tbwa|jwt\b|\bdeloitte\b|\bmckinsey\b|\bpwc\b|\bkpmg\b|\bey\b|\baccenture\b|boston consulting|\bbain\b|\bshell\b|\bpetronas\b|tenaga|maybank|\bcimb\b|\brhb\b|public bank|hong leong|sime darby|axiata|celcom|\bmaxis\b|\bdigi\b|unilever|nestle|procter|p&g\b|samsung|\blg\b|sony\b|panasonic|\bgoogle\b|\bmeta\b|\bamazon\b|\bmicrosoft\b|\bapple\b|\bibm\b/i;
 
-  const icpGatedLeads = verifiedLeads.filter(lead => {
-    // Split into separate fields — geo check on location/snippet only, to avoid false positives
-    // e.g. "Singapore Airlines" in company name should NOT reject a KL-based founder
+  const icpGatedLeads = namedLeads.filter(lead => {
+    // Combine ALL text for comprehensive checks
+    const allText = [lead.name || '', lead.company || '', lead.title || '', lead.snippet || '', lead.location || ''].join(' ');
     const locationText = [lead.location || '', lead.snippet || ''].join(' ');
-    const companyText = [lead.company || '', lead.title || ''].join(' ');
 
-    // Geography check (only enforce if ICP is KL-focused)
-    if (isKLFocused && NON_TARGET_GEO.test(locationText)) {
-      console.warn(`[captain] ICP geo reject: ${lead.name} at ${lead.company} — non-KL indicator found`);
-      logsService.createLog(clientId, {
-        agent: 'director',
-        action: 'lead_skipped_icp',
-        metadata: { name: lead.name, company: lead.company, reason: 'outside_target_geography' },
-      }).catch(() => {});
-      return false;
+    // Geography check (KL-focused: reject foreign OR require Malaysia confirmation)
+    if (isKLFocused) {
+      // If we detect a foreign location → reject
+      if (NON_TARGET_GEO.test(allText)) {
+        console.warn(`[captain] REJECT geo: ${lead.name} at ${lead.company} — foreign location detected`);
+        logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_geo', metadata: { name: lead.name, company: lead.company, reason: 'foreign_location' } }).catch(() => {});
+        return false;
+      }
+      // If no Malaysia confirmation at all in any field → reject (pass-by-default is dead)
+      if (!MALAYSIA_CONFIRM.test(allText)) {
+        console.warn(`[captain] REJECT geo: ${lead.name} at ${lead.company} — no Malaysia confirmation in any field`);
+        logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_geo', metadata: { name: lead.name, company: lead.company, reason: 'no_malaysia_confirmation' } }).catch(() => {});
+        return false;
+      }
     }
 
     // Industry exclusion
-    if (EXCLUDED_INDUSTRIES.test(companyText)) {
-      console.warn(`[captain] ICP industry reject: ${lead.name} at ${lead.company} — excluded industry`);
-      logsService.createLog(clientId, {
-        agent: 'director',
-        action: 'lead_skipped_icp',
-        metadata: { name: lead.name, company: lead.company, reason: 'excluded_industry' },
-      }).catch(() => {});
+    if (EXCLUDED_INDUSTRIES.test(allText)) {
+      console.warn(`[captain] REJECT industry: ${lead.name} at ${lead.company}`);
+      logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_industry', metadata: { name: lead.name, company: lead.company } }).catch(() => {});
       return false;
     }
 
-    // Large multinational check
-    if (LARGE_CORPS.test(companyText)) {
-      console.warn(`[captain] ICP size reject: ${lead.name} at ${lead.company} — large multinational`);
-      logsService.createLog(clientId, {
-        agent: 'director',
-        action: 'lead_skipped_icp',
-        metadata: { name: lead.name, company: lead.company, reason: 'large_multinational' },
-      }).catch(() => {});
+    // Large multinational check — now checks ALL fields including name
+    if (LARGE_CORPS.test(allText)) {
+      console.warn(`[captain] REJECT corp: ${lead.name} at ${lead.company} — large multinational`);
+      logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_corp', metadata: { name: lead.name, company: lead.company } }).catch(() => {});
       return false;
     }
 
@@ -1031,8 +1044,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   });
 
   diagnostics.after_icp_gate = icpGatedLeads.length;
-  if (verifiedLeads.length !== icpGatedLeads.length) {
-    console.log(`[captain] ICP gate removed ${verifiedLeads.length - icpGatedLeads.length} leads (wrong geo/industry/size)`);
+  if (namedLeads.length !== icpGatedLeads.length) {
+    console.log(`[captain] ICP gate removed ${namedLeads.length - icpGatedLeads.length} leads (geo/industry/corp)`);
   }
 
   // Update status: research phase counts
