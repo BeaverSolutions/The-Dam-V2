@@ -412,4 +412,117 @@ router.put('/leads/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/myclaw/validate-leads — Batch-validate Research Beaver output
+// Gates leads before Sales Beaver can process them.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/validate-leads', async (req, res, next) => {
+  try {
+    const { client_id, lead_ids } = req.body;
+    if (!client_id || !Array.isArray(lead_ids) || lead_ids.length === 0) {
+      return res.status(400).json({ error: 'client_id and lead_ids (non-empty array) required', code: 'MISSING_FIELDS' });
+    }
+
+    const qualified = [];
+    const rejected = [];
+
+    for (const leadId of lead_ids) {
+      const leadResult = await pool.query(
+        `SELECT id, name, company, email, linkedin_url, pipeline_stage, metadata
+         FROM leads
+         WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL`,
+        [leadId, client_id]
+      );
+
+      if (leadResult.rows.length === 0) {
+        rejected.push({ id: leadId, reason: 'Lead not found' });
+        continue;
+      }
+
+      const lead = leadResult.rows[0];
+      const reasons = [];
+
+      // Validation checks
+      if (!lead.name) reasons.push('missing name');
+      if (!lead.company) reasons.push('missing company');
+      if (!lead.email && !lead.linkedin_url) reasons.push('no contact channel (email or linkedin_url)');
+      if (lead.pipeline_stage !== 'researched') reasons.push(`pipeline_stage is '${lead.pipeline_stage}', expected 'researched'`);
+
+      const now = new Date().toISOString();
+
+      if (reasons.length === 0) {
+        // Valid — qualify the lead
+        const existingMeta = lead.metadata || {};
+        const patchedMeta = { ...existingMeta, myclaw_validated: true, qualified_at: now };
+
+        await pool.query(
+          `UPDATE leads SET pipeline_stage = 'qualified', metadata = $1::jsonb, updated_at = NOW()
+           WHERE id = $2 AND client_id = $3`,
+          [JSON.stringify(patchedMeta), leadId, client_id]
+        );
+
+        qualified.push(leadId);
+
+        await logsService.createLog(client_id, {
+          agent: 'myclaw',
+          action: 'lead_qualified',
+          target_type: 'lead',
+          target_id: leadId,
+          metadata: { source: 'myclaw_validate_leads' },
+        });
+      } else {
+        // Invalid — reject the lead
+        const existingMeta = lead.metadata || {};
+        const patchedMeta = { ...existingMeta, rejection_reason: reasons.join('; '), rejected_at: now };
+
+        await pool.query(
+          `UPDATE leads SET pipeline_stage = 'rejected', metadata = $1::jsonb, updated_at = NOW()
+           WHERE id = $2 AND client_id = $3`,
+          [JSON.stringify(patchedMeta), leadId, client_id]
+        );
+
+        rejected.push({ id: leadId, reason: reasons.join('; ') });
+
+        await logsService.createLog(client_id, {
+          agent: 'myclaw',
+          action: 'lead_rejected',
+          target_type: 'lead',
+          target_id: leadId,
+          metadata: { reasons, source: 'myclaw_validate_leads' },
+        });
+      }
+    }
+
+    res.json({ data: { qualified, rejected } });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/myclaw/qualified-leads — Qualified leads ready for Sales Beaver
+// Returns leads that passed validation but haven't been contacted yet.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/qualified-leads', async (req, res, next) => {
+  try {
+    const { client_id, limit = 20 } = req.query;
+    if (!client_id) {
+      return res.status(400).json({ error: 'client_id required', code: 'MISSING_FIELDS' });
+    }
+
+    const result = await pool.query(
+      `SELECT id, name, email, company, title, linkedin_url, signal_tier, status,
+              pipeline_stage, score, metadata, created_at, updated_at
+       FROM leads
+       WHERE client_id = $1
+         AND pipeline_stage = 'qualified'
+         AND deleted_at IS NULL
+         AND (first_contacted_at IS NULL OR (sequence_status = 'active' AND sequence_touch = 0))
+       ORDER BY signal_tier ASC, created_at DESC
+       LIMIT $2`,
+      [client_id, Math.min(Number(limit), 100)]
+    );
+
+    res.json({ data: result.rows, meta: { total: result.rowCount } });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
