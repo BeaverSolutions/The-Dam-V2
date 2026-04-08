@@ -405,7 +405,7 @@ function stripEmDashes(text) {
  * RANGER
  * =========================
  */
-async function rangerReview(clientId, { message_id, message_body }) {
+async function rangerReview(clientId, { message_id, message_body, lead_context = {} }) {
   await logsService.createLog(clientId, {
     agent: 'ranger',
     action: 'ranger_review',
@@ -418,9 +418,15 @@ async function rangerReview(clientId, { message_id, message_body }) {
     try {
       const persona = await getClientPersona(clientId);
       const personaContext = buildPersonaContext(persona);
+
+      // Inject lead context so Enforcer can validate personalization is real
+      const leadContextStr = lead_context?.name
+        ? `LEAD CONTEXT (validate message is accurate for this person):\n- Name: ${lead_context.name}\n- Company: ${lead_context.company || 'Unknown'}\n- Title: ${lead_context.title || 'Unknown'}\n- Signal (why now): ${lead_context.signal || lead_context.why_now || 'Not specified'}\n- Angle: ${lead_context.angle || 'Not specified'}\n- Friction: ${lead_context.friction || 'Not specified'}\n\n`
+        : '';
+
       const result = await callAgent(
         'ranger',
-        `Review this message:\n\n${message_body}${personaContext}`,
+        `Review this message:\n\n${leadContextStr}MESSAGE:\n${message_body}${personaContext}`,
         { message_id }
       );
 
@@ -1534,7 +1540,19 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     // ── Server gates passed — now run AI Enforcer review (fail-closed) ──
     let rangerResult;
     try {
-      rangerResult = await rangerReview(clientId, { message_id: msg.id, message_body: currentBody });
+      rangerResult = await rangerReview(clientId, {
+        message_id: msg.id,
+        message_body: currentBody,
+        lead_context: {
+          name: lead.name,
+          company: lead.company,
+          title: lead.title,
+          signal: lead.metadata?.signal,
+          angle: lead.metadata?.angle,
+          friction: lead.metadata?.friction,
+          why_now: lead.metadata?.why_now,
+        },
+      });
     } catch (err) {
       console.error('[pipeline] AI Enforcer unavailable, blocking message (fail-closed):', err.message);
       await pool.query(
@@ -1550,32 +1568,130 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     }
 
     if (!rangerResult?.approved) {
-      // AI Enforcer rejected
-      await pool.query(
-        `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
-         status = 'ranger_rejected', updated_at = NOW()
-         WHERE id = $5 AND client_id = $6`,
-        [currentBody, currentSubject, rangerResult?.score || 0, rangerResult?.notes || rangerResult?.reject_reason || 'Enforcer rejected', msg.id, clientId]
+      // ── Rejection feedback loop: Sales redrafts with Enforcer's specific feedback ──
+      // Get current attempt count from DB
+      const attemptRow = await pool.query(
+        `SELECT ranger_attempt_count FROM messages WHERE id = $1 AND client_id = $2`,
+        [msg.id, clientId]
       );
-      await logsService.createLog(clientId, {
-        agent: 'enforcer_beaver',
-        action: 'message_rejected',
-        target_type: 'message',
-        target_id: msg.id,
-        metadata: { channel: msg.channel, score: rangerResult?.score, notes: rangerResult?.notes, method: 'ai_enforcer' },
-      });
-      rejectedCount++;
-      execStatus.beavers.enforcer.rejected++;
-      execStatus.beavers.enforcer.status = 'done';
-      return;
+      const attemptCount = attemptRow.rows[0]?.ranger_attempt_count || 0;
+
+      if (attemptCount < 2) {
+        // Sales Beaver gets another chance with explicit rejection feedback
+        const rejectionFeedback = rangerResult?.reject_reason || rangerResult?.notes || 'Message did not pass quality gates';
+        const feedbackContext = [
+          `Name: ${lead.name}`,
+          `Company: ${lead.company}`,
+          `Title: ${lead.title || 'N/A'}`,
+          lead.metadata?.signal ? `Signal: ${lead.metadata.signal}` : '',
+          lead.metadata?.angle ? `Angle: ${lead.metadata.angle}` : '',
+          lead.metadata?.friction ? `Friction: ${lead.metadata.friction}` : '',
+          `\nPREVIOUS ATTEMPT REJECTED: ${rejectionFeedback}`,
+          `Previous message that was rejected:\n${currentBody}`,
+          `\nRewrite the message fixing the issue above. Do NOT repeat the same structure.`,
+        ].filter(Boolean).join('\n');
+
+        try {
+          const redraftResult = await salesGenerate(clientId, {
+            lead_id: lead.id,
+            channel: msg.channel,
+            context: feedbackContext,
+          });
+
+          if (redraftResult?.body) {
+            currentBody = stripEmDashes(redraftResult.body);
+            currentSubject = redraftResult.subject || currentSubject;
+
+            // Save updated draft + increment attempt count
+            await pool.query(
+              `UPDATE messages SET body = $1, subject = $2, ranger_attempt_count = $3,
+               ranger_notes = $4, status = 'pending_ranger', updated_at = NOW()
+               WHERE id = $5 AND client_id = $6`,
+              [currentBody, currentSubject, attemptCount + 1, `Redraft ${attemptCount + 1}: fixing — ${rejectionFeedback}`, msg.id, clientId]
+            );
+
+            await logsService.createLog(clientId, {
+              agent: 'sales_beaver',
+              action: 'message_redrafted',
+              target_type: 'message',
+              target_id: msg.id,
+              metadata: { attempt: attemptCount + 1, rejection_reason: rejectionFeedback, lead_name: lead.name },
+            });
+
+            // Re-run Enforcer on the new draft
+            rangerResult = await rangerReview(clientId, {
+              message_id: msg.id,
+              message_body: currentBody,
+              lead_context: {
+                name: lead.name,
+                company: lead.company,
+                title: lead.title,
+                signal: lead.metadata?.signal,
+                angle: lead.metadata?.angle,
+                friction: lead.metadata?.friction,
+                why_now: lead.metadata?.why_now,
+              },
+            });
+
+            // If approved on retry, fall through to approval block below
+            if (rangerResult?.approved) {
+              // Will continue to approval queue
+            } else {
+              // Still rejected after redraft — mark final rejection
+              await pool.query(
+                `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
+                 ranger_breakdown = $5, status = 'ranger_rejected', updated_at = NOW()
+                 WHERE id = $6 AND client_id = $7`,
+                [currentBody, currentSubject, rangerResult?.score || 0, `Rejected after ${attemptCount + 1} attempts: ${rangerResult?.notes || rangerResult?.reject_reason || 'Quality gates failed'}`, JSON.stringify(rangerResult?.breakdown || null), msg.id, clientId]
+              );
+              await logsService.createLog(clientId, {
+                agent: 'enforcer_beaver',
+                action: 'message_rejected',
+                target_type: 'message',
+                target_id: msg.id,
+                metadata: { channel: msg.channel, score: rangerResult?.score, notes: rangerResult?.notes, attempts: attemptCount + 1, method: 'ai_enforcer_retry' },
+              });
+              rejectedCount++;
+              execStatus.beavers.enforcer.rejected++;
+              execStatus.beavers.enforcer.status = 'done';
+              return;
+            }
+          }
+        } catch (redraftErr) {
+          console.warn('[pipeline] Sales redraft failed, marking rejected:', redraftErr.message);
+          // Fall through to final rejection below
+          rangerResult.approved = false;
+        }
+      }
+
+      // Final rejection — no more retries
+      if (!rangerResult?.approved) {
+        await pool.query(
+          `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
+           ranger_breakdown = $5, status = 'ranger_rejected', updated_at = NOW()
+           WHERE id = $6 AND client_id = $7`,
+          [currentBody, currentSubject, rangerResult?.score || 0, rangerResult?.notes || rangerResult?.reject_reason || 'Enforcer rejected', JSON.stringify(rangerResult?.breakdown || null), msg.id, clientId]
+        );
+        await logsService.createLog(clientId, {
+          agent: 'enforcer_beaver',
+          action: 'message_rejected',
+          target_type: 'message',
+          target_id: msg.id,
+          metadata: { channel: msg.channel, score: rangerResult?.score, notes: rangerResult?.notes, method: 'ai_enforcer' },
+        });
+        rejectedCount++;
+        execStatus.beavers.enforcer.rejected++;
+        execStatus.beavers.enforcer.status = 'done';
+        return;
+      }
     }
 
     // ── AI Enforcer approved — push to approval queue ──
     await pool.query(
       `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
-       status = 'pending_approval', updated_at = NOW()
-       WHERE id = $5 AND client_id = $6`,
-      [currentBody, currentSubject, rangerResult?.score || 80, rangerResult?.notes || 'Enforcer approved', msg.id, clientId]
+       ranger_breakdown = $5, status = 'pending_approval', updated_at = NOW()
+       WHERE id = $6 AND client_id = $7`,
+      [currentBody, currentSubject, rangerResult?.score || 80, rangerResult?.notes || 'Enforcer approved', JSON.stringify(rangerResult?.breakdown || null), msg.id, clientId]
     );
 
     await pool.query(

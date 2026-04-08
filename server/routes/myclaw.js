@@ -1,0 +1,415 @@
+'use strict';
+
+// ─── MyClaw Integration Routes ─────────────────────────────────────────────
+// Endpoints for MyClaw (OpenClaw) to act as Director layer in The Dam.
+// Auth: MYCLAW_HOOK_TOKEN via x-myclaw-token header or Authorization: Bearer
+//
+// Inbound (MyClaw → The Dam):
+//   POST /api/myclaw/approve        — Approve a message in queue
+//   POST /api/myclaw/reject         — Reject a message in queue
+//   POST /api/myclaw/memory         — Write agent memory (learnings, ICP updates)
+//   POST /api/myclaw/leads          — Create a validated lead
+//   PUT  /api/myclaw/leads/:id      — Update lead metadata / validation score
+//
+// Outbound (The Dam exposes for MyClaw to read):
+//   GET  /api/myclaw/approvals      — Pending approvals with ranger breakdown
+//   GET  /api/myclaw/memory         — Read agent memory by agent/key
+//   GET  /api/myclaw/leads          — Lead list with pipeline context
+//   GET  /api/myclaw/status         — Connection health check
+
+const express = require('express');
+const router = express.Router();
+const pool = require('../db/pool');
+const logsService = require('../services/logs');
+const { safeCompare } = require('../utils/crypto');
+const { enqueueMessage } = require('../services/sendQueueWorker');
+
+// ── MyClaw auth middleware ─────────────────────────────────────────────────
+function requireMyClawAuth(req, res, next) {
+  const MYCLAW_TOKEN = process.env.MYCLAW_HOOK_TOKEN || process.env.MYCLAW_API_KEY;
+  if (!MYCLAW_TOKEN) {
+    return res.status(503).json({ error: 'MyClaw not configured', code: 'MYCLAW_NOT_CONFIGURED' });
+  }
+
+  const authHeader = req.headers.authorization;
+  const tokenHeader = req.headers['x-myclaw-token'] || req.headers['x-openclaw-token'];
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  const token = bearerToken || tokenHeader;
+
+  if (!token || !safeCompare(token, MYCLAW_TOKEN)) {
+    return res.status(401).json({ error: 'Unauthorized', code: 'INVALID_MYCLAW_TOKEN' });
+  }
+  next();
+}
+
+router.use(requireMyClawAuth);
+
+// ── Helper: resolve client_id from body or query ──────────────────────────
+function getClientId(req) {
+  return req.body?.client_id || req.query?.client_id;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/myclaw/status — Health check + capability summary
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/status', (req, res) => {
+  res.json({
+    data: {
+      connected: true,
+      role: 'director',
+      capabilities: ['approve', 'reject', 'read_approvals', 'write_memory', 'read_memory', 'create_leads', 'update_leads'],
+      timestamp: new Date().toISOString(),
+    },
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/myclaw/approvals — Pending approvals with full context + ranger breakdown
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/approvals', async (req, res, next) => {
+  try {
+    const clientId = getClientId(req);
+    const where = clientId ? 'AND a.client_id = $1::uuid' : '';
+    const params = clientId ? [clientId] : [];
+
+    const result = await pool.query(
+      `SELECT
+         a.id              AS approval_id,
+         a.client_id,
+         a.status,
+         a.created_at,
+         m.id              AS message_id,
+         m.subject,
+         m.body,
+         m.channel,
+         m.ranger_score,
+         m.ranger_notes,
+         m.ranger_breakdown,
+         m.ranger_attempt_count,
+         l.id              AS lead_id,
+         l.name            AS lead_name,
+         l.company         AS lead_company,
+         l.title           AS lead_title,
+         l.email           AS lead_email,
+         l.linkedin_url    AS lead_linkedin,
+         l.signal_tier,
+         l.metadata->>'signal'   AS lead_signal,
+         l.metadata->>'angle'    AS lead_angle,
+         l.metadata->>'friction' AS lead_friction
+       FROM approvals a
+       JOIN messages m ON m.id = a.message_id
+       JOIN leads l ON l.id = m.lead_id
+       WHERE a.status = 'pending' ${where}
+       ORDER BY a.created_at ASC
+       LIMIT 50`,
+      params
+    );
+
+    res.json({ data: result.rows, meta: { total: result.rowCount } });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/myclaw/approve — MyClaw approves a message → auto-enqueues for send
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/approve', async (req, res, next) => {
+  try {
+    const { approval_id, client_id, feedback } = req.body;
+    if (!approval_id || !client_id) {
+      return res.status(400).json({ error: 'approval_id and client_id required', code: 'MISSING_FIELDS' });
+    }
+
+    const existing = await pool.query(
+      `SELECT a.*, m.id as message_id FROM approvals a
+       JOIN messages m ON m.id = a.message_id
+       WHERE a.id = $1 AND a.client_id = $2`,
+      [approval_id, client_id]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Approval not found', code: 'NOT_FOUND' });
+    }
+    if (existing.rows[0].status !== 'pending') {
+      return res.status(400).json({ error: 'Approval already resolved', code: 'ALREADY_RESOLVED' });
+    }
+
+    const { message_id } = existing.rows[0];
+
+    await pool.query(
+      `UPDATE approvals SET status = 'approved', notes = $1, approved_by = 'myclaw', resolved_at = NOW()
+       WHERE id = $2 AND client_id = $3`,
+      [feedback || 'Approved by MyClaw', approval_id, client_id]
+    );
+    await pool.query(
+      `UPDATE messages SET status = 'approved', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
+      [message_id, client_id]
+    );
+
+    // Auto-enqueue for send
+    await enqueueMessage(client_id, message_id);
+
+    await logsService.createLog(client_id, {
+      agent: 'myclaw',
+      action: 'message_approved',
+      target_type: 'approval',
+      target_id: approval_id,
+      metadata: { message_id, feedback, source: 'myclaw_director' },
+    });
+
+    res.json({ data: { approval_id, message_id, status: 'approved' } });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/myclaw/reject — MyClaw rejects with structured feedback
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/reject', async (req, res, next) => {
+  try {
+    const { approval_id, client_id, reason, agent_learnings } = req.body;
+    if (!approval_id || !client_id) {
+      return res.status(400).json({ error: 'approval_id and client_id required', code: 'MISSING_FIELDS' });
+    }
+
+    const existing = await pool.query(
+      `SELECT a.*, m.id as message_id FROM approvals a
+       JOIN messages m ON m.id = a.message_id
+       WHERE a.id = $1 AND a.client_id = $2`,
+      [approval_id, client_id]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Approval not found', code: 'NOT_FOUND' });
+    }
+    if (existing.rows[0].status !== 'pending') {
+      return res.status(400).json({ error: 'Approval already resolved', code: 'ALREADY_RESOLVED' });
+    }
+
+    const { message_id } = existing.rows[0];
+
+    await pool.query(
+      `UPDATE approvals SET status = 'rejected', notes = $1, approved_by = 'myclaw', resolved_at = NOW()
+       WHERE id = $2 AND client_id = $3`,
+      [reason || 'Rejected by MyClaw', approval_id, client_id]
+    );
+    await pool.query(
+      `UPDATE messages SET status = 'rejected', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
+      [message_id, client_id]
+    );
+
+    // Persist agent learnings from MyClaw's rejection decision
+    if (agent_learnings && typeof agent_learnings === 'object') {
+      for (const [agent, learnings] of Object.entries(agent_learnings)) {
+        if (!learnings || typeof learnings !== 'object') continue;
+        await pool.query(
+          `INSERT INTO agent_memory (client_id, agent, memory_type, key, content)
+           VALUES ($1, $2, 'pattern', 'myclaw_rejections', $3::jsonb)
+           ON CONFLICT (client_id, agent, key)
+           DO UPDATE SET content = agent_memory.content || $3::jsonb, updated_at = NOW()`,
+          [client_id, agent, JSON.stringify(learnings)]
+        );
+      }
+    }
+
+    await logsService.createLog(client_id, {
+      agent: 'myclaw',
+      action: 'message_rejected',
+      target_type: 'approval',
+      target_id: approval_id,
+      metadata: { message_id, reason, agent_learnings, source: 'myclaw_director' },
+    });
+
+    res.json({ data: { approval_id, message_id, status: 'rejected' } });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/myclaw/memory — Read agent memory by agent + optional key
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/memory', async (req, res, next) => {
+  try {
+    const { client_id, agent, key, memory_type } = req.query;
+    if (!client_id) {
+      return res.status(400).json({ error: 'client_id required', code: 'MISSING_FIELDS' });
+    }
+
+    const conditions = ['client_id = $1', "memory_type != 'secret'"];
+    const params = [client_id];
+
+    if (agent) { conditions.push(`agent = $${params.push(agent)}`); }
+    if (key) { conditions.push(`key = $${params.push(key)}`); }
+    if (memory_type) { conditions.push(`memory_type = $${params.push(memory_type)}`); }
+
+    const result = await pool.query(
+      `SELECT agent, memory_type, key, content, updated_at
+       FROM agent_memory
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY updated_at DESC
+       LIMIT 50`,
+      params
+    );
+
+    res.json({ data: result.rows, meta: { total: result.rowCount } });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/myclaw/memory — MyClaw writes learnings back to agent memory
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/memory', async (req, res, next) => {
+  try {
+    const { client_id, agent, memory_type, key, content } = req.body;
+    if (!client_id || !agent || !memory_type || !key || content === undefined) {
+      return res.status(400).json({ error: 'client_id, agent, memory_type, key, content required', code: 'MISSING_FIELDS' });
+    }
+
+    const allowed = ['icp', 'brand_voice', 'objection', 'pattern', 'preference', 'conversion_data', 'persona', 'journal', 'config', 'mistakes', 'key'];
+    if (!allowed.includes(memory_type)) {
+      return res.status(400).json({ error: `Invalid memory_type. Must be one of: ${allowed.join(', ')}`, code: 'INVALID_MEMORY_TYPE' });
+    }
+
+    await pool.query(
+      `INSERT INTO agent_memory (client_id, agent, memory_type, key, content)
+       VALUES ($1, $2, $3, $4, $5::jsonb)
+       ON CONFLICT (client_id, agent, key)
+       DO UPDATE SET content = $5::jsonb, memory_type = $3, updated_at = NOW()`,
+      [client_id, agent, memory_type, key, JSON.stringify(content)]
+    );
+
+    await logsService.createLog(client_id, {
+      agent: 'myclaw',
+      action: 'memory_updated',
+      target_type: 'agent_memory',
+      metadata: { agent, memory_type, key, source: 'myclaw_director' },
+    });
+
+    res.json({ data: { agent, memory_type, key, updated: true } });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/myclaw/leads — Lead list with pipeline context
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/leads', async (req, res, next) => {
+  try {
+    const { client_id, status, signal_tier, limit = 20 } = req.query;
+    if (!client_id) {
+      return res.status(400).json({ error: 'client_id required', code: 'MISSING_FIELDS' });
+    }
+
+    const conditions = ['client_id = $1', 'deleted_at IS NULL'];
+    const params = [client_id];
+
+    if (status) { conditions.push(`status = $${params.push(status)}`); }
+    if (signal_tier) { conditions.push(`signal_tier = $${params.push(signal_tier)}`); }
+
+    const result = await pool.query(
+      `SELECT id, name, email, company, title, linkedin_url, signal_tier, status,
+              pipeline_stage, score, metadata, created_at, updated_at
+       FROM leads
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY created_at DESC
+       LIMIT $${params.push(Math.min(Number(limit), 100))}`,
+      params
+    );
+
+    res.json({ data: result.rows, meta: { total: result.rowCount } });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/myclaw/leads — MyClaw creates a validated lead directly
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/leads', async (req, res, next) => {
+  try {
+    const {
+      client_id, name, email, company, title, linkedin_url,
+      signal_tier, signal, angle, friction, why_now, notes,
+      myclaw_confidence, myclaw_notes,
+    } = req.body;
+
+    if (!client_id || !name || !company) {
+      return res.status(400).json({ error: 'client_id, name, company required', code: 'MISSING_FIELDS' });
+    }
+
+    // Dedup check
+    if (email) {
+      const dup = await pool.query(
+        `SELECT id FROM leads WHERE client_id = $1 AND email = $2 AND deleted_at IS NULL LIMIT 1`,
+        [client_id, email]
+      );
+      if (dup.rows.length > 0) {
+        return res.status(409).json({ error: 'Lead with this email already exists', code: 'DUPLICATE_LEAD', data: { id: dup.rows[0].id } });
+      }
+    }
+
+    const metadata = {
+      signal, angle, friction, why_now, notes,
+      data_source: 'myclaw',
+      myclaw_confidence: myclaw_confidence || null,
+      myclaw_notes: myclaw_notes || null,
+      verified: true,
+    };
+
+    const result = await pool.query(
+      `INSERT INTO leads (client_id, name, email, company, title, linkedin_url,
+                          signal_tier, source, pipeline_stage, status, score, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'myclaw', 'prospecting', 'new', 0, $8::jsonb)
+       RETURNING *`,
+      [client_id, name, email || null, company, title || null, linkedin_url || null,
+       signal_tier || 'P1', JSON.stringify(metadata)]
+    );
+
+    await logsService.createLog(client_id, {
+      agent: 'myclaw',
+      action: 'lead_created',
+      target_type: 'lead',
+      target_id: result.rows[0].id,
+      metadata: { name, company, signal_tier, source: 'myclaw_director' },
+    });
+
+    res.status(201).json({ data: result.rows[0] });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/myclaw/leads/:id — MyClaw updates lead metadata / validation score
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/leads/:id', async (req, res, next) => {
+  try {
+    const { client_id, status, pipeline_stage, signal_tier, metadata_patch } = req.body;
+    if (!client_id) {
+      return res.status(400).json({ error: 'client_id required', code: 'MISSING_FIELDS' });
+    }
+
+    const updates = ['updated_at = NOW()'];
+    const params = [req.params.id, client_id];
+
+    if (status) { updates.push(`status = $${params.push(status)}`); }
+    if (pipeline_stage) { updates.push(`pipeline_stage = $${params.push(pipeline_stage)}`); }
+    if (signal_tier) { updates.push(`signal_tier = $${params.push(signal_tier)}`); }
+    if (metadata_patch && typeof metadata_patch === 'object') {
+      updates.push(`metadata = metadata || $${params.push(JSON.stringify(metadata_patch))}::jsonb`);
+    }
+
+    const result = await pool.query(
+      `UPDATE leads SET ${updates.join(', ')}
+       WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL
+       RETURNING *`,
+      params
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Lead not found', code: 'NOT_FOUND' });
+    }
+
+    await logsService.createLog(client_id, {
+      agent: 'myclaw',
+      action: 'lead_updated',
+      target_type: 'lead',
+      target_id: req.params.id,
+      metadata: { status, pipeline_stage, signal_tier, source: 'myclaw_director' },
+    });
+
+    res.json({ data: result.rows[0] });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;

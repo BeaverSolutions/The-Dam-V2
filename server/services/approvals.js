@@ -3,6 +3,31 @@
 const pool = require('../db/pool');
 const { AppError } = require('../utils/errors');
 const logsService = require('./logs');
+const { enqueueMessage } = require('./sendQueueWorker');
+
+// Push approval notification to MyClaw so it doesn't have to poll
+async function notifyMyClaw(approvalId, messageId, clientId) {
+  const hookUrl = process.env.MYCLAW_WEBHOOK_URL;
+  const hookToken = process.env.MYCLAW_HOOK_TOKEN;
+  if (!hookUrl || !hookToken) return; // MyClaw not configured — skip silently
+
+  try {
+    if (!global.fetch) return; // Node < 18 without polyfill — skip
+
+    await fetch(`${hookUrl}/approval-pending`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${hookToken}`,
+      },
+      body: JSON.stringify({ approval_id: approvalId, message_id: messageId, client_id: clientId }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (err) {
+    // Non-fatal — MyClaw will pick it up on next poll
+    console.warn('[approvals] MyClaw notify failed (non-fatal):', err.message);
+  }
+}
 
 async function getApprovals(clientId, filters = {}, pagination = {}) {
   const { status = 'pending' } = filters;
@@ -64,6 +89,9 @@ async function createApproval(clientId, { message_id, requested_by }) {
     metadata: { message_id, requested_by },
   });
 
+  // Notify MyClaw — fire and forget (non-fatal if MyClaw is down)
+  notifyMyClaw(result.rows[0].id, message_id, clientId).catch(() => {});
+
   return result.rows[0];
 }
 
@@ -86,6 +114,13 @@ async function resolveApproval(clientId, approvalId, { status, notes, userId }) 
     `UPDATE messages SET status = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
     [messageStatus, existing.rows[0].message_id, clientId]
   );
+
+  // Auto-enqueue approved messages for send (with retry on failure)
+  if (status === 'approved') {
+    await enqueueMessage(clientId, existing.rows[0].message_id).catch(err => {
+      console.warn('[approvals] Failed to enqueue message for send:', err.message);
+    });
+  }
 
   await logsService.createLog(clientId, {
     agent: 'system',

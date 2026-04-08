@@ -106,6 +106,10 @@ app.use('/api/import',       authMiddleware, tenantScope, clientContext, require
 // runWithClientContext(clientId, ...) so Claude calls get attributed.
 app.use('/api/autonomous', require('./routes/autonomous'));
 
+// MyClaw routes — token auth (MYCLAW_HOOK_TOKEN), no JWT required.
+// MyClaw acts as director: reads approvals, resolves them, manages memory, manages leads.
+app.use('/api/myclaw', require('./routes/myclaw'));
+
 // Routes - super admin only (Beaver Solutions)
 app.use('/api/admin', authMiddleware, tenantScope, clientContext, superAdminOnly, require('./routes/admin'));
 
@@ -188,6 +192,15 @@ async function start() {
       });
     }, 5 * 60 * 1000);
     logger.info({ msg: 'Reply detector + Discord approvals polling started (5 min interval)' });
+
+    // Send queue worker — auto-sends approved messages, retries on failure
+    const { processSendQueue } = require('./services/sendQueueWorker');
+    setInterval(() => {
+      processSendQueue().catch(err => {
+        logger.warn({ msg: 'Send queue worker error', err: err.message });
+      });
+    }, 60 * 1000); // Every 60 seconds
+    logger.info({ msg: 'Send queue worker started (60s interval)' });
   } catch (err) {
     logger.error({ msg: 'Failed to start server', err: err.message, stack: err.stack });
     process.exit(1);
