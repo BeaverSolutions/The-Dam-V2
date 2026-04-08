@@ -6,6 +6,21 @@ const validate = require('../middleware/validate');
 const agentsService = require('../services/agents');
 const pool = require('../db/pool');
 
+// ── MyClaw diagnostic: test connection ──
+router.get('/myclaw/status', async (req, res) => {
+  const myclaw = require('../services/myclaw');
+  const configured = myclaw.isConfigured();
+  if (!configured) {
+    return res.json({ data: { configured: false, reason: 'MYCLAW_BASE_URL or MYCLAW_HOOK_TOKEN not set', base_url: process.env.MYCLAW_BASE_URL ? 'set' : 'missing', token: process.env.MYCLAW_HOOK_TOKEN ? 'set' : 'missing' } });
+  }
+  try {
+    const result = await myclaw.callAgent('What is your name? Reply in one sentence.', { timeoutSeconds: 15 });
+    return res.json({ data: { configured: true, connected: !!result, response: result } });
+  } catch (err) {
+    return res.json({ data: { configured: true, connected: false, error: err.message } });
+  }
+});
+
 router.post('/research/search',
   [body('query').notEmpty().trim(), validate],
   async (req, res, next) => {
