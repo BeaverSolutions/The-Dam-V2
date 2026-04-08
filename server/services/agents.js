@@ -1439,7 +1439,37 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           metadata: { lead_id: lead.id, lead_name: lead.name, channel: selectedChannel, reason: `Best channel: ${selectedChannel}` },
         });
 
-        // ── Server-side gates check ──
+        // ── Captain validation gate — check for placeholders, missing data ──
+        const validation = await captainValidate(clientId, lead, message);
+        if (!validation.valid) {
+          if (validation.fixed_body) {
+            // Captain fixed the message — update body before Enforcer review
+            await pool.query(
+              `UPDATE messages SET body = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
+              [validation.fixed_body, message.id, clientId]
+            );
+            msgWithMeta.body = validation.fixed_body;
+            await logsService.createLog(clientId, {
+              agent: 'captain_beaver', action: 'message_fixed', target_type: 'message', target_id: message.id,
+              metadata: { notes: validation.notes },
+            });
+          } else {
+            // Captain can't fix — reject the message, skip Enforcer
+            await pool.query(
+              `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
+              [validation.notes, message.id, clientId]
+            );
+            await logsService.createLog(clientId, {
+              agent: 'captain_beaver', action: 'message_rejected', target_type: 'message', target_id: message.id,
+              metadata: { notes: validation.notes },
+            });
+            diagnostics.messages_failed++;
+            // Skip Enforcer — message is already rejected
+            return;
+          }
+        }
+
+        // ── Enforcer review pipeline (server gates + AI Enforcer) ──
         await runRangerPipeline(lead, msgWithMeta);
       }
     } catch (err) {
@@ -1462,7 +1492,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     execStatus.beavers.enforcer.task = `Checking ${msg.channel} for ${msg.lead_name}`;
     await updateExecStatus(clientId, plan_id, execStatus);
 
-    // ── Server-side hard gates ONLY (no AI Enforcer — saves credits, eliminates false rejections) ──
+    // ── Server-side hard gates (fast pre-filter before AI Enforcer) ──
     const gateFailures = [];
     if (currentBody) {
       // Strip greeting (single or multi-word first name) and sign-off before word count
@@ -1489,11 +1519,11 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         [`Server gate failures: ${gateFailures.join('; ')}`, msg.id, clientId]
       );
       await logsService.createLog(clientId, {
-        agent: 'ranger',
+        agent: 'enforcer_beaver',
         action: 'message_rejected',
         target_type: 'message',
         target_id: msg.id,
-        metadata: { gates: gateFailures, channel: msg.channel },
+        metadata: { gates: gateFailures, channel: msg.channel, method: 'server_gates' },
       });
       rejectedCount++;
       execStatus.beavers.enforcer.rejected++;
@@ -1501,12 +1531,51 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       return;
     }
 
-    // ── Gates passed — push straight to approval queue ──
+    // ── Server gates passed — now run AI Enforcer review (fail-closed) ──
+    let rangerResult;
+    try {
+      rangerResult = await rangerReview(clientId, { message_id: msg.id, message_body: currentBody });
+    } catch (err) {
+      console.error('[pipeline] AI Enforcer unavailable, blocking message (fail-closed):', err.message);
+      await pool.query(
+        `UPDATE messages SET ranger_score = 0, ranger_notes = $1, status = 'ranger_rejected', updated_at = NOW()
+         WHERE id = $2 AND client_id = $3`,
+        ['AI Enforcer unavailable — message blocked (fail-closed)', msg.id, clientId]
+      );
+      await logMistake(clientId, 'enforcer_beaver', 'Claude call failed during Enforcer review', err.message, 'Enforcer fell back to reject — investigate Claude API');
+      rejectedCount++;
+      execStatus.beavers.enforcer.rejected++;
+      execStatus.beavers.enforcer.status = 'done';
+      return;
+    }
+
+    if (!rangerResult?.approved) {
+      // AI Enforcer rejected
+      await pool.query(
+        `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
+         status = 'ranger_rejected', updated_at = NOW()
+         WHERE id = $5 AND client_id = $6`,
+        [currentBody, currentSubject, rangerResult?.score || 0, rangerResult?.notes || rangerResult?.reject_reason || 'Enforcer rejected', msg.id, clientId]
+      );
+      await logsService.createLog(clientId, {
+        agent: 'enforcer_beaver',
+        action: 'message_rejected',
+        target_type: 'message',
+        target_id: msg.id,
+        metadata: { channel: msg.channel, score: rangerResult?.score, notes: rangerResult?.notes, method: 'ai_enforcer' },
+      });
+      rejectedCount++;
+      execStatus.beavers.enforcer.rejected++;
+      execStatus.beavers.enforcer.status = 'done';
+      return;
+    }
+
+    // ── AI Enforcer approved — push to approval queue ──
     await pool.query(
-      `UPDATE messages SET body = $1, subject = $2, ranger_score = 80, ranger_notes = 'Server gates passed',
+      `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
        status = 'pending_approval', updated_at = NOW()
-       WHERE id = $3 AND client_id = $4`,
-      [currentBody, currentSubject, msg.id, clientId]
+       WHERE id = $5 AND client_id = $6`,
+      [currentBody, currentSubject, rangerResult?.score || 80, rangerResult?.notes || 'Enforcer approved', msg.id, clientId]
     );
 
     await pool.query(
@@ -1515,11 +1584,11 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     );
 
     await logsService.createLog(clientId, {
-      agent: 'ranger',
+      agent: 'enforcer_beaver',
       action: 'message_approved',
       target_type: 'message',
       target_id: msg.id,
-      metadata: { channel: msg.channel, gates: 'passed', method: 'server_side_only' },
+      metadata: { channel: msg.channel, score: rangerResult?.score, method: 'ai_enforcer' },
     });
 
     approvedCount++;

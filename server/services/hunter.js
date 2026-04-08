@@ -46,8 +46,8 @@ async function findEmail(clientId, { firstName, lastName, domain, company }) {
         domain: targetDomain,
         first_name: firstName,
         last_name: lastName,
-        api_key: apiKey,
       },
+      headers: { 'X-Api-Key': apiKey },
       timeout: 10000,
     });
 
@@ -88,7 +88,8 @@ async function domainSearch(clientId, { domain, company, limit = 5 }) {
 
   try {
     const resp = await axios.get(`${BASE}/domain-search`, {
-      params: { domain: targetDomain, limit, api_key: apiKey },
+      params: { domain: targetDomain, limit },
+      headers: { 'X-Api-Key': apiKey },
       timeout: 10000,
     });
 
@@ -117,7 +118,8 @@ async function verifyEmail(clientId, email) {
 
   try {
     const resp = await axios.get(`${BASE}/email-verifier`, {
-      params: { email, api_key: apiKey },
+      params: { email },
+      headers: { 'X-Api-Key': apiKey },
       timeout: 10000,
     });
     return resp.data?.data?.status || null; // 'valid', 'invalid', 'accept_all', 'unknown'
@@ -134,7 +136,7 @@ async function testConnection(clientId) {
   if (!apiKey) return false;
   try {
     const resp = await axios.get(`${BASE}/account`, {
-      params: { api_key: apiKey },
+      headers: { 'X-Api-Key': apiKey },
       timeout: 8000,
     });
     return resp.status === 200;

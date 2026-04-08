@@ -72,8 +72,9 @@ app.get('/api/integrations/gmail/callback', async (req, res) => {
       if (!clientId || typeof clientId !== 'string' || !/^[0-9a-f-]{36}$/i.test(clientId)) throw new Error('invalid');
       // Verify HMAC signature to prevent state tampering
       const crypto = require('crypto');
+      const { safeCompare } = require('./utils/crypto');
       const expectedSig = crypto.createHmac('sha256', config.jwt.secret).update(clientId).digest('hex');
-      if (!sig || sig !== expectedSig) throw new Error('invalid signature');
+      if (!safeCompare(sig, expectedSig)) throw new Error('invalid signature');
     } catch {
       return res.redirect(`${frontendUrl}/settings?gmail=error`);
     }

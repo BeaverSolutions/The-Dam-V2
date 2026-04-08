@@ -121,9 +121,10 @@ async function sendEmail(clientId, { to, subject, body }) {
     const client = getOAuthClient();
     client.setCredentials(tokens);
 
-    // Auto-refresh if expired
+    // Auto-refresh if expired — read latest tokens from DB to prevent race condition
     client.on('tokens', async (newTokens) => {
-      await storeTokens(clientId, { ...tokens, ...newTokens });
+      const latestTokens = await getTokens(clientId);
+      await storeTokens(clientId, { ...(latestTokens || tokens), ...newTokens });
     });
 
     const gmail = google.gmail({ version: 'v1', auth: client });

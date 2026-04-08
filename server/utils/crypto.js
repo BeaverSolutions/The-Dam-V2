@@ -12,6 +12,7 @@ function getKey() {
 }
 
 function encrypt(text) {
+  if (!text) throw new Error('Cannot encrypt empty value');
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv(ALGORITHM, getKey(), iv);
   let encrypted = cipher.update(text, 'utf8', 'hex');
@@ -21,7 +22,10 @@ function encrypt(text) {
 }
 
 function decrypt(encryptedText) {
-  const [ivHex, authTagHex, encrypted] = encryptedText.split(':');
+  if (!encryptedText) throw new Error('Cannot decrypt empty value');
+  const parts = encryptedText.split(':');
+  if (parts.length !== 3) throw new Error('Invalid encrypted text format');
+  const [ivHex, authTagHex, encrypted] = parts;
   const decipher = crypto.createDecipheriv(ALGORITHM, getKey(), Buffer.from(ivHex, 'hex'));
   decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
   let decrypted = decipher.update(encrypted, 'hex', 'utf8');
@@ -29,4 +33,16 @@ function decrypt(encryptedText) {
   return decrypted;
 }
 
-module.exports = { encrypt, decrypt };
+/**
+ * Timing-safe string comparison for secrets, HMAC signatures, API keys.
+ * Returns false if either value is missing.
+ */
+function safeCompare(a, b) {
+  if (!a || !b) return false;
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+module.exports = { encrypt, decrypt, safeCompare };

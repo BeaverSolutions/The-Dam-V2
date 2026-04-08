@@ -14,10 +14,13 @@ const logger = require('../utils/logger');
  * It is registered in index.js BEFORE the global express.json() middleware.
  */
 router.post('/agentmail', require('express').raw({ type: '*/*' }), async (req, res) => {
-  // Verify webhook secret
+  // Verify webhook secret (fail-closed: reject if no secret configured)
+  const crypto = require('crypto');
   const webhookSecret = process.env.AGENTMAIL_WEBHOOK_SECRET;
   const headerSecret = req.headers['x-webhook-secret'];
-  if (webhookSecret && headerSecret !== webhookSecret) {
+  if (!webhookSecret || !headerSecret ||
+      Buffer.from(String(webhookSecret)).length !== Buffer.from(String(headerSecret)).length ||
+      !crypto.timingSafeEqual(Buffer.from(String(webhookSecret)), Buffer.from(String(headerSecret)))) {
     return res.status(403).json({ error: 'Invalid webhook secret' });
   }
 

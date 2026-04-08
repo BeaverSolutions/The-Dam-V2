@@ -16,7 +16,13 @@ clients/
     config.md
   trl/
     config.md
-  gamerexchange/
+  the-gaming-company/
+    config.md
+  mastercard/
+    config.md
+  emplifive/
+    config.md
+  mgmax-sdn-bhd/
     config.md
 ```
 
@@ -37,7 +43,7 @@ clients/
 1. Run discovery call using `onboarding/discovery-questionnaire.md`
 2. Create a new folder: `clients/[client-slug]/`
    - Slug must match the `slug` column in the `clients` DB table
-   - Use lowercase, hyphens, no spaces (e.g. `trl`, `gamer-exchange`)
+   - Use lowercase, hyphens, no spaces (e.g. `trl`, `the-gaming-company`)
 3. Copy `_template/config.md` → `clients/[client-slug]/config.md`
 4. Fill in every section using answers from the discovery call
 5. Add the client to the database (via admin panel or SQL)

@@ -13,7 +13,7 @@ const pool = new Pool(
           : process.env.NODE_ENV === 'production'
             ? { rejectUnauthorized: false }
             : false,
-        max: 5,
+        max: parseInt(process.env.PG_POOL_MAX || '15'),
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 10000,
         statement_timeout: 30000,

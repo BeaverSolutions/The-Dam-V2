@@ -299,6 +299,7 @@ export default function BeaverStatusBoard({ execStatus, kpis: kpisProp, agentLog
   const fetchKpis = async () => {
     try {
       const res = await fetch('/api/agents/kpis', { credentials: 'include' });
+      if (res.status === 401) { window.location.href = '/login'; return; }
       if (!res.ok) return;
       const data = await res.json();
       if (data?.data) setKpis(data.data);

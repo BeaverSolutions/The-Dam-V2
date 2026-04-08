@@ -31,7 +31,10 @@ const PRICING = {
  */
 function costForUsage(model, usage = {}) {
   const p = PRICING[model];
-  if (!p) return 0;
+  if (!p) {
+    logger.error({ msg: 'Unknown model for billing — applying conservative default cost', model });
+    return 0.05; // Conservative default per call to prevent silent budget bypass
+  }
   const cost = (
     (usage.input_tokens || 0)                * p.input +
     (usage.output_tokens || 0)               * p.output +

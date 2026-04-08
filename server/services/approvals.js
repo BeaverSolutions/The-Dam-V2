@@ -35,6 +35,16 @@ async function getApprovals(clientId, filters = {}, pagination = {}) {
 }
 
 async function createApproval(clientId, { message_id, requested_by }) {
+  // Verify message is actually in pending_approval status before creating approval
+  const msgCheck = await pool.query(
+    `SELECT status FROM messages WHERE id = $1 AND client_id = $2`,
+    [message_id, clientId]
+  );
+  if (msgCheck.rows.length === 0) throw new AppError('Message not found', 404, 'NOT_FOUND');
+  if (msgCheck.rows[0].status !== 'pending_approval') {
+    throw new AppError(`Cannot create approval: message status is '${msgCheck.rows[0].status}', expected 'pending_approval'`, 400, 'INVALID_STATUS');
+  }
+
   const result = await pool.query(
     `INSERT INTO approvals (client_id, message_id, requested_by)
      VALUES ($1, $2, $3) RETURNING *`,

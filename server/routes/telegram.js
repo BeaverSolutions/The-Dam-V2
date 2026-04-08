@@ -117,8 +117,9 @@ function formatResult(result) {
 // ─── Webhook (receives all Telegram updates) ──────────────────────────────────
 router.post('/webhook', async (req, res) => {
   // Validate Telegram's secret token header
+  const { safeCompare } = require('../utils/crypto');
   const secret = req.headers['x-telegram-bot-api-secret-token'];
-  if (!BOT_SECRET || secret !== BOT_SECRET) {
+  if (!BOT_SECRET || !safeCompare(secret, BOT_SECRET)) {
     return res.sendStatus(403);
   }
 
@@ -230,8 +231,9 @@ router.post('/webhook', async (req, res) => {
 // POST /api/telegram/set-webhook
 // Call this once after deploying to register the webhook URL with Telegram.
 function requireInternalKey(req, res, next) {
+  const { safeCompare } = require('../utils/crypto');
   const key = req.headers['x-internal-key'];
-  if (!process.env.INTERNAL_API_KEY || !key || key !== process.env.INTERNAL_API_KEY) {
+  if (!process.env.INTERNAL_API_KEY || !safeCompare(key, process.env.INTERNAL_API_KEY)) {
     return res.status(401).json({ error: 'Unauthorized', code: 'INVALID_KEY' });
   }
   next();

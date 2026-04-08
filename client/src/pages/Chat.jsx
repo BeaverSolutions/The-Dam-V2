@@ -341,6 +341,7 @@ export default function Chat() {
                 const pollId = setInterval(async () => {
                   try {
                     const pollRes = await fetch(`/api/agents/director/execute/${planId}`, { credentials: 'include' });
+                    if (pollRes.status === 401) { clearInterval(pollId); activePolls.current.delete(planId); window.location.href = '/login'; return; }
                     const pollData = await pollRes.json();
                     const pollStatus = pollData?.data?.status;
                     // Update beaver status board with live state

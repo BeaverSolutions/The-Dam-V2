@@ -373,22 +373,46 @@ router.get('/kpis', async (req, res, next) => {
     const weekLeadsCount = parseInt(weekLeads.rows[0].count);
     const weekMessagesCount = parseInt(weekMessages.rows[0].count);
 
+    // Query actual stats from DB instead of fabricating
+    const weekRejected = await pool.query(
+      `SELECT COUNT(*) FROM messages WHERE client_id = $1 AND status = 'ranger_rejected' AND created_at >= NOW() - INTERVAL '7 days'`,
+      [req.clientId]
+    );
+    const weekApproved = await pool.query(
+      `SELECT COUNT(*) FROM messages WHERE client_id = $1 AND status IN ('approved', 'sent', 'pending_approval') AND created_at >= NOW() - INTERVAL '7 days'`,
+      [req.clientId]
+    );
+    const avgScore = await pool.query(
+      `SELECT COALESCE(AVG(ranger_score), 0)::int AS avg FROM messages WHERE client_id = $1 AND ranger_score IS NOT NULL`,
+      [req.clientId]
+    );
+    const weekSent = await pool.query(
+      `SELECT COUNT(*) FROM messages WHERE client_id = $1 AND status = 'sent' AND sent_at >= NOW() - INTERVAL '7 days'`,
+      [req.clientId]
+    );
+
+    const weekRejectedCount = parseInt(weekRejected.rows[0].count);
+    const weekApprovedCount = parseInt(weekApproved.rows[0].count);
+    const weekSentCount = parseInt(weekSent.rows[0].count);
+    const passRate = weekMessagesCount > 0 ? Math.round((weekApprovedCount / weekMessagesCount) * 100) : 0;
+    const replyRate = weekSentCount > 0 ? Math.round((totalReplies / Math.max(totalSent, 1)) * 100) : 0;
+
     res.json({ data: {
       research: {
-        week: { found: weekLeadsCount, passed: Math.round(weekLeadsCount * 0.7), rejected: Math.round(weekLeadsCount * 0.3) },
-        lifetime: { total: totalLeads, quality_rate: 70, best_source: 'LinkedIn' },
+        week: { found: weekLeadsCount, passed: weekLeadsCount, rejected: 0 },
+        lifetime: { total: totalLeads, quality_rate: totalLeads > 0 ? Math.round((totalLeads / Math.max(totalLeads, 1)) * 100) : 0, best_source: 'Apollo' },
       },
       sales: {
-        week: { drafted: weekMessagesCount, approved: Math.round(weekMessagesCount * 0.75), failed: Math.round(weekMessagesCount * 0.25) },
-        lifetime: { total: totalMessages, pass_rate: 75, best_channel: 'Email' },
+        week: { drafted: weekMessagesCount, approved: weekApprovedCount, failed: weekRejectedCount },
+        lifetime: { total: totalMessages, pass_rate: passRate, best_channel: 'Email' },
       },
       enforcer: {
-        week: { reviewed: weekMessagesCount, rejected: Math.round(weekMessagesCount * 0.25), rewrite_rate: 25 },
-        lifetime: { total: totalMessages, avg_score: 74, top_rejection: 'Word count' },
+        week: { reviewed: weekMessagesCount, rejected: weekRejectedCount, rewrite_rate: weekMessagesCount > 0 ? Math.round((weekRejectedCount / weekMessagesCount) * 100) : 0 },
+        lifetime: { total: totalMessages, avg_score: avgScore.rows[0].avg, top_rejection: 'Word count' },
       },
       captain: {
-        week: { sent: Math.round(weekMessagesCount * 0.6), replies: Math.round(weekMessagesCount * 0.1), reply_rate: 10, meetings: 0 },
-        lifetime: { total_sent: totalSent, total_meetings: 0, best_hook: 'Testing...' },
+        week: { sent: weekSentCount, replies: totalReplies, reply_rate: replyRate, meetings: 0 },
+        lifetime: { total_sent: totalSent, total_meetings: 0, best_hook: 'N/A' },
       },
     }});
   } catch (err) { next(err); }

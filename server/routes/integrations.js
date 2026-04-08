@@ -307,8 +307,8 @@ async function sendMessageById(clientId, message_id, provider) {
   try {
     const { rows: prevSent } = await pool.query(
       `SELECT COUNT(*) AS cnt FROM messages
-       WHERE lead_id = $1 AND status = 'sent'`,
-      [message.lead_id]
+       WHERE lead_id = $1 AND client_id = $2 AND status = 'sent'`,
+      [message.lead_id, clientId]
     );
     if (parseInt(prevSent[0].cnt) === 1) {
       const { scheduleFollowUps } = require('../services/followupSequence');

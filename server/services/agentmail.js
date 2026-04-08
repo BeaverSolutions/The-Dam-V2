@@ -58,7 +58,7 @@ async function getOrCreateInbox(clientId, clientSlug) {
   // Persist inbox in agent_memory
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, memory_type, content)
-     VALUES ($1, 'sales_beaver', 'agentmail_inbox', 'secret', $2)
+     VALUES ($1, 'sales_beaver', 'agentmail_inbox', 'config', $2)
      ON CONFLICT (client_id, agent, key) DO UPDATE
        SET content = EXCLUDED.content, updated_at = NOW()`,
     [clientId, JSON.stringify(inboxData)]

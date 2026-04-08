@@ -1,7 +1,7 @@
-# Ranger Hard Rules — DO NOT EDIT PER CLIENT
+# Enforcer Beaver Hard Rules — DO NOT EDIT PER CLIENT
 
 These rules apply to ALL clients, ALL messages, ALL channels.
-They are enforced in code (server/services/agents.js) and cannot be overridden by client config.
+They are enforced in code (server/config/agents.js Enforcer prompt + server/services/agents.js server-side gates) and cannot be overridden by client config.
 
 ---
 

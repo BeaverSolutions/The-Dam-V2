@@ -48,11 +48,13 @@ async function getMessage(clientId, messageId) {
 }
 
 async function createMessage(clientId, data) {
-  const { lead_id, channel, subject, body, status = 'draft' } = data;
+  const { lead_id, channel, subject, body } = data;
+  // Force status to 'draft' — pipeline controls status transitions, never user input
+  const safeStatus = 'draft';
   const result = await pool.query(
     `INSERT INTO messages (client_id, lead_id, channel, subject, body, status)
      VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [clientId, lead_id, channel, subject, body, status]
+    [clientId, lead_id, channel, subject, body, safeStatus]
   );
   const message = result.rows[0];
 

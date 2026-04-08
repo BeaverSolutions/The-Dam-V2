@@ -32,7 +32,6 @@ async function searchPeople(clientId, { query, limit = 5 }) {
   const title = titleMatch ? titleMatch[0] : undefined;
 
   const payload = {
-    api_key: apiKey,
     q_keywords: query,
     page: 1,
     per_page: limit,
@@ -41,7 +40,7 @@ async function searchPeople(clientId, { query, limit = 5 }) {
 
   try {
     const resp = await axios.post(`${APOLLO_BASE}/mixed_people/search`, payload, {
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
       timeout: 15000,
     });
 
@@ -84,10 +83,9 @@ async function testConnection(clientId) {
   if (!apiKey) return false;
   try {
     const resp = await axios.post(`${APOLLO_BASE}/mixed_people/search`, {
-      api_key: apiKey,
       q_keywords: 'test',
       per_page: 1,
-    }, { timeout: 10000 });
+    }, { headers: { 'X-Api-Key': apiKey }, timeout: 10000 });
     return resp.status === 200;
   } catch {
     return false;

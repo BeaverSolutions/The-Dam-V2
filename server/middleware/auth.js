@@ -16,6 +16,9 @@ function authMiddleware(req, res, next) {
 
   try {
     const decoded = jwt.verify(token, config.jwt.secret);
+    if (!decoded.userId || !decoded.clientId || !decoded.role) {
+      return res.status(401).json({ error: 'Malformed token', code: 'AUTH_INVALID' });
+    }
     req.user = decoded; // { userId, clientId, role }
     next();
   } catch (err) {

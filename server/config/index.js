@@ -37,4 +37,8 @@ if (!config.jwt.secret) {
   throw new Error('JWT_SECRET environment variable is required. Generate with: openssl rand -base64 48');
 }
 
+if (config.nodeEnv === 'production' && !config.database.connectionString) {
+  throw new Error('DATABASE_URL environment variable is required in production');
+}
+
 module.exports = config;

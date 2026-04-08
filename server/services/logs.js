@@ -17,7 +17,8 @@ async function createLog(clientId, { agent, action, target_type, target_id, meta
 
 async function getLogs(clientId, filters = {}, pagination = {}) {
   const { agent, action, date_from, date_to, target_type } = filters;
-  const { page = 1, perPage = 50 } = pagination;
+  const { page = 1, perPage: rawPerPage = 50 } = pagination;
+  const perPage = Math.min(rawPerPage || 50, 200);
   const offset = (page - 1) * perPage;
 
   const countResult = await pool.query(

@@ -42,7 +42,7 @@ router.get('/:id', [param('id').isUUID(), validate], async (req, res, next) => {
 router.put('/:id',
   [
     param('id').isUUID(),
-    body('status').optional().isIn(['draft', 'pending_ranger', 'ranger_rejected', 'pending_approval', 'failed']),
+    body('status').optional().isIn(['draft', 'pending_ranger', 'ranger_rejected', 'failed']),
     body('body').optional().notEmpty(),
     validate,
   ],

@@ -26,29 +26,41 @@ function generateAccessCode() {
 }
 
 async function signup({ email, password, name }) {
-  const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
-  if (existing.rows.length > 0) {
-    throw new AppError('Email already registered', 409, 'EMAIL_EXISTS');
-  }
-
   const passwordHash = await bcrypt.hash(password, 12);
   const verificationCode = generateVerificationCode();
 
-  const clientResult = await pool.query(
-    `INSERT INTO clients (name, email) VALUES ($1, $2) RETURNING id`,
-    [name || email.split('@')[0], email]
-  );
-  const clientId = clientResult.rows[0].id;
+  // Wrap in transaction to prevent orphaned client rows on failure
+  const dbClient = await pool.connect();
+  try {
+    await dbClient.query('BEGIN');
 
-  const userResult = await pool.query(
-    `INSERT INTO users (client_id, email, password_hash, role, verification_code)
-     VALUES ($1, $2, $3, 'admin', $4) RETURNING id, client_id, role, email`,
-    [clientId, email, passwordHash, verificationCode]
-  );
-  const user = userResult.rows[0];
+    const clientResult = await dbClient.query(
+      `INSERT INTO clients (name, email) VALUES ($1, $2) RETURNING id`,
+      [name || email.split('@')[0], email]
+    );
+    const clientId = clientResult.rows[0].id;
 
-  const token = generateToken(user);
-  return { token, user: { id: user.id, email: user.email, role: user.role, clientId } };
+    const userResult = await dbClient.query(
+      `INSERT INTO users (client_id, email, password_hash, role, verification_code)
+       VALUES ($1, $2, $3, 'admin', $4) RETURNING id, client_id, role, email`,
+      [clientId, email, passwordHash, verificationCode]
+    );
+    const user = userResult.rows[0];
+
+    await dbClient.query('COMMIT');
+
+    const token = generateToken(user);
+    return { token, user: { id: user.id, email: user.email, role: user.role, clientId } };
+  } catch (err) {
+    await dbClient.query('ROLLBACK');
+    // Catch DB unique violation (email already exists)
+    if (err.code === '23505') {
+      throw new AppError('Email already registered', 409, 'EMAIL_EXISTS');
+    }
+    throw err;
+  } finally {
+    dbClient.release();
+  }
 }
 
 async function login({ email, password }) {
@@ -99,7 +111,7 @@ async function verifyEmail({ email, code }) {
 
 async function verifyAccessCode({ code, deviceFingerprint, userAgent }) {
   const codeResult = await pool.query(
-    `SELECT * FROM access_codes WHERE code = $1 AND revoked = false`,
+    `SELECT * FROM access_codes WHERE code = $1 AND revoked = false AND (expires_at IS NULL OR expires_at > NOW())`,
     [code]
   );
   if (codeResult.rows.length === 0) {

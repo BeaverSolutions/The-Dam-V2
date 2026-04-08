@@ -4,17 +4,16 @@ const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
-const { directorExecute } = require('../services/agents');
+const { directorExecute, rangerReview } = require('../services/agents');
 const { runWithClientContext } = require('../middleware/clientContext');
 const logger = require('../utils/logger');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
 function requireInternalKey(req, res, next) {
+  const { safeCompare } = require('../utils/crypto');
   const key = req.headers['x-internal-key'];
-  // Explicitly guard against missing env var — if INTERNAL_API_KEY is undefined,
-  // both key and process.env.INTERNAL_API_KEY would be undefined and comparison would pass.
-  if (!process.env.INTERNAL_API_KEY || !key || key !== process.env.INTERNAL_API_KEY) {
+  if (!process.env.INTERNAL_API_KEY || !safeCompare(key, process.env.INTERNAL_API_KEY)) {
     return res.status(401).json({ error: 'Unauthorized', code: 'INVALID_KEY' });
   }
   next();
@@ -127,6 +126,7 @@ router.post('/approve', requireInternalKey, async (req, res) => {
     return res.status(400).json({ error: 'approval_id and client_id required' });
   }
   try {
+    // Verify message is actually in pending_approval status before approving
     const { rows: [approval] } = await pool.query(
       `UPDATE approvals SET status = 'approved', resolved_at = NOW()
        WHERE id = $1 AND client_id = $2 AND status = 'pending'
@@ -136,9 +136,13 @@ router.post('/approve', requireInternalKey, async (req, res) => {
     if (!approval) {
       return res.status(404).json({ error: 'Approval not found or already actioned', code: 'NOT_FOUND' });
     }
+    const { rows: [msg] } = await pool.query(`SELECT status FROM messages WHERE id = $1 AND client_id = $2`, [approval.message_id, client_id]);
+    if (!msg || msg.status !== 'pending_approval') {
+      return res.status(400).json({ error: `Cannot approve: message status is '${msg?.status || 'missing'}'`, code: 'INVALID_STATUS' });
+    }
     await pool.query(
-      `UPDATE messages SET status = 'approved' WHERE id = $1`,
-      [approval.message_id]
+      `UPDATE messages SET status = 'approved' WHERE id = $1 AND client_id = $2`,
+      [approval.message_id, client_id]
     );
     await pool.query(
       `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)
@@ -286,12 +290,16 @@ router.post('/send-approved', requireInternalKey, async (req, res) => {
   try {
     const { sendMessageById } = require('./integrations');
 
-    // Get all approved messages ready to send
+    // Atomically claim approved messages to prevent double-sends on concurrent calls
     const { rows: approved } = await pool.query(
-      `SELECT id, channel, lead_id FROM messages
-       WHERE client_id = $1 AND status = 'approved'
-       ORDER BY created_at ASC
-       LIMIT 20`,
+      `UPDATE messages SET status = 'sending', updated_at = NOW()
+       WHERE id IN (
+         SELECT id FROM messages
+         WHERE client_id = $1 AND status = 'approved'
+         ORDER BY created_at ASC
+         LIMIT 20
+       )
+       RETURNING id, channel, lead_id`,
       [client_id]
     );
 
@@ -308,11 +316,12 @@ router.post('/send-approved', requireInternalKey, async (req, res) => {
           sent++;
           logger.info({ msg: `[auto-send] Sent message ${msg.id} (${msg.channel})`, client_id });
         } else {
-          // simulated or other — don't count as sent
           logger.info({ msg: `[auto-send] Message ${msg.id} result: ${result.status}`, client_id });
         }
       } catch (err) {
         failed++;
+        // Revert to approved so it can be retried
+        await pool.query(`UPDATE messages SET status = 'approved', updated_at = NOW() WHERE id = $1 AND client_id = $2`, [msg.id, client_id]);
         logger.error({ msg: `[auto-send] Failed to send message ${msg.id}`, err: err.message, client_id });
       }
     }
@@ -431,23 +440,52 @@ async function _runAutonomousKickoffInner(clientId) {
 
         const passedGates = gateFailures.length === 0;
 
+        // If server gates failed, insert as rejected immediately
+        if (!passedGates) {
+          const { rows: [savedMsg] } = await pool.query(
+            `INSERT INTO messages (client_id, lead_id, subject, body, status, metadata, channel, follow_up_day)
+             VALUES ($1, $2, $3, $4, 'ranger_rejected', $5, $6, $7)
+             RETURNING id`,
+            [
+              clientId, followUp.lead_id, draft.subject || null, cleanBody,
+              JSON.stringify({ ...draft, is_followup: true, touch_number: followUp.touch_number, gate_failures: gateFailures }),
+              originalChannel, followUp.touch_number === 2 ? 2 : followUp.touch_number === 3 ? 4 : 7,
+            ]
+          );
+          await pool.query(`UPDATE followup_queue SET status = 'skipped', message_id = $1 WHERE id = $2`, [savedMsg.id, followUp.id]);
+          continue;
+        }
+
+        // Server gates passed — insert as pending_ranger, then run AI Enforcer (fail-closed)
         const { rows: [savedMsg] } = await pool.query(
           `INSERT INTO messages (client_id, lead_id, subject, body, status, metadata, channel, follow_up_day)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           VALUES ($1, $2, $3, $4, 'pending_ranger', $5, $6, $7)
            RETURNING id`,
           [
-            clientId,
-            followUp.lead_id,
-            draft.subject || null,
-            cleanBody,
-            passedGates ? 'pending_approval' : 'ranger_rejected',
-            JSON.stringify({ ...draft, is_followup: true, touch_number: followUp.touch_number, gate_failures: gateFailures }),
-            originalChannel,
-            followUp.touch_number === 2 ? 2 : followUp.touch_number === 3 ? 4 : 7,
+            clientId, followUp.lead_id, draft.subject || null, cleanBody,
+            JSON.stringify({ ...draft, is_followup: true, touch_number: followUp.touch_number }),
+            originalChannel, followUp.touch_number === 2 ? 2 : followUp.touch_number === 3 ? 4 : 7,
           ]
         );
 
-        if (passedGates) {
+        let enforcerApproved = false;
+        try {
+          const rangerResult = await rangerReview(clientId, { message_id: savedMsg.id, message_body: cleanBody });
+          enforcerApproved = !!rangerResult?.approved;
+          const newStatus = enforcerApproved ? 'pending_approval' : 'ranger_rejected';
+          await pool.query(
+            `UPDATE messages SET status = $1, ranger_score = $2, ranger_notes = $3, updated_at = NOW() WHERE id = $4 AND client_id = $5`,
+            [newStatus, rangerResult?.score || 0, rangerResult?.notes || rangerResult?.reject_reason || 'Enforcer review', savedMsg.id, clientId]
+          );
+        } catch (err) {
+          console.error('[FollowUp] AI Enforcer unavailable, blocking follow-up (fail-closed):', err.message);
+          await pool.query(
+            `UPDATE messages SET status = 'ranger_rejected', ranger_notes = 'AI Enforcer unavailable — blocked', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
+            [savedMsg.id, clientId]
+          );
+        }
+
+        if (enforcerApproved) {
           await pool.query(
             `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`,
             [clientId, savedMsg.id]
@@ -456,7 +494,7 @@ async function _runAutonomousKickoffInner(clientId) {
 
         await pool.query(
           `UPDATE followup_queue SET status = $1, message_id = $2 WHERE id = $3`,
-          [passedGates ? 'sent' : 'skipped', savedMsg.id, followUp.id]
+          [enforcerApproved ? 'sent' : 'skipped', savedMsg.id, followUp.id]
         );
 
         // Calculate next follow-up date

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useApi } from '../hooks/useApi';
-import { setToken, setUser } from '../utils/auth';
+import { setUser } from '../utils/auth';
 
 export default function Join() {
   const [params] = useSearchParams();
@@ -50,7 +50,6 @@ export default function Join() {
         body: JSON.stringify({ token, ...form }),
       });
       if (res?.data) {
-        setToken(res.data.token);
         setUser(res.data.user);
         navigate('/');
       }

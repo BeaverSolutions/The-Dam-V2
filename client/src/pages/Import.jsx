@@ -113,6 +113,10 @@ export default function Import() {
   };
 
   const handleImport = async () => {
+    if (rows.length > 500) {
+      setError('Max 500 rows allowed per import');
+      return;
+    }
     setImporting(true);
     try {
       const res = await request('/import/leads', {
@@ -121,7 +125,7 @@ export default function Import() {
       });
       setResult(res?.data);
       setStep('done');
-    } catch {}
+    } catch (err) { setError('Import failed: ' + (err.message || 'Unknown error')); }
     setImporting(false);
   };
 
