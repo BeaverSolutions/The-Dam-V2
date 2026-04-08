@@ -76,8 +76,8 @@ function buildQueryPool(icpMemory) {
   const rawIndustries = parseCsvField(icp.industries);
   const industries = rawIndustries.length > 0 ? rawIndustries : DEFAULT_INDUSTRIES;
 
-  // Resolve base location (use first entry of KL_LOCATIONS if empty)
-  const rawLocation = (icp.location || icp.geography || '').trim();
+  // Resolve base location — ICP stores as 'geographies' (plural), also check 'geography' and 'location'
+  const rawLocation = (icp.geographies || icp.geography || icp.location || '').trim();
   const baseLocation = rawLocation || KL_LOCATIONS[0];
 
   const pool = [];

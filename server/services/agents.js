@@ -990,7 +990,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   });
 
   // ── Gate 4: Geography + Industry + Company Size ──
-  const icpLocation = (icpMemory?.location || icpMemory?.geography || '').toLowerCase();
+  const icpLocation = (icpMemory?.geographies || icpMemory?.geography || icpMemory?.location || '').toLowerCase();
   const isKLFocused = !icpLocation || /klang|kuala lumpur|kl|selangor|malaysia/i.test(icpLocation);
 
   // Non-target geographies — expanded list
