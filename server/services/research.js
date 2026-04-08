@@ -34,10 +34,13 @@ const ICP_TITLE_KEYWORDS = [
 /* ─── Helpers ────────────────────────────────────────────── */
 
 /**
- * Parse a comma-separated string into a trimmed array, ignoring empties.
+ * Parse a comma-separated string OR an array into a trimmed array, ignoring empties.
  */
 function parseCsvField(value) {
-  if (!value || typeof value !== 'string') return [];
+  if (!value) return [];
+  // Already an array (from commandOverride injection)
+  if (Array.isArray(value)) return value.map(v => String(v).trim()).filter(Boolean);
+  if (typeof value !== 'string') return [];
   return value.split(',').map(v => v.trim()).filter(Boolean);
 }
 
@@ -241,7 +244,7 @@ try {
  * Verify a single candidate against the ICP using Hunter + Haiku.
  * Returns the candidate with verification metadata + score.
  */
-async function verifyCandidate(candidate, icp, hunterCache = {}) {
+async function verifyCandidate(candidate, icp, hunterCache = {}, clientId = null) {
   const verification = {
     score: 0,
     hunterMatch: false,
@@ -257,9 +260,8 @@ async function verifyCandidate(candidate, icp, hunterCache = {}) {
 
   if (!hunterData && candidate.company && candidate.company !== 'Unknown' && candidate.company.length >= 3) {
     try {
-      // Hunter domainSearch needs a clientId — use a special research context
-      // We pass the company name and let Hunter find the domain
-      const results = await hunterService.domainSearch(null, { company: candidate.company, limit: 1 }).catch(() => []);
+      // Hunter domainSearch needs the real clientId to get the API key from secrets
+      const results = await hunterService.domainSearch(clientId, { company: candidate.company, limit: 1 }).catch(() => []);
       if (results && results.length > 0) {
         const domain = results[0]?.domain || null;
         hunterData = { domain, found: true, employees: results.length };
@@ -313,7 +315,7 @@ Verify:
 Return JSON:
 {"location":"confirmed|likely|unlikely|unknown","location_evidence":"...","industry":"confirmed|likely|unlikely|unknown","industry_evidence":"...","role":"confirmed|likely|unlikely|unknown","confidence":0-100,"pass":true|false,"reason":"one line summary"}`;
 
-      const result = await callAgent('research_beaver', prompt, {}, { model: 'claude-haiku-4-5-20251001', maxTokens: 256 });
+      const result = await callAgent('research_beaver', prompt, { clientId });
       verification.haikuResult = result;
 
       if (result) {
@@ -370,15 +372,15 @@ Return JSON:
  * Verify a batch of candidates in parallel.
  * Hard cap: max 20 Haiku calls per batch (cost control).
  */
-async function verifyBatch(candidates, icp) {
+async function verifyBatch(candidates, icp, clientId = null) {
   const MAX_VERIFY = 20;
   const toVerify = candidates.slice(0, MAX_VERIFY);
   const hunterCache = {}; // shared cache to avoid duplicate company lookups
 
-  console.log(`[verify] Verifying ${toVerify.length} candidates (max ${MAX_VERIFY})`);
+  console.log(`[verify] Verifying ${toVerify.length} candidates (max ${MAX_VERIFY}) clientId=${clientId || 'none'}`);
 
   const results = await Promise.allSettled(
-    toVerify.map(c => verifyCandidate(c, icp, hunterCache))
+    toVerify.map(c => verifyCandidate(c, icp, hunterCache, clientId))
   );
 
   const verified = [];
@@ -733,7 +735,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     console.log(`[research] Layer 1 complete: ${deduped.length} candidates. Starting Layer 2 verification...`);
 
     const icp = effectiveIcp || {};
-    const { verified, rejected } = await verifyBatch(deduped, icp);
+    const { verified, rejected } = await verifyBatch(deduped, icp, clientId);
 
     console.log(`[research] Layer 2 complete: ${verified.length} verified, ${rejected.length} rejected`);
 
