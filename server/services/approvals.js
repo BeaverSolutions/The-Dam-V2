@@ -71,7 +71,7 @@ async function resolveApproval(clientId, approvalId, { status, notes, userId }) 
     [status, notes, userId, approvalId, clientId]
   );
 
-  const messageStatus = status === 'approved' ? 'approved' : 'user_rejected';
+  const messageStatus = status === 'approved' ? 'approved' : 'rejected';
   await pool.query(
     `UPDATE messages SET status = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
     [messageStatus, existing.rows[0].message_id, clientId]
