@@ -6,19 +6,44 @@ const validate = require('../middleware/validate');
 const agentsService = require('../services/agents');
 const pool = require('../db/pool');
 
-// ── MyClaw diagnostic: test connection ──
+// ── MyClaw diagnostic: test connection with detailed error info ──
 router.get('/myclaw/status', async (req, res) => {
   const myclaw = require('../services/myclaw');
+  const axios = require('axios');
   const configured = myclaw.isConfigured();
+  const baseUrl = process.env.MYCLAW_BASE_URL || '';
+  const hasToken = !!process.env.MYCLAW_HOOK_TOKEN;
+
   if (!configured) {
-    return res.json({ data: { configured: false, reason: 'MYCLAW_BASE_URL or MYCLAW_HOOK_TOKEN not set', base_url: process.env.MYCLAW_BASE_URL ? 'set' : 'missing', token: process.env.MYCLAW_HOOK_TOKEN ? 'set' : 'missing' } });
+    return res.json({ data: { configured: false, base_url: baseUrl || 'missing', token: hasToken ? 'set' : 'missing' } });
   }
-  try {
-    const result = await myclaw.callAgent('What is your name? Reply in one sentence.', { timeoutSeconds: 15 });
-    return res.json({ data: { configured: true, connected: !!result, response: result } });
-  } catch (err) {
-    return res.json({ data: { configured: true, connected: false, error: err.message } });
+
+  // Try multiple endpoint paths to find the right one
+  const paths = ['/hooks/agent', '/hooks/wake', '/api/hooks/agent', '/api/v1/hooks/agent'];
+  const results = {};
+
+  for (const path of paths) {
+    try {
+      const url = `${baseUrl}${path}`;
+      const resp = await axios.post(url,
+        { message: 'ping', name: 'The Dam' },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.MYCLAW_HOOK_TOKEN}`,
+            'x-openclaw-token': process.env.MYCLAW_HOOK_TOKEN,
+          },
+          timeout: 10000,
+          validateStatus: () => true, // don't throw on 4xx/5xx
+        }
+      );
+      results[path] = { status: resp.status, statusText: resp.statusText, data: typeof resp.data === 'string' ? resp.data.substring(0, 200) : resp.data };
+    } catch (err) {
+      results[path] = { error: err.code || err.message };
+    }
   }
+
+  return res.json({ data: { configured: true, base_url: baseUrl, token: 'set', endpoints_tested: results } });
 });
 
 router.post('/research/search',
