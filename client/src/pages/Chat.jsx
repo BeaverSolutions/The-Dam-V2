@@ -154,7 +154,7 @@ function Message({ msg }) {
         lineHeight: 1.6,
       }}>
         {isMyClaw && (
-          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--lime)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.35rem' }}>MyClaw</div>
+          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--lime)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.35rem' }}>Lodge Master</div>
         )}
         <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
 

@@ -1055,31 +1055,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // Large multinationals — check ALL text fields including name
   const LARGE_CORPS = /\bwpp\b|publicis|omnicom|interpublic|\bbbdo\b|ogilvy|mccann|\bvml\b|dentsu|havas|grey group|leo burnett|saatchi|ddb\b|tbwa|jwt\b|\bdeloitte\b|\bmckinsey\b|\bpwc\b|\bkpmg\b|\bey\b|\baccenture\b|boston consulting|\bbain\b|\bshell\b|\bpetronas\b|tenaga|maybank|\bcimb\b|\brhb\b|public bank|hong leong|sime darby|axiata|celcom|\bmaxis\b|\bdigi\b|unilever|nestle|procter|p&g\b|samsung|\blg\b|sony\b|panasonic|\bgoogle\b|\bmeta\b|\bamazon\b|\bmicrosoft\b|\bapple\b|\bibm\b/i;
 
-  // ── Command intent industry filter ──
-  // If the command specifically names an industry (e.g. "marketing agency"), build a POSITIVE
-  // allowlist and reject leads that don't match. This prevents ICP industry bleed-through
-  // (e.g. user asks for marketing agencies but ICP also has "Property" → real estate leaks in).
-  let commandIndustryFilter = null;
-  if (command) {
-    const cmdLow = command.toLowerCase();
-    const INDUSTRY_INTENTS = [
-      { keywords: ['marketing agency', 'digital agency', 'creative agency', 'ad agency', 'advertising agency'], pattern: /marketing agency|digital agency|creative agency|ad agency|advertising/i },
-      { keywords: ['real estate', 'property', 'proptech'], pattern: /real estate|property developer|property management|proptech/i },
-      { keywords: ['fintech', 'financial tech'], pattern: /fintech|financial tech|payment|banking tech/i },
-      { keywords: ['edtech', 'education tech'], pattern: /edtech|education tech|e-learning/i },
-      { keywords: ['saas', 'software'], pattern: /saas|software|tech company|technology company/i },
-      { keywords: ['recruitment', 'headhunting', 'staffing'], pattern: /recruit|headhunt|staffing|talent acquisition/i },
-      { keywords: ['logistics', 'supply chain'], pattern: /logistic|supply chain|freight/i },
-      { keywords: ['legal', 'law firm'], pattern: /law firm|legal|solicitor|advocate/i },
-    ];
-    for (const intent of INDUSTRY_INTENTS) {
-      if (intent.keywords.some(kw => cmdLow.includes(kw))) {
-        commandIndustryFilter = intent.pattern;
-        console.log(`[captain] Command intent filter: "${intent.keywords.find(kw => cmdLow.includes(kw))}" — leads must match ${intent.pattern}`);
-        break;
-      }
-    }
-  }
+  // ── Command intent industry filter — DISABLED ──
+  // Previously rejected leads whose profile text didn't contain the exact industry name
+  // (e.g. "marketing agency"). This killed valid leads because LinkedIn/Serper snippets
+  // rarely include the industry name verbatim. The search query itself already targets
+  // the right industry — requiring double-confirmation was too aggressive.
+  // Kept as comment for reference; re-enable only with broader matching (e.g. NLP).
+  const commandIndustryFilter = null;
 
   const icpGatedLeads = namedLeads.filter(lead => {
     // Combine ALL text for comprehensive checks

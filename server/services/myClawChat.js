@@ -37,10 +37,10 @@ function classifyIntent(command) {
 
   // Greetings and general chat
   if (/^(hi|hey|hello|sup|yo|what'?s?\s*up|how\s*are)/i.test(lower)) {
-    return { intent: 'general', reply: "Hey! I'm MyClaw, your pipeline assistant. I can check your leads, approvals, pipeline stats, and agent memory. What do you need?" };
+    return { intent: 'general', reply: "Hey! I'm Lodge Master, your pipeline assistant. I can check your leads, approvals, pipeline stats, and agent memory. What do you need?" };
   }
 
-  return { intent: 'general', reply: "I'm MyClaw. Try asking me to:\n- Check my leads\n- Show approvals\n- Pipeline summary\n- Check agent memory\n- Show status" };
+  return { intent: 'general', reply: "I'm Lodge Master. Try asking me to:\n- Check my leads\n- Show approvals\n- Pipeline summary\n- Check agent memory\n- Show status" };
 }
 
 // ── Intent handlers ─────────────────────────────────────────────────────────
@@ -158,7 +158,7 @@ async function handleCheckStatus(clientId) {
   );
 
   return formatResponse(
-    `MyClaw Status:\n• Connection: ${configured ? 'Connected' : 'Not configured (using Claude fallback)'}\n• Leads in DB: ${leadCount.rows[0].count}\n• Pending approvals: ${pendingApprovals.rows[0].count}\n• System: Operational`
+    `Lodge Master Status:\n• Connection: ${configured ? 'Connected' : 'Not configured (using Claude fallback)'}\n• Leads in DB: ${leadCount.rows[0].count}\n• Pending approvals: ${pendingApprovals.rows[0].count}\n• System: Operational`
   );
 }
 
@@ -235,9 +235,9 @@ async function handleChat(clientId, command) {
     case 'general':
     default:
       return formatResponse(
-        intent.reply || "Hey! I'm MyClaw. I can check your approvals, leads, pipeline status, and agent memory. What do you need?"
+        intent.reply || "Hey! I'm Lodge Master. I can check your approvals, leads, pipeline status, and agent memory. What do you need?"
       );
   }
 }
 
-module.exports = { handleChat, isMyClawMessage: (cmd) => /^(?:@?(?:my)?claw|hey\s+claw)[,:\s]*/i.test(cmd.trim()) };
+module.exports = { handleChat, isMyClawMessage: (cmd) => /^(?:@?(?:my)?claw|hey\s+claw|@?lodge(?:\s*master)?)[,:\s]*/i.test(cmd.trim()) };

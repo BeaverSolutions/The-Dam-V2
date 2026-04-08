@@ -21,7 +21,7 @@ const BEAVER_LABELS = {
   sales_beaver: 'Sales Beaver',
   ranger: 'Enforcer Beaver',
   director: 'Captain Beaver',
-  myclaw: 'MyClaw',
+  myclaw: 'Lodge Master',
 };
 
 const BEAVER_INITIALS = {
@@ -29,7 +29,7 @@ const BEAVER_INITIALS = {
   sales_beaver: 'S',
   ranger: 'R',
   director: 'D',
-  myclaw: 'C',
+  myclaw: 'L',
 };
 
 const SIZE_MAP = {
