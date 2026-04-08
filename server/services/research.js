@@ -133,10 +133,13 @@ function buildQueryPool(icpMemory) {
 
   for (const title of topTitles) {
     for (const phrase of uniquePhrases.slice(0, 6)) {
-      // Strategy: direct people search — use compound phrase + "Sdn Bhd" for Malaysia signal
-      // DO NOT put location in query — it causes query pollution
+      // Strategy: direct people search.
+      // "Sdn Bhd" is a structural Malaysia signal (legal entity suffix) — safe to include.
+      // NO location keywords (Malaysia, KL, etc.) — they cause query pollution where all
+      // snippets contain the keyword, making Haiku's location verification circular.
+      // Geographic bias comes from gl:'my' in Serper only.
       queryPool.push({
-        query:    `${title} ${phrase} "Sdn Bhd" OR "Malaysia"`,
+        query:    `${title} ${phrase} "Sdn Bhd"`,
         strategy: 'direct',
         title,
         industry: phrase,
@@ -144,10 +147,10 @@ function buildQueryPool(icpMemory) {
       });
     }
 
-    // Strategy: company search
+    // Strategy: company search — no location in query, gl:'my' handles geo bias
     for (const phrase of uniquePhrases.slice(0, 4)) {
       queryPool.push({
-        query:    `site:linkedin.com/company ${phrase} "${baseLocation}"`,
+        query:    `site:linkedin.com/company ${phrase} "Sdn Bhd"`,
         strategy: 'company',
         title:    '',
         industry: phrase,
@@ -157,9 +160,11 @@ function buildQueryPool(icpMemory) {
   }
 
   // Strategy: buying signals (fewer, more targeted)
+  // No location in query — "Sdn Bhd" + gl:'my' + Haiku handles Malaysia verification
   for (const phrase of uniquePhrases.slice(0, 3)) {
     queryPool.push({
-      query:    `site:linkedin.com/jobs ${phrase} "${baseLocation}" hiring 2025 OR 2026`,
+      // searchLinkedInProfiles prepends site:linkedin.com/in — don't add it here
+      query:    `${phrase} "Sdn Bhd" hiring`,
       strategy: 'signal_jobs',
       title:    '',
       industry: phrase,
@@ -167,7 +172,7 @@ function buildQueryPool(icpMemory) {
     });
 
     queryPool.push({
-      query:    `${phrase} "${baseLocation}" hiring OR raised OR launched 2025 OR 2026`,
+      query:    `${phrase} "Sdn Bhd" hiring OR raised OR launched`,
       strategy: 'signal_news',
       title:    '',
       industry: phrase,
@@ -442,9 +447,12 @@ async function strategyCompanyFirst(clientId, icpMemory, limit) {
 
     for (const item of companyQueries) {
       try {
-        // Step 1: find company LinkedIn pages via Serper
+        // Step 1: find company LinkedIn pages via Serper.
+        // Pass item.industry (just the phrase) — searchLinkedInCompanies prepends
+        // "site:linkedin.com/company" itself. Passing item.query would double it.
+        const searchPhrase = `${item.industry} "Sdn Bhd"`;
         const companyResults = await serperService.searchLinkedInCompanies
-          ? serperService.searchLinkedInCompanies(item.query, 3)
+          ? serperService.searchLinkedInCompanies(searchPhrase, 3)
           : Promise.resolve([]);
 
         const companies = await companyResults;

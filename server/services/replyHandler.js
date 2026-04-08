@@ -141,16 +141,17 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       return;
     }
 
-    // ── Step 4: Ranger review ───────────────────────────────
-    const { rangerReview } = require('./agents');
+    // ── Step 4: Server-side hard gates (no AI — replies aren't cold outreach) ──
+    // Word count NOT enforced on replies (they can legitimately exceed 80 words).
+    // Em dash and bullet checks still apply — house style, not cold-outreach rules.
+    const gateFailures = [];
+    if (/—/.test(draft.body)) gateFailures.push('Em dash (—) found');
+    if (/^[\s\t]*[-*•]/m.test(draft.body)) gateFailures.push('Bullet points found');
+    const questionCount = (draft.body.match(/\?/g) || []).length;
+    if (questionCount > 2) gateFailures.push(`${questionCount} questions (max 2 for replies)`);
 
-    const rangerResult = await rangerReview(clientId, {
-      message_id: null,
-      message_body: draft.body,
-    });
-
-    const rangerApproved = rangerResult.approved === true;
-    const rangerNotes = rangerResult.notes || rangerResult.reject_reason || null;
+    const gatesPassed = gateFailures.length === 0;
+    const gateNotes = gateFailures.length > 0 ? gateFailures.join('; ') : null;
 
     // ── Step 5: Save draft message ─────────────────────────
     const msgRes = await pool.query(
@@ -162,17 +163,17 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
         leadId,
         draft.subject || `Re: ${history[history.length - 1]?.subject || 'Following up'}`,
         draft.body,
-        rangerApproved ? 'pending_approval' : 'ranger_rejected',
-        Math.round(rangerResult.score || 75),
-        rangerNotes,
+        gatesPassed ? 'pending_approval' : 'ranger_rejected',
+        gatesPassed ? 90 : 0,
+        gateNotes,
         JSON.stringify({ is_reply: true, reply_to_message_id: messageId, reply_sentiment: sentiment, auto_drafted: true }),
       ]
     );
 
     const newMsgId = msgRes.rows[0].id;
 
-    // ── Step 6: Push to approval queue if Ranger approved ──
-    if (rangerApproved) {
+    // ── Step 6: Push to approval queue if gates passed ──
+    if (gatesPassed) {
       await pool.query(
         `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'director')`,
         [clientId, newMsgId]
@@ -183,7 +184,7 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
         action: 'reply_draft_queued',
         target_type: 'message',
         target_id: newMsgId,
-        metadata: { lead_id: leadId, lead_name: lead.name, sentiment, ranger_score: rangerResult.score },
+        metadata: { lead_id: leadId, lead_name: lead.name, sentiment, method: 'server_side_only' },
       });
 
       console.log(`[replyHandler] Reply draft for ${lead.name} (${sentiment}) queued for approval`);
@@ -193,9 +194,9 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
         action: 'reply_draft_rejected',
         target_type: 'message',
         target_id: newMsgId,
-        metadata: { lead_id: leadId, ranger_notes: rangerNotes },
+        metadata: { lead_id: leadId, gate_failures: gateFailures },
       });
-      console.warn(`[replyHandler] Reply draft for ${lead.name} failed Ranger: ${rangerNotes}`);
+      console.warn(`[replyHandler] Reply draft for ${lead.name} failed gates: ${gateNotes}`);
     }
 
     // Update lead stage and store sentiment in metadata for UI display

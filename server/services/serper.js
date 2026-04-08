@@ -157,9 +157,9 @@ async function searchLinkedInCompanies(query, limit = 5) {
     return [];
   }
 
-  const hasLocation = /malaysia|kuala lumpur|\bkl\b|selangor|klang/i.test(query);
-  const locationSuffix = hasLocation ? '' : ' "Kuala Lumpur" OR "Malaysia"';
-  const searchQuery = `site:linkedin.com/company ${query}${locationSuffix}`;
+  // DO NOT append location keywords — query pollution makes Haiku verification circular.
+  // Geographic bias is handled by gl:'my' param only.
+  const searchQuery = `site:linkedin.com/company ${query}`;
 
   console.log('[serper] Company search query:', searchQuery);
 
