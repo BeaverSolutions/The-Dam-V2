@@ -156,11 +156,7 @@ router.post('/approve', async (req, res, next) => {
     });
 
     res.json({ data: { approval_id, message_id, status: 'approved' } });
-  } catch (err) {
-    // Temporary debug — remove after testing
-    console.error('[myclaw/approve] Error:', err.message, err.detail, err.column);
-    res.status(500).json({ error: err.message, code: err.code, detail: err.detail, column: err.column });
-  }
+  } catch (err) { next(err); }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -221,11 +217,7 @@ router.post('/reject', async (req, res, next) => {
     });
 
     res.json({ data: { approval_id, message_id, status: 'rejected' } });
-  } catch (err) {
-    // Temporary debug — remove after testing
-    console.error('[myclaw/reject] Error:', err.message, err.detail, err.column);
-    res.status(500).json({ error: err.message, code: err.code, detail: err.detail, column: err.column });
-  }
+  } catch (err) { next(err); }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
