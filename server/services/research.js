@@ -53,10 +53,45 @@ function normaliseLead(partial) {
     email:          partial.email          || '',
     email_verified: partial.email_verified || false,
     email_source:   partial.email_source   || '',
-    verified:       true,
+    verified:       false,  // NEVER true from Serper — must pass Layer 2 verification
     data_source:    partial.data_source    || 'serper',
     snippet:        partial.snippet        || '',
   };
+}
+
+/**
+ * Map ICP industry names to concrete search phrases.
+ * "Agency" alone is too generic — expand to specific types.
+ */
+const INDUSTRY_SEARCH_PHRASES = {
+  'property':     ['"property developer"', '"real estate"', '"property management"'],
+  'proptech':     ['"proptech"', '"property technology"', '"property tech"'],
+  'agency':       ['"marketing agency"', '"digital agency"', '"creative agency"', '"advertising agency"'],
+  'marketing':    ['"marketing agency"', '"digital marketing"'],
+  'digital':      ['"digital agency"', '"digital marketing"'],
+  'consulting':   ['"consulting firm"', '"management consulting"'],
+  'saas':         ['"SaaS"', '"software as a service"'],
+  'fintech':      ['"fintech"', '"financial technology"'],
+  'edtech':       ['"edtech"', '"education technology"'],
+  'recruitment':  ['"recruitment agency"', '"staffing"', '"headhunting"'],
+  'ecommerce':    ['"e-commerce"', '"online retail"'],
+  'f&b':          ['"F&B"', '"food and beverage"', '"restaurant"'],
+  'logistics':    ['"logistics"', '"supply chain"'],
+  'insurance':    ['"insurance"', '"insurtech"'],
+  'hr':           ['"HR tech"', '"human resources"'],
+  'legal':        ['"law firm"', '"legal"'],
+  'accounting':   ['"accounting firm"', '"audit"'],
+  'media':        ['"media company"', '"content"', '"publishing"'],
+  'design':       ['"design agency"', '"UX"', '"branding agency"'],
+  'tech':         ['"tech company"', '"technology"'],
+  'software':     ['"software company"', '"software development"'],
+  'seo':          ['"SEO agency"', '"search engine"'],
+  'advertising':  ['"advertising agency"', '"ad agency"'],
+};
+
+function expandIndustry(industry) {
+  const key = industry.toLowerCase().trim();
+  return INDUSTRY_SEARCH_PHRASES[key] || [`"${industry}"`];
 }
 
 /* ─── Query pool ─────────────────────────────────────────── */
@@ -72,81 +107,74 @@ function buildQueryPool(icpMemory) {
   const rawTitles = parseCsvField(icp.job_titles || icp.who);
   const titles = rawTitles.length > 0 ? rawTitles : DEFAULT_TITLES;
 
-  // Resolve industries
+  // Resolve industries — expand to concrete search phrases
   const rawIndustries = parseCsvField(icp.industries);
   const industries = rawIndustries.length > 0 ? rawIndustries : DEFAULT_INDUSTRIES;
 
-  // Resolve base location — ICP stores as 'geographies' (plural), also check 'geography' and 'location'
+  // Resolve base location — ICP stores as 'geographies' (plural)
   const rawLocation = (icp.geographies || icp.geography || icp.location || '').trim();
   const baseLocation = rawLocation || KL_LOCATIONS[0];
 
-  const pool = [];
+  const queryPool = [];
 
-  for (const title of titles) {
-    for (const industry of industries) {
-      // Strategy: direct people search
-      pool.push({
-        query:    `site:linkedin.com/in ${title} ${industry} "${baseLocation}"`,
+  // Generate compound industry search phrases
+  const industryPhrases = [];
+  for (const ind of industries) {
+    industryPhrases.push(...expandIndustry(ind));
+  }
+  // Deduplicate phrases
+  const uniquePhrases = [...new Set(industryPhrases)];
+
+  // Top 3 titles only (avoid query explosion)
+  const topTitles = titles.slice(0, 3);
+
+  for (const title of topTitles) {
+    for (const phrase of uniquePhrases.slice(0, 6)) {
+      // Strategy: direct people search — use compound phrase + "Sdn Bhd" for Malaysia signal
+      // DO NOT put location in query — it causes query pollution
+      queryPool.push({
+        query:    `${title} ${phrase} "Sdn Bhd" OR "Malaysia"`,
         strategy: 'direct',
         title,
-        industry,
+        industry: phrase,
         location: baseLocation,
       });
+    }
 
-      // Strategy: company search (one per industry × location, deduplicated later)
-      pool.push({
-        query:    `site:linkedin.com/company ${industry} "${baseLocation}"`,
+    // Strategy: company search
+    for (const phrase of uniquePhrases.slice(0, 4)) {
+      queryPool.push({
+        query:    `site:linkedin.com/company ${phrase} "${baseLocation}"`,
         strategy: 'company',
         title:    '',
-        industry,
-        location: baseLocation,
-      });
-
-      // Strategy: buying signal — job postings (indicates growth/hiring intent)
-      pool.push({
-        query:    `site:linkedin.com/jobs "Head of Sales" "${industry}" "${baseLocation}"`,
-        strategy: 'signal_jobs',
-        title,
-        industry,
-        location: baseLocation,
-      });
-
-      // Strategy: buying signal — news (hiring/raised/launched)
-      pool.push({
-        query:    `"${industry}" "${baseLocation}" hiring OR raised OR launched 2024 OR 2025`,
-        strategy: 'signal_news',
-        title:    '',
-        industry,
-        location: baseLocation,
-      });
-    }
-
-    for (const signal of SIGNALS) {
-      // Strategy: signal-based
-      pool.push({
-        query:    `site:linkedin.com/in "${title}" "${baseLocation}" ${signal}`,
-        strategy: 'signal',
-        title,
-        industry: '',
-        location: baseLocation,
-      });
-    }
-
-    // Strategy: buying signal — LinkedIn company growth
-    for (const industry of industries.slice(0, 3)) { // cap to avoid too many queries
-      pool.push({
-        query:    `site:linkedin.com/company "${industry}" "${baseLocation}" employees`,
-        strategy: 'signal_growth',
-        title:    '',
-        industry,
+        industry: phrase,
         location: baseLocation,
       });
     }
   }
 
-  // Deduplicate by query string (company queries repeat per title loop)
+  // Strategy: buying signals (fewer, more targeted)
+  for (const phrase of uniquePhrases.slice(0, 3)) {
+    queryPool.push({
+      query:    `site:linkedin.com/jobs ${phrase} "${baseLocation}" hiring 2025 OR 2026`,
+      strategy: 'signal_jobs',
+      title:    '',
+      industry: phrase,
+      location: baseLocation,
+    });
+
+    queryPool.push({
+      query:    `${phrase} "${baseLocation}" hiring OR raised OR launched 2025 OR 2026`,
+      strategy: 'signal_news',
+      title:    '',
+      industry: phrase,
+      location: baseLocation,
+    });
+  }
+
+  // Deduplicate by query string
   const seen = new Set();
-  return pool.filter(item => {
+  return queryPool.filter(item => {
     if (seen.has(item.query)) return false;
     seen.add(item.query);
     return true;
@@ -194,6 +222,182 @@ async function saveUsedQueries(clientId, usedSet) {
   } catch (err) {
     console.warn('[research] saveUsedQueries failed:', err.message);
   }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ * LAYER 2: VERIFICATION — confirm candidates before saving
+ * Each candidate from Serper is UNVERIFIED. This layer uses
+ * Hunter (structured data) + Haiku (AI classification) to verify
+ * location, industry, and role independently.
+ * Cost: ~$0.001 per Haiku call, Hunter included in plan.
+ * ══════════════════════════════════════════════════════════════ */
+
+let callAgent;
+try {
+  callAgent = require('./claude').callAgent;
+} catch { callAgent = null; }
+
+/**
+ * Verify a single candidate against the ICP using Hunter + Haiku.
+ * Returns the candidate with verification metadata + score.
+ */
+async function verifyCandidate(candidate, icp, hunterCache = {}) {
+  const verification = {
+    score: 0,
+    hunterMatch: false,
+    hunterDomain: null,
+    haikuResult: null,
+    pass: false,
+    rejectReason: null,
+  };
+
+  // ── Hunter company lookup (use cache to avoid duplicate calls) ──
+  const companyKey = (candidate.company || '').toLowerCase().trim();
+  let hunterData = hunterCache[companyKey] || null;
+
+  if (!hunterData && candidate.company && candidate.company !== 'Unknown' && candidate.company.length >= 3) {
+    try {
+      // Hunter domainSearch needs a clientId — use a special research context
+      // We pass the company name and let Hunter find the domain
+      const results = await hunterService.domainSearch(null, { company: candidate.company, limit: 1 }).catch(() => []);
+      if (results && results.length > 0) {
+        const domain = results[0]?.domain || null;
+        hunterData = { domain, found: true, employees: results.length };
+        verification.hunterDomain = domain;
+        if (domain && (domain.endsWith('.my') || domain.endsWith('.com.my'))) {
+          verification.score += 5;
+        }
+      }
+      hunterCache[companyKey] = hunterData || { domain: null, found: false, employees: 0 };
+    } catch (err) {
+      console.warn(`[verify] Hunter lookup failed for "${candidate.company}":`, err.message);
+      hunterCache[companyKey] = { domain: null, found: false, employees: 0, error: err.message };
+    }
+  }
+
+  if (hunterData?.found) {
+    verification.score += 10; // company domain exists
+    if (hunterData.employees > 0) verification.score += 5;
+    verification.hunterMatch = true;
+  }
+
+  // ── Haiku AI classification (the core verification) ──
+  if (callAgent) {
+    try {
+      const icpContext = `Industries: ${icp.industries || 'any'}\nTitles: ${icp.job_titles || 'CEO, Founder, Director'}\nGeography: ${icp.geographies || icp.geography || 'Malaysia'}\nCompany Size: ${icp.company_size || '1-50'}`;
+
+      const hunterContext = hunterData?.found
+        ? `Hunter found domain: ${hunterData.domain}, ~${hunterData.employees} employees indexed`
+        : 'Hunter: no data (common for SEA SMBs)';
+
+      const prompt = `Classify this lead candidate against the ICP. Return JSON only.
+
+CANDIDATE:
+Name: ${candidate.name}
+Title: ${candidate.title || 'unknown'}
+Company: ${candidate.company || 'unknown'}
+LinkedIn URL: ${candidate.linkedin_url || 'none'}
+Google Snippet: ${candidate.snippet || 'none'}
+${hunterContext}
+
+ICP REQUIREMENTS:
+${icpContext}
+
+CRITICAL: Do NOT count search query terms as evidence of location. Only count as Malaysia evidence: .my domain, "Sdn Bhd" or "Berhad" in company name, Malaysian city names in the company description or person's headline, Malay language markers. Generic mentions of "Malaysia" in snippets are unreliable.
+
+Verify:
+1. LOCATION: Is this person actually based in ${icp.geographies || 'Malaysia'}? Cite specific evidence.
+2. INDUSTRY: Is this company actually in ${icp.industries || 'the target industry'}? Not just tangentially related.
+3. ROLE: Is "${candidate.title}" actually a decision-maker role (${icp.job_titles || 'CEO/Founder/Director'})?
+
+Return JSON:
+{"location":"confirmed|likely|unlikely|unknown","location_evidence":"...","industry":"confirmed|likely|unlikely|unknown","industry_evidence":"...","role":"confirmed|likely|unlikely|unknown","confidence":0-100,"pass":true|false,"reason":"one line summary"}`;
+
+      const result = await callAgent('research_beaver', prompt, {}, { model: 'claude-haiku-4-5-20251001', maxTokens: 256 });
+      verification.haikuResult = result;
+
+      if (result) {
+        // Hard rejects
+        if (result.location === 'unlikely') {
+          verification.rejectReason = `Location: ${result.location_evidence || 'not in target geography'}`;
+          verification.pass = false;
+          return { ...candidate, verification };
+        }
+        if (result.industry === 'unlikely') {
+          verification.rejectReason = `Industry: ${result.industry_evidence || 'not in target industry'}`;
+          verification.pass = false;
+          return { ...candidate, verification };
+        }
+        if (result.role === 'unlikely') {
+          verification.rejectReason = `Role: not a decision-maker`;
+          verification.pass = false;
+          return { ...candidate, verification };
+        }
+
+        // Score points
+        if (result.location === 'confirmed') verification.score += 15;
+        else if (result.location === 'likely') verification.score += 8;
+        if (result.industry === 'confirmed') verification.score += 15;
+        else if (result.industry === 'likely') verification.score += 8;
+        if (result.role === 'confirmed') verification.score += 10;
+        else if (result.role === 'likely') verification.score += 5;
+      }
+    } catch (err) {
+      console.warn(`[verify] Haiku classification failed for "${candidate.name}":`, err.message);
+      // If Haiku fails, rely on Hunter + regex signals only
+    }
+  }
+
+  // ── Regex-based bonus signals (free, no API calls) ──
+  const allText = `${candidate.name} ${candidate.company} ${candidate.title} ${candidate.snippet}`;
+  if (/sdn\s*bhd|berhad/i.test(allText)) verification.score += 5;
+
+  // ── Final decision ──
+  if (verification.score >= 50) {
+    verification.pass = true;
+  } else if (verification.score >= 30) {
+    verification.pass = true; // lower confidence, but save with P3 tier
+    candidate.signal_tier = 'P3';
+  } else {
+    verification.pass = false;
+    verification.rejectReason = verification.rejectReason || `Score too low (${verification.score})`;
+  }
+
+  return { ...candidate, verification };
+}
+
+/**
+ * Verify a batch of candidates in parallel.
+ * Hard cap: max 20 Haiku calls per batch (cost control).
+ */
+async function verifyBatch(candidates, icp) {
+  const MAX_VERIFY = 20;
+  const toVerify = candidates.slice(0, MAX_VERIFY);
+  const hunterCache = {}; // shared cache to avoid duplicate company lookups
+
+  console.log(`[verify] Verifying ${toVerify.length} candidates (max ${MAX_VERIFY})`);
+
+  const results = await Promise.allSettled(
+    toVerify.map(c => verifyCandidate(c, icp, hunterCache))
+  );
+
+  const verified = [];
+  const rejected = [];
+
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value) {
+      if (r.value.verification?.pass) {
+        verified.push(r.value);
+        console.log(`[verify] ✅ ${r.value.name} (${r.value.company}) — score ${r.value.verification.score}`);
+      } else {
+        rejected.push(r.value);
+        console.log(`[verify] ❌ ${r.value.name} (${r.value.company}) — ${r.value.verification?.rejectReason || 'failed'}`);
+      }
+    }
+  }
+
+  console.log(`[verify] Results: ${verified.length} verified, ${rejected.length} rejected`);
+  return { verified, rejected };
 }
 
 /* ─── Strategy 1: Direct LinkedIn people search ──────────── */
@@ -524,10 +728,28 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     }
     await saveUsedQueries(clientId, usedSet);
 
-    // 9. Return results
+    // 9. LAYER 2: Verify candidates before returning
     const queriesUsed = picked.map(q => q.query);
+    console.log(`[research] Layer 1 complete: ${deduped.length} candidates. Starting Layer 2 verification...`);
+
+    const icp = effectiveIcp || {};
+    const { verified, rejected } = await verifyBatch(deduped, icp);
+
+    console.log(`[research] Layer 2 complete: ${verified.length} verified, ${rejected.length} rejected`);
+
+    // Mark verified leads
+    const verifiedLeads = verified.map(lead => ({
+      ...lead,
+      verified: true,
+      metadata: {
+        ...(lead.metadata || {}),
+        verification: lead.verification,
+        data_source: 'serper',
+      },
+    }));
+
     return {
-      leads:       deduped,
+      leads:       verifiedLeads,
       queriesUsed,
       source:      'multi',
       pool_stats: {
@@ -535,6 +757,12 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         unused: unusedQueries.length,
         used: usedQueries.length,
         exhaustion_pct: Math.round(exhaustionRate * 100),
+      },
+      verification_stats: {
+        candidates: deduped.length,
+        verified: verified.length,
+        rejected: rejected.length,
+        rejection_reasons: rejected.map(r => `${r.name}: ${r.verification?.rejectReason || 'unknown'}`),
       },
     };
   } catch (err) {

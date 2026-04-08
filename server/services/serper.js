@@ -40,11 +40,10 @@ async function searchLinkedInProfiles(query, limit = 5) {
   }
 
   // Build a targeted LinkedIn search query.
-  // Always enforce Malaysian context unless the query already has it,
-  // to prevent returning US/UK/global results.
-  const hasLocation = /malaysia|kuala lumpur|\bkl\b|selangor|klang/i.test(query);
-  const locationSuffix = hasLocation ? '' : ' "Kuala Lumpur" OR "Malaysia"';
-  const searchQuery = `site:linkedin.com/in ${query}${locationSuffix}`;
+  // DO NOT auto-append location — it causes "query pollution" where all snippets
+  // contain the location keyword, making location verification circular.
+  // Instead, rely on Serper's gl:'my' param for geographic bias + Layer 2 verification.
+  const searchQuery = `site:linkedin.com/in ${query}`;
 
   try {
     const resp = await axios.post(
@@ -109,7 +108,7 @@ async function searchLinkedInProfiles(query, limit = 5) {
           linkedin_url: linkedinUrl,
           email: '',
           snippet: r.snippet || '',
-          verified: true,
+          verified: false,
           data_source: 'serper',
         };
       })
@@ -268,7 +267,7 @@ async function searchBySignal(query, limit = 5) {
           linkedin_url: linkedinUrl,
           email: '',
           snippet: r.snippet || '',
-          verified: true,
+          verified: false,
           data_source: 'serper_signal',
         };
       })
