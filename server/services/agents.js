@@ -880,10 +880,17 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // ── ICP Pre-flight check ─────────────────────────────────
   // Captain Beaver rule: before ANY kickoff, confirm ICP is defined.
   // If critical fields are missing AND command doesn't cover them → ask user first.
+  // ICP field detection: check if the command itself provides enough context
+  // Be generous — if the command mentions ANY industry-like term, geography, or role, skip the poll
+  const cmd = command || '';
+  const hasIndustry = icpMemory.industries || /industry|sector|niche|agency|agencies|saas|fintech|proptech|tech|gaming|esports|web3|crypto|marketing|digital|consulting|legal|insurance|real estate|property|food|logistics|healthcare|education|retail|ecommerce|e-commerce|startup|software|ai\b|crypto/i.test(cmd);
+  const hasGeo = icpMemory.geographies || icpMemory.location || /location|city|country|region|kuala lumpur|\bkl\b|malaysia|singapore|\bsg\b|indonesia|bangkok|jakarta|penang|johor|selangor|cyberjaya|global|asia|sea\b|southeast asia/i.test(cmd);
+  const hasTitle = icpMemory.job_titles || icpMemory.who || /ceo|founder|co-founder|director|title|role|head of|manager|lead|owner|partner|vp|president|chief|cto|cmo|coo|cfo/i.test(cmd);
+
   const missingIcpFields = [];
-  if (!icpMemory.industries && !/industry|sector|niche/i.test(command || '')) missingIcpFields.push('industries');
-  if (!icpMemory.geographies && !icpMemory.location && !/location|city|country|region|kuala lumpur|kl\b|malaysia/i.test(command || '')) missingIcpFields.push('geographies');
-  if (!icpMemory.job_titles && !icpMemory.who && !/ceo|founder|director|title|role|head of/i.test(command || '')) missingIcpFields.push('job_titles');
+  if (!hasIndustry) missingIcpFields.push('industries');
+  if (!hasGeo) missingIcpFields.push('geographies');
+  if (!hasTitle) missingIcpFields.push('job_titles');
 
   if (missingIcpFields.length > 0) {
     const icpQuestion = `Before I brief the crew, I need a bit more context. Your ICP is missing: ${missingIcpFields.join(', ')}. Could you tell me: who exactly are we targeting (title/role), what industry/sector, and which geography? This helps Research Beaver find the right leads.`;
@@ -912,11 +919,11 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       progress: { total: 0, complete: 0 },
     });
 
-    // Poll for user answer up to 15 minutes (30 attempts × 30s)
-    const MAX_POLL_ATTEMPTS = 30;
+    // Poll for user answer up to 60 seconds (6 attempts × 10s), then proceed
+    const MAX_POLL_ATTEMPTS = 6;
     let icpAnswered = false;
     for (let poll = 0; poll < MAX_POLL_ATTEMPTS; poll++) {
-      await new Promise(resolve => setTimeout(resolve, 30000));
+      await new Promise(resolve => setTimeout(resolve, 10000));
       const answerRow = await getMemory(clientId, 'director', `icp_answer_${plan_id}`);
       if (answerRow && answerRow.answer) {
         // Merge answer into icpMemory and proceed
