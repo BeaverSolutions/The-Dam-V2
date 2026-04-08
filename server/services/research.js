@@ -731,16 +731,62 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     await saveUsedQueries(clientId, usedSet);
 
     // 9. LAYER 2: Verify candidates before returning
+    // Retry up to 2 more times if we haven't hit targetCount yet (each retry fetches fresh queries)
     const queriesUsed = picked.map(q => q.query);
     console.log(`[research] Layer 1 complete: ${deduped.length} candidates. Starting Layer 2 verification...`);
 
     const icp = effectiveIcp || {};
-    const { verified, rejected } = await verifyBatch(deduped, icp, clientId);
+    let { verified, rejected } = await verifyBatch(deduped, icp, clientId);
 
     console.log(`[research] Layer 2 complete: ${verified.length} verified, ${rejected.length} rejected`);
 
+    // Retry loop — if we're short of targetCount, run another Layer 1 batch and verify again
+    // Max 2 retries to avoid excessive API spend
+    const MAX_RETRIES = 2;
+    let retryCount = 0;
+    const allVerifiedUrls = new Set(verified.map(l => l.linkedin_url).filter(Boolean));
+
+    while (verified.length < targetCount && retryCount < MAX_RETRIES) {
+      retryCount++;
+      const shortfall = targetCount - verified.length;
+      console.log(`[research] Retry ${retryCount}: need ${shortfall} more verified leads`);
+
+      // Fetch fresh candidates using next batch offset
+      const retryOffset = (batchIndex + retryCount) * pickCount;
+      const freshPool = buildQueryPool(effectiveIcp);
+      const freshSeen = new Set(usedSet);
+      const freshUnused = freshPool.filter(q => !freshSeen.has(q.query));
+      const freshPicked = freshUnused.slice(retryOffset % Math.max(freshUnused.length, 1), retryOffset % Math.max(freshUnused.length, 1) + pickCount);
+      const actualPicked = freshPicked.length > 0 ? freshPicked : freshPool.slice(0, Math.min(pickCount, freshPool.length));
+
+      const retryDirectQueries = actualPicked.filter(q => q.strategy === 'direct');
+      const retrySignalQueries = actualPicked.filter(q => q.strategy === 'signal' || q.strategy === 'signal_jobs' || q.strategy === 'signal_news');
+
+      const retryResults = await Promise.all([
+        ...retryDirectQueries.map(q => strategyDirectPeople(q.query, perQueryLimit).catch(() => [])),
+        ...retrySignalQueries.map(q => strategySignalBased(q.query, perQueryLimit).catch(() => [])),
+      ]);
+
+      const retryCandidates = retryResults.flat()
+        .filter(l => l.linkedin_url && !allVerifiedUrls.has(l.linkedin_url));
+
+      if (retryCandidates.length === 0) {
+        console.log(`[research] Retry ${retryCount}: no new candidates — stopping`);
+        break;
+      }
+
+      console.log(`[research] Retry ${retryCount}: verifying ${retryCandidates.length} fresh candidates`);
+      const retryVerification = await verifyBatch(retryCandidates, icp, clientId);
+      verified.push(...retryVerification.verified.filter(l => !allVerifiedUrls.has(l.linkedin_url)));
+      rejected.push(...retryVerification.rejected);
+      retryVerification.verified.forEach(l => { if (l.linkedin_url) allVerifiedUrls.add(l.linkedin_url); });
+
+      // Add retry queries to used set
+      for (const q of actualPicked) usedSet.add(q.query);
+    }
+
     // Mark verified leads
-    const verifiedLeads = verified.map(lead => ({
+    const verifiedLeads = verified.slice(0, targetCount * 2).map(lead => ({
       ...lead,
       verified: true,
       metadata: {
@@ -765,6 +811,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         verified: verified.length,
         rejected: rejected.length,
         rejection_reasons: rejected.map(r => `${r.name}: ${r.verification?.rejectReason || 'unknown'}`),
+        retries: retryCount,
       },
     };
   } catch (err) {

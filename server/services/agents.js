@@ -324,17 +324,54 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         `Write a ${channel} outreach message for this lead: ${context}
 ${signOffInstruction}
 ${personaContext}${fileContext}${rangerContext}`,
-        { lead_id, channel }
+        { lead_id, channel, clientId }
       );
 
+      // Primary: structured JSON response with body field
       if (result?.body) {
         return {
           lead_id,
           channel,
           subject: stripEmDashes(result.subject) || null,
-          body: stripEmDashes(result.body),
-          status: 'pending_ranger',
+          body:    stripEmDashes(result.body),
+          status:  'pending_ranger',
         };
+      }
+
+      // Fallback: Claude returned raw text (JSON parse failed) — extract body from raw
+      if (result?.raw) {
+        const raw = result.raw;
+        console.warn(`[agents] Sales Beaver returned raw text (JSON parse failed) for lead ${lead_id} — attempting body extraction`);
+
+        // Try: find "body": "..." in the raw string (handles escaped JSON)
+        const bodyMatch = raw.match(/"body"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
+        const subjectMatch = raw.match(/"subject"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        if (bodyMatch) {
+          const extractedBody = bodyMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+          const extractedSubject = subjectMatch ? subjectMatch[1].replace(/\\"/g, '"') : null;
+          console.log(`[agents] Extracted body from raw response for lead ${lead_id}`);
+          return {
+            lead_id,
+            channel,
+            subject: extractedSubject ? stripEmDashes(extractedSubject) : null,
+            body:    stripEmDashes(extractedBody),
+            status:  'pending_ranger',
+          };
+        }
+
+        // Last resort: use the entire raw text as body if it looks like a message (>20 chars)
+        if (raw.length > 20 && !raw.startsWith('{')) {
+          console.log(`[agents] Using raw response as body for lead ${lead_id} (${raw.length} chars)`);
+          return {
+            lead_id,
+            channel,
+            subject: null,
+            body:    stripEmDashes(raw.trim()),
+            status:  'pending_ranger',
+          };
+        }
+
+        console.warn(`[agents] Could not extract body from raw response for lead ${lead_id}. Raw: ${raw.substring(0, 200)}`);
       }
     } catch (err) {
       console.warn('[agents] Sales Claude failed:', err.message);
@@ -1005,9 +1042,42 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // Large multinationals — check ALL text fields including name
   const LARGE_CORPS = /\bwpp\b|publicis|omnicom|interpublic|\bbbdo\b|ogilvy|mccann|\bvml\b|dentsu|havas|grey group|leo burnett|saatchi|ddb\b|tbwa|jwt\b|\bdeloitte\b|\bmckinsey\b|\bpwc\b|\bkpmg\b|\bey\b|\baccenture\b|boston consulting|\bbain\b|\bshell\b|\bpetronas\b|tenaga|maybank|\bcimb\b|\brhb\b|public bank|hong leong|sime darby|axiata|celcom|\bmaxis\b|\bdigi\b|unilever|nestle|procter|p&g\b|samsung|\blg\b|sony\b|panasonic|\bgoogle\b|\bmeta\b|\bamazon\b|\bmicrosoft\b|\bapple\b|\bibm\b/i;
 
+  // ── Command intent industry filter ──
+  // If the command specifically names an industry (e.g. "marketing agency"), build a POSITIVE
+  // allowlist and reject leads that don't match. This prevents ICP industry bleed-through
+  // (e.g. user asks for marketing agencies but ICP also has "Property" → real estate leaks in).
+  let commandIndustryFilter = null;
+  if (command) {
+    const cmdLow = command.toLowerCase();
+    const INDUSTRY_INTENTS = [
+      { keywords: ['marketing agency', 'digital agency', 'creative agency', 'ad agency', 'advertising agency'], pattern: /marketing agency|digital agency|creative agency|ad agency|advertising/i },
+      { keywords: ['real estate', 'property', 'proptech'], pattern: /real estate|property developer|property management|proptech/i },
+      { keywords: ['fintech', 'financial tech'], pattern: /fintech|financial tech|payment|banking tech/i },
+      { keywords: ['edtech', 'education tech'], pattern: /edtech|education tech|e-learning/i },
+      { keywords: ['saas', 'software'], pattern: /saas|software|tech company|technology company/i },
+      { keywords: ['recruitment', 'headhunting', 'staffing'], pattern: /recruit|headhunt|staffing|talent acquisition/i },
+      { keywords: ['logistics', 'supply chain'], pattern: /logistic|supply chain|freight/i },
+      { keywords: ['legal', 'law firm'], pattern: /law firm|legal|solicitor|advocate/i },
+    ];
+    for (const intent of INDUSTRY_INTENTS) {
+      if (intent.keywords.some(kw => cmdLow.includes(kw))) {
+        commandIndustryFilter = intent.pattern;
+        console.log(`[captain] Command intent filter: "${intent.keywords.find(kw => cmdLow.includes(kw))}" — leads must match ${intent.pattern}`);
+        break;
+      }
+    }
+  }
+
   const icpGatedLeads = namedLeads.filter(lead => {
     // Combine ALL text for comprehensive checks
     const allText = [lead.name || '', lead.company || '', lead.title || '', lead.snippet || '', lead.location || ''].join(' ');
+
+    // Command intent gate: if user asked for specific industry, reject leads that don't match
+    if (commandIndustryFilter && !commandIndustryFilter.test(allText)) {
+      console.warn(`[captain] REJECT command intent: ${lead.name} at ${lead.company} — doesn't match command industry filter`);
+      logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_command_intent', metadata: { name: lead.name, company: lead.company, reason: 'command_industry_mismatch' } }).catch(() => {});
+      return false;
+    }
     const locationText = [lead.location || '', lead.snippet || ''].join(' ');
 
     // Geography check (KL-focused: reject foreign OR require Malaysia confirmation)
@@ -1395,7 +1465,12 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     // ── Server-side hard gates ONLY (no AI Enforcer — saves credits, eliminates false rejections) ──
     const gateFailures = [];
     if (currentBody) {
-      const bodyText = currentBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
+      // Strip greeting (single or multi-word first name) and sign-off before word count
+      const bodyText = currentBody
+        .replace(/^Hi\s+[\w\s]{1,40}?,\s*/i, '')  // "Hi Name," or "Hi First Last,"
+        .replace(/\s*Regards,?\s*.*/is, '')          // everything from "Regards," onwards
+        .replace(/\s*Best,?\s*.*/is, '')             // "Best," sign-off variant
+        .trim();
       const wordCount = bodyText.trim().split(/\s+/).length;
       if (msg.channel === 'email' && wordCount > 80) gateFailures.push(`Word count ${wordCount} exceeds 80`);
       const questionCount = (currentBody.match(/\?/g) || []).length;
