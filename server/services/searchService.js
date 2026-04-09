@@ -164,10 +164,14 @@ async function callGoogleCSE(searchQuery, num) {
   const cx     = process.env.GOOGLE_CSE_CX;
   if (!apiKey || !cx) throw new Error('GOOGLE_CSE_API_KEY or GOOGLE_CSE_CX not set');
 
-  console.log('[google-cse] Using key:', apiKey?.substring(0, 8), 'cx:', cx?.substring(0, 8));
+  // CSE is domain-restricted to linkedin.com — strip any existing site: operator and force linkedin.com/in
+  const strippedQuery = searchQuery.replace(/\bsite:\S+\s*/gi, '').trim();
+  const cseQuery = `site:linkedin.com/in ${strippedQuery}`;
+
+  console.log('[google-cse] Query:', cseQuery);
 
   const resp = await axios.get(GOOGLE_CSE_URL, {
-    params: { key: apiKey, cx, q: searchQuery, num: Math.min(num, 10), gl: 'MY', hl: 'en' },
+    params: { key: apiKey, cx, q: cseQuery, num: Math.min(num, 10), gl: 'MY', hl: 'en' },
     timeout: 10000,
   });
   // Google CSE uses `items[]` with same { link, title, snippet } shape as Serper organic[]
@@ -177,8 +181,13 @@ async function callGoogleCSE(searchQuery, num) {
 async function callDuckDuckGo(searchQuery) {
   // DuckDuckGo's Instant Answer API — no key needed, but results are sparse for LinkedIn searches.
   // It won't return lists of profiles, but it will never crash the pipeline.
+  // Strip any existing site: operator and force linkedin.com/in (same as CSE)
+  const strippedQuery = searchQuery.replace(/\bsite:\S+\s*/gi, '').trim();
+  const ddgQuery = `site:linkedin.com/in ${strippedQuery}`;
+  console.log('[duckduckgo] Query:', ddgQuery);
+
   const resp = await axios.get(DDG_URL, {
-    params: { q: searchQuery, format: 'json', no_html: 1, skip_disambig: 1 },
+    params: { q: ddgQuery, format: 'json', no_html: 1, skip_disambig: 1 },
     timeout: 8000,
   });
 
