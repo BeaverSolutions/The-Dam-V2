@@ -247,11 +247,13 @@ async function handleDoOutreach(clientId, command) {
   const limit = limitMatch ? parseInt(limitMatch[1], 10) : 15;
 
   const { rows: leads } = await pool.query(
-    `SELECT id, name, company, email, linkedin_url
+    `SELECT id, name, company, title, email, linkedin_url,
+            metadata->>'signal' AS signal, metadata->>'angle' AS angle, metadata->>'friction' AS friction
      FROM leads
      WHERE client_id = $1
        AND deleted_at IS NULL
-       AND pipeline_stage IN ('sourced', 'qualified', 'new')
+       AND pipeline_stage IN ('researched', 'qualified', 'prospecting', 'outreach_ready')
+       AND status = 'new'
        AND id NOT IN (
          SELECT DISTINCT lead_id FROM messages
          WHERE client_id = $1 AND status NOT IN ('ranger_rejected')
@@ -268,15 +270,98 @@ async function handleDoOutreach(clientId, command) {
   }
 
   let drafted = 0;
+  let approved = 0;
   let failed = 0;
 
   for (const lead of leads) {
     try {
       const channel = lead.email ? 'email' : 'linkedin';
-      const result = await agentsService.salesGenerate(clientId, { lead_id: lead.id, channel });
-      if (result?.message_id) {
-        await agentsService.rangerReview(clientId, { message_id: result.message_id });
-        drafted++;
+
+      // Build lead context for Sales Beaver
+      const leadContext = `Name: ${lead.name}, Company: ${lead.company || 'Unknown'}, Title: ${lead.title || 'Unknown'}${lead.signal ? `, Signal: ${lead.signal}` : ''}${lead.angle ? `, Angle: ${lead.angle}` : ''}${lead.friction ? `, Friction: ${lead.friction}` : ''}`;
+
+      // 1. Sales Beaver drafts the message
+      const salesResult = await agentsService.salesGenerate(clientId, {
+        lead_id: lead.id,
+        channel,
+        context: leadContext,
+      });
+
+      if (!salesResult?.body) {
+        console.warn(`[myclaw] Sales draft failed for ${lead.name}: no body`);
+        failed++;
+        continue;
+      }
+
+      // 2. Save draft to messages table (mirrors Director pipeline)
+      const msgRes = await pool.query(
+        `INSERT INTO messages (client_id, lead_id, channel, subject, body, status)
+         VALUES ($1, $2, $3, $4, $5, 'pending_ranger')
+         RETURNING *`,
+        [clientId, lead.id, channel, salesResult.subject || null, salesResult.body]
+      );
+      const message = msgRes.rows[0];
+      drafted++;
+
+      await logsService.createLog(clientId, {
+        agent: 'sales_beaver',
+        action: 'message_created',
+        target_type: 'message',
+        target_id: message.id,
+        metadata: { lead_id: lead.id, lead_name: lead.name, channel, source: 'myclaw_outreach' },
+      });
+
+      // 3. Enforcer reviews the message
+      const rangerResult = await agentsService.rangerReview(clientId, {
+        message_id: message.id,
+        message_body: salesResult.body,
+        lead_context: { name: lead.name, company: lead.company, title: lead.title, signal: lead.signal, angle: lead.angle, friction: lead.friction },
+      });
+
+      if (rangerResult?.decision === 'approve' || rangerResult?.decision === 'approve_with_edits') {
+        // Update message with Enforcer results and move to pending_approval
+        const finalBody = rangerResult.decision === 'approve_with_edits' && rangerResult.suggested_edit
+          ? rangerResult.suggested_edit
+          : salesResult.body;
+
+        await pool.query(
+          `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
+           ranger_breakdown = $5, status = 'pending_approval', updated_at = NOW()
+           WHERE id = $6 AND client_id = $7`,
+          [finalBody, salesResult.subject || null, rangerResult?.score || 80, rangerResult?.feedback || 'Enforcer approved',
+           JSON.stringify(rangerResult?.breakdown || null), message.id, clientId]
+        );
+
+        // Create approval queue entry
+        await pool.query(
+          `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`,
+          [clientId, message.id]
+        );
+
+        await logsService.createLog(clientId, {
+          agent: 'enforcer_beaver',
+          action: 'message_approved',
+          target_type: 'message',
+          target_id: message.id,
+          metadata: { channel, score: rangerResult?.score, source: 'myclaw_outreach' },
+        });
+
+        approved++;
+      } else {
+        // Ranger rejected — mark message and log
+        await pool.query(
+          `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'ranger_rejected', updated_at = NOW()
+           WHERE id = $3 AND client_id = $4`,
+          [rangerResult?.score || 0, rangerResult?.reject_reason || rangerResult?.feedback || 'Rejected', message.id, clientId]
+        );
+
+        await logsService.createLog(clientId, {
+          agent: 'enforcer_beaver',
+          action: 'message_rejected',
+          target_type: 'message',
+          target_id: message.id,
+          metadata: { channel, score: rangerResult?.score, reason: rangerResult?.reject_reason, source: 'myclaw_outreach' },
+        });
       }
     } catch (err) {
       console.warn(`[myclaw] Outreach failed for ${lead.name}:`, err.message);
@@ -284,9 +369,12 @@ async function handleDoOutreach(clientId, command) {
     }
   }
 
-  return formatResponse(
-    `Outreach drafted for ${drafted} lead${drafted !== 1 ? 's' : ''}${failed > 0 ? ` (${failed} failed)` : ''}.\n\nMessages are in your Approval Queue — review and send when ready.`
-  );
+  const parts = [`Outreach complete: ${drafted} drafted, ${approved} approved by Enforcer.`];
+  if (failed > 0) parts.push(`${failed} failed.`);
+  if (approved > 0) parts.push(`\n${approved} message${approved !== 1 ? 's are' : ' is'} in your **Approval Queue** — review and send when ready.`);
+  if (drafted > 0 && approved === 0) parts.push('\nAll messages were rejected by Enforcer. Check the rejection notes in Messages.');
+
+  return formatResponse(parts.join(' '));
 }
 
 // ── Claude fallback — handles anything Lodge Master can't classify ─────────────
@@ -486,7 +574,7 @@ async function saveLeadsToDB(clientId, leads) {
     try {
       await pool.query(
         `INSERT INTO leads (id, client_id, name, title, company, linkedin_url, email, pipeline_stage, status, data_source, signal_tier, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'sourced', 'new', $8, 'P3', NOW(), NOW())
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'researched', 'new', $8, 'P3', NOW(), NOW())
          ON CONFLICT (client_id, linkedin_url) DO NOTHING`,
         [uuidv4Lead(), clientId, lead.name, lead.title || '', lead.company || '', lead.linkedin_url || '', lead.email || '', lead.data_source || 'serper']
       );
