@@ -164,6 +164,8 @@ async function callGoogleCSE(searchQuery, num) {
   const cx     = process.env.GOOGLE_CSE_CX;
   if (!apiKey || !cx) throw new Error('GOOGLE_CSE_API_KEY or GOOGLE_CSE_CX not set');
 
+  console.log('[google-cse] Using key:', apiKey?.substring(0, 8), 'cx:', cx?.substring(0, 8));
+
   const resp = await axios.get(GOOGLE_CSE_URL, {
     params: { key: apiKey, cx, q: searchQuery, num: Math.min(num, 10), gl: 'MY', hl: 'en' },
     timeout: 10000,
@@ -213,7 +215,14 @@ async function withFallback(label, searchQuery, num, parseItems) {
     return parseItems(items);
   } catch (err) {
     const status = err.response?.status ? ` (${err.response.status})` : '';
-    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    const body   = err.response?.data;
+    const detail = body
+      ? JSON.stringify(body?.error ?? body)
+      : err.message;
+    const firstError = body?.error?.errors?.[0];
+    if (firstError) {
+      console.warn(`[google-cse] Error detail — domain: ${firstError.domain}, reason: ${firstError.reason}, message: ${firstError.message}`);
+    }
     console.warn(`[search] Google CSE failed${status}: ${detail}, falling back to DuckDuckGo`);
   }
 
