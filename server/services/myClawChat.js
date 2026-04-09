@@ -281,10 +281,17 @@ function buildIcpFromCommand(command, baseIcp = {}) {
     if (lower.includes(kw)) { extractedLocation = label; break; }
   }
 
+  // If command mentions specific titles, expand with DEFAULT_TITLES variants
+  // so we search all seniority levels, not just the one mentioned
+  const DEFAULT_TITLES = ['CEO', 'Founder', 'Co-Founder', 'Managing Director', 'Owner', 'Director', 'MD'];
+  const mergedTitles = extractedTitles.length > 0
+    ? [...new Set([...extractedTitles, ...DEFAULT_TITLES])]
+    : [];
+
   return {
     ...baseIcp,
     ...(extractedIndustries.length > 0 ? { industries: extractedIndustries } : {}),
-    ...(extractedTitles.length > 0 ? { job_titles: extractedTitles } : {}),
+    ...(mergedTitles.length > 0 ? { job_titles: mergedTitles } : {}),
     ...(extractedLocation ? { geographies: extractedLocation } : {}),
   };
 }

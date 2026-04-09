@@ -8,12 +8,14 @@ const hunterService = require('./hunter');
 
 const DEFAULT_TITLES = [
   'CEO', 'Founder', 'Co-Founder', 'Managing Director', 'Owner',
-  'Director', 'MD',
+  'Director', 'MD', 'CTO', 'COO', 'Partner',
 ];
 
 const DEFAULT_INDUSTRIES = [
   'consulting', 'agency', 'SaaS', 'training',
-  'professional services', 'recruitment',
+  'professional services', 'recruitment', 'marketing',
+  'digital marketing', 'technology', 'software', 'fintech',
+  'e-commerce', 'logistics', 'media', 'advertising',
 ];
 
 const KL_LOCATIONS = [
@@ -128,11 +130,11 @@ function buildQueryPool(icpMemory) {
   // Deduplicate phrases
   const uniquePhrases = [...new Set(industryPhrases)];
 
-  // Top 3 titles only (avoid query explosion)
-  const topTitles = titles.slice(0, 3);
+  // Up to 5 titles — broader coverage while avoiding query explosion
+  const topTitles = titles.slice(0, 5);
 
   for (const title of topTitles) {
-    for (const phrase of uniquePhrases.slice(0, 6)) {
+    for (const phrase of uniquePhrases.slice(0, 12)) {
       // Strategy: direct people search.
       // "Sdn Bhd" is a structural Malaysia signal (legal entity suffix) — safe to include.
       // NO location keywords (Malaysia, KL, etc.) — they cause query pollution where all
@@ -145,10 +147,19 @@ function buildQueryPool(icpMemory) {
         industry: phrase,
         location: baseLocation,
       });
+
+      // "Berhad" variant — catches public listed and larger Malaysian companies
+      queryPool.push({
+        query:    `${title} ${phrase} "Berhad"`,
+        strategy: 'direct',
+        title,
+        industry: phrase,
+        location: baseLocation,
+      });
     }
 
     // Strategy: company search — no location in query, gl:'my' handles geo bias
-    for (const phrase of uniquePhrases.slice(0, 4)) {
+    for (const phrase of uniquePhrases.slice(0, 8)) {
       queryPool.push({
         query:    `site:linkedin.com/company ${phrase} "Sdn Bhd"`,
         strategy: 'company',
@@ -161,7 +172,7 @@ function buildQueryPool(icpMemory) {
 
   // Strategy: buying signals (fewer, more targeted)
   // No location in query — "Sdn Bhd" + gl:'my' + Haiku handles Malaysia verification
-  for (const phrase of uniquePhrases.slice(0, 3)) {
+  for (const phrase of uniquePhrases.slice(0, 6)) {
     queryPool.push({
       // searchLinkedInProfiles prepends site:linkedin.com/in — don't add it here
       query:    `${phrase} "Sdn Bhd" hiring`,
