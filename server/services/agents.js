@@ -1015,7 +1015,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // ── Step 1b: Captain Beaver verification gate ────────────
   // If a lead came from Claude fallback (not Apollo) and has no linkedin_url,
   // it cannot be verified and must be skipped to prevent hallucinated outreach.
-  const researchSource = researchResult?.data?.source || 'claude';
+  const researchSource = diagnostics.research_source || 'claude';
   const isVerifiedSource = researchSource === 'apollo' || researchSource === 'serper' || researchSource === 'multi';
   // ══════════════════════════════════════════════════════════════
   // CAPTAIN'S QUALITY GATE — strict filtering, fewer but real leads
