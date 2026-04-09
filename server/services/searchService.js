@@ -246,6 +246,96 @@ async function withFallback(label, searchQuery, num, parseItems) {
   }
 }
 
+// ── Parallel search helpers ──────────────────────────────────────────────────
+
+/**
+ * Run all Serper queries and collect profile results.
+ * Never throws — failed queries are logged and skipped.
+ */
+async function runAllSerperQueries(queries) {
+  const results = [];
+  for (const q of queries) {
+    try {
+      const items = await callSerper(q, 10);
+      results.push(...parseProfileItems(items, 'serper'));
+    } catch (err) {
+      console.warn(`[search] Serper query failed for "${q}": ${err.message}`);
+    }
+  }
+  return results;
+}
+
+/**
+ * Run all CSE queries and collect profile results.
+ * callGoogleCSE already strips and re-adds site:linkedin.com/in, so queries
+ * can include it or not — same result.
+ * Never throws — failed queries are logged and skipped.
+ */
+async function runAllCSEQueries(queries) {
+  const results = [];
+  for (const q of queries) {
+    try {
+      const items = await callGoogleCSE(q, 10);
+      results.push(...parseProfileItems(items, 'cse'));
+    } catch (err) {
+      console.warn(`[search] CSE query failed for "${q}": ${err.message}`);
+    }
+  }
+  return results;
+}
+
+/**
+ * parallelSearch(serperQueries, cseQueries)
+ *
+ * Runs Serper + CSE in parallel (not cascade). Combines fulfilled results.
+ * DuckDuckGo runs only if BOTH Serper AND CSE return 0 results.
+ *
+ * Returns a flat array of parsed profile leads (scorer format not applied here —
+ * callers should pass through leadScorer.normalize() if needed).
+ */
+async function parallelSearch(serperQueries, cseQueries) {
+  console.log(`[search] parallelSearch — Serper: ${serperQueries.length} queries, CSE: ${cseQueries.length} queries`);
+
+  const [serperSettled, cseSettled] = await Promise.allSettled([
+    runAllSerperQueries(serperQueries),
+    runAllCSEQueries(cseQueries),
+  ]);
+
+  const combined = [];
+
+  if (serperSettled.status === 'fulfilled') {
+    combined.push(...serperSettled.value);
+    console.log(`[search] Serper batch: ${serperSettled.value.length} results`);
+  } else {
+    console.warn(`[search] Serper batch rejected: ${serperSettled.reason?.message}`);
+  }
+
+  if (cseSettled.status === 'fulfilled') {
+    combined.push(...cseSettled.value);
+    console.log(`[search] CSE batch: ${cseSettled.value.length} results`);
+  } else {
+    console.warn(`[search] CSE batch rejected: ${cseSettled.reason?.message}`);
+  }
+
+  // DDG only runs if BOTH Serper AND CSE returned 0 results
+  if (combined.length === 0) {
+    console.log('[search] Both Serper and CSE returned 0 results — falling back to DuckDuckGo');
+    const fallbackQuery = serperQueries[0] || cseQueries[0];
+    if (fallbackQuery) {
+      try {
+        const ddgItems = await callDuckDuckGo(fallbackQuery);
+        combined.push(...parseProfileItems(ddgItems, 'ddg'));
+        console.log(`[search] DuckDuckGo fallback: ${ddgItems.length} items`);
+      } catch (err) {
+        console.warn(`[search] DuckDuckGo fallback failed: ${err.message}`);
+      }
+    }
+  }
+
+  console.log(`[search] parallelSearch total: ${combined.length} results`);
+  return combined;
+}
+
 // ── Public API (same signatures as serper.js) ─────────────────────────────
 
 async function searchLinkedInProfiles(query, limit = 5) {
@@ -272,4 +362,4 @@ async function searchBySignal(query, limit = 5) {
   return results.slice(0, limit);
 }
 
-module.exports = { searchLinkedInProfiles, searchLinkedInCompanies, searchBySignal };
+module.exports = { searchLinkedInProfiles, searchLinkedInCompanies, searchBySignal, parallelSearch };

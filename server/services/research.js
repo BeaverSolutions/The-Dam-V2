@@ -850,4 +850,4 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
   }
 }
 
-module.exports = { researchLeads, buildQueryPool };
+module.exports = { researchLeads, buildQueryPool, verifyBatch };

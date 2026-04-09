@@ -14,9 +14,11 @@
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
 const logsService = require('./logs');
-const { researchLeads } = require('./research');
+const { researchLeads, verifyBatch } = require('./research');
 const serperService = require('./searchService');
 const agentsService = require('./agents');
+const queryGenerator = require('./queryGenerator');
+const leadScorer = require('./leadScorer');
 
 let callAgent;
 try { callAgent = require('./claude').callAgent; } catch { callAgent = null; }
@@ -566,68 +568,89 @@ function buildIcpFromCommand(command, baseIcp = {}) {
   };
 }
 
-// ── Research execution (MyClaw as researcher) ────────────────────────────────
-// MyClaw skips Haiku verification — user is doing manual research and will judge quality.
-// We call Serper directly with diverse queries built from the command.
+// ── Research execution (V1 quality pipeline) ────────────────────────────────
+// queryGenerator → parallelSearch → leadScorer → verifyBatch (Hunter + Haiku) → saveLeadsToDB
 async function handleResearchExecute(clientId, query) {
   try {
-    const targetCount = extractLimit(query) || 5;
-    const serperQueries = buildSerperQueries(query, targetCount);
-    const accumulated = [];
-    const seenUrls = new Set();
+    const targetCount = extractLimit(query) || 10;
 
-    console.log(`[captain] Research target: ${targetCount} leads. Queries: ${serperQueries.length}`);
+    // 1. Build ICP from command keywords
+    const icp = buildIcpFromCommand(query);
 
-    for (const sq of serperQueries) {
-      if (accumulated.length >= targetCount) break;
+    // 2. Generate queries (role synonym rotation + region expansion)
+    console.log(`[query-gen] Building queries for: "${query}"`);
+    const { serperQueries, cseQueries } = queryGenerator.generateQueries(query, icp);
 
-      const remaining = targetCount - accumulated.length;
-      let results = [];
-      try {
-        results = await serperService.searchLinkedInProfiles(sq, Math.min(remaining + 3, 10));
-      } catch (searchErr) {
-        console.error(`[captain] Serper search failed for "${sq}":`, searchErr.message);
-        continue;
-      }
+    // 3. Parallel search (Serper + CSE simultaneously; DDG only if both return 0)
+    console.log(`[search] Running parallel search — ${serperQueries.length} Serper + ${cseQueries.length} CSE queries`);
+    const rawResults = await serperService.parallelSearch(serperQueries, cseQueries);
+    console.log(`[search] ${rawResults.length} raw results`);
 
-      const fresh = results.filter(l => {
-        if (!l.linkedin_url) return false;
-        const key = l.linkedin_url;
-        if (seenUrls.has(key)) return false;
-        seenUrls.add(key);
-        return true;
-      });
+    // 4. Lead scorer pipeline
+    console.log('[scorer] normalize → filter → dedup → rank → threshold');
+    const normalized = leadScorer.normalize(rawResults);
 
-      accumulated.push(...fresh);
-      console.log(`[captain] Query "${sq}": ${fresh.length} fresh, total=${accumulated.length}/${targetCount}`);
-    }
+    // Extract signal keyword from command if present (hiring, growing, etc.)
+    const signalMatch = query.match(/\b(hir\w+|grow\w+|expan\w+|launch\w+|rais\w+)\b/i);
+    const signalKeyword = signalMatch ? signalMatch[1] : null;
 
-    // Save leads to DB
-    const final = accumulated.slice(0, targetCount);
-    if (final.length === 0) {
+    const filtered = leadScorer.filterResults(normalized, signalKeyword);
+    const deduped  = leadScorer.deduplicate(filtered);
+
+    const criteria = {
+      role:     Array.isArray(icp.job_titles)  ? icp.job_titles[0]  : (icp.job_titles  || ''),
+      location: icp.geographies || '',
+      signal:   signalKeyword || '',
+    };
+    const ranked    = leadScorer.rankLeads(deduped, criteria);
+    // Use threshold 25 for the chat path — enough to require a LinkedIn URL (+20) + any extra signal
+    const qualified = leadScorer.thresholdFilter(ranked, 25);
+
+    console.log(`[scorer] ${rawResults.length} raw → ${normalized.length} normalized → ${filtered.length} filtered → ${deduped.length} deduped → ${qualified.length} qualified (threshold 25)`);
+
+    if (qualified.length === 0) {
       return formatResponse(
         `No leads found for "${query}". Try being more specific — e.g. "Find 10 marketing agency founders KL".`
       );
     }
 
-    const { saved, skipped } = await saveLeadsToDB(clientId, final);
+    // 5. Convert scorer format back to lead format for verifyBatch
+    const candidates = qualified.map(r => ({
+      name:        r.name,
+      title:       r.title,
+      company:     r.company,
+      linkedin_url: r.url,
+      snippet:     r.snippet,
+      data_source: r.source,
+      email:       '',
+    }));
 
-    const lines = final.filter(lead => {
-      // Only show leads that pass validation (have name + company)
-      return lead.name && lead.name.trim().length >= 2 && lead.company && lead.company.trim().length >= 2 && lead.company.toLowerCase() !== 'unknown';
-    }).map((lead, i) => {
-      const title = lead.title || 'N/A';
-      return `${i + 1}. ${lead.name} — ${title} @ ${lead.company}`;
-    });
+    // 6. Verify with Hunter + Haiku (reuse research.js Layer 2)
+    console.log(`[verify] Verifying ${Math.min(candidates.length, 20)} candidates (Hunter + Haiku)`);
+    const { verified, rejected } = await verifyBatch(candidates, icp, clientId);
+    console.log(`[verify] ${verified.length} verified, ${rejected.length} rejected`);
+
+    if (verified.length === 0) {
+      return formatResponse(
+        `Found ${qualified.length} candidate${qualified.length !== 1 ? 's' : ''} but none passed ICP verification for "${query}". Try different criteria.`
+      );
+    }
+
+    // 7. Save only verified leads to DB
+    const toSave = verified.slice(0, targetCount);
+    const { saved, skipped } = await saveLeadsToDB(clientId, toSave);
+
+    const lines = toSave
+      .filter(l => l.name?.trim().length >= 2 && l.company && l.company.toLowerCase() !== 'unknown')
+      .map((l, i) => `${i + 1}. ${l.name} — ${l.title || 'N/A'} @ ${l.company}`);
 
     const parts = [];
-    if (saved > 0) parts.push(`${saved} lead${saved !== 1 ? 's' : ''} saved to pipeline.`);
-    if (skipped > 0) parts.push(`${skipped} rejected (missing name, company, or invalid email).`);
+    if (saved > 0)   parts.push(`${saved} verified lead${saved !== 1 ? 's' : ''} saved to pipeline.`);
+    if (skipped > 0) parts.push(`${skipped} rejected (validation gate).`);
     parts.push('Ready for outreach.');
-    const note = parts.join(' ');
 
     return formatResponse(
-      `Found ${final.length} lead${final.length !== 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}\n\n${note}`
+      `Found ${verified.length} verified lead${verified.length !== 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}\n\n${parts.join(' ')}`
     );
   } catch (err) {
     console.error('[captain] Research failed:', err.message);
