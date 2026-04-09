@@ -92,9 +92,14 @@ router.post('/ranger/review',
 
 // ── MyClaw chat prefix detection ──────────────────────────────────────────
 const MYCLAW_PREFIX_RE = /^(?:@?(?:my)?claw|(?:hey|hi|yo)\s+claw|@?lodge(?:\s*master)?)[,:\s]*/i;
+const RESEARCH_COMMAND_RE = /\b(?:find|search|look\s*for|get\s*me|discover)\b/i;
 
 function isMyClawMessage(command) {
   return MYCLAW_PREFIX_RE.test(command.trim());
+}
+
+function isResearchCommand(command) {
+  return RESEARCH_COMMAND_RE.test(command);
 }
 
 function stripMyClawPrefix(command) {
@@ -107,13 +112,22 @@ router.post('/director/plan',
     try {
       const { command } = req.body;
 
-      // ── Route MyClaw-directed messages ──────────────────────
+      // ── Route MyClaw-directed messages (explicit prefix) ─────────────────
       if (isMyClawMessage(command)) {
         const myClawChat = require('../services/myClawChat');
         const result = await myClawChat.handleChat(req.clientId, stripMyClawPrefix(command));
         return res.json({ data: result });
       }
 
+      // ── Route research commands to MyClaw (implicit) ───────────────────
+      // "find 20 founders", "search for managers", etc. go directly to MyClaw
+      if (isResearchCommand(command)) {
+        const myClawChat = require('../services/myClawChat');
+        const result = await myClawChat.handleChat(req.clientId, command);
+        return res.json({ data: result });
+      }
+
+      // ── Everything else → Director/Captain Beaver (structured pipeline) ──
       const result = await agentsService.directorPlan(req.clientId, req.body);
       res.json({ data: result });
     } catch (err) { next(err); }

@@ -14,6 +14,8 @@
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
 const logsService = require('./logs');
+const researchModule = require('./research');
+const { getClientConfig } = require('./clientConfig');
 
 // ── Intent classification — fast keyword matching ───────────────────────────
 // No Claude call needed here. Keeps it instant and saves tokens.
@@ -27,6 +29,12 @@ function classifyIntent(command) {
   const limitMatch = lower.match(/\b(\d+)\s*(?:leads?|results?)\b/);
   if (limitMatch) filters.limit = parseInt(limitMatch[1], 10);
 
+  // ── RESEARCH COMMANDS (priority) ──
+  // "find 20 b2b founders in KL", "search for marketing managers", etc.
+  if (/\b(?:find|search|look\s*for|get\s*me|discover)\b/i.test(lower)) {
+    return { intent: 'research_execute', query: command };
+  }
+
   if (/approv|queue|review|pending\s*message/i.test(lower)) return { intent: 'check_approvals', filters };
   if (/qualif|ready\s*(?:for|to)\s*(?:outreach|contact)/i.test(lower)) return { intent: 'check_qualified', filters };
   if (/\b(?:count|how\s*many|total)\b.*lead/i.test(lower) || /lead.*\b(?:count|how\s*many|total)\b/i.test(lower)) return { intent: 'lead_count', filters };
@@ -37,10 +45,10 @@ function classifyIntent(command) {
 
   // Greetings and general chat
   if (/^(hi|hey|hello|sup|yo|what'?s?\s*up|how\s*are)/i.test(lower)) {
-    return { intent: 'general', reply: "Hey! I'm Lodge Master, your pipeline assistant. I can check your leads, approvals, pipeline stats, and agent memory. What do you need?" };
+    return { intent: 'general', reply: "Hey! I'm Lodge Master, your pipeline assistant. I can find leads, check your approvals, pipeline stats, and agent memory. What do you need?" };
   }
 
-  return { intent: 'general', reply: "I'm Lodge Master. Try asking me to:\n- Check my leads\n- Show approvals\n- Pipeline summary\n- Check agent memory\n- Show status" };
+  return { intent: 'general', reply: "I'm Lodge Master. Try asking me to:\n- Find 20 b2b founders in KL\n- Check my leads\n- Show approvals\n- Pipeline summary\n- Check agent memory\n- Show status" };
 }
 
 // ── Intent handlers ─────────────────────────────────────────────────────────
@@ -195,6 +203,51 @@ async function handlePipelineSummary(clientId) {
   );
 }
 
+// ── Research execution (MyClaw as researcher) ────────────────────────────────
+async function handleResearchExecute(clientId, query) {
+  try {
+    // Get client config for ICP context
+    const config = await getClientConfig(clientId);
+    const icp = config?.icp || {};
+
+    // Execute research synchronously — MyClaw returns actual leads
+    const results = await researchModule.findLeads(clientId, {
+      query,
+      icp,
+      limit: extractLimit(query) || 5,
+    });
+
+    if (!results || results.length === 0) {
+      return formatResponse(
+        `No leads found for "${query}". Try being more specific about industry, location, or role.`
+      );
+    }
+
+    // Format results for chat
+    const lines = results.slice(0, 20).map((lead, i) => {
+      const company = lead.company || 'Unknown';
+      const title = lead.title || 'N/A';
+      const source = lead.data_source || 'web';
+      return `${i + 1}. ${lead.name} — ${title} @ ${company} [${source}]`;
+    });
+
+    return formatResponse(
+      `Found ${results.length} lead${results.length !== 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}\n\nUse Director Chat to create a campaign plan with these leads.`
+    );
+  } catch (err) {
+    console.error('[myclaw] Research failed:', err.message);
+    return formatResponse(
+      `Research failed: ${err.message}. Check your ICP configuration and try again.`
+    );
+  }
+}
+
+// Helper: extract requested lead count from query
+function extractLimit(query) {
+  const match = query.match(/\b(\d+)\b/);
+  return match ? parseInt(match[1], 10) : null;
+}
+
 // ── Response formatter ──────────────────────────────────────────────────────
 // Returns in a shape the frontend can render as a chat message from MyClaw
 function formatResponse(content) {
@@ -218,6 +271,8 @@ async function handleChat(clientId, command) {
   const intent = classifyIntent(command);
 
   switch (intent.intent) {
+    case 'research_execute':
+      return handleResearchExecute(clientId, intent.query);
     case 'check_approvals':
       return handleCheckApprovals(clientId);
     case 'check_leads':
@@ -235,7 +290,7 @@ async function handleChat(clientId, command) {
     case 'general':
     default:
       return formatResponse(
-        intent.reply || "Hey! I'm Lodge Master. I can check your approvals, leads, pipeline status, and agent memory. What do you need?"
+        intent.reply || "Hey! I'm Lodge Master. I can find leads, check your approvals, pipeline status, and agent memory. What do you need?"
       );
   }
 }
