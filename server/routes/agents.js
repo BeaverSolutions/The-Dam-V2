@@ -91,7 +91,7 @@ router.post('/ranger/review',
 );
 
 // ── MyClaw chat prefix detection ──────────────────────────────────────────
-const MYCLAW_PREFIX_RE = /^(?:@?(?:my)?claw|hey\s+claw|@?lodge(?:\s*master)?)[,:\s]*/i;
+const MYCLAW_PREFIX_RE = /^(?:@?(?:my)?claw|(?:hey|hi|yo)\s+claw|@?lodge(?:\s*master)?)[,:\s]*/i;
 
 function isMyClawMessage(command) {
   return MYCLAW_PREFIX_RE.test(command.trim());
