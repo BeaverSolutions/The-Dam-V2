@@ -21,6 +21,48 @@ try {
 const SERPER_URL = 'https://google.serper.dev/search';
 
 /**
+ * Extract company name from a Google snippet when the title line didn't have it.
+ * LinkedIn snippets follow predictable patterns:
+ *   "CEO at Company Name · Pengalaman: ..."
+ *   "Co-Founder and CEO at Company Sdn Bhd. ..."
+ *   "Title · Company Name · Location: ..."
+ *   "Founder of Company Name. ..."
+ *   "Company Name. Title. ..."  (snippet starts with company)
+ */
+function extractCompanyFromSnippet(snippet, name, title) {
+  if (!snippet) return '';
+
+  // Clean the person's name from the snippet so it doesn't match as company
+  const cleanSnippet = snippet.replace(new RegExp(escapeRegex(name), 'gi'), '').trim();
+
+  // Pattern 1: "Title at Company" — most common in LinkedIn snippets
+  const atMatch = cleanSnippet.match(/(?:CEO|Founder|Co-Founder|Director|MD|Managing Director|Owner|CTO|COO|CMO|Partner|Head)\s+(?:and\s+\w+\s+)?at\s+([^·.;,\n]{3,60})/i);
+  if (atMatch) return atMatch[1].trim();
+
+  // Pattern 2: "Title · Company" — LinkedIn uses middle dot as separator
+  const dotMatch = cleanSnippet.match(/(?:CEO|Founder|Co-Founder|Director|MD|Managing Director|Owner|CTO|COO|CMO|Partner|Head)[^·]*·\s*([^·.;\n]{3,60})/i);
+  if (dotMatch) return dotMatch[1].trim();
+
+  // Pattern 3: "Founder of Company" / "Director of Company"
+  const ofMatch = cleanSnippet.match(/(?:Founder|Director|Owner|Partner|Head)\s+of\s+([^·.;,\n]{3,60})/i);
+  if (ofMatch) return ofMatch[1].trim();
+
+  // Pattern 4: "Pengalaman: Company" or "Pengalaman ; Title. Company" (Malay LinkedIn)
+  const pengalamanMatch = cleanSnippet.match(/Pengalaman\s*[;:]\s*(?:[^.]*?\.\s*)?([^·.;\n]{3,60})/i);
+  if (pengalamanMatch) return pengalamanMatch[1].trim();
+
+  // Pattern 5: Look for "Sdn Bhd" or "Berhad" — the company name precedes it
+  const sdnMatch = cleanSnippet.match(/([A-Z][\w\s&'()-]{2,40}(?:Sdn\s*Bhd|Berhad))/i);
+  if (sdnMatch) return sdnMatch[1].trim();
+
+  return '';
+}
+
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
  * Search Google for LinkedIn profiles matching the ICP query.
  * Returns an array of seed leads with real LinkedIn URLs.
  *
@@ -65,36 +107,50 @@ async function searchLinkedInProfiles(query, limit = 5) {
       .slice(0, limit * 2) // over-fetch before validation trims some out
       .map(r => {
         // LinkedIn titles in Google look like: "John Doe - CEO at Acme Corp | LinkedIn"
-        // Sometimes: "John Doe | LinkedIn" (no title/company in snippet)
+        // Sometimes: "John Doe - CEO | LinkedIn" (no company in title)
+        // Sometimes: "John Doe - CompanyName - | LinkedIn" (company is in title position)
         const titleLine = (r.title || '')
           .replace(/\s*\|?\s*LinkedIn\s*$/, '')  // strip " | LinkedIn" or "| LinkedIn" from end
           .trim();
 
-        // Try splitting on first " - " (most common)
-        let parts = titleLine.split(' - ');
-        let name = parts[0]?.trim() || '';
-        let rest = parts.length > 1 ? parts.slice(1).join(' - ').trim() : '';
+        // Split on " - " — LinkedIn uses this as separator
+        let parts = titleLine.split(' - ').map(p => p.trim()).filter(Boolean);
+        let name = parts[0] || '';
+        let title = '';
+        let company = '';
 
-        // Fallback: if no rest found, try splitting on the LAST " - "
-        // LinkedIn sometimes formats as "Name - Title - Company | LinkedIn"
-        if (!rest && titleLine.includes(' - ')) {
-          const lastDash = titleLine.lastIndexOf(' - ');
-          name = titleLine.substring(0, lastDash).trim();
-          rest = titleLine.substring(lastDash + 3).trim();
+        if (parts.length >= 3) {
+          // "Name - Title - Company" or "Name - Title at Company - Extra"
+          title = parts[1];
+          company = parts[2];
+        } else if (parts.length === 2) {
+          // "Name - Title at Company" or "Name - Title" or "Name - Company"
+          title = parts[1];
+        }
+        // else: just a name, no extra info
+
+        // Extract company from "Title at Company" pattern
+        const atIdx = title.toLowerCase().indexOf(' at ');
+        if (atIdx > -1) {
+          company = company || title.substring(atIdx + 4).trim();
+          title = title.substring(0, atIdx).trim();
         }
 
-        // If still no parseable name, warn and use full title line as name
+        // If still no parseable name, use full title line
         if (!name) {
           console.warn('[serper] Could not parse title:', r.title);
           name = titleLine;
         }
 
-        // "CEO at Acme Corp" → title + company
-        const atIdx = rest.toLowerCase().indexOf(' at ');
-        const title = atIdx > -1 ? rest.substring(0, atIdx).trim() : rest;
-        let company = atIdx > -1 ? rest.substring(atIdx + 4).trim() : '';
+        // ── Snippet fallback: extract company from Google's description ──
+        // Snippets contain patterns like: "CEO at Company Name", "Title · Company",
+        // "Title at Company · Pengalaman:", "Founder of Company Sdn Bhd"
+        const snippet = r.snippet || '';
+        if (!company || company === 'Unknown') {
+          company = extractCompanyFromSnippet(snippet, name, title) || '';
+        }
 
-        // Company should never be empty string — use 'Unknown' as fallback
+        // Last resort
         if (!company) company = 'Unknown';
 
         // Normalise LinkedIn URL — strip query params and trailing slashes
@@ -107,7 +163,7 @@ async function searchLinkedInProfiles(query, limit = 5) {
           company,
           linkedin_url: linkedinUrl,
           email: '',
-          snippet: r.snippet || '',
+          snippet,
           verified: false,
           data_source: 'serper',
         };

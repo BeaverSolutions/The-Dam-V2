@@ -62,16 +62,13 @@ async function callAgent(agentKey, userMessage, context = {}) {
   const model = agent.model || CLAUDE_MODEL;
   const maxTokens = agent.maxTokens || MAX_TOKENS;
 
-  // Strip clientId (used only for usage attribution) out of the context
-  // that gets stringified into the user message. If the caller didn't pass
-  // one explicitly, fall back to the AsyncLocalStorage context set by
-  // middleware/clientContext.js for request-driven callers.
-  const { clientId: ctxClientId, ...passthroughContext } = context;
-  const clientId = ctxClientId || getCurrentClientId() || null;
-  const contextStr =
-    Object.keys(passthroughContext).length > 0
-      ? `\n\nContext:\n${JSON.stringify(passthroughContext, null, 2)}`
-      : '';
+  // Extract clientId for usage attribution — everything else is ignored.
+  // Previously, non-clientId context was serialized as JSON and appended to
+  // the prompt, which caused the Ranger to see raw UUIDs/metadata and reject
+  // clean messages for "unfilled template variables." All context the agent
+  // needs must be in the userMessage itself, not smuggled through this param.
+  const clientId = context?.clientId || getCurrentClientId() || null;
+  const contextStr = '';
 
   // ─── Budget gate ───────────────────────────────────────────
   // If we know who's paying, enforce their daily cap BEFORE burning tokens.

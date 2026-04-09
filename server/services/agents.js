@@ -966,19 +966,51 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     started_at: new Date().toISOString(),
   });
 
-  // ── Step 1: Research Beaver ──────────────────────────────
+  // ── Step 1: Research Beaver (with retry loop) ───────────
   // Extract requested count from command if not passed explicitly
   const cmdCountMatch = command && command.match(/\b(\d+)\b/);
   const targetLimit = limit || (cmdCountMatch ? parseInt(cmdCountMatch[1], 10) : 5);
 
-  const researchResult = command
-    ? await researchSearch(clientId, { query: command, filters: { batchIndex, limit: targetLimit } })
-    : { data: { leads: [] } };
+  // Retry loop: keep searching until we have enough leads that pass ALL Director gates
+  // Max 3 rounds to cap API spend (each round = 1 Serper batch + verification)
+  const MAX_RESEARCH_ROUNDS = 3;
+  let rawLeads = [];
+  let currentBatchIndex = batchIndex;
+  let allSerperQueries = [];
 
-  const rawLeads = researchResult?.data?.leads || [];
+  for (let round = 0; round < MAX_RESEARCH_ROUNDS; round++) {
+    const researchResult = command
+      ? await researchSearch(clientId, { query: command, filters: { batchIndex: currentBatchIndex, limit: targetLimit } })
+      : { data: { leads: [] } };
+
+    const roundLeads = researchResult?.data?.leads || [];
+    if (researchResult?.data?.query) allSerperQueries.push(researchResult.data.query);
+    diagnostics.research_source = researchResult?.data?.source || 'unknown';
+
+    // Deduplicate against leads already collected in previous rounds
+    const existingUrls = new Set(rawLeads.map(l => l.linkedin_url).filter(Boolean));
+    const newLeads = roundLeads.filter(l => !l.linkedin_url || !existingUrls.has(l.linkedin_url));
+    rawLeads.push(...newLeads);
+
+    console.log(`[research] Round ${round + 1}: got ${roundLeads.length} (${newLeads.length} new), total raw: ${rawLeads.length}`);
+
+    if (rawLeads.length >= targetLimit * 2) {
+      console.log(`[research] Have ${rawLeads.length} raw leads (>= ${targetLimit * 2} buffer) — stopping search`);
+      break;
+    }
+
+    // If this round returned 0 new leads, stop — query pool is exhausted
+    if (newLeads.length === 0) {
+      console.log(`[research] Round ${round + 1} returned 0 new leads — query pool exhausted`);
+      break;
+    }
+
+    currentBatchIndex++;
+  }
+
   diagnostics.raw_from_research = rawLeads.length;
-  diagnostics.research_source = researchResult?.data?.source || 'unknown';
-  diagnostics.serper_query = researchResult?.data?.query || null;
+  diagnostics.research_rounds = Math.min(currentBatchIndex - batchIndex + 1, MAX_RESEARCH_ROUNDS);
+  diagnostics.serper_query = allSerperQueries.join(' | ') || null;
 
   // ── Step 1b: Captain Beaver verification gate ────────────
   // If a lead came from Claude fallback (not Apollo) and has no linkedin_url,

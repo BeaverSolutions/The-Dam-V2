@@ -732,19 +732,30 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       return true;
     });
 
-    // 8. Mark all picked queries as used, save back
+    // 8. Pre-filter: reject leads with no company name BEFORE Layer 2
+    // This saves Haiku API calls on leads that will be rejected anyway
+    const preFiltered = deduped.filter(lead => {
+      if (!lead.company || lead.company === 'Unknown' || lead.company.length < 3) {
+        console.log(`[research] Pre-filter: dropping ${lead.name} — no company name`);
+        return false;
+      }
+      return true;
+    });
+    console.log(`[research] Pre-filter: ${deduped.length} → ${preFiltered.length} (dropped ${deduped.length - preFiltered.length} with unknown company)`);
+
+    // 9. Mark all picked queries as used, save back
     for (const q of picked) {
       usedSet.add(q.query);
     }
     await saveUsedQueries(clientId, usedSet);
 
-    // 9. LAYER 2: Verify candidates before returning
+    // 10. LAYER 2: Verify candidates before returning
     // Retry up to 2 more times if we haven't hit targetCount yet (each retry fetches fresh queries)
     const queriesUsed = picked.map(q => q.query);
-    console.log(`[research] Layer 1 complete: ${deduped.length} candidates. Starting Layer 2 verification...`);
+    console.log(`[research] Layer 1 complete: ${preFiltered.length} candidates (from ${deduped.length} raw). Starting Layer 2 verification...`);
 
     const icp = effectiveIcp || {};
-    let { verified, rejected } = await verifyBatch(deduped, icp, clientId);
+    let { verified, rejected } = await verifyBatch(preFiltered, icp, clientId);
 
     console.log(`[research] Layer 2 complete: ${verified.length} verified, ${rejected.length} rejected`);
 
