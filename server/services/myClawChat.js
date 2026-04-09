@@ -276,16 +276,11 @@ async function handleDoOutreach(clientId, command) {
   for (const lead of leads) {
     try {
       const channel = lead.email ? 'email' : 'linkedin';
-
-      // Build lead context for Sales Beaver
       const leadContext = `Name: ${lead.name}, Company: ${lead.company || 'Unknown'}, Title: ${lead.title || 'Unknown'}${lead.signal ? `, Signal: ${lead.signal}` : ''}${lead.angle ? `, Angle: ${lead.angle}` : ''}${lead.friction ? `, Friction: ${lead.friction}` : ''}`;
+      const leadCtx = { name: lead.name, company: lead.company, title: lead.title, signal: lead.signal, angle: lead.angle, friction: lead.friction };
 
-      // 1. Sales Beaver drafts the message
-      const salesResult = await agentsService.salesGenerate(clientId, {
-        lead_id: lead.id,
-        channel,
-        context: leadContext,
-      });
+      // ── Attempt 1: Sales Beaver drafts ──
+      let salesResult = await agentsService.salesGenerate(clientId, { lead_id: lead.id, channel, context: leadContext });
 
       if (!salesResult?.body) {
         console.warn(`[myclaw] Sales draft failed for ${lead.name}: no body`);
@@ -293,94 +288,128 @@ async function handleDoOutreach(clientId, command) {
         continue;
       }
 
-      // 2. Save draft to messages table (mirrors Director pipeline)
+      // Save draft to messages table
       const msgRes = await pool.query(
         `INSERT INTO messages (client_id, lead_id, channel, subject, body, status)
-         VALUES ($1, $2, $3, $4, $5, 'pending_ranger')
-         RETURNING *`,
+         VALUES ($1, $2, $3, $4, $5, 'pending_ranger') RETURNING *`,
         [clientId, lead.id, channel, salesResult.subject || null, salesResult.body]
       );
       const message = msgRes.rows[0];
       drafted++;
 
       await logsService.createLog(clientId, {
-        agent: 'sales_beaver',
-        action: 'message_created',
-        target_type: 'message',
-        target_id: message.id,
+        agent: 'sales_beaver', action: 'message_created', target_type: 'message', target_id: message.id,
         metadata: { lead_id: lead.id, lead_name: lead.name, channel, source: 'myclaw_outreach' },
       });
 
-      // 3. Enforcer reviews the message
-      const rangerResult = await agentsService.rangerReview(clientId, {
-        message_id: message.id,
-        message_body: salesResult.body,
-        lead_context: { name: lead.name, company: lead.company, title: lead.title, signal: lead.signal, angle: lead.angle, friction: lead.friction },
-      });
+      // ── Review loop: Sales gets 2 attempts, then Enforcer writes from scratch ──
+      const MAX_ATTEMPTS = 2;
+      let currentBody = salesResult.body;
+      let currentSubject = salesResult.subject || null;
+      let messageApproved = false;
 
-      if (rangerResult?.decision === 'approve' || rangerResult?.decision === 'approve_with_edits') {
-        // Update message with Enforcer results and move to pending_approval
-        const finalBody = rangerResult.decision === 'approve_with_edits' && rangerResult.suggested_edit
-          ? rangerResult.suggested_edit
-          : salesResult.body;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        // Enforcer reviews
+        const rangerResult = await agentsService.rangerReview(clientId, {
+          message_id: message.id, message_body: currentBody, lead_context: leadCtx,
+        });
 
-        // Code-level Enforcer gates — catch anything Claude missed
-        const codeGateResult = agentsService.codeEnforcerGates(finalBody, 0);
-        if (!codeGateResult.passed) {
-          console.warn(`[myclaw] Code gate OVERRIDE for message ${message.id}: ${codeGateResult.reason}`);
+        if (rangerResult?.decision === 'approve' || rangerResult?.decision === 'approve_with_edits') {
+          const finalBody = rangerResult.decision === 'approve_with_edits' && rangerResult.suggested_edit
+            ? rangerResult.suggested_edit : currentBody;
+
+          // Code-level gates
+          const codeGate = agentsService.codeEnforcerGates(finalBody, 0);
+          if (!codeGate.passed) {
+            console.warn(`[myclaw] Code gate OVERRIDE attempt ${attempt} for ${lead.name}: ${codeGate.reason}`);
+            // Treat as rejection — continue to next attempt or Enforcer draft
+            if (attempt < MAX_ATTEMPTS) continue;
+            break;
+          }
+
+          // Approved — save and queue
           await pool.query(
-            `UPDATE messages SET ranger_score = 0, ranger_notes = $1, status = 'ranger_rejected', updated_at = NOW()
-             WHERE id = $2 AND client_id = $3`,
-            [`Code gate: ${codeGateResult.reason}`, message.id, clientId]
+            `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
+             ranger_breakdown = $5, status = 'pending_approval', updated_at = NOW()
+             WHERE id = $6 AND client_id = $7`,
+            [finalBody, currentSubject, rangerResult?.score || 80, rangerResult?.feedback || 'Enforcer approved',
+             JSON.stringify(rangerResult?.breakdown || null), message.id, clientId]
+          );
+          await pool.query(
+            `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`,
+            [clientId, message.id]
           );
           await logsService.createLog(clientId, {
-            agent: 'enforcer_beaver',
-            action: 'message_rejected',
-            target_type: 'message',
-            target_id: message.id,
-            metadata: { channel, reason: codeGateResult.reason, method: 'code_enforcer_gate', source: 'myclaw_outreach' },
+            agent: 'enforcer_beaver', action: 'message_approved', target_type: 'message', target_id: message.id,
+            metadata: { channel, score: rangerResult?.score, attempt, source: 'myclaw_outreach' },
           });
-          continue;
+          approved++;
+          messageApproved = true;
+          break;
+
+        } else if (attempt < MAX_ATTEMPTS) {
+          // Rejected — Sales Beaver rewrites with Enforcer feedback
+          console.log(`[myclaw] Attempt ${attempt} rejected for ${lead.name}, Sales rewriting...`);
+          const rewriteContext = `${leadContext}\n\nPREVIOUS DRAFT (REJECTED):\n${currentBody}\n\nENFORCER FEEDBACK:\n${rangerResult?.reject_reason || rangerResult?.feedback || 'Did not meet quality standards'}\n\nRewrite the message addressing this feedback. Do NOT repeat the same approach.`;
+
+          const rewrite = await agentsService.salesGenerate(clientId, { lead_id: lead.id, channel, context: rewriteContext });
+          if (rewrite?.body) {
+            currentBody = rewrite.body;
+            currentSubject = rewrite.subject || currentSubject;
+            await pool.query(
+              `UPDATE messages SET body = $1, subject = $2, revision_count = COALESCE(revision_count, 0) + 1, updated_at = NOW()
+               WHERE id = $3 AND client_id = $4`,
+              [currentBody, currentSubject, message.id, clientId]
+            );
+          }
         }
+      }
 
-        await pool.query(
-          `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
-           ranger_breakdown = $5, status = 'pending_approval', updated_at = NOW()
-           WHERE id = $6 AND client_id = $7`,
-          [finalBody, salesResult.subject || null, rangerResult?.score || 80, rangerResult?.feedback || 'Enforcer approved',
-           JSON.stringify(rangerResult?.breakdown || null), message.id, clientId]
-        );
-
-        // Create approval queue entry
-        await pool.query(
-          `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`,
-          [clientId, message.id]
-        );
-
-        await logsService.createLog(clientId, {
-          agent: 'enforcer_beaver',
-          action: 'message_approved',
-          target_type: 'message',
-          target_id: message.id,
-          metadata: { channel, score: rangerResult?.score, source: 'myclaw_outreach' },
+      // ── Last resort: Enforcer writes from scratch ──
+      if (!messageApproved) {
+        console.log(`[myclaw] Sales failed ${MAX_ATTEMPTS} attempts for ${lead.name} — Enforcer drafting from scratch`);
+        const enforcerDraft = await agentsService.rangerDraft(clientId, {
+          lead_name: lead.name, lead_company: lead.company || 'Unknown', lead_title: lead.title || '',
+          lead_angle: lead.angle || '', lead_friction: lead.friction || '', rejected_body: currentBody,
         });
 
-        approved++;
-      } else {
-        // Ranger rejected — mark message and log
-        await pool.query(
-          `UPDATE messages SET ranger_score = $1, ranger_notes = $2, status = 'ranger_rejected', updated_at = NOW()
-           WHERE id = $3 AND client_id = $4`,
-          [rangerResult?.score || 0, rangerResult?.reject_reason || rangerResult?.feedback || 'Rejected', message.id, clientId]
-        );
+        if (enforcerDraft?.body) {
+          const finalBody = enforcerDraft.body;
 
-        await logsService.createLog(clientId, {
-          agent: 'enforcer_beaver',
-          action: 'message_rejected',
-          target_type: 'message',
-          target_id: message.id,
-          metadata: { channel, score: rangerResult?.score, reason: rangerResult?.reject_reason, source: 'myclaw_outreach' },
-        });
+          // Code-level gates on Enforcer draft too
+          const codeGate = agentsService.codeEnforcerGates(finalBody, 0);
+          if (codeGate.passed) {
+            await pool.query(
+              `UPDATE messages SET body = $1, subject = $2, ranger_score = 80, ranger_notes = 'Enforcer self-drafted (Sales failed QA)',
+               status = 'pending_approval', updated_at = NOW()
+               WHERE id = $3 AND client_id = $4`,
+              [finalBody, enforcerDraft.subject || currentSubject, message.id, clientId]
+            );
+            await pool.query(
+              `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`,
+              [clientId, message.id]
+            );
+            await logsService.createLog(clientId, {
+              agent: 'enforcer_beaver', action: 'message_approved', target_type: 'message', target_id: message.id,
+              metadata: { channel, method: 'enforcer_draft', source: 'myclaw_outreach' },
+            });
+            approved++;
+          } else {
+            // Even Enforcer's draft failed code gates — flag for manual
+            await pool.query(
+              `UPDATE messages SET ranger_score = 0, ranger_notes = $1, status = 'ranger_rejected', updated_at = NOW()
+               WHERE id = $2 AND client_id = $3`,
+              [`Enforcer draft also failed code gate: ${codeGate.reason}`, message.id, clientId]
+            );
+          }
+        } else {
+          // Enforcer draft returned nothing — mark for manual
+          await pool.query(
+            `UPDATE messages SET ranger_score = 0, ranger_notes = 'All attempts failed — needs manual message',
+             status = 'ranger_rejected', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
+            [message.id, clientId]
+          );
+        }
       }
     } catch (err) {
       console.warn(`[myclaw] Outreach failed for ${lead.name}:`, err.message);
@@ -565,16 +594,17 @@ async function handleResearchExecute(clientId, query) {
     const { saved, skipped } = await saveLeadsToDB(clientId, final);
 
     const lines = final.filter(lead => {
-      // Only show leads that would pass validation (have name + company)
-      return lead.name && lead.name.trim().length >= 2 && lead.company && lead.company.trim().length >= 2 && lead.company.toLowerCase() !== 'unknown';
+      // Only hide leads with no name (hard reject)
+      return lead.name && lead.name.trim().length >= 2;
     }).map((lead, i) => {
+      const company = lead.company && lead.company.trim().length >= 2 && lead.company.toLowerCase() !== 'unknown' ? lead.company : '(company unknown)';
       const title = lead.title || 'N/A';
-      return `${i + 1}. ${lead.name} — ${title} @ ${lead.company}`;
+      return `${i + 1}. ${lead.name} — ${title} @ ${company}`;
     });
 
     const parts = [];
     if (saved > 0) parts.push(`${saved} lead${saved !== 1 ? 's' : ''} saved to pipeline.`);
-    if (skipped > 0) parts.push(`${skipped} rejected (missing company or invalid data).`);
+    if (skipped > 0) parts.push(`${skipped} rejected (no name or invalid email).`);
     parts.push('Ready for outreach.');
     const note = parts.join(' ');
 
@@ -587,33 +617,38 @@ async function handleResearchExecute(clientId, query) {
   }
 }
 
-// ── Lead quality validation — reject garbage before it enters pipeline ────────
+// ── Lead quality validation — only reject truly unusable leads ────────────────
+// Philosophy: a lead that fits ICP should never be rejected because of missing
+// enrichment data. Missing company = save with flag, not reject.
 function validateLead(lead) {
   const failures = [];
+  const warnings = [];
 
-  // Must have a name
+  // Hard reject: must have a name (can't outreach someone with no name)
   if (!lead.name || lead.name.trim().length < 2) {
     failures.push('no name');
   }
 
-  // Must have a company (not "Unknown" or empty)
+  // Soft warning: missing company (still save — Sales Beaver can work with name + title + LinkedIn)
   if (!lead.company || lead.company.trim().length < 2 || lead.company.toLowerCase() === 'unknown') {
-    failures.push('no company');
+    warnings.push('no company');
   }
 
-  // Email format check (if provided)
+  // Hard reject: invalid email format (if provided — wrong email is worse than no email)
   if (lead.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lead.email)) {
     failures.push(`invalid email: ${lead.email}`);
   }
 
-  // LinkedIn URL format check (if provided)
+  // Soft warning: LinkedIn URL doesn't match expected format
   if (lead.linkedin_url && !lead.linkedin_url.includes('linkedin.com/in/')) {
-    failures.push(`invalid LinkedIn URL: ${lead.linkedin_url}`);
+    warnings.push(`non-standard LinkedIn URL`);
   }
 
-  return failures.length > 0
-    ? { valid: false, reason: failures.join(', ') }
-    : { valid: true };
+  if (failures.length > 0) {
+    return { valid: false, reason: failures.join(', '), warnings };
+  }
+
+  return { valid: true, warnings };
 }
 
 // Save raw Serper leads to DB (no Haiku verification — MyClaw manual mode)
@@ -624,19 +659,24 @@ async function saveLeadsToDB(clientId, leads) {
 
   for (const lead of leads) {
     try {
-      // Quality gate — reject leads with missing critical data
+      // Quality gate — only reject truly unusable leads
       const validation = validateLead(lead);
       if (!validation.valid) {
-        console.warn(`[myclaw] Lead rejected (quality gate): ${lead.name || 'unnamed'} — ${validation.reason}`);
+        console.warn(`[myclaw] Lead rejected (hard gate): ${lead.name || 'unnamed'} — ${validation.reason}`);
         skipped++;
         continue;
       }
+      if (validation.warnings?.length) {
+        console.log(`[myclaw] Lead saved with warnings: ${lead.name} — ${validation.warnings.join(', ')}`);
+      }
 
       await pool.query(
-        `INSERT INTO leads (id, client_id, name, title, company, linkedin_url, email, pipeline_stage, status, data_source, signal_tier, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'researched', 'new', $8, 'P3', NOW(), NOW())
+        `INSERT INTO leads (id, client_id, name, title, company, linkedin_url, email, pipeline_stage, status, data_source, signal_tier, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'researched', 'new', $8, 'P3', $9, NOW(), NOW())
          ON CONFLICT (client_id, linkedin_url) DO NOTHING`,
-        [uuidv4Lead(), clientId, lead.name, lead.title || '', lead.company, lead.linkedin_url || '', lead.email || '', lead.data_source || 'serper']
+        [uuidv4Lead(), clientId, lead.name, lead.title || '', lead.company || '', lead.linkedin_url || '', lead.email || '',
+         lead.data_source || 'serper',
+         JSON.stringify({ quality_warnings: validation.warnings || [], source_query: lead.source_query || '' })]
       );
       saved++;
     } catch (err) {
