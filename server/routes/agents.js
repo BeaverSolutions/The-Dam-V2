@@ -93,8 +93,10 @@ router.post('/ranger/review',
 // ── MyClaw chat prefix detection ──────────────────────────────────────────
 const MYCLAW_PREFIX_RE = /^(?:@?(?:my)?claw|(?:hey|hi|yo)\s+claw|@?lodge(?:\s*master)?)[,:\s]*/i;
 const RESEARCH_COMMAND_RE = /\b(?:find|search|look\s*for|get\s*me|discover)\b/i;
-// Short replies that should never trigger a Director pipeline plan
+// Short replies and conversational messages that should never trigger Director pipeline
 const CONVERSATIONAL_RE = /^(yes|no|ok|okay|sure|great|thanks|thank you|nice|cool|got it|noted|perfect|done|good|awesome|yep|nope|yup|alright|sounds good|makes sense)[\s!.?]*$/i;
+// Questions and info requests → Lodge Master, not Captain Beaver
+const QUESTION_RE = /^(can you|could you|what|who|where|when|how|show me|tell me|give me|provide|list|display|what'?s|what are|do you|does|is there|are there)/i;
 
 function isMyClawMessage(command) {
   return MYCLAW_PREFIX_RE.test(command.trim());
@@ -129,8 +131,8 @@ router.post('/director/plan',
         return res.json({ data: result });
       }
 
-      // ── Block conversational replies from triggering the pipeline ───────
-      if (CONVERSATIONAL_RE.test(command.trim())) {
+      // ── Block conversational replies and questions from triggering the pipeline ──
+      if (CONVERSATIONAL_RE.test(command.trim()) || QUESTION_RE.test(command.trim())) {
         const myClawChat = require('../services/myClawChat');
         const result = await myClawChat.handleChat(req.clientId, command);
         return res.json({ data: result });
