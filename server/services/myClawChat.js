@@ -594,17 +594,16 @@ async function handleResearchExecute(clientId, query) {
     const { saved, skipped } = await saveLeadsToDB(clientId, final);
 
     const lines = final.filter(lead => {
-      // Only hide leads with no name (hard reject)
-      return lead.name && lead.name.trim().length >= 2;
+      // Only show leads that pass validation (have name + company)
+      return lead.name && lead.name.trim().length >= 2 && lead.company && lead.company.trim().length >= 2 && lead.company.toLowerCase() !== 'unknown';
     }).map((lead, i) => {
-      const company = lead.company && lead.company.trim().length >= 2 && lead.company.toLowerCase() !== 'unknown' ? lead.company : '(company unknown)';
       const title = lead.title || 'N/A';
-      return `${i + 1}. ${lead.name} — ${title} @ ${company}`;
+      return `${i + 1}. ${lead.name} — ${title} @ ${lead.company}`;
     });
 
     const parts = [];
     if (saved > 0) parts.push(`${saved} lead${saved !== 1 ? 's' : ''} saved to pipeline.`);
-    if (skipped > 0) parts.push(`${skipped} rejected (no name or invalid email).`);
+    if (skipped > 0) parts.push(`${skipped} rejected (missing name, company, or invalid email).`);
     parts.push('Ready for outreach.');
     const note = parts.join(' ');
 
@@ -629,9 +628,9 @@ function validateLead(lead) {
     failures.push('no name');
   }
 
-  // Soft warning: missing company (still save — Sales Beaver can work with name + title + LinkedIn)
+  // Hard reject: must have a company (can't personalise outreach without it)
   if (!lead.company || lead.company.trim().length < 2 || lead.company.toLowerCase() === 'unknown') {
-    warnings.push('no company');
+    failures.push('no company');
   }
 
   // Hard reject: invalid email format (if provided — wrong email is worse than no email)
