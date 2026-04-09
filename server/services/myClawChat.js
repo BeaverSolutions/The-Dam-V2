@@ -324,6 +324,25 @@ async function handleDoOutreach(clientId, command) {
           ? rangerResult.suggested_edit
           : salesResult.body;
 
+        // Code-level Enforcer gates — catch anything Claude missed
+        const codeGateResult = agentsService.codeEnforcerGates(finalBody, 0);
+        if (!codeGateResult.passed) {
+          console.warn(`[myclaw] Code gate OVERRIDE for message ${message.id}: ${codeGateResult.reason}`);
+          await pool.query(
+            `UPDATE messages SET ranger_score = 0, ranger_notes = $1, status = 'ranger_rejected', updated_at = NOW()
+             WHERE id = $2 AND client_id = $3`,
+            [`Code gate: ${codeGateResult.reason}`, message.id, clientId]
+          );
+          await logsService.createLog(clientId, {
+            agent: 'enforcer_beaver',
+            action: 'message_rejected',
+            target_type: 'message',
+            target_id: message.id,
+            metadata: { channel, reason: codeGateResult.reason, method: 'code_enforcer_gate', source: 'myclaw_outreach' },
+          });
+          continue;
+        }
+
         await pool.query(
           `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
            ranger_breakdown = $5, status = 'pending_approval', updated_at = NOW()
@@ -537,29 +556,30 @@ async function handleResearchExecute(clientId, query) {
 
     // Save leads to DB
     const final = accumulated.slice(0, targetCount);
-    if (final.length > 0) {
-      await saveLeadsToDB(clientId, final);
-    }
-
     if (final.length === 0) {
       return formatResponse(
         `No leads found for "${query}". Try being more specific — e.g. "Find 10 marketing agency founders KL".`
       );
     }
 
-    const lines = final.map((lead, i) => {
-      const company = lead.company && lead.company !== 'Unknown' ? lead.company : '—';
+    const { saved, skipped } = await saveLeadsToDB(clientId, final);
+
+    const lines = final.filter(lead => {
+      // Only show leads that would pass validation (have name + company)
+      return lead.name && lead.name.trim().length >= 2 && lead.company && lead.company.trim().length >= 2 && lead.company.toLowerCase() !== 'unknown';
+    }).map((lead, i) => {
       const title = lead.title || 'N/A';
-      return `${i + 1}. ${lead.name} — ${title} @ ${company}`;
+      return `${i + 1}. ${lead.name} — ${title} @ ${lead.company}`;
     });
 
-    const shortfall = targetCount - final.length;
-    const note = shortfall > 0
-      ? `\n\nNote: Only ${final.length}/${targetCount} found. Try a different industry or location.`
-      : '\n\nLeads saved to pipeline. Ready for outreach.';
+    const parts = [];
+    if (saved > 0) parts.push(`${saved} lead${saved !== 1 ? 's' : ''} saved to pipeline.`);
+    if (skipped > 0) parts.push(`${skipped} rejected (missing company or invalid data).`);
+    parts.push('Ready for outreach.');
+    const note = parts.join(' ');
 
     return formatResponse(
-      `Found ${final.length} lead${final.length !== 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}${note}`
+      `Found ${final.length} lead${final.length !== 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}\n\n${note}`
     );
   } catch (err) {
     console.error('[myclaw] Research failed:', err.message);
@@ -567,21 +587,69 @@ async function handleResearchExecute(clientId, query) {
   }
 }
 
+// ── Lead quality validation — reject garbage before it enters pipeline ────────
+function validateLead(lead) {
+  const failures = [];
+
+  // Must have a name
+  if (!lead.name || lead.name.trim().length < 2) {
+    failures.push('no name');
+  }
+
+  // Must have a company (not "Unknown" or empty)
+  if (!lead.company || lead.company.trim().length < 2 || lead.company.toLowerCase() === 'unknown') {
+    failures.push('no company');
+  }
+
+  // Email format check (if provided)
+  if (lead.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lead.email)) {
+    failures.push(`invalid email: ${lead.email}`);
+  }
+
+  // LinkedIn URL format check (if provided)
+  if (lead.linkedin_url && !lead.linkedin_url.includes('linkedin.com/in/')) {
+    failures.push(`invalid LinkedIn URL: ${lead.linkedin_url}`);
+  }
+
+  return failures.length > 0
+    ? { valid: false, reason: failures.join(', ') }
+    : { valid: true };
+}
+
 // Save raw Serper leads to DB (no Haiku verification — MyClaw manual mode)
 async function saveLeadsToDB(clientId, leads) {
   const { v4: uuidv4Lead } = require('uuid');
+  let saved = 0;
+  let skipped = 0;
+
   for (const lead of leads) {
     try {
+      // Quality gate — reject leads with missing critical data
+      const validation = validateLead(lead);
+      if (!validation.valid) {
+        console.warn(`[myclaw] Lead rejected (quality gate): ${lead.name || 'unnamed'} — ${validation.reason}`);
+        skipped++;
+        continue;
+      }
+
       await pool.query(
         `INSERT INTO leads (id, client_id, name, title, company, linkedin_url, email, pipeline_stage, status, data_source, signal_tier, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'researched', 'new', $8, 'P3', NOW(), NOW())
          ON CONFLICT (client_id, linkedin_url) DO NOTHING`,
-        [uuidv4Lead(), clientId, lead.name, lead.title || '', lead.company || '', lead.linkedin_url || '', lead.email || '', lead.data_source || 'serper']
+        [uuidv4Lead(), clientId, lead.name, lead.title || '', lead.company, lead.linkedin_url || '', lead.email || '', lead.data_source || 'serper']
       );
+      saved++;
     } catch (err) {
       console.warn('[myclaw] saveLeadsToDB skip:', err.message);
+      skipped++;
     }
   }
+
+  if (skipped > 0) {
+    console.log(`[myclaw] Lead quality gate: ${saved} saved, ${skipped} rejected`);
+  }
+
+  return { saved, skipped };
 }
 
 // Build diverse Serper queries from the user's command

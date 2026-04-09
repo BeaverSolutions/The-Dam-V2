@@ -402,6 +402,64 @@ function stripEmDashes(text) {
 
 /**
  * =========================
+ * CODE-LEVEL ENFORCER GATES
+ * =========================
+ * Hard checks that run AFTER Claude's Enforcer review, BEFORE saving to pending_approval.
+ * These catch anything Claude missed. If any gate fails, the message is force-rejected
+ * regardless of Claude's score.
+ */
+const BANNED_PHRASES = [
+  'cutting-edge', 'paradigm shift', 'seamless', 'leverage', 'synergy',
+  'game-changer', 'innovative', 'revolutionary', 'transformative', 'delve',
+  'i hope this email finds you well', 'i wanted to reach out', 'unlock',
+  'unleash', 'empower', 'elevate', 'streamline', 'actionable insights',
+  'thought leader', 'disruptive', 'data-driven', 'circle back', 'touch base',
+  'move the needle', 'best-in-class',
+];
+
+function codeEnforcerGates(body, touchNumber = 0) {
+  if (!body) return { passed: false, reason: 'Empty message body' };
+
+  const failures = [];
+
+  // Gate 1: Word count > 80 for Day 0 cold messages
+  const wordCount = body.split(/\s+/).filter(w => w.length > 0).length;
+  if (touchNumber === 0 && wordCount > 80) {
+    failures.push(`Word count ${wordCount} exceeds 80 for cold outreach`);
+  }
+
+  // Gate 2: More than 1 question
+  const questionCount = (body.match(/\?/g) || []).length;
+  if (questionCount > 1) {
+    failures.push(`${questionCount} questions found (max 1)`);
+  }
+
+  // Gate 3: Em dash anywhere
+  if (body.includes('\u2014') || body.includes('\u2013')) {
+    failures.push('Em dash or en dash detected');
+  }
+
+  // Gate 4: Bullet points in body
+  if (/^\s*[•\-\*]\s/m.test(body)) {
+    failures.push('Bullet points detected in message body');
+  }
+
+  // Gate 5: Banned phrases
+  const lowerBody = body.toLowerCase();
+  const foundBanned = BANNED_PHRASES.filter(phrase => lowerBody.includes(phrase));
+  if (foundBanned.length > 0) {
+    failures.push(`Banned phrase(s): ${foundBanned.join(', ')}`);
+  }
+
+  if (failures.length > 0) {
+    return { passed: false, reason: failures.join('; ') };
+  }
+
+  return { passed: true };
+}
+
+/**
+ * =========================
  * RANGER
  * =========================
  */
@@ -1716,7 +1774,30 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       }
     }
 
-    // ── AI Enforcer approved — push to approval queue ──
+    // ── Code-level Enforcer gates — catch anything Claude missed ──
+    const codeGateResult = codeEnforcerGates(currentBody, msg.touch_number || 0);
+    if (!codeGateResult.passed) {
+      console.warn(`[enforcer] Code gate OVERRIDE for message ${msg.id}: ${codeGateResult.reason}`);
+      await pool.query(
+        `UPDATE messages SET body = $1, subject = $2, ranger_score = 0, ranger_notes = $3,
+         status = 'ranger_rejected', updated_at = NOW()
+         WHERE id = $4 AND client_id = $5`,
+        [currentBody, currentSubject, `Code gate: ${codeGateResult.reason}`, msg.id, clientId]
+      );
+      await logsService.createLog(clientId, {
+        agent: 'enforcer_beaver',
+        action: 'message_rejected',
+        target_type: 'message',
+        target_id: msg.id,
+        metadata: { channel: msg.channel, reason: codeGateResult.reason, method: 'code_enforcer_gate' },
+      });
+      rejectedCount++;
+      execStatus.beavers.enforcer.rejected++;
+      execStatus.beavers.enforcer.status = 'done';
+      return;
+    }
+
+    // ── AI Enforcer approved + code gates passed — push to approval queue ──
     await pool.query(
       `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
        ranger_breakdown = $5, status = 'pending_approval', updated_at = NOW()
@@ -2093,4 +2174,6 @@ module.exports = {
   captainValidate,
   // Win/Loss capture
   captureWinLoss,
+  // Code-level Enforcer gates
+  codeEnforcerGates,
 };
