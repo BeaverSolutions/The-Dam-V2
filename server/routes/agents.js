@@ -93,10 +93,13 @@ router.post('/ranger/review',
 // ── MyClaw chat prefix detection ──────────────────────────────────────────
 const MYCLAW_PREFIX_RE = /^(?:@?(?:my)?claw|(?:hey|hi|yo)\s+claw|@?lodge(?:\s*master)?)[,:\s]*/i;
 const RESEARCH_COMMAND_RE = /\b(?:find|search|look\s*for|get\s*me|discover)\b/i;
-// Short replies and conversational messages that should never trigger Director pipeline
-const CONVERSATIONAL_RE = /^(yes|no|ok|okay|sure|great|thanks|thank you|nice|cool|got it|noted|perfect|done|good|awesome|yep|nope|yup|alright|sounds good|makes sense)[\s!.?]*$/i;
-// Questions and info requests → Lodge Master, not Captain Beaver
-const QUESTION_RE = /^(can you|could you|what|who|where|when|how|show me|tell me|give me|provide|list|display|what'?s|what are|do you|does|is there|are there)/i;
+// Captain Beaver pipeline trigger words — ONLY these go to Director
+// Everything else goes to MyClaw (Lodge Master) as the main chat brain
+const PIPELINE_TRIGGER_RE = /\b(kickoff|kick off|start campaign|launch campaign|execute|run campaign|start outreach|begin campaign|activate campaign)\b/i;
+
+function isPipelineCommand(command) {
+  return PIPELINE_TRIGGER_RE.test(command);
+}
 
 function isMyClawMessage(command) {
   return MYCLAW_PREFIX_RE.test(command.trim());
@@ -123,23 +126,16 @@ router.post('/director/plan',
         return res.json({ data: result });
       }
 
-      // ── Route research commands to MyClaw (implicit) ───────────────────
-      // "find 20 founders", "search for managers", etc. go directly to MyClaw
-      if (isResearchCommand(command)) {
-        const myClawChat = require('../services/myClawChat');
-        const result = await myClawChat.handleChat(req.clientId, command);
+      // ── Captain Beaver only activates for explicit pipeline trigger words ──
+      // Everything else goes to MyClaw (Lodge Master) as the main chat brain
+      if (isPipelineCommand(command)) {
+        const result = await agentsService.directorPlan(req.clientId, req.body);
         return res.json({ data: result });
       }
 
-      // ── Block conversational replies and questions from triggering the pipeline ──
-      if (CONVERSATIONAL_RE.test(command.trim()) || QUESTION_RE.test(command.trim())) {
-        const myClawChat = require('../services/myClawChat');
-        const result = await myClawChat.handleChat(req.clientId, command);
-        return res.json({ data: result });
-      }
-
-      // ── Everything else → Director/Captain Beaver (structured pipeline) ──
-      const result = await agentsService.directorPlan(req.clientId, req.body);
+      // ── All other messages → MyClaw (Lodge Master) ──────────────────────
+      const myClawChat = require('../services/myClawChat');
+      const result = await myClawChat.handleChat(req.clientId, command);
       res.json({ data: result });
     } catch (err) { next(err); }
   }
