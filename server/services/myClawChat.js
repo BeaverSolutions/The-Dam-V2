@@ -582,7 +582,13 @@ async function handleResearchExecute(clientId, query) {
       if (accumulated.length >= targetCount) break;
 
       const remaining = targetCount - accumulated.length;
-      const results = await serperService.searchLinkedInProfiles(sq, Math.min(remaining + 3, 10));
+      let results = [];
+      try {
+        results = await serperService.searchLinkedInProfiles(sq, Math.min(remaining + 3, 10));
+      } catch (searchErr) {
+        console.error(`[captain] Serper search failed for "${sq}":`, searchErr.message);
+        continue;
+      }
 
       const fresh = results.filter(l => {
         if (!l.linkedin_url) return false;
@@ -722,11 +728,18 @@ function buildSerperQueries(command, targetCount) {
   const industries = INDUSTRY_TERMS.filter(i => lower.includes(i.toLowerCase()));
   const activeIndustries = industries.length > 0 ? industries : INDUSTRY_TERMS.slice(0, 6);
 
-  // Build queries — title × industry combinations with Sdn Bhd anchor
+  // Extract location anchor — use Malaysia-related terms if found, else default
+  const LOCATION_MAP = { 'kl': 'Kuala Lumpur', 'kuala lumpur': 'Kuala Lumpur', 'malaysia': 'Malaysia', 'klang valley': 'Malaysia', 'penang': 'Penang', 'johor': 'Johor', 'singapore': 'Singapore' };
+  let locationAnchor = 'Malaysia';
+  for (const [kw, label] of Object.entries(LOCATION_MAP)) {
+    if (lower.includes(kw)) { locationAnchor = label; break; }
+  }
+
+  // Build queries — role × industry, anchored by location (not "Sdn Bhd" — too restrictive for LinkedIn)
   const queries = [];
   for (const role of activeRoles.slice(0, 4)) {
     for (const industry of activeIndustries.slice(0, 6)) {
-      queries.push(`${role} ${industry} "Sdn Bhd"`);
+      queries.push(`${role} ${industry} ${locationAnchor}`);
       if (queries.length >= targetCount * 3) break;
     }
     if (queries.length >= targetCount * 3) break;
