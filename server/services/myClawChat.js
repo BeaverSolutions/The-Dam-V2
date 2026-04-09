@@ -15,7 +15,7 @@ const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
 const logsService = require('./logs');
 const { researchLeads } = require('./research');
-const serperService = require('./serper');
+const serperService = require('./searchService');
 const agentsService = require('./agents');
 
 let callAgent;

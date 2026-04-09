@@ -1,7 +1,7 @@
 'use strict';
 
 const pool = require('../db/pool');
-const serperService = require('./serper');
+const serperService = require('./searchService');
 const hunterService = require('./hunter');
 
 /* ─── Rotation pools ─────────────────────────────────────── */

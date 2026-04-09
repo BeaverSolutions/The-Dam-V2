@@ -219,6 +219,10 @@ async function searchLinkedInProfiles(query, limit = 5) {
     return deduped.slice(0, limit);
   } catch (err) {
     console.error('[serper] Search failed:', err.message);
+    if (err.response) {
+      console.error('[serper] Status:', err.response.status);
+      console.error('[serper] Response body:', JSON.stringify(err.response.data));
+    }
     return [];
   }
 }
@@ -280,6 +284,10 @@ async function searchLinkedInCompanies(query, limit = 5) {
       .filter(c => c.company && c.company.length > 1);
   } catch (err) {
     console.error('[serper] Company search failed:', err.message);
+    if (err.response) {
+      console.error('[serper] Status:', err.response.status);
+      console.error('[serper] Response body:', JSON.stringify(err.response.data));
+    }
     return [];
   }
 }
@@ -376,6 +384,10 @@ async function searchBySignal(query, limit = 5) {
       .slice(0, limit);
   } catch (err) {
     console.error('[serper] Signal search failed:', err.message);
+    if (err.response) {
+      console.error('[serper] Status:', err.response.status);
+      console.error('[serper] Response body:', JSON.stringify(err.response.data));
+    }
     return [];
   }
 }
