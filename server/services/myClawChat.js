@@ -209,7 +209,8 @@ function buildIcpFromCommand(command, baseIcp = {}) {
   const lower = command.toLowerCase();
 
   const industryMap = {
-    'b2b': 'B2B services',
+    // 'b2b' intentionally omitted — it's a business model, not a LinkedIn industry
+    // Falls through to DEFAULT_INDUSTRIES (consulting, agency, SaaS, etc.)
     'saas': 'SaaS',
     'marketing': 'marketing',
     'agency': 'agency',
@@ -301,8 +302,7 @@ async function handleResearchExecute(clientId, query) {
     // Augment ICP with keywords parsed from the command
     const commandIcp = buildIcpFromCommand(query, icpMemory);
 
-    // Reset used_queries so manual command gets full pool
-    // (used_queries tracks autonomous batch rotation — manual searches always start fresh)
+    // Reset used_queries so manual command always searches with a fresh pool
     await pool.query(
       `DELETE FROM agent_memory WHERE client_id = $1 AND agent = 'research_beaver' AND key = 'used_queries'`,
       [clientId]
