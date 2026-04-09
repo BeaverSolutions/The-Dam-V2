@@ -34,9 +34,17 @@ router.post('/kickoff', requireInternalKey, async (req, res) => {
   // `callAgent(...)` inside the kickoff gets budget-checked and usage-logged
   // against the right tenant.
   runWithClientContext(client_id, () =>
-    runAutonomousKickoff(client_id).catch(err =>
-      console.error(`[Autonomous] Kickoff failed for ${client_id}:`, err.message)
-    )
+    runAutonomousKickoff(client_id).catch(err => {
+      console.error(`[Autonomous] Kickoff failed for ${client_id}:`, err.message);
+      // Alert on kickoff crash
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (chatId) {
+        const { sendMessage } = require('../services/telegram');
+        sendMessage(chatId,
+          `<b>Pipeline Alert: Kickoff Crashed</b>\n\nClient: ${client_id}\nError: ${err.message}`
+        ).catch(() => {});
+      }
+    })
   );
 });
 
@@ -760,6 +768,61 @@ async function _runAutonomousKickoffInner(clientId) {
     if (batch < MAX_BATCHES) {
       await new Promise(r => setTimeout(r, 3000));
     }
+  }
+
+  // ── Kickoff verification — alert if zero output produced ──
+  await verifyKickoffOutput(clientId, target);
+}
+
+/**
+ * Post-kickoff verification: checks if the kickoff actually produced results.
+ * Fires a Telegram alert to MJ if zero outreach was generated today.
+ */
+async function verifyKickoffOutput(clientId, target) {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const { rows } = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'sent'             AND DATE(COALESCE(sent_at, created_at)) = $2) AS sent,
+         COUNT(*) FILTER (WHERE status = 'pending_approval'  AND DATE(created_at) = $2) AS pending,
+         COUNT(*) FILTER (WHERE status = 'pending_ranger'    AND DATE(created_at) = $2) AS drafting,
+         COUNT(*) FILTER (WHERE status = 'ranger_rejected'   AND DATE(created_at) = $2) AS rejected
+       FROM messages WHERE client_id = $1`,
+      [clientId, today]
+    );
+
+    const { sent, pending, drafting, rejected } = rows[0];
+    const totalOutput = parseInt(sent) + parseInt(pending) + parseInt(drafting);
+
+    if (totalOutput === 0) {
+      console.warn(`[Autonomous] ZERO OUTPUT for client ${clientId} — kickoff produced nothing`);
+
+      // Get client name for alert
+      const { rows: clientRows } = await pool.query(`SELECT name FROM clients WHERE id = $1`, [clientId]);
+      const clientName = clientRows[0]?.name || clientId;
+
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (chatId) {
+        const { sendMessage } = require('../services/telegram');
+        await sendMessage(chatId,
+          `<b>Pipeline Alert: Zero Output</b>\n\n` +
+          `Client: ${clientName}\n` +
+          `Target: ${target}\n` +
+          `Sent: ${sent} | Pending: ${pending} | Rejected: ${rejected}\n\n` +
+          `Kickoff completed but produced nothing. Check Railway logs.`
+        ).catch(err => console.warn('[telegram] Alert failed:', err.message));
+      }
+
+      await pool.query(
+        `INSERT INTO logs (client_id, agent, action, target_type, metadata, created_at)
+         VALUES ($1, 'system', 'kickoff_zero_output', 'system', $2, NOW())`,
+        [clientId, JSON.stringify({ target, sent, pending, rejected })]
+      );
+    } else {
+      console.log(`[Autonomous] Kickoff verified for ${clientId}: ${totalOutput} messages produced (${sent} sent, ${pending} pending, ${drafting} drafting)`);
+    }
+  } catch (err) {
+    console.warn('[Autonomous] Kickoff verification failed:', err.message);
   }
 }
 
