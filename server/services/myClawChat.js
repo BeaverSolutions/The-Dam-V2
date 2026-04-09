@@ -205,7 +205,7 @@ async function handlePipelineSummary(clientId) {
 // ── Research execution (MyClaw as researcher) ────────────────────────────────
 async function handleResearchExecute(clientId, query) {
   try {
-    // Load ICP from agent_memory (same place researchLeads uses)
+    // Load ICP from agent_memory
     const icpRow = await pool.query(
       `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
       [clientId]
@@ -213,30 +213,67 @@ async function handleResearchExecute(clientId, query) {
     const icpMemory = icpRow.rows[0]?.content || {};
 
     const targetCount = extractLimit(query) || 5;
+    const MAX_OUTER_LOOPS = 6; // hard cap — prevents runaway spend
+    const accumulated = [];
+    const seenUrls = new Set();
+    let batchIndex = 0;
+    let loopCount = 0;
 
-    // Execute research — same pipeline as Director but triggered directly
-    const result = await researchLeads(clientId, {
-      icpMemory,
-      targetCount,
-      commandOverride: query,
-    });
+    console.log(`[myclaw] Research target: ${targetCount} leads for "${query}"`);
 
-    const leads = result?.leads || [];
+    // Loop until we hit targetCount or exhaust sources
+    while (accumulated.length < targetCount && loopCount < MAX_OUTER_LOOPS) {
+      loopCount++;
+      const remaining = targetCount - accumulated.length;
+      console.log(`[myclaw] Research loop ${loopCount}: need ${remaining} more leads`);
 
-    if (leads.length === 0) {
+      const result = await researchLeads(clientId, {
+        icpMemory,
+        targetCount: remaining,
+        batchIndex,
+        commandOverride: query,
+      });
+
+      const leads = result?.leads || [];
+      const fresh = leads.filter(l => {
+        const key = l.linkedin_url || `${l.name}||${l.company}`.toLowerCase();
+        if (seenUrls.has(key)) return false;
+        seenUrls.add(key);
+        return true;
+      });
+
+      accumulated.push(...fresh);
+      console.log(`[myclaw] Loop ${loopCount}: got ${fresh.length} fresh leads, total=${accumulated.length}/${targetCount}`);
+
+      // If no new leads came in, sources are exhausted — stop
+      if (fresh.length === 0) {
+        console.log('[myclaw] No new leads from loop — sources exhausted');
+        break;
+      }
+
+      batchIndex++;
+    }
+
+    if (accumulated.length === 0) {
       return formatResponse(
         `No leads found for "${query}". Try being more specific about industry, location, or role.`
       );
     }
 
-    const lines = leads.slice(0, 20).map((lead, i) => {
+    const final = accumulated.slice(0, targetCount);
+    const lines = final.map((lead, i) => {
       const company = lead.company || 'Unknown';
       const title = lead.title || 'N/A';
       return `${i + 1}. ${lead.name} — ${title} @ ${company}`;
     });
 
+    const shortfall = targetCount - final.length;
+    const note = shortfall > 0
+      ? `\n\nNote: Only ${final.length}/${targetCount} found — Serper sources exhausted. Try a broader search term.`
+      : '\n\nLeads saved to pipeline. Ready for outreach.';
+
     return formatResponse(
-      `Found ${leads.length} lead${leads.length !== 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}\n\nLeads saved to pipeline. Ready for outreach.`
+      `Found ${final.length} lead${final.length !== 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}${note}`
     );
   } catch (err) {
     console.error('[myclaw] Research failed:', err.message);
