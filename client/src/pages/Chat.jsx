@@ -134,10 +134,10 @@ function SummaryCard({ summary, diagnostics, onGoToApprovals }) {
 function Message({ msg }) {
   const navigate = useNavigate();
   const isUser = msg.role === 'user';
-  const isMyClaw = msg.source === 'myclaw';
-  const agentType = isMyClaw ? 'myclaw' : 'director';
-  const bgColor = isMyClaw ? 'rgba(200,255,0,0.05)' : 'var(--panel)';
-  const borderColor = isMyClaw ? 'rgba(200,255,0,0.15)' : 'var(--border)';
+  const isCaptain = msg.source === 'captain' || msg.source === 'myclaw';
+  const agentType = isCaptain ? 'captain' : 'director';
+  const bgColor = isCaptain ? 'rgba(168,85,247,0.05)' : 'var(--panel)';
+  const borderColor = isCaptain ? 'rgba(168,85,247,0.15)' : 'var(--border)';
   return (
     <div style={{
       display: 'flex', gap: '0.75rem', alignItems: 'flex-start',
@@ -153,8 +153,8 @@ function Message({ msg }) {
         fontSize: '0.875rem',
         lineHeight: 1.6,
       }}>
-        {isMyClaw && (
-          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--lime)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.35rem' }}>Lodge Master</div>
+        {isCaptain && (
+          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--purple)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.35rem' }}>Captain Beaver</div>
         )}
         <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
 
@@ -297,12 +297,12 @@ export default function Chat() {
       if (res?.data) {
         const plan = res.data;
 
-        // MyClaw response — show with MyClaw avatar
-        if (plan.status === 'myclaw_response') {
+        // Captain Beaver response
+        if (plan.status === 'captain_response' || plan.status === 'myclaw_response') {
           setMessages(prev => [...prev, {
             id: Date.now() + 1,
             role: 'assistant',
-            source: 'myclaw',
+            source: 'captain',
             content: plan.message,
           }]);
           return;

@@ -1,14 +1,14 @@
 'use strict';
 
 /**
- * MyClaw Chat — handles natural language commands directed at MyClaw
- * from the Director Chat interface.
+ * Captain Beaver Chat — the unified brain behind Director Chat.
  *
- * Detection: messages prefixed with "claw", "@claw", "@myclaw", "hey claw"
- * are routed here instead of going through the Captain Beaver pipeline.
+ * Captain Beaver is the director of operations. All commands in Director Chat
+ * route through here. Captain handles: research triggers, outreach, approvals,
+ * pipeline queries, memory, and general conversation.
  *
- * Uses a lightweight Claude call to interpret intent, then queries the
- * database directly (same queries the /api/myclaw/* routes use).
+ * External API for OpenClaw integration remains at /api/myclaw/* (backward compat)
+ * and /api/captain/* (canonical).
  */
 
 const { v4: uuidv4 } = require('uuid');
@@ -59,10 +59,10 @@ function classifyIntent(command) {
 
   // Greetings and general chat
   if (/^(hi|hey|hello|sup|yo|what'?s?\s*up|how\s*are)/i.test(lower)) {
-    return { intent: 'general', reply: "Hey! I'm Lodge Master, your pipeline assistant. I can find leads, check your approvals, pipeline stats, and agent memory. What do you need?" };
+    return { intent: 'general', reply: "Hey! I'm Captain Beaver, your pipeline assistant. I can find leads, check your approvals, pipeline stats, and agent memory. What do you need?" };
   }
 
-  return { intent: 'general', reply: "I'm Lodge Master. Try asking me to:\n- Find 20 b2b founders in KL\n- Check my leads\n- Show approvals\n- Pipeline summary\n- Check agent memory\n- Show status" };
+  return { intent: 'general', reply: "I'm Captain Beaver. Try asking me to:\n- Find 20 b2b founders in KL\n- Check my leads\n- Show approvals\n- Pipeline summary\n- Check agent memory\n- Show status" };
 }
 
 // ── Intent handlers ─────────────────────────────────────────────────────────
@@ -203,7 +203,7 @@ async function handleCheckStatus(clientId) {
   );
 
   return formatResponse(
-    `Lodge Master Status:\n• Connection: ${configured ? 'Connected' : 'Not configured (using Claude fallback)'}\n• Leads in DB: ${leadCount.rows[0].count}\n• Pending approvals: ${pendingApprovals.rows[0].count}\n• System: Operational`
+    `Captain Beaver Status:\n• Connection: ${configured ? 'Connected' : 'Not configured (using Claude fallback)'}\n• Leads in DB: ${leadCount.rows[0].count}\n• Pending approvals: ${pendingApprovals.rows[0].count}\n• System: Operational`
   );
 }
 
@@ -272,6 +272,7 @@ async function handleDoOutreach(clientId, command) {
   let drafted = 0;
   let approved = 0;
   let failed = 0;
+  const rejectionReasons = [];
 
   for (const lead of leads) {
     try {
@@ -283,7 +284,7 @@ async function handleDoOutreach(clientId, command) {
       let salesResult = await agentsService.salesGenerate(clientId, { lead_id: lead.id, channel, context: leadContext });
 
       if (!salesResult?.body) {
-        console.warn(`[myclaw] Sales draft failed for ${lead.name}: no body`);
+        console.warn(`[captain] Sales draft failed for ${lead.name}: no body`);
         failed++;
         continue;
       }
@@ -299,7 +300,7 @@ async function handleDoOutreach(clientId, command) {
 
       await logsService.createLog(clientId, {
         agent: 'sales_beaver', action: 'message_created', target_type: 'message', target_id: message.id,
-        metadata: { lead_id: lead.id, lead_name: lead.name, channel, source: 'myclaw_outreach' },
+        metadata: { lead_id: lead.id, lead_name: lead.name, channel, source: 'captain_outreach' },
       });
 
       // ── Review loop: Sales gets 2 attempts, then Enforcer writes from scratch ──
@@ -321,7 +322,7 @@ async function handleDoOutreach(clientId, command) {
           // Code-level gates
           const codeGate = agentsService.codeEnforcerGates(finalBody, 0);
           if (!codeGate.passed) {
-            console.warn(`[myclaw] Code gate OVERRIDE attempt ${attempt} for ${lead.name}: ${codeGate.reason}`);
+            console.warn(`[captain] Code gate OVERRIDE attempt ${attempt} for ${lead.name}: ${codeGate.reason}`);
             // Treat as rejection — continue to next attempt or Enforcer draft
             if (attempt < MAX_ATTEMPTS) continue;
             break;
@@ -341,7 +342,7 @@ async function handleDoOutreach(clientId, command) {
           );
           await logsService.createLog(clientId, {
             agent: 'enforcer_beaver', action: 'message_approved', target_type: 'message', target_id: message.id,
-            metadata: { channel, score: rangerResult?.score, attempt, source: 'myclaw_outreach' },
+            metadata: { channel, score: rangerResult?.score, attempt, source: 'captain_outreach' },
           });
           approved++;
           messageApproved = true;
@@ -349,7 +350,7 @@ async function handleDoOutreach(clientId, command) {
 
         } else if (attempt < MAX_ATTEMPTS) {
           // Rejected — Sales Beaver rewrites with Enforcer feedback
-          console.log(`[myclaw] Attempt ${attempt} rejected for ${lead.name}, Sales rewriting...`);
+          console.log(`[captain] Attempt ${attempt} rejected for ${lead.name}, Sales rewriting...`);
           const rewriteContext = `${leadContext}\n\nPREVIOUS DRAFT (REJECTED):\n${currentBody}\n\nENFORCER FEEDBACK:\n${rangerResult?.reject_reason || rangerResult?.feedback || 'Did not meet quality standards'}\n\nRewrite the message addressing this feedback. Do NOT repeat the same approach.`;
 
           const rewrite = await agentsService.salesGenerate(clientId, { lead_id: lead.id, channel, context: rewriteContext });
@@ -367,7 +368,7 @@ async function handleDoOutreach(clientId, command) {
 
       // ── Last resort: Enforcer writes from scratch ──
       if (!messageApproved) {
-        console.log(`[myclaw] Sales failed ${MAX_ATTEMPTS} attempts for ${lead.name} — Enforcer drafting from scratch`);
+        console.log(`[captain] Sales failed ${MAX_ATTEMPTS} attempts for ${lead.name} — Enforcer drafting from scratch`);
         const enforcerDraft = await agentsService.rangerDraft(clientId, {
           lead_name: lead.name, lead_company: lead.company || 'Unknown', lead_title: lead.title || '',
           lead_angle: lead.angle || '', lead_friction: lead.friction || '', rejected_body: currentBody,
@@ -391,11 +392,13 @@ async function handleDoOutreach(clientId, command) {
             );
             await logsService.createLog(clientId, {
               agent: 'enforcer_beaver', action: 'message_approved', target_type: 'message', target_id: message.id,
-              metadata: { channel, method: 'enforcer_draft', source: 'myclaw_outreach' },
+              metadata: { channel, method: 'enforcer_draft', source: 'captain_outreach' },
             });
             approved++;
           } else {
             // Even Enforcer's draft failed code gates — flag for manual
+            const reason = `Code gate: ${codeGate.reason}`;
+            rejectionReasons.push(`${lead.name}: ${reason}`);
             await pool.query(
               `UPDATE messages SET ranger_score = 0, ranger_notes = $1, status = 'ranger_rejected', updated_at = NOW()
                WHERE id = $2 AND client_id = $3`,
@@ -404,6 +407,7 @@ async function handleDoOutreach(clientId, command) {
           }
         } else {
           // Enforcer draft returned nothing — mark for manual
+          rejectionReasons.push(`${lead.name}: All attempts failed — needs manual message`);
           await pool.query(
             `UPDATE messages SET ranger_score = 0, ranger_notes = 'All attempts failed — needs manual message',
              status = 'ranger_rejected', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
@@ -412,7 +416,7 @@ async function handleDoOutreach(clientId, command) {
         }
       }
     } catch (err) {
-      console.warn(`[myclaw] Outreach failed for ${lead.name}:`, err.message);
+      console.warn(`[captain] Outreach failed for ${lead.name}:`, err.message);
       failed++;
     }
   }
@@ -420,16 +424,25 @@ async function handleDoOutreach(clientId, command) {
   const parts = [`Outreach complete: ${drafted} drafted, ${approved} approved by Enforcer.`];
   if (failed > 0) parts.push(`${failed} failed.`);
   if (approved > 0) parts.push(`\n${approved} message${approved !== 1 ? 's are' : ' is'} in your **Approval Queue** — review and send when ready.`);
-  if (drafted > 0 && approved === 0) parts.push('\nAll messages were rejected by Enforcer. Check the rejection notes in Messages.');
+  if (drafted > 0 && approved === 0) {
+    parts.push('\nAll messages were rejected by Enforcer.');
+    if (rejectionReasons.length > 0) {
+      parts.push('\n\nTop rejection reasons:');
+      rejectionReasons.slice(0, 5).forEach(r => parts.push(`\n- ${r}`));
+    }
+  } else if (rejectionReasons.length > 0 && approved < drafted) {
+    parts.push(`\n\n${drafted - approved} rejected:`);
+    rejectionReasons.slice(0, 3).forEach(r => parts.push(`\n- ${r}`));
+  }
 
   return formatResponse(parts.join(' '));
 }
 
-// ── Claude fallback — handles anything Lodge Master can't classify ─────────────
+// ── Claude fallback — handles anything Captain Beaver can't classify ─────────────
 // Uses Claude to understand intent and generate a helpful response
 async function handleWithClaude(clientId, command) {
   if (!callAgent) {
-    return formatResponse("I'm Lodge Master. I can find leads, check approvals, show pipeline stats, and start outreach. What do you need?");
+    return formatResponse("I'm Captain Beaver. I can find leads, check approvals, show pipeline stats, and start outreach. What do you need?");
   }
 
   try {
@@ -441,7 +454,7 @@ async function handleWithClaude(clientId, command) {
 
     const context = `Leads in pipeline: ${leadsRow.rows[0].count}. Pending approvals: ${approvalsRow.rows[0].count}.`;
 
-    const prompt = `You are Lodge Master, a pipeline assistant for a B2B sales automation tool.
+    const prompt = `You are Captain Beaver, a pipeline assistant for a B2B sales automation tool.
 
 Pipeline context: ${context}
 
@@ -563,7 +576,7 @@ async function handleResearchExecute(clientId, query) {
     const accumulated = [];
     const seenUrls = new Set();
 
-    console.log(`[myclaw] Research target: ${targetCount} leads. Queries: ${serperQueries.length}`);
+    console.log(`[captain] Research target: ${targetCount} leads. Queries: ${serperQueries.length}`);
 
     for (const sq of serperQueries) {
       if (accumulated.length >= targetCount) break;
@@ -580,7 +593,7 @@ async function handleResearchExecute(clientId, query) {
       });
 
       accumulated.push(...fresh);
-      console.log(`[myclaw] Query "${sq}": ${fresh.length} fresh, total=${accumulated.length}/${targetCount}`);
+      console.log(`[captain] Query "${sq}": ${fresh.length} fresh, total=${accumulated.length}/${targetCount}`);
     }
 
     // Save leads to DB
@@ -611,7 +624,7 @@ async function handleResearchExecute(clientId, query) {
       `Found ${final.length} lead${final.length !== 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}\n\n${note}`
     );
   } catch (err) {
-    console.error('[myclaw] Research failed:', err.message);
+    console.error('[captain] Research failed:', err.message);
     return formatResponse(`Research failed: ${err.message}`);
   }
 }
@@ -661,12 +674,12 @@ async function saveLeadsToDB(clientId, leads) {
       // Quality gate — only reject truly unusable leads
       const validation = validateLead(lead);
       if (!validation.valid) {
-        console.warn(`[myclaw] Lead rejected (hard gate): ${lead.name || 'unnamed'} — ${validation.reason}`);
+        console.warn(`[captain] Lead rejected (hard gate): ${lead.name || 'unnamed'} — ${validation.reason}`);
         skipped++;
         continue;
       }
       if (validation.warnings?.length) {
-        console.log(`[myclaw] Lead saved with warnings: ${lead.name} — ${validation.warnings.join(', ')}`);
+        console.log(`[captain] Lead saved with warnings: ${lead.name} — ${validation.warnings.join(', ')}`);
       }
 
       await pool.query(
@@ -679,13 +692,13 @@ async function saveLeadsToDB(clientId, leads) {
       );
       saved++;
     } catch (err) {
-      console.warn('[myclaw] saveLeadsToDB skip:', err.message);
+      console.warn('[captain] saveLeadsToDB skip:', err.message);
       skipped++;
     }
   }
 
   if (skipped > 0) {
-    console.log(`[myclaw] Lead quality gate: ${saved} saved, ${skipped} rejected`);
+    console.log(`[captain] Lead quality gate: ${saved} saved, ${skipped} rejected`);
   }
 
   return { saved, skipped };
@@ -734,8 +747,8 @@ function extractLimit(query) {
 function formatResponse(content) {
   return {
     plan_id: uuidv4(),
-    status: 'myclaw_response',
-    source: 'myclaw',
+    status: 'captain_response',
+    source: 'captain',
     message: content,
   };
 }
@@ -744,7 +757,7 @@ function formatResponse(content) {
 async function handleChat(clientId, command) {
   // Log the MyClaw interaction
   await logsService.createLog(clientId, {
-    agent: 'myclaw',
+    agent: 'captain_beaver',
     action: 'chat_command',
     metadata: { command, source: 'director_chat' },
   }).catch(() => {});
@@ -774,10 +787,16 @@ async function handleChat(clientId, command) {
       return handlePipelineSummary(clientId);
     case 'general':
     default:
-      // If Lodge Master can't classify, use Claude as the brain
+      // If Captain Beaver can't classify, use Claude as the brain
       if (intent.reply) return formatResponse(intent.reply);
       return handleWithClaude(clientId, command);
   }
 }
 
-module.exports = { handleChat, isMyClawMessage: (cmd) => /^(?:@?(?:my)?claw|hey\s+claw|@?lodge(?:\s*master)?)[,:\s]*/i.test(cmd.trim()) };
+module.exports = {
+  handleChat,
+  // Backward compat — old MyClaw prefix still works, plus new @captain prefix
+  isCaptainMessage: (cmd) => /^(?:@?(?:my)?claw|hey\s+claw|@?captain|hey\s+captain|@?lodge(?:\s*master)?)[,:\s]*/i.test(cmd.trim()),
+  // Legacy alias
+  isMyClawMessage: (cmd) => /^(?:@?(?:my)?claw|hey\s+claw|@?captain|hey\s+captain|@?lodge(?:\s*master)?)[,:\s]*/i.test(cmd.trim()),
+};

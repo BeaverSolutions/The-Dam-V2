@@ -90,27 +90,23 @@ router.post('/ranger/review',
   }
 );
 
-// ── MyClaw chat prefix detection ──────────────────────────────────────────
-const MYCLAW_PREFIX_RE = /^(?:@?(?:my)?claw|(?:hey|hi|yo)\s+claw|@?lodge(?:\s*master)?)[,:\s]*/i;
-const RESEARCH_COMMAND_RE = /\b(?:find|search|look\s*for|get\s*me|discover)\b/i;
-// Captain Beaver pipeline trigger words — ONLY these go to Director
-// Everything else goes to MyClaw (Lodge Master) as the main chat brain
+// ── Captain Beaver routing ──────────────────────────────────────────────
+// Captain Beaver is the unified brain. All Director Chat goes through Captain.
+// Pipeline trigger words activate the full agent pipeline (Research → Sales → Enforcer).
+// Everything else is handled by Captain Beaver directly (queries, outreach, memory, etc.)
+const CAPTAIN_PREFIX_RE = /^(?:@?(?:my)?claw|(?:hey|hi|yo)\s+(?:claw|captain)|@?captain|@?lodge(?:\s*master)?)[,:\s]*/i;
 const PIPELINE_TRIGGER_RE = /\b(kickoff|kick off|start campaign|launch campaign|execute|run campaign|start outreach|begin campaign|activate campaign)\b/i;
 
 function isPipelineCommand(command) {
   return PIPELINE_TRIGGER_RE.test(command);
 }
 
-function isMyClawMessage(command) {
-  return MYCLAW_PREFIX_RE.test(command.trim());
+function hasCaptainPrefix(command) {
+  return CAPTAIN_PREFIX_RE.test(command.trim());
 }
 
-function isResearchCommand(command) {
-  return RESEARCH_COMMAND_RE.test(command);
-}
-
-function stripMyClawPrefix(command) {
-  return command.trim().replace(MYCLAW_PREFIX_RE, '').trim();
+function stripCaptainPrefix(command) {
+  return command.trim().replace(CAPTAIN_PREFIX_RE, '').trim();
 }
 
 router.post('/director/plan',
@@ -118,24 +114,19 @@ router.post('/director/plan',
   async (req, res, next) => {
     try {
       const { command } = req.body;
+      const captainChat = require('../services/myClawChat');
 
-      // ── Route MyClaw-directed messages (explicit prefix) ─────────────────
-      if (isMyClawMessage(command)) {
-        const myClawChat = require('../services/myClawChat');
-        const result = await myClawChat.handleChat(req.clientId, stripMyClawPrefix(command));
-        return res.json({ data: result });
-      }
+      // Strip @captain / @claw prefix if present
+      const cleanCommand = hasCaptainPrefix(command) ? stripCaptainPrefix(command) : command;
 
-      // ── Captain Beaver only activates for explicit pipeline trigger words ──
-      // Everything else goes to MyClaw (Lodge Master) as the main chat brain
-      if (isPipelineCommand(command)) {
+      // ── Full pipeline activation (kickoff, start campaign, etc.) ──
+      if (isPipelineCommand(cleanCommand)) {
         const result = await agentsService.directorPlan(req.clientId, req.body);
         return res.json({ data: result });
       }
 
-      // ── All other messages → MyClaw (Lodge Master) ──────────────────────
-      const myClawChat = require('../services/myClawChat');
-      const result = await myClawChat.handleChat(req.clientId, command);
+      // ── Everything else → Captain Beaver (the unified brain) ──
+      const result = await captainChat.handleChat(req.clientId, cleanCommand);
       res.json({ data: result });
     } catch (err) { next(err); }
   }

@@ -148,11 +148,11 @@ router.post('/approve', async (req, res, next) => {
     await enqueueMessage(client_id, message_id);
 
     await logsService.createLog(client_id, {
-      agent: 'myclaw',
+      agent: 'captain_beaver',
       action: 'message_approved',
       target_type: 'approval',
       target_id: approval_id,
-      metadata: { message_id, feedback, source: 'myclaw_director' },
+      metadata: { message_id, feedback, source: 'captain_api' },
     });
 
     res.json({ data: { approval_id, message_id, status: 'approved' } });
@@ -209,11 +209,11 @@ router.post('/reject', async (req, res, next) => {
     }
 
     await logsService.createLog(client_id, {
-      agent: 'myclaw',
+      agent: 'captain_beaver',
       action: 'message_rejected',
       target_type: 'approval',
       target_id: approval_id,
-      metadata: { message_id, reason, agent_learnings, source: 'myclaw_director' },
+      metadata: { message_id, reason, agent_learnings, source: 'captain_api' },
     });
 
     res.json({ data: { approval_id, message_id, status: 'rejected' } });
@@ -274,10 +274,10 @@ router.post('/memory', async (req, res, next) => {
     );
 
     await logsService.createLog(client_id, {
-      agent: 'myclaw',
+      agent: 'captain_beaver',
       action: 'memory_updated',
       target_type: 'agent_memory',
-      metadata: { agent, memory_type, key, source: 'myclaw_director' },
+      metadata: { agent, memory_type, key, source: 'captain_api' },
     });
 
     res.json({ data: { agent, memory_type, key, updated: true } });
@@ -358,11 +358,11 @@ router.post('/leads', async (req, res, next) => {
     );
 
     await logsService.createLog(client_id, {
-      agent: 'myclaw',
+      agent: 'captain_beaver',
       action: 'lead_created',
       target_type: 'lead',
       target_id: result.rows[0].id,
-      metadata: { name, company, signal_tier, source: 'myclaw_director' },
+      metadata: { name, company, signal_tier, source: 'captain_api' },
     });
 
     res.status(201).json({ data: result.rows[0] });
@@ -401,11 +401,11 @@ router.put('/leads/:id', async (req, res, next) => {
     }
 
     await logsService.createLog(client_id, {
-      agent: 'myclaw',
+      agent: 'captain_beaver',
       action: 'lead_updated',
       target_type: 'lead',
       target_id: req.params.id,
-      metadata: { status, pipeline_stage, signal_tier, source: 'myclaw_director' },
+      metadata: { status, pipeline_stage, signal_tier, source: 'captain_api' },
     });
 
     res.json({ data: result.rows[0] });
@@ -464,7 +464,7 @@ router.post('/validate-leads', async (req, res, next) => {
         qualified.push(leadId);
 
         await logsService.createLog(client_id, {
-          agent: 'myclaw',
+          agent: 'captain_beaver',
           action: 'lead_qualified',
           target_type: 'lead',
           target_id: leadId,
@@ -484,7 +484,7 @@ router.post('/validate-leads', async (req, res, next) => {
         rejected.push({ id: leadId, reason: reasons.join('; ') });
 
         await logsService.createLog(client_id, {
-          agent: 'myclaw',
+          agent: 'captain_beaver',
           action: 'lead_rejected',
           target_type: 'lead',
           target_id: leadId,

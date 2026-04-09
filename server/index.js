@@ -106,9 +106,11 @@ app.use('/api/import',       authMiddleware, tenantScope, clientContext, require
 // runWithClientContext(clientId, ...) so Claude calls get attributed.
 app.use('/api/autonomous', require('./routes/autonomous'));
 
-// MyClaw routes — token auth (MYCLAW_HOOK_TOKEN), no JWT required.
-// MyClaw acts as director: reads approvals, resolves them, manages memory, manages leads.
-app.use('/api/myclaw', require('./routes/myclaw'));
+// Captain Beaver external API — token auth (MYCLAW_HOOK_TOKEN), no JWT required.
+// Used by OpenClaw integration for approvals, memory, leads, etc.
+const captainRoutes = require('./routes/myclaw');
+app.use('/api/captain', captainRoutes);
+app.use('/api/myclaw', captainRoutes);  // backward compat
 
 // Routes - super admin only (Beaver Solutions)
 app.use('/api/admin', authMiddleware, tenantScope, clientContext, superAdminOnly, require('./routes/admin'));
