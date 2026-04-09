@@ -29,6 +29,9 @@ const SERPER_URL = 'https://google.serper.dev/search';
  *   "Founder of Company Name. ..."
  *   "Company Name. Title. ..."  (snippet starts with company)
  */
+// Title keywords — used across all extraction patterns
+const TITLE_KEYWORDS = '(?:CEO|Founder|Co-Founder|Director|MD|Managing Director|Owner|CTO|COO|CMO|CFO|CRO|CPO|Partner|Head|VP|Vice President|President|Manager|General Manager|Principal|Lead|Chief)';
+
 function extractCompanyFromSnippet(snippet, name, title) {
   if (!snippet) return '';
 
@@ -36,24 +39,34 @@ function extractCompanyFromSnippet(snippet, name, title) {
   const cleanSnippet = snippet.replace(new RegExp(escapeRegex(name), 'gi'), '').trim();
 
   // Pattern 1: "Title at Company" — most common in LinkedIn snippets
-  const atMatch = cleanSnippet.match(/(?:CEO|Founder|Co-Founder|Director|MD|Managing Director|Owner|CTO|COO|CMO|Partner|Head)\s+(?:and\s+\w+\s+)?at\s+([^·.;,\n]{3,60})/i);
+  const atMatch = cleanSnippet.match(new RegExp(TITLE_KEYWORDS + '\\s+(?:and\\s+\\w+\\s+)?(?:&\\s+\\w+\\s+)?at\\s+([^·.;,\\n]{3,60})', 'i'));
   if (atMatch) return atMatch[1].trim();
 
-  // Pattern 2: "Title · Company" — LinkedIn uses middle dot as separator
-  const dotMatch = cleanSnippet.match(/(?:CEO|Founder|Co-Founder|Director|MD|Managing Director|Owner|CTO|COO|CMO|Partner|Head)[^·]*·\s*([^·.;\n]{3,60})/i);
+  // Pattern 2: "at Company" — without title prefix (e.g. "Working at Company")
+  const simpleAtMatch = cleanSnippet.match(/\bat\s+([A-Z][^·.;,\n]{2,60})/);
+  if (simpleAtMatch) return simpleAtMatch[1].trim();
+
+  // Pattern 3: "Title · Company" — LinkedIn uses middle dot as separator
+  const dotMatch = cleanSnippet.match(new RegExp(TITLE_KEYWORDS + '[^·]*·\\s*([^·.;\\n]{3,60})', 'i'));
   if (dotMatch) return dotMatch[1].trim();
 
-  // Pattern 3: "Founder of Company" / "Director of Company"
-  const ofMatch = cleanSnippet.match(/(?:Founder|Director|Owner|Partner|Head)\s+of\s+([^·.;,\n]{3,60})/i);
+  // Pattern 4: "Founder of Company" / "Director of Company" / "Head of Sales at Company"
+  const ofMatch = cleanSnippet.match(/(?:Founder|Director|Owner|Partner|Head|Manager|President)\s+of\s+([^·.;,\n]{3,60})/i);
   if (ofMatch) return ofMatch[1].trim();
 
-  // Pattern 4: "Pengalaman: Company" or "Pengalaman ; Title. Company" (Malay LinkedIn)
+  // Pattern 5: "Pengalaman: Company" or "Pengalaman ; Title. Company" (Malay LinkedIn)
   const pengalamanMatch = cleanSnippet.match(/Pengalaman\s*[;:]\s*(?:[^.]*?\.\s*)?([^·.;\n]{3,60})/i);
   if (pengalamanMatch) return pengalamanMatch[1].trim();
 
-  // Pattern 5: Look for "Sdn Bhd" or "Berhad" — the company name precedes it
-  const sdnMatch = cleanSnippet.match(/([A-Z][\w\s&'()-]{2,40}(?:Sdn\s*Bhd|Berhad))/i);
-  if (sdnMatch) return sdnMatch[1].trim();
+  // Pattern 6: Look for "Sdn Bhd", "Berhad", "Pte Ltd", "Pvt Ltd", "Inc", "LLC", "Ltd"
+  const companyMatch = cleanSnippet.match(/([A-Z][\w\s&'()-]{2,40}(?:Sdn\s*Bhd|Berhad|Pte\.?\s*Ltd|Pvt\.?\s*Ltd|Inc\.?|LLC|Ltd\.?))/i);
+  if (companyMatch) return companyMatch[1].trim();
+
+  // Pattern 7: First segment after middle dot (LinkedIn profile structure: "Title · Company · Location")
+  const firstDotSegment = cleanSnippet.match(/^[^·]+·\s*([^·.;\n]{3,60})/);
+  if (firstDotSegment && !/^\d/.test(firstDotSegment[1].trim())) {
+    return firstDotSegment[1].trim();
+  }
 
   return '';
 }
@@ -124,16 +137,29 @@ async function searchLinkedInProfiles(query, limit = 5) {
           title = parts[1];
           company = parts[2];
         } else if (parts.length === 2) {
-          // "Name - Title at Company" or "Name - Title" or "Name - Company"
-          title = parts[1];
+          // Could be "Name - Title at Company" or "Name - Title" or "Name - Company"
+          const segment = parts[1];
+          const atIdx = segment.toLowerCase().indexOf(' at ');
+          if (atIdx > -1) {
+            // "Title at Company"
+            title = segment.substring(0, atIdx).trim();
+            company = segment.substring(atIdx + 4).trim();
+          } else if (/(?:Sdn|Bhd|Berhad|Pte|Ltd|Inc|LLC|Agency|Consulting|Solutions|Group|Studio|Lab|Media|Digital|Tech|Capital)/i.test(segment)) {
+            // Looks like a company name, not a title
+            company = segment;
+          } else {
+            title = segment;
+          }
         }
         // else: just a name, no extra info
 
-        // Extract company from "Title at Company" pattern
-        const atIdx = title.toLowerCase().indexOf(' at ');
-        if (atIdx > -1) {
-          company = company || title.substring(atIdx + 4).trim();
-          title = title.substring(0, atIdx).trim();
+        // Extract company from "Title at Company" in already-parsed title
+        if (!company) {
+          const atIdx = title.toLowerCase().indexOf(' at ');
+          if (atIdx > -1) {
+            company = title.substring(atIdx + 4).trim();
+            title = title.substring(0, atIdx).trim();
+          }
         }
 
         // If still no parseable name, use full title line
@@ -311,10 +337,16 @@ async function searchBySignal(query, limit = 5) {
 
         const atIdx = rest.toLowerCase().indexOf(' at ');
         const title = atIdx > -1 ? rest.substring(0, atIdx).trim() : rest;
-        let company = atIdx > -1 ? rest.substring(atIdx + 4).trim() : 'Unknown';
-        if (!company) company = 'Unknown';
+        let company = atIdx > -1 ? rest.substring(atIdx + 4).trim() : '';
 
+        const snippet = r.snippet || '';
         const linkedinUrl = (r.link || '').split('?')[0].replace(/\/$/, '');
+
+        // Snippet fallback — same as searchLinkedInProfiles
+        if (!company || company === 'Unknown') {
+          company = extractCompanyFromSnippet(snippet, name, title) || '';
+        }
+        if (!company) company = 'Unknown';
 
         return {
           name,
@@ -322,7 +354,7 @@ async function searchBySignal(query, limit = 5) {
           company,
           linkedin_url: linkedinUrl,
           email: '',
-          snippet: r.snippet || '',
+          snippet,
           verified: false,
           data_source: 'serper_signal',
         };
