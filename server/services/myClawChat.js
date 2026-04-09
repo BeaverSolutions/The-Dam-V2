@@ -16,6 +16,10 @@ const pool = require('../db/pool');
 const logsService = require('./logs');
 const { researchLeads } = require('./research');
 const serperService = require('./serper');
+const agentsService = require('./agents');
+
+let callAgent;
+try { callAgent = require('./claude').callAgent; } catch { callAgent = null; }
 
 // ── Intent classification — fast keyword matching ───────────────────────────
 // No Claude call needed here. Keeps it instant and saves tokens.
@@ -38,6 +42,11 @@ function classifyIntent(command) {
   // ── Follow-up: LinkedIn URLs of recent leads ──
   if (/linkedin/i.test(lower) && /provid|show|give|get|their|url|link/i.test(lower)) {
     return { intent: 'show_linkedin', filters };
+  }
+
+  // ── Outreach / Sales trigger ──
+  if (/\b(?:outreach|draft|message|email|send|contact|reach out|write to|do outreach)\b/i.test(lower)) {
+    return { intent: 'do_outreach', filters };
   }
 
   if (/approv|queue|review|pending\s*message/i.test(lower)) return { intent: 'check_approvals', filters };
@@ -229,6 +238,86 @@ async function handlePipelineSummary(clientId) {
   return formatResponse(
     `Pipeline overview:\n• Total leads: ${leads.rows[0].count}\n• Messages drafted: ${messages.rows[0].count}\n• Messages sent: ${sent.rows[0].count}\n• Pending approvals: ${approvals.rows[0].count}`
   );
+}
+
+// ── Outreach handler — triggers Sales Beaver for recent leads ────────────────
+async function handleDoOutreach(clientId, command) {
+  // Get recent uncontacted leads
+  const limitMatch = command.match(/\b(\d+)\b/);
+  const limit = limitMatch ? parseInt(limitMatch[1], 10) : 15;
+
+  const { rows: leads } = await pool.query(
+    `SELECT id, name, company, email, linkedin_url
+     FROM leads
+     WHERE client_id = $1
+       AND deleted_at IS NULL
+       AND pipeline_stage IN ('sourced', 'qualified')
+       AND status = 'new'
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    [clientId, limit]
+  );
+
+  if (leads.length === 0) {
+    return formatResponse(
+      'No new leads ready for outreach. Run a search first to find leads, then try again.'
+    );
+  }
+
+  let drafted = 0;
+  let failed = 0;
+
+  for (const lead of leads) {
+    try {
+      const channel = lead.email ? 'email' : 'linkedin';
+      const result = await agentsService.salesGenerate(clientId, { lead_id: lead.id, channel });
+      if (result?.message_id) {
+        await agentsService.rangerReview(clientId, { message_id: result.message_id });
+        drafted++;
+      }
+    } catch (err) {
+      console.warn(`[myclaw] Outreach failed for ${lead.name}:`, err.message);
+      failed++;
+    }
+  }
+
+  return formatResponse(
+    `Outreach drafted for ${drafted} lead${drafted !== 1 ? 's' : ''}${failed > 0 ? ` (${failed} failed)` : ''}.\n\nMessages are in your Approval Queue — review and send when ready.`
+  );
+}
+
+// ── Claude fallback — handles anything Lodge Master can't classify ─────────────
+// Uses Claude to understand intent and generate a helpful response
+async function handleWithClaude(clientId, command) {
+  if (!callAgent) {
+    return formatResponse("I'm Lodge Master. I can find leads, check approvals, show pipeline stats, and start outreach. What do you need?");
+  }
+
+  try {
+    // Get quick pipeline context to ground Claude's response
+    const [leadsRow, approvalsRow] = await Promise.all([
+      pool.query(`SELECT COUNT(*) FROM leads WHERE client_id = $1 AND deleted_at IS NULL`, [clientId]),
+      pool.query(`SELECT COUNT(*) FROM approvals WHERE client_id = $1 AND status = 'pending'`, [clientId]),
+    ]);
+
+    const context = `Leads in pipeline: ${leadsRow.rows[0].count}. Pending approvals: ${approvalsRow.rows[0].count}.`;
+
+    const prompt = `You are Lodge Master, a pipeline assistant for a B2B sales automation tool.
+
+Pipeline context: ${context}
+
+User said: "${command}"
+
+Respond helpfully in 1-3 sentences. If the user wants to find leads, tell them to say "Find N [role] in [location]". If they want outreach, tell them to say "do outreach to [N] leads". Be concise and direct. Do not use bullet points.
+
+Return JSON: {"message": "your response here"}`;
+
+    const result = await callAgent('research_beaver', prompt, { clientId });
+    const message = result?.message || result?.raw || "I can find leads, start outreach, check approvals, or show pipeline stats. What do you need?";
+    return formatResponse(message);
+  } catch {
+    return formatResponse("I can find leads, start outreach, check approvals, or show pipeline stats. What do you need?");
+  }
 }
 
 // ── Build ICP from command keywords ─────────────────────────────────────────
@@ -469,6 +558,8 @@ async function handleChat(clientId, command) {
       return handleResearchExecute(clientId, intent.query);
     case 'show_linkedin':
       return handleShowLinkedin(clientId, intent.filters || {});
+    case 'do_outreach':
+      return handleDoOutreach(clientId, command);
     case 'check_approvals':
       return handleCheckApprovals(clientId);
     case 'check_leads':
@@ -485,9 +576,9 @@ async function handleChat(clientId, command) {
       return handlePipelineSummary(clientId);
     case 'general':
     default:
-      return formatResponse(
-        intent.reply || "Hey! I'm Lodge Master. I can find leads, check your approvals, pipeline status, and agent memory. What do you need?"
-      );
+      // If Lodge Master can't classify, use Claude as the brain
+      if (intent.reply) return formatResponse(intent.reply);
+      return handleWithClaude(clientId, command);
   }
 }
 
