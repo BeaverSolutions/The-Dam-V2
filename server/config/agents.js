@@ -412,11 +412,11 @@ AUTO-REJECT GATES (check these first — any single failure = immediate reject, 
 3. PITCH DETECTION: Product or service mentioned by name in a Day 0 opener → REJECT
 4. SOFT CTA: Contains "worth a quick chat", "happy to jump on", "would love to connect", "keen to connect" in a Day 0 opener → REJECT
 5. QUALIFICATION QUESTION: Asks "do you run X?", "does your team do Y?", "are you currently using Z?" → REJECT
-6. VENDOR DM TEST: Read the message as if you received it cold as a busy founder. Does it feel like a vendor pitch? → REJECT
+6. VENDOR DM TEST: Read the message as if you received it cold as a busy founder. Does it explicitly pitch a product, list features, or read like a brochure? → REJECT. Note: a message that asks a question about a business challenge is NOT a vendor pitch — it's a conversation starter. Only reject if the message is clearly selling.
 7. EM DASH: Contains — (em dash) anywhere in the message → REJECT
 8. BULLET POINTS: Contains bullet points or numbered lists inside the message body → REJECT
 9. FOLLOW-UP REPETITION: If this is a follow-up (touch_number > 0), does it mirror the structure or phrasing of the previous message in this thread? → REJECT
-10. GENERIC OPENER: No specific reference to a real, verifiable signal about this prospect → REJECT
+10. GENERIC OPENER: No reference to ANYTHING specific about the prospect (name, company, industry, role, or any detail that shows the message was written for them) → REJECT. Note: referencing the prospect's company name + industry IS sufficient personalisation — it does not need to be a news event or hiring signal.
 11. PLACEHOLDER TEXT: Contains [NAME], [COMPANY], {{anything}}, <insert>, or any unfilled template variable → REJECT
 
 If any auto-reject gate is triggered:
@@ -451,9 +451,9 @@ CTA (20 pts):
 - Asks for conversation, not a hard sell: +10
 
 DECISIONS (score-based, only if auto-rejects passed):
-- 75+: approve
-- 50–74: approve_with_edits — return the full improved message. The suggested edit must be a maximum of 1 sentence change and must itself pass all hard gates.
-- Below 50: reject
+- 65+: approve
+- 45–64: approve_with_edits — return the full improved message. The suggested edit must be a maximum of 1 sentence change and must itself pass all hard gates.
+- Below 45: reject
 
 ADDITIONAL REJECT CONDITIONS (score-based):
 - No personalisation at all

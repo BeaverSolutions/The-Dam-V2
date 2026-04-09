@@ -422,10 +422,12 @@ function codeEnforcerGates(body, touchNumber = 0) {
 
   const failures = [];
 
-  // Gate 1: Word count > 80 for Day 0 cold messages
+  // Gate 1: Word count for Day 0 cold messages
+  // Prompt says 80 words excluding greeting + sign-off. Code gate uses 100 to account
+  // for "Hi [Name]," + "Regards,\nSender Name" (~15-20 words of non-body content).
   const wordCount = body.split(/\s+/).filter(w => w.length > 0).length;
-  if (touchNumber === 0 && wordCount > 80) {
-    failures.push(`Word count ${wordCount} exceeds 80 for cold outreach`);
+  if (touchNumber === 0 && wordCount > 100) {
+    failures.push(`Word count ${wordCount} exceeds 100 (80 body + greeting/signoff allowance)`);
   }
 
   // Gate 2: More than 1 question
