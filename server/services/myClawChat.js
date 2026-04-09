@@ -14,8 +14,7 @@
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
 const logsService = require('./logs');
-const researchModule = require('./research');
-const { getClientConfig } = require('./clientConfig');
+const { researchLeads } = require('./research');
 
 // ── Intent classification — fast keyword matching ───────────────────────────
 // No Claude call needed here. Keeps it instant and saves tokens.
@@ -206,33 +205,38 @@ async function handlePipelineSummary(clientId) {
 // ── Research execution (MyClaw as researcher) ────────────────────────────────
 async function handleResearchExecute(clientId, query) {
   try {
-    // Get client config for ICP context
-    const config = await getClientConfig(clientId);
-    const icp = config?.icp || {};
+    // Load ICP from agent_memory (same place researchLeads uses)
+    const icpRow = await pool.query(
+      `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
+      [clientId]
+    );
+    const icpMemory = icpRow.rows[0]?.content || {};
 
-    // Execute research synchronously — MyClaw returns actual leads
-    const results = await researchModule.findLeads(clientId, {
-      query,
-      icp,
-      limit: extractLimit(query) || 5,
+    const targetCount = extractLimit(query) || 5;
+
+    // Execute research — same pipeline as Director but triggered directly
+    const result = await researchLeads(clientId, {
+      icpMemory,
+      targetCount,
+      commandOverride: query,
     });
 
-    if (!results || results.length === 0) {
+    const leads = result?.leads || [];
+
+    if (leads.length === 0) {
       return formatResponse(
         `No leads found for "${query}". Try being more specific about industry, location, or role.`
       );
     }
 
-    // Format results for chat
-    const lines = results.slice(0, 20).map((lead, i) => {
+    const lines = leads.slice(0, 20).map((lead, i) => {
       const company = lead.company || 'Unknown';
       const title = lead.title || 'N/A';
-      const source = lead.data_source || 'web';
-      return `${i + 1}. ${lead.name} — ${title} @ ${company} [${source}]`;
+      return `${i + 1}. ${lead.name} — ${title} @ ${company}`;
     });
 
     return formatResponse(
-      `Found ${results.length} lead${results.length !== 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}\n\nUse Director Chat to create a campaign plan with these leads.`
+      `Found ${leads.length} lead${leads.length !== 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}\n\nLeads saved to pipeline. Ready for outreach.`
     );
   } catch (err) {
     console.error('[myclaw] Research failed:', err.message);
