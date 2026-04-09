@@ -251,8 +251,11 @@ async function handleDoOutreach(clientId, command) {
      FROM leads
      WHERE client_id = $1
        AND deleted_at IS NULL
-       AND pipeline_stage IN ('sourced', 'qualified')
-       AND status = 'new'
+       AND pipeline_stage IN ('sourced', 'qualified', 'new')
+       AND id NOT IN (
+         SELECT DISTINCT lead_id FROM messages
+         WHERE client_id = $1 AND status NOT IN ('ranger_rejected')
+       )
      ORDER BY created_at DESC
      LIMIT $2`,
     [clientId, limit]
