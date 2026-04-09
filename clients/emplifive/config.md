@@ -5,7 +5,7 @@ _Status: **Pilot onboarding pending.** Fill during discovery call with Michael._
 <!--
   Slug (must match clients.slug in DB): emplifive
   Primary contact: Michael
-  The Dam reads this file before every agent execution. Changes take effect
+  BeavrDam reads this file before every agent execution. Changes take effect
   on next Railway deploy (git push).
 
   Some context pulled from _archive/openclaw-guide.md which referenced an
@@ -112,7 +112,7 @@ world-class, state-of-the-art, next-generation, end-to-end, data-driven, ecosyst
 ## Onboarding Checklist
 
 - [ ] Discovery call with Michael
-- [x] Account created in The Dam (seeded)
+- [x] Account created in BeavrDam (seeded)
 - [ ] ICP filled in (this file)
 - [ ] Client Persona saved
 - [ ] AgentMail inbox created + verified

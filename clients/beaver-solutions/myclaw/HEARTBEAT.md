@@ -22,7 +22,7 @@ State is tracked in `memory/heartbeat-state.json`.
 
 ## Heartbeat Sequence
 
-### H1 — Ping The Dam
+### H1 — Ping BeavrDam
 ```
 GET /api/autonomous/pending-approvals?client_id=ce2fc8e5-617e-42d5-91fe-4275ceaa0030
 Headers: x-internal-key: {DAM_INTERNAL_KEY}
@@ -105,7 +105,7 @@ If there are unresolved items (stalled approvals, missed cron, unanswered hot re
 End of day — a few things carried over:
 - {item 1}
 - {item 2}
-Reply tomorrow or handle in The Dam UI.
+Reply tomorrow or handle in BeavrDam UI.
 ```
 
 ---
@@ -130,11 +130,11 @@ After every heartbeat, write to `memory/heartbeat-state.json`:
 
 ## Alert Formats
 
-### Critical — The Dam is down
+### Critical — BeavrDam is down
 ```
-The Dam is not responding.
+BeavrDam is not responding.
 Last successful ping: {time GMT+8}
-Check: railway.app → the-dam-v2 → Logs tab
+Check: railway.app → beavrdam → Logs tab
 ```
 
 ### Critical — Positive reply received

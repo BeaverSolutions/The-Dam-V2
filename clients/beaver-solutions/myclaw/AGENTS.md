@@ -6,7 +6,7 @@ Core rules file. Loaded every session. No exceptions.
 
 ## Memory System
 
-Memory does not survive sessions. Files and The Dam database are the only persistence.
+Memory does not survive sessions. Files and BeavrDam database are the only persistence.
 
 ### Daily Notes (`memory/YYYY-MM-DD.md`)
 - Raw capture of conversations, decisions, tasks. Write here first.
@@ -18,9 +18,9 @@ Memory does not survive sessions. Files and The Dam database are the only persis
 - Load in private Telegram chats only. Do not surface personal context in group chats.
 - Update during heartbeat when new patterns are confirmed.
 
-### The Dam as Source of Truth
-- For pipeline, leads, messages, budgets, approvals: always query The Dam API.
-- Do not rely on memory files for live data. Memory is context. The Dam is truth.
+### BeavrDam as Source of Truth
+- For pipeline, leads, messages, budgets, approvals: always query BeavrDam API.
+- Do not rely on memory files for live data. Memory is context. BeavrDam is truth.
 
 ---
 
@@ -70,7 +70,7 @@ Memory does not survive sessions. Files and The Dam database are the only persis
 ### Internal (group chats OK, no external sharing)
 - Pipeline status and lead counts
 - Agent performance summaries
-- The Dam API responses
+- BeavrDam API responses
 - Cron job outputs
 - System health
 
@@ -114,7 +114,7 @@ If a task could reasonably be expanded, note the expansion opportunity in one se
 
 ### When to use subagents
 - Any task that would block the main chat for more than a few seconds.
-- All The Dam API calls that return large data sets.
+- All BeavrDam API calls that return large data sets.
 - Anything involving web fetching or external APIs.
 
 ### Before multi-step tasks with side effects or paid API calls
@@ -142,9 +142,9 @@ Always convert before displaying.
 
 ---
 
-## The Dam Integration
+## BeavrDam Integration
 
-The Dam is Claw's primary tool. All sales pipeline work goes through it.
+BeavrDam is Claw's primary tool. All sales pipeline work goes through it.
 
 **Base URL:** `https://app.beaver.solutions`
 **Auth header:** `x-internal-key: {DAM_INTERNAL_KEY}` (stored in MyClaw secrets)
@@ -174,7 +174,7 @@ The Dam is Claw's primary tool. All sales pipeline work goes through it.
 
 Three-tier priority:
 
-**Critical (immediate):** Budget cap hit, Telegram pairing lost, The Dam API down, urgent reply from a prospect (positive interest), any error that stops the pipeline.
+**Critical (immediate):** Budget cap hit, Telegram pairing lost, BeavrDam API down, urgent reply from a prospect (positive interest), any error that stops the pipeline.
 
 **High (surface within 1 hour):** New approvals in queue (3+), reply rate drops below 1%, follow-ups due today not processed.
 
@@ -197,7 +197,7 @@ Every cron job:
 ## Heartbeats
 
 During heartbeats (every 4 hours while active):
-- Check The Dam API health (one ping to /api/autonomous/pending-approvals)
+- Check BeavrDam API health (one ping to /api/autonomous/pending-approvals)
 - Synthesize new daily note entries into MEMORY.md if patterns have emerged
 - Do not alert MJ on heartbeat success — silent unless something is wrong
 - Do not attempt git commits or pushes — MyClaw cloud has no git environment. Skip silently.

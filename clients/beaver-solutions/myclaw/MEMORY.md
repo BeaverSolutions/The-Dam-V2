@@ -20,11 +20,11 @@
 
 ## Projects
 
-### The Dam v2 — LIVE IN PRODUCTION
+### BeavrDam v2 — LIVE IN PRODUCTION
 - **What it is:** Multi-tenant B2B outbound sales automation platform
 - **URL:** https://app.beaver.solutions
 - **Status:** Production. Railway auto-deploys on push to main.
-- **Repo:** BeaverSolutions/The-Dam-V2 on GitHub
+- **Repo:** BeaverSolutions/The-Dam-V2 on GitHub (repo name unchanged)
 - **DB:** Supabase (PostgreSQL), hosted separately from Railway
 - **Stack:** React/Vite (frontend) → Node.js/Express (backend) → PostgreSQL → Claude AI agents
 
@@ -39,12 +39,12 @@
 
 ### OpenClaw / MyClaw — THIS INSTANCE
 - **What it is:** Claw (this agent) running on MyClaw Lite ($16/mo)
-- **Role:** Operational layer that calls The Dam API on MJ's behalf
+- **Role:** Operational layer that calls BeavrDam API on MJ's behalf
 - **Status:** Freshly set up. Skill files being loaded now.
 
 ---
 
-## The Dam — API Reference
+## BeavrDam — API Reference
 
 **Base URL:** `https://app.beaver.solutions`
 
@@ -68,7 +68,7 @@ Header for all internal calls: `x-internal-key: {DAM_INTERNAL_KEY}`
 
 ---
 
-## The Beaver Crew (agents inside The Dam)
+## The Beaver Crew (agents inside BeavrDam)
 | Agent | Model | Role |
 |-------|-------|------|
 | Captain Beaver | claude-sonnet-4-20250514 | Orchestration, plans, client comms |
@@ -86,7 +86,7 @@ Header for all internal calls: `x-internal-key: {DAM_INTERNAL_KEY}`
 4. **No message sends without Enforcer + MJ approval** — this is non-negotiable, hard-coded in pipeline
 5. **MyClaw Lite for Beaver Solutions** — upgrade to per-client instances when pilot converts to paid
 6. **Internal API key auth for agent-to-agent calls** — not JWT, not OAuth
-7. **Jarvis webhook belongs to MyClaw** — The Dam is send-only. Never re-register The Dam webhook to Jarvis.
+7. **Jarvis webhook belongs to MyClaw** — BeavrDam is send-only. Never re-register BeavrDam webhook to Jarvis.
 
 ---
 

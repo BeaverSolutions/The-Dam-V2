@@ -181,7 +181,7 @@ router.post('/webhook', async (req, res) => {
 
       if (text === '/start' || text === '/help') {
         await telegram.sendMessage(msg.chat.id,
-          `<b>The Dam — Director</b>\n\nSend me a command and I'll build a plan.\n\n<b>Examples:</b>\n• Find 10 SaaS leads in London\n• Follow up on active conversations\n• Run the morning kickoff\n• Show me today's pipeline`);
+          `<b>BeavrDam — Director</b>\n\nSend me a command and I'll build a plan.\n\n<b>Examples:</b>\n• Find 10 SaaS leads in London\n• Follow up on active conversations\n• Run the morning kickoff\n• Show me today's pipeline`);
         return;
       }
 
@@ -222,7 +222,7 @@ router.post('/webhook', async (req, res) => {
     logger.error({ msg: 'Telegram webhook error', err: err.message, stack: err.stack });
     const chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
     if (chatId) {
-      telegram.sendMessage(chatId, 'Something went wrong. Check The Dam logs for details.').catch(() => {});
+      telegram.sendMessage(chatId, 'Something went wrong. Check BeavrDam logs for details.').catch(() => {});
     }
   }
 });

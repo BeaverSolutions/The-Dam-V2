@@ -53,7 +53,7 @@ _Note: Enterprise client — higher compliance bar. Ranger threshold likely need
 <!-- Enterprise clients often have outreach compliance requirements -->
 - [ ] Confirm approved outreach channels (email only? LinkedIn?)
 - [ ] Confirm data handling requirements (GDPR, PDPA)
-- [ ] Confirm whether prospect data can be stored in The Dam
+- [ ] Confirm whether prospect data can be stored in BeavrDam
 - [ ] Get legal sign-off on outreach templates if required
 - [ ] Confirm unsubscribe process meets their compliance standards
 
@@ -90,7 +90,7 @@ in today's fast-paced world, —,
 ## Onboarding Checklist
 - [ ] Discovery call completed
 - [ ] Compliance review done
-- [ ] Account created in The Dam
+- [ ] Account created in BeavrDam
 - [ ] ICP saved in Settings
 - [ ] Client Persona saved in Settings (this file filled in)
 - [ ] AgentMail inbox verified

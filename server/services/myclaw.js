@@ -58,7 +58,7 @@ async function callAgent(message, options = {}) {
       endpoint,
       {
         message,
-        name: options.name || 'The Dam',
+        name: options.name || 'BeavrDam',
         timeoutSeconds: options.timeoutSeconds || 55,
       },
       {
@@ -107,7 +107,7 @@ async function callAgent(message, options = {}) {
  * MyClaw returns: { interpretation, steps, estimated_leads, estimated_time }
  */
 async function myClawPlan(payload) {
-  const message = `You are Captain Beaver — the Director of The Dam.
+  const message = `You are Captain Beaver — the Director of BeavrDam.
 
 A user just gave this command in Director Chat:
 "${payload.command}"
@@ -152,7 +152,7 @@ Return valid JSON only:
  * Ask MyClaw for a strategic daily brief.
  */
 async function myClawBrief(payload) {
-  const message = `You are Captain Beaver — the Director of The Dam.
+  const message = `You are Captain Beaver — the Director of BeavrDam.
 
 Generate a strategic morning brief for the team.
 
@@ -178,7 +178,7 @@ Return valid JSON only:
  * Ask MyClaw to review campaign results and suggest next actions.
  */
 async function myClawReview(payload) {
-  const message = `You are Captain Beaver — the Director of The Dam.
+  const message = `You are Captain Beaver — the Director of BeavrDam.
 
 A campaign just completed. Review the results:
 ${JSON.stringify(payload, null, 2)}

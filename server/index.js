@@ -165,7 +165,7 @@ async function start() {
     }
 
     app.listen(config.port, () => {
-      logger.info({ msg: `The Dam v2 API running on port ${config.port}`, env: config.nodeEnv });
+      logger.info({ msg: `BeavrDam API running on port ${config.port}`, env: config.nodeEnv });
     });
 
     // Pre-warm client config cache (reads clients/<slug>/config.md for each client)

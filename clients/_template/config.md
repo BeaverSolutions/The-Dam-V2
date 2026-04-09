@@ -1,7 +1,7 @@
 # [CLIENT NAME] — Agent Config
 
 <!--
-  This file is read by The Dam before every agent execution for this client.
+  This file is read by BeavrDam before every agent execution for this client.
   The slug must match the `slug` column on the clients table in the database.
   Changes here take effect on next Railway deploy (git push).
 -->
@@ -152,7 +152,7 @@ world-class, state-of-the-art, next-generation
 
 ## Onboarding Checklist
 - [ ] Discovery call completed
-- [ ] Account created in The Dam
+- [ ] Account created in BeavrDam
 - [ ] ICP saved in Settings
 - [ ] Client Persona saved (this file filled in)
 - [ ] AgentMail inbox verified

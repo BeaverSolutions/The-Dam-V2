@@ -14,7 +14,7 @@ Activate when MJ says:
 Also runs as part of `dam-morning-brief.md` (Step 3).
 
 ## What This Skill Does
-Fetches all pending messages from The Dam's approval queue, presents each one with full context (lead profile + message body), and lets MJ approve or reject directly from Telegram with a simple reply command.
+Fetches all pending messages from BeavrDam's approval queue, presents each one with full context (lead profile + message body), and lets MJ approve or reject directly from Telegram with a simple reply command.
 
 ## Prerequisites
 - `DAM_INTERNAL_KEY` stored in secrets
@@ -28,7 +28,7 @@ Fetches all pending messages from The Dam's approval queue, presents each one wi
 
 **Step 1 — Fetch the queue**
 ```
-GET https://the-dam-v2-production.up.railway.app/api/autonomous/pending-approvals?client_id=ce2fc8e5-617e-42d5-91fe-4275ceaa0030
+GET https://beavrdam-production.up.railway.app/api/autonomous/pending-approvals?client_id=ce2fc8e5-617e-42d5-91fe-4275ceaa0030
 Headers:
   x-internal-key: {DAM_INTERNAL_KEY}
 ```
@@ -88,7 +88,7 @@ If not found: "I don't have #N in memory. Run 'show approvals' first."
 
 **Step 2 — Call approve endpoint**
 ```
-POST https://the-dam-v2-production.up.railway.app/api/autonomous/approve
+POST https://beavrdam-production.up.railway.app/api/autonomous/approve
 Headers:
   x-internal-key: {DAM_INTERNAL_KEY}
   Content-Type: application/json
@@ -101,7 +101,7 @@ Body:
 
 **Step 3 — Confirm to MJ**
 Success: "Approved. Message to {lead_name} at {lead_company} is queued for send."
-Error: "Approval failed — [error]. Try again or check The Dam UI."
+Error: "Approval failed — [error]. Try again or check BeavrDam UI."
 
 **Step 4 — Log to daily notes**
 `[{time GMT+8}] Approved message #{N} to {lead_name} ({lead_company}).`
@@ -114,7 +114,7 @@ Error: "Approval failed — [error]. Try again or check The Dam UI."
 
 **Step 2 — Call reject endpoint**
 ```
-POST https://the-dam-v2-production.up.railway.app/api/autonomous/reject
+POST https://beavrdam-production.up.railway.app/api/autonomous/reject
 Headers:
   x-internal-key: {DAM_INTERNAL_KEY}
   Content-Type: application/json
@@ -146,7 +146,7 @@ Report: "Approved {success_count} messages. {fail_count} failed — [list failur
 
 | Error | Action |
 |-------|--------|
-| GET pending-approvals fails | "Could not reach The Dam. Check Railway." |
+| GET pending-approvals fails | "Could not reach BeavrDam. Check Railway." |
 | Approval not found (404) | "Already actioned or ID mismatch. Run 'show approvals' to refresh." |
 | Approve/reject call fails | Report error, do not retry automatically |
 | Session memory lost | Ask MJ to run "show approvals" again to reload the list |

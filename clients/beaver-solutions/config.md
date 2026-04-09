@@ -128,7 +128,7 @@ We build an AI-powered sales crew that finds your ideal clients, writes personal
 The only outbound solution built specifically for Malaysian B2B founders — we understand local business culture, relationships, and how decisions are actually made here.
 
 **Social proof:**
-Running our own pipeline on The Dam — generating 80+ outreach per day autonomously. We eat our own cooking.
+Running our own pipeline on BeavrDam — generating 80+ outreach per day autonomously. We eat our own cooking.
 
 **CTA preference:**
 Ask for a 20-min call to see if it's a fit. Not a demo. Not a proposal. Just a conversation.
@@ -178,7 +178,7 @@ low-hanging fruit, circle back, touch base, move the needle, best-in-class
 ---
 
 ## Onboarding Checklist
-- [x] Account created in The Dam
+- [x] Account created in BeavrDam
 - [x] ICP saved in Settings
 - [x] Client Persona saved in Settings
 - [x] AgentMail inbox verified

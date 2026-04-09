@@ -77,7 +77,7 @@ in today's fast-paced world, —
 
 ## Onboarding Checklist
 - [ ] Discovery call completed
-- [ ] Account created in The Dam
+- [ ] Account created in BeavrDam
 - [ ] ICP saved in Settings
 - [ ] Client Persona saved in Settings (this file filled in)
 - [ ] AgentMail inbox verified

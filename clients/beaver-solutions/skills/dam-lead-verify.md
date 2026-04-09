@@ -106,8 +106,8 @@ Wait for MJ's confirmation before taking any action.
 ---
 
 ## Notes
-- Always show the LinkedIn URL found (even if different from what The Dam stored)
-- If The Dam stored a linkedin_url and Google confirms the same URL → extra confidence
-- If The Dam stored a linkedin_url but Google finds a different URL → flag the mismatch
+- Always show the LinkedIn URL found (even if different from what BeavrDam stored)
+- If BeavrDam stored a linkedin_url and Google confirms the same URL → extra confidence
+- If BeavrDam stored a linkedin_url but Google finds a different URL → flag the mismatch
 - This skill does NOT update the lead record. It only informs MJ's decision.
 - If lead source is `apollo` or `serper`, skip verification — these are already real. Just confirm to MJ: "#N — [Name]: Source is [apollo/serper] — verified automatically. Safe to approve."

@@ -1,7 +1,7 @@
 {
-  "name": "the-dam-v2-server",
+  "name": "beavrdam-server",
   "version": "1.0.0",
-  "description": "The Dam v2 - Backend API",
+  "description": "BeavrDam - Backend API",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

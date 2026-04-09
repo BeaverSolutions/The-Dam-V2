@@ -33,9 +33,9 @@ Check for `memory/YYYY-MM-DD.md` where YYYY-MM-DD is today's date in GMT+8.
 
 ---
 
-## Step 3 — Check The Dam API
+## Step 3 — Check BeavrDam API
 
-Ping the pending-approvals endpoint to confirm The Dam is reachable:
+Ping the pending-approvals endpoint to confirm BeavrDam is reachable:
 
 ```
 GET https://app.beaver.solutions/api/autonomous/pending-approvals?client_id=ce2fc8e5-617e-42d5-91fe-4275ceaa0030
@@ -46,13 +46,13 @@ Headers:
 | Result | Action |
 |--------|--------|
 | 200 OK | Silent. Continue. |
-| Timeout (>10s) | Alert MJ: "The Dam is not responding. Check Railway." Stop here. |
+| Timeout (>10s) | Alert MJ: "BeavrDam is not responding. Check Railway." Stop here. |
 | 401 Unauthorized | Alert MJ: "Internal key rejected. Check DAM_INTERNAL_KEY secret." Stop here. |
-| 500 Error | Alert MJ: "The Dam returned a server error on startup. Check Railway logs." Continue with reduced capability. |
+| 500 Error | Alert MJ: "BeavrDam returned a server error on startup. Check Railway logs." Continue with reduced capability. |
 
 Record result in today's daily log:
 ```
-[{HH:MM}] Bootstrap — The Dam: {status}
+[{HH:MM}] Bootstrap — BeavrDam: {status}
 ```
 
 ---
@@ -107,11 +107,11 @@ If any job is missing from the state file: register it and log:
 
 Bootstrap complete. Log it:
 ```
-[{HH:MM}] Bootstrap complete. The Dam: {status}. Approvals: {N}. Crons: active.
+[{HH:MM}] Bootstrap complete. BeavrDam: {status}. Approvals: {N}. Crons: active.
 ```
 
 Send nothing to MJ unless:
-- The Dam is down
+- BeavrDam is down
 - 5+ approvals are queued
 - A cron job failed to register
 - Morning brief was missed and it's before 10AM

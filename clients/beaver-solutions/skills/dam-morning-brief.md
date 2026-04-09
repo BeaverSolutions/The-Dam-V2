@@ -7,7 +7,7 @@ Activate when:
 - MJ sends a message first thing in the morning with no other context
 
 ## What This Skill Does
-Fires The Dam's autonomous daily kickoff for Beaver Solutions, waits for initial processing, then pulls a full status summary and delivers it to MJ in one clean message. This is MJ's daily operating brief.
+Fires BeavrDam's autonomous daily kickoff for Beaver Solutions, waits for initial processing, then pulls a full status summary and delivers it to MJ in one clean message. This is MJ's daily operating brief.
 
 ## Prerequisites
 - `DAM_INTERNAL_KEY` stored in secrets
@@ -19,7 +19,7 @@ Fires The Dam's autonomous daily kickoff for Beaver Solutions, waits for initial
 
 ### Step 1 — Fire the kickoff
 ```
-POST https://the-dam-v2-production.up.railway.app/api/autonomous/kickoff
+POST https://beavrdam-production.up.railway.app/api/autonomous/kickoff
 Headers:
   x-internal-key: {DAM_INTERNAL_KEY}
   Content-Type: application/json
@@ -29,17 +29,17 @@ Body:
 Expected response: `{"data":{"status":"kickoff_started","client_id":"..."}}`
 
 If response is not `kickoff_started`:
-- Report error to MJ immediately: "The Dam kickoff failed — [error]. Check Railway logs."
+- Report error to MJ immediately: "BeavrDam kickoff failed — [error]. Check Railway logs."
 - Stop here. Do not proceed.
 
 Send confirmation to MJ: "Kickoff fired. Fetching status in 45 seconds..."
 
 ### Step 2 — Wait
-Wait 45 seconds. The Dam agents run in the background during this time.
+Wait 45 seconds. BeavrDam agents run in the background during this time.
 
 ### Step 3 — Pull pending approvals
 ```
-GET https://the-dam-v2-production.up.railway.app/api/autonomous/pending-approvals?client_id=ce2fc8e5-617e-42d5-91fe-4275ceaa0030
+GET https://beavrdam-production.up.railway.app/api/autonomous/pending-approvals?client_id=ce2fc8e5-617e-42d5-91fe-4275ceaa0030
 Headers:
   x-internal-key: {DAM_INTERNAL_KEY}
 ```
@@ -47,7 +47,7 @@ Store the full response as `approvals_data`.
 
 ### Step 4 — Pull recent replies (last 24h)
 ```
-GET https://the-dam-v2-production.up.railway.app/api/autonomous/recent-replies?client_id=ce2fc8e5-617e-42d5-91fe-4275ceaa0030&hours=24
+GET https://beavrdam-production.up.railway.app/api/autonomous/recent-replies?client_id=ce2fc8e5-617e-42d5-91fe-4275ceaa0030&hours=24
 Headers:
   x-internal-key: {DAM_INTERNAL_KEY}
 ```
@@ -111,7 +111,7 @@ Send this as a single Telegram message. No preamble. No "Good job!" No padding.
 | Kickoff POST fails (non-200) | Alert MJ, stop. Include error message. |
 | Approvals GET fails | Report "Could not fetch approvals — [error]" but still deliver rest of brief |
 | Replies GET fails | Report "Could not fetch replies — [error]" but still deliver rest of brief |
-| Both secondary fetches fail | Report "The Dam API may be down. Check Railway." |
+| Both secondary fetches fail | Report "BeavrDam API may be down. Check Railway." |
 | Timeout (>30s on any call) | Flag as timeout, report to MJ, suggest checking Railway |
 
 ---

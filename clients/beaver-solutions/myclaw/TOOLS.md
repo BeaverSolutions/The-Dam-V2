@@ -4,7 +4,7 @@ Environment-specific references. Skills = how to use tools. This file = the spec
 
 ---
 
-## The Dam API
+## BeavrDam API
 
 | Item | Value |
 |------|-------|
@@ -70,8 +70,8 @@ POST /api/autonomous/weekly-review
 | Timezone for all times | GMT+8 |
 
 **Architecture note:** MyClaw owns Jarvis's incoming messages (polling/webhook).
-The Dam uses Jarvis only to SEND alerts (budget cap, pipeline errors) — it does not receive via webhook anymore.
-This was set up intentionally to avoid conflicts. Do not re-register The Dam's webhook.
+BeavrDam uses Jarvis only to SEND alerts (budget cap, pipeline errors) — it does not receive via webhook anymore.
+This was set up intentionally to avoid conflicts. Do not re-register BeavrDam's webhook.
 
 ---
 

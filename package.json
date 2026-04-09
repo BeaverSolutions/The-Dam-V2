@@ -1,7 +1,7 @@
 {
-  "name": "the-dam-v2",
+  "name": "beavrdam",
   "version": "2.0.0",
-  "description": "The Dam v2 — AI-powered sales pipeline by Beaver Solutions",
+  "description": "BeavrDam — AI-powered sales pipeline by Beaver Solutions",
   "private": true,
   "scripts": {
     "build": "cd client && npm install && npm run build",

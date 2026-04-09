@@ -540,7 +540,7 @@ function screenCommand(command) {
   if (/\b(skip|bypass|without|disable|remove|ignore)\s+(the\s+)?ranger\b/i.test(command) ||
       /\bno\s+ranger\b/i.test(command) ||
       /\bskip\s+qa\b/i.test(command)) {
-    return "The Ranger review is a mandatory quality gate and cannot be skipped or bypassed. Every message must pass Ranger's QA check before it reaches your approval queue. This protects you from sending non-compliant, low-quality, or off-brand messages — it's a core safety feature of The Dam.\n\nIf Ranger keeps rejecting messages, try asking me to adjust the messaging style instead.";
+    return "The Ranger review is a mandatory quality gate and cannot be skipped or bypassed. Every message must pass Ranger's QA check before it reaches your approval queue. This protects you from sending non-compliant, low-quality, or off-brand messages — it's a core safety feature of BeavrDam.\n\nIf Ranger keeps rejecting messages, try asking me to adjust the messaging style instead.";
   }
 
   // Direct personal notification email (not outreach)

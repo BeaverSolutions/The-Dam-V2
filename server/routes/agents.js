@@ -26,7 +26,7 @@ router.get('/myclaw/status', async (req, res) => {
     try {
       const url = `${baseUrl}${path}`;
       const resp = await axios.post(url,
-        { message: 'ping', name: 'The Dam' },
+        { message: 'ping', name: 'BeavrDam' },
         {
           headers: {
             'Content-Type': 'application/json',

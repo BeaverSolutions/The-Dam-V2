@@ -79,7 +79,7 @@ export default function Join() {
             <span style={{ color: 'var(--brand)' }}>Beaver</span>{' '}
             <span style={{ color: 'var(--text)' }}>Solutions</span>
           </h1>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>The Dam — Client Portal</p>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>BeavrDam — Client Portal</p>
         </div>
 
         <div className="card">
@@ -103,7 +103,7 @@ export default function Join() {
               <div style={{ marginBottom: '1.5rem' }}>
                 <h2 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '0.4rem' }}>You're invited</h2>
                 <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
-                  Set up your account to join <strong style={{ color: 'var(--text)' }}>{tokenInfo.client_name}</strong> on The Dam.
+                  Set up your account to join <strong style={{ color: 'var(--text)' }}>{tokenInfo.client_name}</strong> on BeavrDam.
                 </p>
               </div>
 

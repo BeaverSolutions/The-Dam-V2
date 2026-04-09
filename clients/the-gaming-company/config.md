@@ -5,7 +5,7 @@ _Status: **Pilot onboarding pending.** Fill during discovery call with Adrian / 
 <!--
   Slug (must match clients.slug in DB): the-gaming-company
   Primary contacts: Adrian, Keith
-  The Dam reads this file before every agent execution. Changes take effect
+  BeavrDam reads this file before every agent execution. Changes take effect
   on next Railway deploy (git push).
 
   Until this file is filled in, Research Beaver will refuse to source leads
@@ -105,7 +105,7 @@ world-class, state-of-the-art, next-generation, end-to-end, data-driven, ecosyst
 ## Onboarding Checklist
 
 - [ ] Discovery call with Adrian / Keith
-- [x] Account created in The Dam (seeded)
+- [x] Account created in BeavrDam (seeded)
 - [ ] ICP filled in (this file)
 - [ ] Client Persona saved
 - [ ] AgentMail inbox created + verified

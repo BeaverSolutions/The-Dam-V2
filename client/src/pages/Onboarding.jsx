@@ -104,7 +104,7 @@ export default function Onboarding() {
             {step < steps.length - 1 ? (
               <button className="btn btn-primary" onClick={() => setStep(s => s + 1)}>Continue</button>
             ) : (
-              <button className="btn btn-primary" onClick={handleFinish}>Launch The Dam 🦫</button>
+              <button className="btn btn-primary" onClick={handleFinish}>Launch BeavrDam 🦫</button>
             )}
           </div>
         </div>

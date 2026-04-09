@@ -572,7 +572,7 @@ async function startDiscordBot() {
           const token = config.discord.token ? 'loaded' : 'missing';
           const guild = process.env.DISCORD_GUILD_ID || 'not set';
           await message.reply(
-            `Bot: online\nApp: The Dam v2\nEnvironment: ${env}\nDiscord token: ${token}\nGuild ID: ${guild}`
+            `Bot: online\nApp: BeavrDam\nEnvironment: ${env}\nDiscord token: ${token}\nGuild ID: ${guild}`
           );
         }
       } catch (err) {

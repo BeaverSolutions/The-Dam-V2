@@ -1,18 +1,18 @@
 ---
 name: openclaw-integration
-description: "Plan and implement OpenClaw integration with The Dam. Use when connecting OpenClaw as an external orchestration layer, setting up OpenClaw to control The Dam agents, or building the bridge between OpenClaw's task execution and The Dam's pipeline API."
+description: "Plan and implement OpenClaw integration with BeavrDam. Use when connecting OpenClaw as an external orchestration layer, setting up OpenClaw to control BeavrDam agents, or building the bridge between OpenClaw's task execution and BeavrDam's pipeline API."
 ---
 
-# OpenClaw Integration — The Dam v2
+# OpenClaw Integration — BeavrDam v2
 
 ## What OpenClaw Is (Context)
 
-OpenClaw is an autonomous AI agent framework — it operates a computer 24/7, executes goals without supervision, and improves over time. Unlike The Dam's browser-based UI, OpenClaw communicates via Telegram or Discord and can be left to run unattended overnight.
+OpenClaw is an autonomous AI agent framework — it operates a computer 24/7, executes goals without supervision, and improves over time. Unlike BeavrDam's browser-based UI, OpenClaw communicates via Telegram or Discord and can be left to run unattended overnight.
 
-**The integration goal:** OpenClaw becomes the "outer brain" that drives The Dam via API. Roy talks to OpenClaw on Telegram → OpenClaw calls The Dam → The Dam's crew executes.
+**The integration goal:** OpenClaw becomes the "outer brain" that drives BeavrDam via API. Roy talks to OpenClaw on Telegram → OpenClaw calls BeavrDam → BeavrDam's crew executes.
 
 ```
-Roy (Telegram) → OpenClaw → The Dam API → Director → Research/Sales/Ranger → Approvals → Gmail
+Roy (Telegram) → OpenClaw → BeavrDam API → Director → Research/Sales/Ranger → Approvals → Gmail
 ```
 
 ---
@@ -20,7 +20,7 @@ Roy (Telegram) → OpenClaw → The Dam API → Director → Research/Sales/Rang
 ## Architecture: Two Modes
 
 ### Mode 1: OpenClaw as Commander (Phase 1 — Build This First)
-OpenClaw sends commands to The Dam's existing Director endpoint. The Dam handles everything internally. OpenClaw just initiates campaigns and relays status back to Roy via Telegram.
+OpenClaw sends commands to BeavrDam's existing Director endpoint. BeavrDam handles everything internally. OpenClaw just initiates campaigns and relays status back to Roy via Telegram.
 
 ```
 OpenClaw skill → POST /api/agents/director/plan → Director plans → POST /api/agents/director/execute → Results
@@ -28,7 +28,7 @@ OpenClaw skill → POST /api/agents/director/plan → Director plans → POST /a
 
 **Roy's experience:**
 > Roy on Telegram: "Find 10 fintech founders in Singapore and start outreach"
-> OpenClaw: Calls The Dam API, gets plan back
+> OpenClaw: Calls BeavrDam API, gets plan back
 > OpenClaw to Roy: "The Director has a plan — 4 steps, ~10 leads. Approve? [Yes/No]"
 > Roy replies: "Yes"
 > OpenClaw: Calls execute endpoint, waits for results
@@ -39,7 +39,7 @@ OpenClaw bypasses the Director and directly orchestrates Research Beaver, Sales 
 
 ---
 
-## The Dam API Endpoints OpenClaw Will Use
+## BeavrDam API Endpoints OpenClaw Will Use
 
 All endpoints require JWT auth. OpenClaw stores the token as a skill variable.
 
@@ -74,10 +74,10 @@ GET  /api/dashboard/stats             → Pipeline summary
 ## OpenClaw Skill Files to Create
 
 ### 1. `dam-authenticate.md`
-Logs into The Dam and stores the JWT token for subsequent calls.
+Logs into BeavrDam and stores the JWT token for subsequent calls.
 
 ```
-Goal: Authenticate with The Dam
+Goal: Authenticate with BeavrDam
 Steps:
 1. POST to {DAM_URL}/api/auth/login with credentials
 2. Store returned token as session variable DAM_TOKEN
@@ -98,7 +98,7 @@ Steps:
 ```
 
 ### 3. `dam-run-campaign.md`
-Roy triggers this by speaking to OpenClaw naturally. OpenClaw parses the intent and calls The Dam.
+Roy triggers this by speaking to OpenClaw naturally. OpenClaw parses the intent and calls BeavrDam.
 
 ```
 Goal: Run a sales campaign
@@ -142,12 +142,12 @@ Steps:
 ## Implementation Roadmap
 
 ### Phase 1 — Connection (Week 1)
-- [ ] Deploy The Dam to Railway ✅ (done)
+- [ ] Deploy BeavrDam to Railway ✅ (done)
 - [ ] Create OpenClaw account at cloud.clawbot.ai or install locally
 - [ ] Connect Claude API key to OpenClaw (use Claude Opus 4.6)
 - [ ] Set up Telegram bot for OpenClaw
 - [ ] Create `dam-authenticate.md` skill in OpenClaw
-- [ ] Test: Ask OpenClaw to log into The Dam and return a morning brief
+- [ ] Test: Ask OpenClaw to log into BeavrDam and return a morning brief
 - [ ] Create `dam-morning-brief.md` — schedule at 8AM weekdays
 
 ### Phase 2 — Campaign Control (Week 2)
@@ -166,9 +166,9 @@ Steps:
 
 ## Security Notes
 
-- The Dam JWT must be stored as an OpenClaw secret variable (never in skill text)
-- Set a dedicated OpenClaw user in The Dam with `role: agent` (Phase 2 — add this role)
-- Rate limit: The Dam already enforces 100 req/min — OpenClaw polling respects this
+- BeavrDam JWT must be stored as an OpenClaw secret variable (never in skill text)
+- Set a dedicated OpenClaw user in BeavrDam with `role: agent` (Phase 2 — add this role)
+- Rate limit: BeavrDam already enforces 100 req/min — OpenClaw polling respects this
 - Approval gate is ALWAYS Roy — OpenClaw never auto-approves messages
 
 ---
@@ -188,10 +188,10 @@ TELEGRAM_CHAT_ID=[Roy's Telegram chat ID]
 
 Once OpenClaw is installed and Telegram is set up, test with:
 
-> "Check the status of The Dam and tell me how many leads we have"
+> "Check the status of BeavrDam and tell me how many leads we have"
 
 OpenClaw should:
-1. Authenticate with The Dam
+1. Authenticate with BeavrDam
 2. Call GET /api/dashboard/stats
 3. Reply on Telegram with the stats
 

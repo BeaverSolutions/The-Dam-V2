@@ -12,7 +12,7 @@ Activate when MJ says:
 Also runs automatically every 2 hours between 9AM and 6PM GMT+8.
 
 ## What This Skill Does
-Checks The Dam for new prospect replies, classifies urgency by reply type (positive/neutral/objection/no-fit), and surfaces the most important threads first. MJ decides what to do with each one.
+Checks BeavrDam for new prospect replies, classifies urgency by reply type (positive/neutral/objection/no-fit), and surfaces the most important threads first. MJ decides what to do with each one.
 
 ## Prerequisites
 - `DAM_INTERNAL_KEY` stored in secrets
@@ -28,7 +28,7 @@ For manual trigger: use last 48 hours.
 For automated 2-hour check: use last 3 hours (slight overlap to avoid gaps).
 
 ```
-GET https://the-dam-v2-production.up.railway.app/api/autonomous/recent-replies?client_id=ce2fc8e5-617e-42d5-91fe-4275ceaa0030&hours={N}
+GET https://beavrdam-production.up.railway.app/api/autonomous/recent-replies?client_id=ce2fc8e5-617e-42d5-91fe-4275ceaa0030&hours={N}
 Headers:
   x-internal-key: {DAM_INTERNAL_KEY}
 ```
@@ -47,14 +47,14 @@ Prospects who replied but didn't commit. Need a thoughtful follow-up.
 Hard nos, wrong person, unsubscribes. Flag for MJ's awareness but no action required.
 
 **Unclassified — classification is null or missing**
-The Dam hasn't classified this yet. Show it under "Needs review."
+BeavrDam hasn't classified this yet. Show it under "Needs review."
 
 ### Step 3 — Check for stall alerts
 
 Stall = a lead that was contacted 3 or more days ago with no reply since, and no follow-up scheduled.
 
-Note: The Dam tracks this internally. If `recent-replies` shows 0 results across 72 hours, flag it:
-> "No replies in 72 hours. Consider checking stalled leads in The Dam UI."
+Note: BeavrDam tracks this internally. If `recent-replies` shows 0 results across 72 hours, flag it:
+> "No replies in 72 hours. Consider checking stalled leads in BeavrDam UI."
 
 ### Step 4 — Build and send the reply report
 
@@ -86,7 +86,7 @@ If replies found, send this format:
 
 ---
 
-**Next step:** Open The Dam to draft responses, or reply "draft response for {lead_name}" and I'll queue it via Sales Beaver.
+**Next step:** Open BeavrDam to draft responses, or reply "draft response for {lead_name}" and I'll queue it via Sales Beaver.
 
 ---
 
@@ -109,7 +109,7 @@ If `lead_company` or `lead_name` is flagged as referred in metadata, surface it 
 
 ### Two reschedules from same lead
 If the daily notes or metadata show 2+ reschedules from the same lead, flag it:
-> "{lead_name} has rescheduled twice. The Dam will auto-move to Nurture. No further outreach."
+> "{lead_name} has rescheduled twice. BeavrDam will auto-move to Nurture. No further outreach."
 
 ---
 

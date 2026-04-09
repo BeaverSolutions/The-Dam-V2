@@ -1,4 +1,4 @@
-# The Dam — Client Discovery Questionnaire
+# BeavrDam — Client Discovery Questionnaire
 
 **Use this on the first call with every new client.**
 All 4 sections are mandatory before any work starts.
@@ -13,7 +13,7 @@ Estimated time: 30–40 minutes.
 
 - [ ] Pre-work form sent and returned (or plan to cover Section 1 live)
 - [ ] Book 45 minutes — gives breathing room
-- [ ] Have the client's Settings page open in The Dam, ready to fill in live
+- [ ] Have the client's Settings page open in BeavrDam, ready to fill in live
 
 ---
 
@@ -66,7 +66,7 @@ Estimated time: 30–40 minutes.
 
 ## Section 4 — Operations and Preferences (5 min)
 
-> Goal: Set up how they'll interact with The Dam day-to-day.
+> Goal: Set up how they'll interact with BeavrDam day-to-day.
 
 20. How often do you want to review and approve messages? (Daily batch is default)
 21. Who will be the approver? Just you, or someone on your team?
