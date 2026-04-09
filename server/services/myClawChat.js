@@ -15,6 +15,7 @@ const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
 const logsService = require('./logs');
 const { researchLeads } = require('./research');
+const serperService = require('./serper');
 
 // ── Intent classification — fast keyword matching ───────────────────────────
 // No Claude call needed here. Keeps it instant and saves tokens.
@@ -297,82 +298,56 @@ function buildIcpFromCommand(command, baseIcp = {}) {
 }
 
 // ── Research execution (MyClaw as researcher) ────────────────────────────────
+// MyClaw skips Haiku verification — user is doing manual research and will judge quality.
+// We call Serper directly with diverse queries built from the command.
 async function handleResearchExecute(clientId, query) {
   try {
-    // Load ICP from agent_memory
-    const icpRow = await pool.query(
-      `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
-      [clientId]
-    );
-    const icpMemory = icpRow.rows[0]?.content || {};
-
-    // Augment ICP with keywords parsed from the command
-    const commandIcp = buildIcpFromCommand(query, icpMemory);
-
-    // Reset used_queries so manual command always searches with a fresh pool
-    await pool.query(
-      `DELETE FROM agent_memory WHERE client_id = $1 AND agent = 'research_beaver' AND key = 'used_queries'`,
-      [clientId]
-    );
-
     const targetCount = extractLimit(query) || 5;
-    const MAX_OUTER_LOOPS = 6; // hard cap — prevents runaway spend
+    const serperQueries = buildSerperQueries(query, targetCount);
     const accumulated = [];
     const seenUrls = new Set();
-    let batchIndex = 0;
-    let loopCount = 0;
 
-    console.log(`[myclaw] Research target: ${targetCount} leads for "${query}"`);
+    console.log(`[myclaw] Research target: ${targetCount} leads. Queries: ${serperQueries.length}`);
 
-    // Loop until we hit targetCount or exhaust sources
-    while (accumulated.length < targetCount && loopCount < MAX_OUTER_LOOPS) {
-      loopCount++;
+    for (const sq of serperQueries) {
+      if (accumulated.length >= targetCount) break;
+
       const remaining = targetCount - accumulated.length;
-      console.log(`[myclaw] Research loop ${loopCount}: need ${remaining} more leads`);
+      const results = await serperService.searchLinkedInProfiles(sq, Math.min(remaining + 3, 10));
 
-      const result = await researchLeads(clientId, {
-        icpMemory: commandIcp,
-        targetCount: remaining,
-        batchIndex,
-        commandOverride: query,
-      });
-
-      const leads = result?.leads || [];
-      const fresh = leads.filter(l => {
-        const key = l.linkedin_url || `${l.name}||${l.company}`.toLowerCase();
+      const fresh = results.filter(l => {
+        if (!l.linkedin_url) return false;
+        const key = l.linkedin_url;
         if (seenUrls.has(key)) return false;
         seenUrls.add(key);
         return true;
       });
 
       accumulated.push(...fresh);
-      console.log(`[myclaw] Loop ${loopCount}: got ${fresh.length} fresh leads, total=${accumulated.length}/${targetCount}`);
-
-      // If no new leads came in, sources are exhausted — stop
-      if (fresh.length === 0) {
-        console.log('[myclaw] No new leads from loop — sources exhausted');
-        break;
-      }
-
-      batchIndex++;
+      console.log(`[myclaw] Query "${sq}": ${fresh.length} fresh, total=${accumulated.length}/${targetCount}`);
     }
 
-    if (accumulated.length === 0) {
+    // Save leads to DB
+    const final = accumulated.slice(0, targetCount);
+    if (final.length > 0) {
+      await saveLeadsToDB(clientId, final);
+    }
+
+    if (final.length === 0) {
       return formatResponse(
-        `No leads found for "${query}". Try being more specific about industry, location, or role.`
+        `No leads found for "${query}". Try being more specific — e.g. "Find 10 marketing agency founders KL".`
       );
     }
 
-    const final = accumulated.slice(0, targetCount);
     const lines = final.map((lead, i) => {
-      const company = lead.company || 'Unknown';
+      const company = lead.company && lead.company !== 'Unknown' ? lead.company : '—';
       const title = lead.title || 'N/A';
       return `${i + 1}. ${lead.name} — ${title} @ ${company}`;
     });
 
     const shortfall = targetCount - final.length;
     const note = shortfall > 0
-      ? `\n\nNote: Only ${final.length}/${targetCount} found — Serper sources exhausted. Try a broader search term.`
+      ? `\n\nNote: Only ${final.length}/${targetCount} found. Try a different industry or location.`
       : '\n\nLeads saved to pipeline. Ready for outreach.';
 
     return formatResponse(
@@ -380,10 +355,57 @@ async function handleResearchExecute(clientId, query) {
     );
   } catch (err) {
     console.error('[myclaw] Research failed:', err.message);
-    return formatResponse(
-      `Research failed: ${err.message}. Check your ICP configuration and try again.`
-    );
+    return formatResponse(`Research failed: ${err.message}`);
   }
+}
+
+// Save raw Serper leads to DB (no Haiku verification — MyClaw manual mode)
+async function saveLeadsToDB(clientId, leads) {
+  const { v4: uuidv4Lead } = require('uuid');
+  for (const lead of leads) {
+    try {
+      await pool.query(
+        `INSERT INTO leads (id, client_id, name, title, company, linkedin_url, email, pipeline_stage, status, data_source, signal_tier, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'sourced', 'new', $8, 'P3', NOW(), NOW())
+         ON CONFLICT (client_id, linkedin_url) DO NOTHING`,
+        [uuidv4Lead(), clientId, lead.name, lead.title || '', lead.company || '', lead.linkedin_url || '', lead.email || '', lead.data_source || 'serper']
+      );
+    } catch (err) {
+      console.warn('[myclaw] saveLeadsToDB skip:', err.message);
+    }
+  }
+}
+
+// Build diverse Serper queries from the user's command
+function buildSerperQueries(command, targetCount) {
+  const lower = command.toLowerCase();
+
+  // Extract role
+  const ROLES = ['Founder', 'CEO', 'Co-Founder', 'Managing Director', 'Owner', 'Director', 'MD', 'CTO', 'Partner'];
+  const roles = ROLES.filter(r => lower.includes(r.toLowerCase()));
+  const activeRoles = roles.length > 0 ? roles : ['Founder', 'CEO', 'Director'];
+
+  // Extract industry
+  const INDUSTRY_TERMS = [
+    'marketing', 'digital marketing', 'advertising', 'agency', 'consulting',
+    'SaaS', 'technology', 'software', 'fintech', 'e-commerce', 'logistics',
+    'recruitment', 'HR', 'creative', 'media', 'design', 'property', 'training',
+  ];
+  const industries = INDUSTRY_TERMS.filter(i => lower.includes(i.toLowerCase()));
+  const activeIndustries = industries.length > 0 ? industries : INDUSTRY_TERMS.slice(0, 6);
+
+  // Build queries — title × industry combinations with Sdn Bhd anchor
+  const queries = [];
+  for (const role of activeRoles.slice(0, 4)) {
+    for (const industry of activeIndustries.slice(0, 6)) {
+      queries.push(`${role} ${industry} "Sdn Bhd"`);
+      if (queries.length >= targetCount * 3) break;
+    }
+    if (queries.length >= targetCount * 3) break;
+  }
+
+  // Shuffle for variety
+  return queries.sort(() => Math.random() - 0.5).slice(0, Math.ceil(targetCount * 1.5));
 }
 
 // Helper: extract requested lead count from query
