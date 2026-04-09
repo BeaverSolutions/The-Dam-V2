@@ -1246,6 +1246,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
                             pipeline_stage, status, email_verified, email_source,
                             apollo_enriched, apollo_person_id, apollo_org_id, linkedin_url, metadata)
          VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11,$12,$13,$14)
+         ON CONFLICT (client_id, linkedin_url) WHERE linkedin_url IS NOT NULL AND deleted_at IS NULL
+         DO NOTHING
          RETURNING *`,
         [
           clientId,
@@ -1264,7 +1266,11 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           JSON.stringify({ short_description: lead.short_description || '', ...meta }),
         ]
       );
-      savedLeads.push({ ...res.rows[0], short_description: lead.short_description });
+      if (res.rows.length > 0) {
+        savedLeads.push({ ...res.rows[0], short_description: lead.short_description });
+      } else {
+        console.log(`[dedup] Skipped duplicate lead at DB level: ${lead.name} (${lead.linkedin_url})`);
+      }
     } catch (err) {
       console.error('[pipeline] Failed to save lead:', err.message, err.detail || '');
     }
@@ -1407,7 +1413,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       const salesResult = await salesGenerate(clientId, {
         lead_id: lead.id,
         channel: selectedChannel,
-        context: contextParts.join('\n') + memoryContext + `\n\nCHANNEL INSTRUCTIONS: ${hint}`,
+        context: contextParts.join('\n') + `\n\nCHANNEL INSTRUCTIONS: ${hint}`,
       });
 
       if (!salesResult?.body) {

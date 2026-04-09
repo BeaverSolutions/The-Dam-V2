@@ -162,7 +162,24 @@ router.post('/director/execute',
       const { plan_id } = req.body;
       const execKey = `exec_${plan_id}`;
 
-      // Store executing state immediately
+      // Guard: reject if another execution is already running for this client
+      const { rows: running } = await pool.query(
+        `SELECT key FROM agent_memory
+         WHERE client_id = $1 AND agent = 'director' AND key LIKE 'exec_%'
+           AND content->>'status' = 'executing'
+           AND updated_at > NOW() - INTERVAL '10 minutes'
+         LIMIT 1`,
+        [clientId]
+      );
+      if (running.length > 0) {
+        return res.status(429).json({
+          error: 'Another pipeline is already running. Please wait for it to finish.',
+          code: 'PIPELINE_BUSY',
+          existing_key: running[0].key,
+        });
+      }
+
+      // Store executing state
       await pool.query(
         `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
          VALUES ($1, 'director', $2, $3::jsonb, 'config')
@@ -183,13 +200,16 @@ router.post('/director/execute',
            DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
           [clientId, execKey, JSON.stringify({ status: 'completed', result, completed_at: new Date().toISOString() })]
         ))
-        .catch(err => pool.query(
-          `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
-           VALUES ($1, 'director', $2, $3::jsonb, 'config')
-           ON CONFLICT (client_id, agent, key)
-           DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
-          [clientId, execKey, JSON.stringify({ status: 'failed', error: err.message, failed_at: new Date().toISOString() })]
-        ).catch(() => {}));
+        .catch(err => {
+          console.error(`[pipeline] directorExecute FAILED for plan ${plan_id}:`, err.message, err.stack?.split('\n').slice(0, 3).join(' | '));
+          return pool.query(
+            `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+             VALUES ($1, 'director', $2, $3::jsonb, 'config')
+             ON CONFLICT (client_id, agent, key)
+             DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
+            [clientId, execKey, JSON.stringify({ status: 'failed', error: err.message, failed_at: new Date().toISOString() })]
+          ).catch(dbErr => console.error(`[pipeline] CRITICAL: Failed to save error state for plan ${plan_id}:`, dbErr.message));
+        });
     } catch (err) { next(err); }
   }
 );
