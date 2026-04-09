@@ -202,6 +202,92 @@ async function handlePipelineSummary(clientId) {
   );
 }
 
+// ── Build ICP from command keywords ─────────────────────────────────────────
+// Extracts industry, title, location from the user's command and merges with
+// stored ICP — command keywords take priority
+function buildIcpFromCommand(command, baseIcp = {}) {
+  const lower = command.toLowerCase();
+
+  const industryMap = {
+    'b2b': 'B2B services',
+    'saas': 'SaaS',
+    'marketing': 'marketing',
+    'agency': 'agency',
+    'digital': 'digital agency',
+    'property': 'property',
+    'proptech': 'proptech',
+    'fintech': 'fintech',
+    'ecommerce': 'ecommerce',
+    'e-commerce': 'ecommerce',
+    'edtech': 'edtech',
+    'healthtech': 'healthtech',
+    'logistics': 'logistics',
+    'consulting': 'consulting',
+    'recruitment': 'recruitment',
+    'tech': 'tech',
+    'software': 'software',
+    'design': 'design',
+    'creative': 'creative',
+    'media': 'media',
+    'advertising': 'advertising',
+    'seo': 'SEO',
+    'hr': 'HR',
+    'legal': 'legal',
+    'accounting': 'accounting',
+    'insurance': 'insurance',
+    'f&b': 'F&B',
+    'food': 'food',
+  };
+
+  const titleMap = {
+    'founder': 'Founder',
+    'co-founder': 'Co-Founder',
+    'ceo': 'CEO',
+    'coo': 'COO',
+    'cmo': 'CMO',
+    'cto': 'CTO',
+    'director': 'Director',
+    'md': 'Managing Director',
+    'managing director': 'Managing Director',
+    'owner': 'Owner',
+    'partner': 'Partner',
+  };
+
+  const locationMap = {
+    'kl': 'Kuala Lumpur',
+    'kuala lumpur': 'Kuala Lumpur',
+    'pj': 'Petaling Jaya',
+    'petaling jaya': 'Petaling Jaya',
+    'klang valley': 'Klang Valley',
+    'malaysia': 'Malaysia',
+    'penang': 'Penang',
+    'johor': 'Johor',
+    'singapore': 'Singapore',
+  };
+
+  const extractedIndustries = [];
+  for (const [kw, label] of Object.entries(industryMap)) {
+    if (lower.includes(kw)) extractedIndustries.push(label);
+  }
+
+  const extractedTitles = [];
+  for (const [kw, label] of Object.entries(titleMap)) {
+    if (lower.includes(kw)) extractedTitles.push(label);
+  }
+
+  let extractedLocation = '';
+  for (const [kw, label] of Object.entries(locationMap)) {
+    if (lower.includes(kw)) { extractedLocation = label; break; }
+  }
+
+  return {
+    ...baseIcp,
+    ...(extractedIndustries.length > 0 ? { industries: extractedIndustries } : {}),
+    ...(extractedTitles.length > 0 ? { job_titles: extractedTitles } : {}),
+    ...(extractedLocation ? { geographies: extractedLocation } : {}),
+  };
+}
+
 // ── Research execution (MyClaw as researcher) ────────────────────────────────
 async function handleResearchExecute(clientId, query) {
   try {
@@ -211,6 +297,16 @@ async function handleResearchExecute(clientId, query) {
       [clientId]
     );
     const icpMemory = icpRow.rows[0]?.content || {};
+
+    // Augment ICP with keywords parsed from the command
+    const commandIcp = buildIcpFromCommand(query, icpMemory);
+
+    // Reset used_queries so manual command gets full pool
+    // (used_queries tracks autonomous batch rotation — manual searches always start fresh)
+    await pool.query(
+      `DELETE FROM agent_memory WHERE client_id = $1 AND agent = 'research_beaver' AND key = 'used_queries'`,
+      [clientId]
+    );
 
     const targetCount = extractLimit(query) || 5;
     const MAX_OUTER_LOOPS = 6; // hard cap — prevents runaway spend
@@ -228,7 +324,7 @@ async function handleResearchExecute(clientId, query) {
       console.log(`[myclaw] Research loop ${loopCount}: need ${remaining} more leads`);
 
       const result = await researchLeads(clientId, {
-        icpMemory,
+        icpMemory: commandIcp,
         targetCount: remaining,
         batchIndex,
         commandOverride: query,
