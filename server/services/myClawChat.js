@@ -35,6 +35,11 @@ function classifyIntent(command) {
     return { intent: 'research_execute', query: command };
   }
 
+  // ── Follow-up: LinkedIn URLs of recent leads ──
+  if (/linkedin/i.test(lower) && /provid|show|give|get|their|url|link/i.test(lower)) {
+    return { intent: 'show_linkedin', filters };
+  }
+
   if (/approv|queue|review|pending\s*message/i.test(lower)) return { intent: 'check_approvals', filters };
   if (/qualif|ready\s*(?:for|to)\s*(?:outreach|contact)/i.test(lower)) return { intent: 'check_qualified', filters };
   if (/\b(?:count|how\s*many|total)\b.*lead/i.test(lower) || /lead.*\b(?:count|how\s*many|total)\b/i.test(lower)) return { intent: 'lead_count', filters };
@@ -52,6 +57,29 @@ function classifyIntent(command) {
 }
 
 // ── Intent handlers ─────────────────────────────────────────────────────────
+
+async function handleShowLinkedin(clientId, filters = {}) {
+  const limit = Math.min(Number(filters.limit) || 20, 50);
+  const result = await pool.query(
+    `SELECT name, title, company, linkedin_url
+     FROM leads
+     WHERE client_id = $1 AND deleted_at IS NULL AND linkedin_url IS NOT NULL AND linkedin_url != ''
+     ORDER BY created_at DESC LIMIT $2`,
+    [clientId, limit]
+  );
+
+  if (result.rows.length === 0) {
+    return formatResponse('No leads with LinkedIn URLs found. Run a search first.');
+  }
+
+  const lines = result.rows.map((r, i) =>
+    `${i + 1}. ${r.name} — ${r.title || 'N/A'} @ ${r.company || '—'}\n   ${r.linkedin_url}`
+  );
+
+  return formatResponse(
+    `LinkedIn URLs for your ${result.rowCount} most recent lead${result.rowCount !== 1 ? 's' : ''}:\n\n${lines.join('\n\n')}`
+  );
+}
 
 async function handleCheckApprovals(clientId) {
   const result = await pool.query(
@@ -439,6 +467,8 @@ async function handleChat(clientId, command) {
   switch (intent.intent) {
     case 'research_execute':
       return handleResearchExecute(clientId, intent.query);
+    case 'show_linkedin':
+      return handleShowLinkedin(clientId, intent.filters || {});
     case 'check_approvals':
       return handleCheckApprovals(clientId);
     case 'check_leads':
