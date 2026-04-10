@@ -18,9 +18,16 @@ Environment-specific references. Skills = how to use tools. This file = the spec
 ### Endpoints Claw Uses
 
 ```
+POST /api/autonomous/chat
+     Body: {"client_id":"<uuid>","message":"<any natural language>","thread_id":"<optional>"}
+     → Claw's primary conversational entry point. Captain Beaver interprets intent
+       and either returns live data or dispatches beavers in the background.
+     → Intents: status/kpi, kickoff/find X, approvals, signal hunt, replies, memory
+     → See skill: dam-chat.md
+
 POST /api/autonomous/kickoff
      Body: {"client_id":"<uuid>"}
-     → Fires Captain Beaver daily run
+     → Fires Captain Beaver daily run (no custom command — uses client ICP)
 
 GET  /api/autonomous/pending-approvals?client_id=<uuid>
      → Returns full message + lead context for all pending approvals
@@ -93,6 +100,7 @@ This was set up intentionally to avoid conflicts. Do not re-register BeavrDam's 
 
 | Skill file | When it runs |
 |-----------|-------------|
+| `dam-chat.md` | Any free-form command that doesn't fit the specific skills below — "find X leads", "what's my status", "run signal hunt", "any approvals". Single entry point via /api/autonomous/chat. |
 | `dam-morning-brief.md` | 8AM GMT+8 daily, or "morning brief" / "start the day" |
 | `dam-approval-notify.md` | "show approvals" / "any approvals?" / "what needs approval?" |
 | `dam-reply-check.md` | "check replies" / "any replies?" / every 2 hours 9AM–6PM |

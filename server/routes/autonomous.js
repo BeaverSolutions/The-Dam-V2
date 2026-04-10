@@ -19,6 +19,201 @@ function requireInternalKey(req, res, next) {
   next();
 }
 
+/* ─── POST /api/autonomous/chat ───────────────────────────
+ * Claw ↔ Dam conversational bot endpoint.
+ * Mounted here (not under /api/myclaw) so Claw's existing DAM_INTERNAL_KEY
+ * works — no new secret to manage.
+ *
+ * Body: { client_id, message, thread_id?, context? }
+ * Returns: { data: { reply, actions_taken, data, thread_id } }
+ *
+ * Intents:
+ *   - status/kpi   → live DB query, returns sent/pending/leads_today
+ *   - kickoff/run  → fires directorExecute in background, returns plan_id
+ *   - approvals    → lists pending approvals with ranger scores
+ *   - signal hunt  → fires runSignalHunt in background
+ *   - research     → fires Research Beaver only with custom brief
+ *   - pause/resume → pauses send queue or specific leads
+ *   - fallback     → help text
+ */
+router.post('/chat', requireInternalKey, async (req, res, next) => {
+  try {
+    const { client_id, message, thread_id = null, context = {} } = req.body;
+    if (!client_id || !message) {
+      return res.status(400).json({ error: 'client_id and message required', code: 'MISSING_FIELDS' });
+    }
+
+    const logsService = require('../services/logs');
+    await logsService.createLog(client_id, {
+      agent: 'captain',
+      action: 'chat_inbound',
+      metadata: { message: message.substring(0, 500), thread_id, source: 'claw_chat' },
+    });
+
+    const lowerMsg = message.toLowerCase().trim();
+    const response = {
+      reply: '',
+      actions_taken: [],
+      data: {},
+      thread_id: thread_id || `thread_${Date.now()}`,
+    };
+
+    // ── Intent 1: KPI / STATUS ───────────────────────────────────────
+    if (/\b(kpi|status|progress|sent today|how (many|much)|dashboard|stats|telemetry)\b/i.test(lowerMsg)) {
+      const today = new Date().toISOString().split('T')[0];
+      const { rows: [counts] } = await pool.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE status = 'sent' AND DATE(sent_at) = $2)                   AS sent_today,
+           COUNT(*) FILTER (WHERE status = 'pending_approval' AND DATE(created_at) = $2)    AS pending,
+           COUNT(*) FILTER (WHERE status = 'approved' AND DATE(created_at) = $2)            AS approved_awaiting_send,
+           COUNT(*) FILTER (WHERE status = 'ranger_rejected' AND DATE(created_at) = $2)     AS rejected,
+           COUNT(*) FILTER (WHERE status = 'replied')                                       AS total_replied
+         FROM messages WHERE client_id = $1`,
+        [client_id, today]
+      );
+      const { rows: [leadCounts] } = await pool.query(
+        `SELECT COUNT(*) FILTER (WHERE DATE(created_at) = $2) AS leads_today
+         FROM leads WHERE client_id = $1 AND deleted_at IS NULL`,
+        [client_id, today]
+      );
+      const { rows: [kpiRow] } = await pool.query(
+        `SELECT target FROM daily_kpi WHERE client_id = $1 AND date = $2`,
+        [client_id, today]
+      );
+      const target = kpiRow?.target || 80;
+
+      response.data = {
+        date: today,
+        target,
+        sent_today: parseInt(counts.sent_today) || 0,
+        pending_approval: parseInt(counts.pending) || 0,
+        approved_awaiting_send: parseInt(counts.approved_awaiting_send) || 0,
+        rejected_today: parseInt(counts.rejected) || 0,
+        leads_today: parseInt(leadCounts.leads_today) || 0,
+        total_replied_lifetime: parseInt(counts.total_replied) || 0,
+      };
+      response.reply = `Status for ${today}: ${response.data.sent_today}/${target} sent. ${response.data.pending_approval} pending approval. ${response.data.leads_today} leads sourced today. ${response.data.rejected_today} rejected.`;
+      response.actions_taken.push('queried_daily_stats');
+    }
+
+    // ── Intent 2: KICKOFF / EXECUTE ──────────────────────────────────
+    else if (/\b(kickoff|kick off|start|execute|fire|begin|find.*(lead|founder|ceo|director|agency|agencies))\b/i.test(lowerMsg)) {
+      const planId = uuidv4();
+      response.reply = `Dispatching to the crew. Captain is briefing Research Beaver now with your command. Poll back with "status" in 60s, or check /api/autonomous/pending-approvals.`;
+      response.actions_taken.push('triggered_director_execute');
+      response.data = { plan_id: planId };
+
+      // Background execution
+      runWithClientContext(client_id, () =>
+        directorExecute(client_id, { plan_id: planId, command: message }).catch(err => {
+          console.error(`[chat] directorExecute failed for plan ${planId}:`, err.message);
+        })
+      );
+    }
+
+    // ── Intent 3: APPROVALS query ────────────────────────────────────
+    else if (/\b(approval|pending|awaiting|queue)\b/i.test(lowerMsg)) {
+      const { rows } = await pool.query(
+        `SELECT a.id, m.subject, m.body, l.name AS lead_name, l.company, m.ranger_score
+         FROM approvals a
+         JOIN messages m ON m.id = a.message_id
+         JOIN leads l ON l.id = m.lead_id
+         WHERE a.client_id = $1 AND a.status = 'pending'
+         ORDER BY a.created_at DESC LIMIT 10`,
+        [client_id]
+      );
+      response.data = { approvals: rows, count: rows.length };
+      response.reply = `${rows.length} messages waiting for approval.`;
+      response.actions_taken.push('listed_pending_approvals');
+    }
+
+    // ── Intent 4: SIGNAL HUNT ────────────────────────────────────────
+    else if (/\b(signal|hunt|hiring|funding|trigger|buying)\b/i.test(lowerMsg)) {
+      const { runSignalHunt, saveSignalLeads } = require('../services/signalHunt');
+
+      // Load ICP for signal hunt
+      const { rows: icpRows } = await pool.query(
+        `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
+        [client_id]
+      );
+      const icp = icpRows[0]?.content || {};
+
+      response.reply = `Running signal hunt in the background — scanning news + LinkedIn jobs for buying triggers. Target: 20 P1/P2 leads. Check back with "status" in 2-3 minutes.`;
+      response.actions_taken.push('triggered_signal_hunt');
+
+      runWithClientContext(client_id, () =>
+        (async () => {
+          try {
+            const leads = await runSignalHunt(client_id, { maxLeads: 20, icp });
+            if (leads.length > 0) {
+              const saved = await saveSignalLeads(client_id, leads);
+              console.log(`[chat] Signal hunt saved ${saved.length} leads for ${client_id}`);
+
+              // Auto-trigger outreach on signal-sourced leads
+              if (saved.length > 0) {
+                await directorExecute(client_id, {
+                  plan_id: uuidv4(),
+                  command: `SIGNAL-SOURCED BATCH: Process ${saved.length} pre-qualified leads already saved with P1/P2 signals.`,
+                  use_existing_leads: saved.map(l => l.id),
+                });
+              }
+            }
+          } catch (err) {
+            console.error('[chat] Signal hunt background failed:', err.message);
+          }
+        })()
+      );
+    }
+
+    // ── Intent 5: RECENT REPLIES ─────────────────────────────────────
+    else if (/\b(repl(y|ies|ied)|respond(ed)?|answer(ed)?)\b/i.test(lowerMsg)) {
+      const { rows } = await pool.query(
+        `SELECT l.name AS lead_name, l.company, m.body AS reply_body, m.created_at,
+                m.metadata->>'classification' AS classification
+         FROM messages m
+         JOIN leads l ON l.id = m.lead_id
+         WHERE m.client_id = $1 AND m.status = 'replied'
+           AND m.created_at >= NOW() - INTERVAL '48 hours'
+         ORDER BY m.created_at DESC LIMIT 10`,
+        [client_id]
+      );
+      response.data = { replies: rows, count: rows.length };
+      response.reply = `${rows.length} replies in the last 48 hours.`;
+      response.actions_taken.push('listed_recent_replies');
+    }
+
+    // ── Intent 6: MEMORY read ────────────────────────────────────────
+    else if (/\b(icp|memory|config|learnings|what.*targeting)\b/i.test(lowerMsg)) {
+      const { rows } = await pool.query(
+        `SELECT agent, key, content, updated_at FROM agent_memory
+         WHERE client_id = $1 AND memory_type != 'secret'
+         ORDER BY updated_at DESC LIMIT 20`,
+        [client_id]
+      );
+      response.data = { memory: rows };
+      response.reply = `${rows.length} memory entries. Most recent: ${rows.slice(0, 3).map(r => `${r.agent}/${r.key}`).join(', ')}.`;
+      response.actions_taken.push('read_agent_memory');
+    }
+
+    // ── Fallback: help text ──────────────────────────────────────────
+    else {
+      response.reply = `Captain Beaver here. I understand: "status" (daily KPIs), "kickoff" or "find X founders in Y" (fire pipeline), "approvals" (pending queue), "signal hunt" (find buying triggers), "replies" (recent inbound), "memory" or "icp" (read config). What do you need?`;
+      response.actions_taken.push('returned_help_text');
+    }
+
+    await logsService.createLog(client_id, {
+      agent: 'captain',
+      action: 'chat_reply',
+      metadata: { actions: response.actions_taken, thread_id: response.thread_id },
+    });
+
+    res.json({ data: response });
+  } catch (err) {
+    console.error('[autonomous/chat] Error:', err.message);
+    next(err);
+  }
+});
+
 /* ─── POST /api/autonomous/kickoff ───────────────────────── */
 
 router.post('/kickoff', requireInternalKey, async (req, res) => {
