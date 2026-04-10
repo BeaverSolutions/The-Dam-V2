@@ -57,10 +57,18 @@ function nextBusinessDay(date) {
 async function scheduleFollowUps(clientId, leadId, firstContactDate) {
   const base = new Date(firstContactDate);
 
+  // Extended cadence (Day 0 = initial, not scheduled here):
+  // Day 2  — FU1: different angle on same pain
+  // Day 5  — FU2: one-line social proof
+  // Day 10 — FU3: final bump / easy out
+  // Day 18 — FU4: break-up with new framing (nurture mode)
+  // Day 30 — FU5: re-awaken — new signal/angle (long-tail, often converts)
   const schedule = [
     { touch: 2, daysAfter: 2 },
-    { touch: 3, daysAfter: 4 },
-    { touch: 4, daysAfter: 7 },
+    { touch: 3, daysAfter: 5 },
+    { touch: 4, daysAfter: 10 },
+    { touch: 5, daysAfter: 18 },
+    { touch: 6, daysAfter: 30 },
   ];
 
   for (const { touch, daysAfter } of schedule) {
@@ -90,7 +98,7 @@ async function scheduleFollowUps(clientId, leadId, firstContactDate) {
     [firstContactDate, touch2Date, leadId]
   );
 
-  console.log(`[FollowUp] Scheduled 3 follow-ups for lead ${leadId}`);
+  console.log(`[FollowUp] Scheduled ${schedule.length} follow-ups for lead ${leadId} (Day 2/5/10/18/30)`);
 }
 
 /**
@@ -209,19 +217,29 @@ async function draftFollowUp(lead, touchNumber, previousMessages) {
 
   const touchConfig = {
     2: {
-      type: 'FU1 — Different angle on same pain',
+      type: 'FU1 Day 2 — Different angle on same pain',
       instruction: 'Write from a completely different angle than the Day 0 message. Do NOT say "just following up" or "checking in". Lead with a new observation or insight about their business. One question at the end.',
       maxWords: 80,
     },
     3: {
-      type: 'FU2 — One-line social proof',
+      type: 'FU2 Day 5 — One-line social proof',
       instruction: 'One specific result or social proof. Under 20 words for the core line. Example: "We helped a similar property company go from 0 to 12 meetings in 3 weeks." Then one soft question.',
       maxWords: 40,
     },
     4: {
-      type: 'FU3 — Easy out (final)',
-      instruction: 'This is the last message. Give them an easy out. Something like: "Happy to leave this here if the timing is off." Short, honest, human. No pressure.',
+      type: 'FU3 Day 10 — Bump with new framing',
+      instruction: 'Reframe the value prop from a completely new angle. Do NOT sound like a follow-up. Short, punchy. One question.',
       maxWords: 40,
+    },
+    5: {
+      type: 'FU4 Day 18 — Easy out / break-up',
+      instruction: 'Honest break-up. "Last one from me for now. If timing is off, happy to leave it here. But if {specific pain} is on your mind, the door\'s open." Under 40 words. No CTA pressure.',
+      maxWords: 40,
+    },
+    6: {
+      type: 'FU5 Day 30 — Re-awaken with new trigger',
+      instruction: 'Come back with a SPECIFIC new angle or signal. Reference something different from every prior message. This is the "nurture wake-up" message. Often converts because it feels fresh, not like a sequence. One question.',
+      maxWords: 60,
     },
   };
 
@@ -251,7 +269,7 @@ HARD RULES: No em dashes (—). Max 1 question mark. No bullets.`
 
 HARD RULES: No em dashes (—). Max 1 question mark. No bullets. No "Regards,".`;
 
-  const prompt = `You are Sales Beaver writing Touch ${touchNumber} of 4 in a follow-up sequence on ${channel}.
+  const prompt = `You are Sales Beaver writing Touch ${touchNumber} of 6 in a follow-up sequence on ${channel}.
 
 LEAD:
 Name: ${lead.name}

@@ -99,6 +99,77 @@ function expandIndustry(industry) {
   return INDUSTRY_SEARCH_PHRASES[key] || [`"${industry}"`];
 }
 
+/**
+ * Phase B3: Expansion ladder.
+ * When the query pool is exhausted or returning zero new candidates,
+ * progressively widen the ICP to find more leads.
+ *
+ * Level 0 = original ICP (strict)
+ * Level 1 = add synonym titles (Founder → Founder/Owner/Proprietor/Principal)
+ * Level 2 = add sibling industries (agency → also consulting/services/media)
+ * Level 3 = widen geography (Klang Valley → all Malaysia)
+ * Level 4 = broaden to generic B2B founder/CEO across any industry
+ */
+function widenIcp(originalIcp, level) {
+  if (level <= 0) return originalIcp;
+
+  const widened = { ...originalIcp };
+
+  if (level >= 1) {
+    // Expand job titles
+    const origTitles = parseCsvField(widened.job_titles || widened.who);
+    const expandedTitles = new Set(origTitles);
+    for (const t of origTitles) {
+      const lower = t.toLowerCase();
+      if (/founder/i.test(lower)) {
+        ['Owner', 'Principal', 'Proprietor', 'Co-Founder', 'Partner'].forEach(x => expandedTitles.add(x));
+      }
+      if (/ceo/i.test(lower)) {
+        ['Managing Director', 'MD', 'President', 'Chief Executive'].forEach(x => expandedTitles.add(x));
+      }
+      if (/director/i.test(lower)) {
+        ['Head of', 'VP', 'Vice President'].forEach(x => expandedTitles.add(x));
+      }
+    }
+    widened.job_titles = Array.from(expandedTitles).join(', ');
+  }
+
+  if (level >= 2) {
+    // Expand industries with siblings
+    const origIndustries = parseCsvField(widened.industries);
+    const expandedIndustries = new Set(origIndustries);
+    for (const ind of origIndustries) {
+      const lower = ind.toLowerCase();
+      if (/agency|marketing|digital/i.test(lower)) {
+        ['consulting', 'professional services', 'media', 'advertising'].forEach(x => expandedIndustries.add(x));
+      }
+      if (/property|proptech|real estate/i.test(lower)) {
+        ['construction', 'architecture', 'interior design'].forEach(x => expandedIndustries.add(x));
+      }
+      if (/saas|software|tech/i.test(lower)) {
+        ['fintech', 'edtech', 'platform', 'IT services'].forEach(x => expandedIndustries.add(x));
+      }
+    }
+    widened.industries = Array.from(expandedIndustries).join(', ');
+  }
+
+  if (level >= 3) {
+    // Widen geography
+    const origGeo = (widened.geographies || widened.geography || widened.location || '').toLowerCase();
+    if (/klang|kl|kuala lumpur|selangor/i.test(origGeo)) {
+      widened.geographies = 'Malaysia, Kuala Lumpur, Selangor, Penang, Johor, Cyberjaya, Putrajaya';
+    }
+  }
+
+  if (level >= 4) {
+    // Last resort: generic B2B founders
+    widened.industries = 'consulting, agency, saas, professional services, technology, b2b';
+    widened.job_titles = 'Founder, CEO, Managing Director, Owner, Director';
+  }
+
+  return widened;
+}
+
 /* ─── Query pool ─────────────────────────────────────────── */
 
 /**
@@ -770,27 +841,42 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
 
     console.log(`[research] Layer 2 complete: ${verified.length} verified, ${rejected.length} rejected`);
 
-    // Retry loop — if we're short of targetCount, run another Layer 1 batch and verify again
-    // Max 2 retries to avoid excessive API spend
-    const MAX_RETRIES = 2;
+    // ── Phase B3: Retry + expansion ladder ──
+    // Retry up to MAX_RETRIES times. If the pool is exhausted or zero new candidates
+    // come back, WIDEN the ICP progressively instead of giving up.
+    //
+    // Levels: 0 (strict) → 1 (+titles) → 2 (+industries) → 3 (+geo) → 4 (generic B2B)
+    const MAX_RETRIES = 5;
     let retryCount = 0;
+    let expansionLevel = 0;
     const allVerifiedUrls = new Set(verified.map(l => l.linkedin_url).filter(Boolean));
 
     while (verified.length < targetCount && retryCount < MAX_RETRIES) {
       retryCount++;
       const shortfall = targetCount - verified.length;
-      console.log(`[research] Retry ${retryCount}: need ${shortfall} more verified leads`);
+      console.log(`[research] Retry ${retryCount}/${MAX_RETRIES}: need ${shortfall} more verified leads (expansion level ${expansionLevel})`);
 
-      // Fetch fresh candidates using next batch offset
-      const retryOffset = (batchIndex + retryCount) * pickCount;
-      const freshPool = buildQueryPool(effectiveIcp);
+      // Use widened ICP if we've escalated
+      const currentIcp = expansionLevel > 0 ? widenIcp(effectiveIcp, expansionLevel) : effectiveIcp;
+      const freshPool = buildQueryPool(currentIcp);
       const freshSeen = new Set(usedSet);
       const freshUnused = freshPool.filter(q => !freshSeen.has(q.query));
-      const freshPicked = freshUnused.slice(retryOffset % Math.max(freshUnused.length, 1), retryOffset % Math.max(freshUnused.length, 1) + pickCount);
-      const actualPicked = freshPicked.length > 0 ? freshPicked : freshPool.slice(0, Math.min(pickCount, freshPool.length));
+
+      // If the current expansion level has no unused queries, escalate
+      if (freshUnused.length === 0 && expansionLevel < 4) {
+        expansionLevel++;
+        console.log(`[research] Query pool exhausted at level ${expansionLevel - 1} — escalating to level ${expansionLevel}`);
+        retryCount--; // this attempt was wasted, don't count it
+        continue;
+      }
+
+      // Pick next batch of unused queries
+      const actualPicked = freshUnused.slice(0, Math.min(pickCount, freshUnused.length));
 
       const retryDirectQueries = actualPicked.filter(q => q.strategy === 'direct');
-      const retrySignalQueries = actualPicked.filter(q => q.strategy === 'signal' || q.strategy === 'signal_jobs' || q.strategy === 'signal_news');
+      const retrySignalQueries = actualPicked.filter(q =>
+        q.strategy === 'signal' || q.strategy === 'signal_jobs' || q.strategy === 'signal_news' || q.strategy === 'signal_growth'
+      );
 
       const retryResults = await Promise.all([
         ...retryDirectQueries.map(q => strategyDirectPeople(q.query, perQueryLimit).catch(() => [])),
@@ -800,19 +886,34 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       const retryCandidates = retryResults.flat()
         .filter(l => l.linkedin_url && !allVerifiedUrls.has(l.linkedin_url));
 
+      // Always mark queries as used to prevent repeat
+      for (const q of actualPicked) usedSet.add(q.query);
+
       if (retryCandidates.length === 0) {
-        console.log(`[research] Retry ${retryCount}: no new candidates — stopping`);
-        break;
+        console.log(`[research] Retry ${retryCount}: zero new candidates at level ${expansionLevel}`);
+        // Escalate expansion level, but don't count this as a failed retry
+        if (expansionLevel < 4) {
+          expansionLevel++;
+          console.log(`[research] Escalating expansion to level ${expansionLevel}`);
+          retryCount--; // give us another shot at this budget
+          continue;
+        } else {
+          console.log(`[research] Already at max expansion — stopping`);
+          break;
+        }
       }
 
       console.log(`[research] Retry ${retryCount}: verifying ${retryCandidates.length} fresh candidates`);
-      const retryVerification = await verifyBatch(retryCandidates, icp, clientId);
+      const retryVerification = await verifyBatch(retryCandidates, currentIcp || icp, clientId);
       verified.push(...retryVerification.verified.filter(l => !allVerifiedUrls.has(l.linkedin_url)));
       rejected.push(...retryVerification.rejected);
       retryVerification.verified.forEach(l => { if (l.linkedin_url) allVerifiedUrls.add(l.linkedin_url); });
 
-      // Add retry queries to used set
-      for (const q of actualPicked) usedSet.add(q.query);
+      // If this retry still couldn't produce verified leads → escalate
+      if (retryVerification.verified.length === 0 && expansionLevel < 4) {
+        expansionLevel++;
+        console.log(`[research] Zero verified this batch — escalating expansion to level ${expansionLevel}`);
+      }
     }
 
     // Mark verified leads
@@ -850,4 +951,4 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
   }
 }
 
-module.exports = { researchLeads, buildQueryPool, verifyBatch };
+module.exports = { researchLeads, buildQueryPool, verifyBatch, widenIcp };

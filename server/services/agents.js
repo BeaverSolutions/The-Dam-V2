@@ -397,7 +397,207 @@ ${personaContext}${fileContext}${rangerContext}`,
 function stripEmDashes(text) {
   if (!text) return text;
   // Replace em dash with a comma-space for mid-sentence, or just a space
-  return text.replace(/\s*—\s*/g, ', ').replace(/—/g, ' ');
+  return text.replace(/\s*—\s*/g, ', ').replace(/—/g, ' ').replace(/\s*–\s*/g, ', ').replace(/–/g, ' ');
+}
+
+/**
+ * =========================
+ * AUTO-FIX PIPELINE (Phase A)
+ * =========================
+ * Runs BEFORE Enforcer review. Fixes anything that can be fixed deterministically
+ * without damaging the message. Returns the cleaned message + a list of fixes applied.
+ *
+ * Philosophy: Reject → Fix → Retry, not Reject → Drop.
+ * Only BRAND-SAFETY issues are left for the Enforcer to hard-reject.
+ * Quality issues are auto-fixed here so the pipeline keeps flowing.
+ */
+function autoFixMessage(body, { touchNumber = 0, maxWords = 80 } = {}) {
+  if (!body || typeof body !== 'string') {
+    return { body: body || '', fixes: [], fatal: 'empty_body' };
+  }
+
+  const fixes = [];
+  let fixed = body;
+
+  // 1. Em dash / en dash → comma
+  if (/[—–]/.test(fixed)) {
+    fixed = stripEmDashes(fixed);
+    fixes.push('stripped_em_dashes');
+  }
+
+  // 2. Bullet points → merge into sentences
+  if (/^\s*[•\-\*]\s/m.test(fixed)) {
+    fixed = fixed.replace(/^\s*[•\-\*]\s+/gm, '').replace(/\n{2,}/g, '\n\n');
+    fixes.push('removed_bullets');
+  }
+
+  // 3. Strip numbered lists (1. 2. 3.) inside body
+  if (/^\s*\d+[\.\)]\s/m.test(fixed)) {
+    fixed = fixed.replace(/^\s*\d+[\.\)]\s+/gm, '');
+    fixes.push('removed_numbered_list');
+  }
+
+  // 4. Collapse extra whitespace + blank lines
+  fixed = fixed.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+
+  // 5. Strip soft CTA phrases (Day 0 only)
+  if (touchNumber === 0) {
+    const softCtas = [
+      /\bworth a quick chat\b[^.?!]*/gi,
+      /\bhappy to jump on\b[^.?!]*/gi,
+      /\bwould love to connect\b[^.?!]*/gi,
+      /\bkeen to connect\b[^.?!]*/gi,
+      /\blet me know if you'?re open to\b[^.?!]*/gi,
+      /\bopen to a quick\b[^.?!]*/gi,
+    ];
+    let stripped = false;
+    for (const pattern of softCtas) {
+      if (pattern.test(fixed)) {
+        fixed = fixed.replace(pattern, '').replace(/\s+([.?!])/g, '$1').replace(/\s{2,}/g, ' ').trim();
+        stripped = true;
+      }
+    }
+    if (stripped) fixes.push('stripped_soft_cta');
+  }
+
+  // 6. Strip banned phrases (case-insensitive)
+  const bannedLowerList = [
+    'cutting-edge', 'paradigm shift', 'seamless', 'leverage', 'synergy',
+    'game-changer', 'innovative', 'revolutionary', 'transformative', 'delve',
+    'i hope this email finds you well', 'i wanted to reach out', 'unlock',
+    'unleash', 'empower', 'elevate', 'streamline', 'actionable insights',
+    'thought leader', 'disruptive', 'data-driven', 'circle back', 'touch base',
+    'move the needle', 'best-in-class',
+  ];
+  let bannedHit = false;
+  for (const phrase of bannedLowerList) {
+    const re = new RegExp(`\\b${phrase.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}\\b`, 'gi');
+    if (re.test(fixed)) {
+      fixed = fixed.replace(re, '');
+      bannedHit = true;
+    }
+  }
+  if (bannedHit) {
+    fixed = fixed.replace(/\s{2,}/g, ' ').replace(/\s+([.?!,])/g, '$1').trim();
+    fixes.push('stripped_banned_phrases');
+  }
+
+  // 7. Collapse multiple question marks → single
+  if (/\?{2,}/.test(fixed)) {
+    fixed = fixed.replace(/\?{2,}/g, '?');
+    fixes.push('collapsed_question_marks');
+  }
+
+  // 8. Reduce to ONE question (keep the last — usually the CTA question)
+  const questionMatches = fixed.match(/\?/g) || [];
+  if (questionMatches.length > 1) {
+    // Split on sentence boundaries, keep only the last question, convert others to statements
+    const sentences = fixed.split(/(?<=[.?!])\s+/);
+    let lastQuestionIdx = -1;
+    for (let i = sentences.length - 1; i >= 0; i--) {
+      if (sentences[i].includes('?')) { lastQuestionIdx = i; break; }
+    }
+    for (let i = 0; i < sentences.length; i++) {
+      if (i !== lastQuestionIdx && sentences[i].includes('?')) {
+        sentences[i] = sentences[i].replace(/\?/g, '.');
+      }
+    }
+    fixed = sentences.join(' ');
+    fixes.push('reduced_to_one_question');
+  }
+
+  // 9. Word count trim (preserve greeting + sign-off)
+  // Strip greeting "Hi Name," and sign-off "Regards, Name" for counting
+  const bodyOnly = fixed
+    .replace(/^Hi\s+[\w\s]{1,40}?,\s*/i, '')
+    .replace(/\s*Regards,?\s*[\s\S]*$/i, '')
+    .replace(/\s*Best,?\s*[\s\S]*$/i, '')
+    .replace(/\s*Cheers,?\s*[\s\S]*$/i, '')
+    .trim();
+  const words = bodyOnly.split(/\s+/).filter(Boolean);
+  if (words.length > maxWords) {
+    // Trim from the middle: keep opening 2 sentences + closing sentence (usually has the question)
+    const sentences = bodyOnly.split(/(?<=[.?!])\s+/).filter(Boolean);
+    if (sentences.length >= 3) {
+      const questionSentIdx = sentences.findIndex(s => s.includes('?'));
+      const closing = questionSentIdx >= 0 ? sentences[questionSentIdx] : sentences[sentences.length - 1];
+      let trimmed = [sentences[0], sentences[1], closing].join(' ');
+      const trimmedWords = trimmed.split(/\s+/).filter(Boolean);
+      if (trimmedWords.length > maxWords) {
+        trimmed = trimmedWords.slice(0, maxWords).join(' ');
+      }
+      // Rebuild with greeting + sign-off
+      const greetingMatch = fixed.match(/^Hi\s+[\w\s]{1,40}?,/i);
+      const signoffMatch = fixed.match(/(Regards|Best|Cheers),?\s*[\s\S]*$/i);
+      fixed = [
+        greetingMatch ? greetingMatch[0] : 'Hi,',
+        '',
+        trimmed,
+        '',
+        signoffMatch ? signoffMatch[0] : 'Regards,',
+      ].join('\n');
+      fixes.push(`trimmed_from_${words.length}_to_${trimmed.split(/\s+/).length}_words`);
+    }
+  }
+
+  // 10. Final whitespace cleanup
+  fixed = fixed.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').trim();
+
+  return { body: fixed, fixes, fatal: null };
+}
+
+/**
+ * Hard brand-safety checks — these CANNOT be auto-fixed. Fail = drop.
+ * Everything else should be auto-fixed by autoFixMessage().
+ */
+function brandSafetyCheck(body, leadContext = {}) {
+  if (!body) return { safe: false, reason: 'empty_body' };
+
+  // 1. Placeholder text never got filled
+  if (/\[(name|company|first_name|last_name|title)\]/i.test(body) ||
+      /\{\{[^}]+\}\}/.test(body) ||
+      /<insert[^>]*>/i.test(body)) {
+    return { safe: false, reason: 'unfilled_placeholder' };
+  }
+
+  // 2. Prompt injection leaked into message
+  if (/ignore previous instructions|system:|you are now/i.test(body)) {
+    return { safe: false, reason: 'prompt_injection_detected' };
+  }
+
+  // 3. Credential or API key shape
+  if (/\b(sk-[a-zA-Z0-9]{20,}|api[_-]?key|bearer\s+[a-zA-Z0-9]{20,})\b/i.test(body)) {
+    return { safe: false, reason: 'credential_leak' };
+  }
+
+  // 4. Wrong name mismatch (if lead context provided)
+  if (leadContext?.name) {
+    const firstName = leadContext.name.trim().split(/\s+/)[0];
+    if (firstName && firstName.length >= 3) {
+      // Look for "Hi <OtherName>," pattern and check it matches
+      const greetMatch = body.match(/^Hi\s+(\w+)/i);
+      if (greetMatch && greetMatch[1].toLowerCase() !== firstName.toLowerCase()) {
+        return { safe: false, reason: `name_mismatch: greeted "${greetMatch[1]}" but lead is "${firstName}"` };
+      }
+    }
+  }
+
+  // 5. Fabricated growth/funding claims without data (heuristic)
+  if (leadContext && !leadContext.signal && !leadContext.why_now) {
+    const fabricationPatterns = [
+      /\brecently raised\b/i,
+      /\bjust closed (a|your) funding\b/i,
+      /\bimpressive \d+% growth\b/i,
+      /\bcongrats on (your|the) (series|round|raise)\b/i,
+    ];
+    for (const p of fabricationPatterns) {
+      if (p.test(body)) {
+        return { safe: false, reason: 'fabricated_claim' };
+      }
+    }
+  }
+
+  return { safe: true };
 }
 
 /**
@@ -474,6 +674,40 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
     metadata: { message_id },
   });
 
+  // ── Phase A Step 1: Brand-safety hard check (NOT fixable) ──
+  const safety = brandSafetyCheck(message_body, lead_context);
+  if (!safety.safe) {
+    console.warn(`[enforcer] HARD REJECT (brand-safety): ${safety.reason}`);
+    return {
+      message_id,
+      approved: false,
+      decision: 'reject',
+      score: 0,
+      notes: `Brand safety violation: ${safety.reason}`,
+      issues: [safety.reason],
+      suggestions: [],
+      brand_safety_failure: true,
+    };
+  }
+
+  // ── Phase A Step 2: Auto-fix quality issues ──
+  const touchNumber = lead_context?.touch_number || 0;
+  const fixed = autoFixMessage(message_body, { touchNumber, maxWords: 80 });
+  const fixedBody = fixed.body;
+  const fixesApplied = fixed.fixes;
+
+  if (fixesApplied.length > 0) {
+    console.log(`[enforcer] Auto-fixed: ${fixesApplied.join(', ')}`);
+    await logsService.createLog(clientId, {
+      agent: 'ranger',
+      action: 'message_autofixed',
+      target_type: 'message',
+      target_id: message_id,
+      metadata: { fixes: fixesApplied },
+    }).catch(() => {});
+  }
+
+  // ── Phase A Step 3: Claude scores the FIXED version ──
   if (callAgent) {
     try {
       const persona = await getClientPersona(clientId);
@@ -486,17 +720,31 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
 
       const result = await callAgent(
         'ranger',
-        `Review this message:\n\n${leadContextStr}MESSAGE:\n${message_body}${personaContext}`,
+        `Review this message:\n\n${leadContextStr}MESSAGE:\n${fixedBody}${personaContext}`,
         { message_id }
       );
 
       // Normalise new format { decision, score, breakdown, feedback, suggested_edit, reject_reason }
       // to include approved: boolean for backward compat with pipeline code
       if (result?.decision !== undefined) {
-        const approved = result.decision === 'approve' || result.decision === 'approve_with_edits';
+        // ── Phase A Step 4: Score floor lowered. Accept 40+ after auto-fix ──
+        // Rationale: if we auto-fixed the mechanical issues, a 40+ score is a
+        // message worth sending. Only hard brand-safety issues (checked above)
+        // can kill a message now.
+        let approved = result.decision === 'approve' || result.decision === 'approve_with_edits';
+        const score = result.score || 0;
+        if (!approved && score >= 40 && fixesApplied.length > 0) {
+          // Post-autofix rescue: fixes applied + score passes floor → approve
+          approved = true;
+          result.decision = 'approve_with_edits';
+          result.feedback = `${result.feedback || ''} [Auto-rescued: fixes=${fixesApplied.join(',')}, score=${score}]`.trim();
+        }
+
         return {
           ...result,
           approved,
+          body: fixedBody, // ← return the fixed body so caller saves the cleaned version
+          fixes_applied: fixesApplied,
           notes: result.feedback || result.reject_reason || null,
           issues: result.reject_reason ? [result.reject_reason] : [],
           suggestions: result.suggested_edit ? [result.suggested_edit] : [],
@@ -504,21 +752,38 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
       }
       // Legacy format
       if (result?.approved !== undefined) {
-        return result;
+        return { ...result, body: fixedBody, fixes_applied: fixesApplied };
       }
     } catch (err) {
       console.warn('[agents] Ranger failed:', err.message);
-      await logMistake(clientId, 'ranger', 'Claude call failed during QA review', err.message, 'Ranger fell back to default approval — investigate Claude API');
+      await logMistake(clientId, 'ranger', 'Claude call failed during QA review', err.message, 'Ranger fell back to auto-fix only — investigate Claude API');
+      // ── Phase A Step 5: Enforcer fail-OPEN when auto-fix already ran ──
+      // If auto-fix made changes, the message is mechanically clean.
+      // Push to approval queue with a note instead of blocking.
+      return {
+        message_id,
+        approved: true,
+        decision: 'approve_with_edits',
+        score: 60,
+        body: fixedBody,
+        fixes_applied: fixesApplied,
+        notes: `Enforcer unavailable — auto-fix applied (${fixesApplied.join(',') || 'no changes'}), manual review recommended`,
+        issues: [],
+        suggestions: [],
+      };
     }
   }
 
+  // No Claude agent available — return auto-fixed body as approved
   return {
     message_id,
-    approved: false,
-    decision: 'error',
-    score: 0,
-    notes: 'Claude unavailable — manual review required',
-    issues: ['Enforcer could not reach Claude API. Message held for manual review.'],
+    approved: true,
+    decision: 'approve',
+    score: 60,
+    body: fixedBody,
+    fixes_applied: fixesApplied,
+    notes: 'Auto-fix only (Claude agent not configured)',
+    issues: [],
     suggestions: [],
   };
 }
@@ -887,16 +1152,167 @@ Return JSON only: {"body":"fixed message body including greeting and sign-off","
 }
 
 /**
+ * Phase C helper: run the Sales + Enforcer pipeline on leads that were already
+ * saved by signal hunt. Skips research, Captain gates, and Hunter enrichment.
+ * Returns a summary compatible with directorExecute.
+ */
+async function processExistingLeadsPipeline(clientId, plan_id, leads) {
+  await logsService.createLog(clientId, {
+    agent: 'director',
+    action: 'signal_pipeline_executing',
+    metadata: { plan_id, lead_count: leads.length },
+  });
+
+  let approvedCount = 0;
+  let rejectedCount = 0;
+  let messagesDrafted = 0;
+
+  for (const lead of leads) {
+    try {
+      // Build Sales Beaver context from the signal metadata
+      const meta = lead.metadata || {};
+      const contextParts = [
+        `Name: ${lead.name}`,
+        `Company: ${lead.company}`,
+        `Title: ${lead.title || 'Unknown'}`,
+      ];
+      if (meta.signal)   contextParts.push(`Signal (why reaching out now): ${meta.signal}`);
+      if (meta.why_now)  contextParts.push(`Why now: ${meta.why_now}`);
+      if (meta.angle)    contextParts.push(`Angle to lead with: ${meta.angle}`);
+      if (meta.signal_type) contextParts.push(`Signal type: ${meta.signal_type}`);
+
+      const channel = lead.email ? 'email' : 'linkedin';
+      const salesResult = await salesGenerate(clientId, {
+        lead_id: lead.id,
+        channel,
+        context: contextParts.join('\n'),
+      });
+
+      if (!salesResult?.body) {
+        console.warn(`[signal-pipeline] Sales draft failed for ${lead.name}`);
+        continue;
+      }
+
+      // Insert message
+      const { rows: [msg] } = await pool.query(
+        `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, metadata)
+         VALUES ($1, $2, $3, $4, $5, 'pending_ranger', $6)
+         RETURNING *`,
+        [clientId, lead.id, channel, salesResult.subject || null, salesResult.body,
+         JSON.stringify({ source: 'signal_hunt', signal: meta.signal })]
+      );
+      messagesDrafted++;
+
+      // Run auto-fix + Enforcer
+      const fixed = autoFixMessage(msg.body, { touchNumber: 0, maxWords: 80 });
+      if (fixed.fixes.length > 0) {
+        await pool.query(
+          `UPDATE messages SET body = $1 WHERE id = $2`,
+          [fixed.body, msg.id]
+        );
+      }
+
+      const safety = brandSafetyCheck(fixed.body, {
+        name: lead.name, company: lead.company, title: lead.title,
+        signal: meta.signal, why_now: meta.why_now,
+      });
+
+      if (!safety.safe) {
+        await pool.query(
+          `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1 WHERE id = $2`,
+          [`Brand safety: ${safety.reason}`, msg.id]
+        );
+        rejectedCount++;
+        continue;
+      }
+
+      let rangerResult;
+      try {
+        rangerResult = await rangerReview(clientId, {
+          message_id: msg.id,
+          message_body: fixed.body,
+          lead_context: {
+            name: lead.name, company: lead.company, title: lead.title,
+            signal: meta.signal, angle: meta.angle, why_now: meta.why_now,
+          },
+        });
+      } catch (err) {
+        // Fail-open: auto-fix was applied, let it through
+        rangerResult = { approved: true, score: 55, notes: 'Enforcer unavailable — auto-fix applied', body: fixed.body };
+      }
+
+      const finalBody = rangerResult?.body || fixed.body;
+
+      if (rangerResult?.approved) {
+        await pool.query(
+          `UPDATE messages SET body = $1, status = 'pending_approval', ranger_score = $2, ranger_notes = $3 WHERE id = $4`,
+          [finalBody, rangerResult.score || 70, rangerResult.notes || 'Signal-sourced, approved', msg.id]
+        );
+        await pool.query(
+          `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'signal_hunt')`,
+          [clientId, msg.id]
+        );
+        approvedCount++;
+      } else {
+        await pool.query(
+          `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1 WHERE id = $2`,
+          [rangerResult?.notes || 'Rejected by Enforcer', msg.id]
+        );
+        rejectedCount++;
+      }
+    } catch (err) {
+      console.error(`[signal-pipeline] Error processing ${lead.name}:`, err.message);
+    }
+  }
+
+  await logsService.createLog(clientId, {
+    agent: 'director',
+    action: 'signal_pipeline_completed',
+    metadata: { plan_id, leads: leads.length, drafted: messagesDrafted, approved: approvedCount, rejected: rejectedCount },
+  });
+
+  return {
+    plan_id,
+    status: 'completed',
+    leads: leads.length,
+    summary: { leads_found: leads.length, messages_drafted: messagesDrafted, approved: approvedCount, rejected: rejectedCount },
+    source: 'signal_hunt',
+  };
+}
+
+/**
  * =========================
  * DIRECTOR — EXECUTE (full pipeline)
  * =========================
  */
-async function directorExecute(clientId, { plan_id, command, batchIndex = 0, limit }) {
+async function directorExecute(clientId, { plan_id, command, batchIndex = 0, limit, use_existing_leads = null }) {
   await logsService.createLog(clientId, {
     agent: 'director',
     action: 'plan_executing',
-    metadata: { plan_id, batchIndex },
+    metadata: { plan_id, batchIndex, signal_sourced: !!use_existing_leads },
   });
+
+  // ── Phase C: Signal-sourced path ─────────────────────────────
+  // If use_existing_leads is provided, skip research entirely and feed those
+  // lead IDs straight to Sales Beaver + Enforcer. Signal detection IS the gate.
+  if (use_existing_leads && Array.isArray(use_existing_leads) && use_existing_leads.length > 0) {
+    console.log(`[director] Signal-sourced mode: processing ${use_existing_leads.length} pre-saved leads`);
+    try {
+      const { rows: signalLeads } = await pool.query(
+        `SELECT * FROM leads WHERE client_id = $1 AND id = ANY($2::uuid[]) AND deleted_at IS NULL`,
+        [clientId, use_existing_leads]
+      );
+      if (signalLeads.length === 0) {
+        console.warn('[director] use_existing_leads returned no rows, falling through to cold research');
+      } else {
+        // Jump directly to Sales/Enforcer pipeline using these leads
+        return await processExistingLeadsPipeline(clientId, plan_id, signalLeads);
+      }
+    } catch (err) {
+      console.error('[director] Signal-sourced path failed:', err.message);
+      // fall through to cold research
+    }
+  }
 
   // ── Diagnostics: track counts at each filtering stage ──
   const diagnostics = {
@@ -1082,29 +1498,26 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // Philosophy: 3 verified leads > 20 garbage leads
   // ══════════════════════════════════════════════════════════════
 
-  // ── Gate 1: Title must match ICP (strict, not permissive) ──
-  const ICP_TITLES = /founder|ceo|coo|cmo|cto|managing director|\bmd\b|co-founder|cofounder|head of|vp |vice president|owner|principal|partner/i;
-  const EXCLUDED_TITLES = /intern|junior|assistant|coordinator|executive assistant|test|qa |quality assurance|analyst|associate|trainee|admin|receptionist|support|talent acquisition|recruiter|recruitment|human resource|\bhr\b|procurement|clerk|officer|executive(?!\s*(director|officer|chairman))/i;
+  // ── Gate 1: Title check (Phase B2: loosened — prefer, don't require) ──
+  // Philosophy: 3 real leads > 20 garbage, BUT "real" != "perfect title match".
+  // If the title is clearly wrong (intern, assistant, support, recruiter) → reject.
+  // If the title is missing or non-standard → ACCEPT, let downstream filters decide.
+  // Serper often returns profiles without titles, or titles in unusual formats.
+  const EXCLUDED_TITLES = /intern|\bjunior\b|executive assistant|test engineer|\bqa\b|quality assurance|trainee|receptionist|talent acquisition|recruiter|recruitment specialist|human resource|clerk/i;
 
   const titledLeads = rawLeads.filter(lead => {
     const title = lead.title || '';
-    // Also check the name field — Serper sometimes puts title info in the name
     const allText = `${title} ${lead.name || ''}`;
 
-    // Reject explicitly excluded titles
+    // Reject only CLEARLY excluded titles. Everything else passes.
     if (EXCLUDED_TITLES.test(allText)) {
       console.warn(`[captain] REJECT title: "${title}" (${lead.name} at ${lead.company}) — excluded role`);
       logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_title', metadata: { name: lead.name, title, reason: 'excluded_role' } }).catch(() => {});
       return false;
     }
 
-    // Require ICP title match — no title or non-matching title = reject
-    if (!ICP_TITLES.test(allText)) {
-      console.warn(`[captain] REJECT title: "${title}" (${lead.name}) — not a decision-maker`);
-      logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_title', metadata: { name: lead.name, title, reason: 'not_decision_maker' } }).catch(() => {});
-      return false;
-    }
-
+    // No title? Accept — let company/industry filter catch obvious non-fits.
+    // Non-standard title? Accept — Sales Beaver uses role-based hooks anyway.
     return true;
   });
 
@@ -1167,22 +1580,21 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     }
     const locationText = [lead.location || '', lead.snippet || ''].join(' ');
 
-    // Geography check (KL-focused: reject foreign, soft-check Malaysia confirmation)
+    // Geography check (Phase B2: loosened — hard-reject foreign, trust search for rest)
+    // Serper gl:'my' already biases toward Malaysian results. Second-guessing that
+    // via regex on snippets is circular validation and kills valid leads.
     if (isKLFocused) {
-      // Hard reject: if we detect a clearly foreign location → reject
+      // Only hard-reject if the lead explicitly shows they're based in a foreign country.
+      // Passive Malaysia-confirmation is NOT required — trust the search bias.
       if (NON_TARGET_GEO.test(allText)) {
-        console.warn(`[captain] REJECT geo: ${lead.name} at ${lead.company} — foreign location detected`);
-        logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_geo', metadata: { name: lead.name, company: lead.company, reason: 'foreign_location' } }).catch(() => {});
-        return false;
+        // Exception: if Malaysia is ALSO present (e.g. dual-city exec), allow
+        if (!MALAYSIA_CONFIRM.test(allText)) {
+          console.warn(`[captain] REJECT geo: ${lead.name} at ${lead.company} — foreign location`);
+          logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_geo', metadata: { name: lead.name, company: lead.company, reason: 'foreign_location' } }).catch(() => {});
+          return false;
+        }
       }
-      // Soft check: if command already targets Malaysia (e.g. "founders in KL"), trust the search
-      // Only hard-reject for no-Malaysia-confirmation when the command doesn't specify geography
-      const commandMentionsMY = MALAYSIA_CONFIRM.test(command || '');
-      if (!commandMentionsMY && !MALAYSIA_CONFIRM.test(allText)) {
-        console.warn(`[captain] REJECT geo: ${lead.name} at ${lead.company} — no Malaysia confirmation in any field`);
-        logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_geo', metadata: { name: lead.name, company: lead.company, reason: 'no_malaysia_confirmation' } }).catch(() => {});
-        return false;
-      }
+      // No foreign signal + no Malaysia signal = ACCEPT. Trust the search.
     }
 
     // Industry exclusion
@@ -1410,7 +1822,9 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // Channels: email, linkedin, instagram — all unique per lead.
   // Ranger retry: max 2 Sales rewrites. On 3rd attempt → Captain decides (skip or manual).
 
-  const leadsToProcess = savedLeads.slice(0, 10);
+  // Phase B1: Removed hardcoded slice(0, 10) — draft for every saved lead.
+  // With auto-fix and loosened gates, more leads survive to Sales drafting.
+  const leadsToProcess = savedLeads;
   const savedMessages = [];
   const MAX_RANGER_RETRIES = 2; // 2 Sales rewrites max; 3rd attempt = Captain decision
 
@@ -1576,49 +1990,50 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     await updateExecStatus(clientId, plan_id, execStatus);
   }
 
-  // ── Ranger review pipeline per message (2-rejection rule + Captain gate) ──
+  // ── Ranger review pipeline per message (Phase A: auto-fix first, then AI review) ──
   async function runRangerPipeline(lead, msg) {
-    // Strip em dashes immediately — Sales Beaver output may still contain them
-    let currentBody = stripEmDashes(msg.body);
+    // ── Phase A: Auto-fix pre-pass BEFORE the Enforcer runs ──
+    // Reject → Fix → Retry, not Reject → Drop.
+    // autoFixMessage handles em dash, bullets, word count, soft CTAs, banned phrases,
+    // multi-questions. Only brand-safety issues reach the Enforcer as hard reject.
+    const touchNumber = msg.touch_number || 0;
+    const preFixResult = autoFixMessage(msg.body || '', { touchNumber, maxWords: 80 });
+    let currentBody = preFixResult.body;
     let currentSubject = stripEmDashes(msg.subject);
+
+    if (preFixResult.fixes.length > 0) {
+      console.log(`[pipeline] Auto-fixed message ${msg.id}: ${preFixResult.fixes.join(', ')}`);
+      // Persist the fixed body immediately so we review the clean version
+      await pool.query(
+        `UPDATE messages SET body = $1, metadata = jsonb_set(COALESCE(metadata, '{}'), '{autofix}', $2::jsonb)
+         WHERE id = $3 AND client_id = $4`,
+        [currentBody, JSON.stringify(preFixResult.fixes), msg.id, clientId]
+      );
+    }
 
     execStatus.beavers.enforcer.status = 'working';
     execStatus.phase = 'enforcer';
     execStatus.beavers.enforcer.task = `Checking ${msg.channel} for ${msg.lead_name}`;
     await updateExecStatus(clientId, plan_id, execStatus);
-
-    // ── Server-side hard gates (fast pre-filter before AI Enforcer) ──
-    const gateFailures = [];
-    if (currentBody) {
-      // Strip greeting (single or multi-word first name) and sign-off before word count
-      const bodyText = currentBody
-        .replace(/^Hi\s+[\w\s]{1,40}?,\s*/i, '')  // "Hi Name," or "Hi First Last,"
-        .replace(/\s*Regards,?\s*.*/is, '')          // everything from "Regards," onwards
-        .replace(/\s*Best,?\s*.*/is, '')             // "Best," sign-off variant
-        .trim();
-      const wordCount = bodyText.trim().split(/\s+/).length;
-      if (msg.channel === 'email' && wordCount > 80) gateFailures.push(`Word count ${wordCount} exceeds 80`);
-      const questionCount = (currentBody.match(/\?/g) || []).length;
-      if (questionCount > 1) gateFailures.push(`${questionCount} questions (max 1)`);
-      if (/\u2014/.test(currentBody)) gateFailures.push('Em dash detected');
-      if (/^[\s]*[-\u2022*]\s/m.test(currentBody)) gateFailures.push('Bullet points detected');
-    }
-
     execStatus.beavers.enforcer.reviewed++;
 
-    if (gateFailures.length > 0) {
-      // Hard gate failed — reject immediately, no retries
+    // ── Brand-safety hard check (unfixable — drop if any hit) ──
+    const safety = brandSafetyCheck(currentBody, {
+      name: lead.name, company: lead.company, title: lead.title,
+      signal: lead.metadata?.signal, why_now: lead.metadata?.why_now,
+    });
+    if (!safety.safe) {
       await pool.query(
         `UPDATE messages SET ranger_score = 0, ranger_notes = $1, status = 'ranger_rejected', updated_at = NOW()
          WHERE id = $2 AND client_id = $3`,
-        [`Server gate failures: ${gateFailures.join('; ')}`, msg.id, clientId]
+        [`Brand safety: ${safety.reason}`, msg.id, clientId]
       );
       await logsService.createLog(clientId, {
         agent: 'enforcer_beaver',
         action: 'message_rejected',
         target_type: 'message',
         target_id: msg.id,
-        metadata: { gates: gateFailures, channel: msg.channel, method: 'server_gates' },
+        metadata: { reason: safety.reason, channel: msg.channel, method: 'brand_safety' },
       });
       rejectedCount++;
       execStatus.beavers.enforcer.rejected++;
@@ -1626,7 +2041,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       return;
     }
 
-    // ── Server gates passed — now run AI Enforcer review (fail-closed) ──
+    // ── AI Enforcer review (fail-OPEN — auto-fix already cleaned mechanics) ──
     let rangerResult;
     try {
       rangerResult = await rangerReview(clientId, {
@@ -1640,20 +2055,22 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           angle: lead.metadata?.angle,
           friction: lead.metadata?.friction,
           why_now: lead.metadata?.why_now,
+          touch_number: touchNumber,
         },
       });
+      // Enforcer may have further polished the body — use its returned version
+      if (rangerResult?.body) currentBody = rangerResult.body;
     } catch (err) {
-      console.error('[pipeline] AI Enforcer unavailable, blocking message (fail-closed):', err.message);
-      await pool.query(
-        `UPDATE messages SET ranger_score = 0, ranger_notes = $1, status = 'ranger_rejected', updated_at = NOW()
-         WHERE id = $2 AND client_id = $3`,
-        ['AI Enforcer unavailable — message blocked (fail-closed)', msg.id, clientId]
-      );
-      await logMistake(clientId, 'enforcer_beaver', 'Claude call failed during Enforcer review', err.message, 'Enforcer fell back to reject — investigate Claude API');
-      rejectedCount++;
-      execStatus.beavers.enforcer.rejected++;
-      execStatus.beavers.enforcer.status = 'done';
-      return;
+      console.warn('[pipeline] AI Enforcer unavailable, approving auto-fixed version (fail-open):', err.message);
+      // Auto-fix already cleaned mechanics. Ship it to approval queue with low trust score.
+      rangerResult = {
+        approved: true,
+        decision: 'approve_with_edits',
+        score: 55,
+        notes: `Enforcer unavailable — auto-fix applied (${preFixResult.fixes.join(',') || 'none'})`,
+        breakdown: null,
+      };
+      await logMistake(clientId, 'enforcer_beaver', 'Claude call failed during Enforcer review', err.message, 'Enforcer fell back to auto-fix + manual review');
     }
 
     if (!rangerResult?.approved) {
@@ -1776,27 +2193,12 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       }
     }
 
-    // ── Code-level Enforcer gates — catch anything Claude missed ──
-    const codeGateResult = codeEnforcerGates(currentBody, msg.touch_number || 0);
-    if (!codeGateResult.passed) {
-      console.warn(`[enforcer] Code gate OVERRIDE for message ${msg.id}: ${codeGateResult.reason}`);
-      await pool.query(
-        `UPDATE messages SET body = $1, subject = $2, ranger_score = 0, ranger_notes = $3,
-         status = 'ranger_rejected', updated_at = NOW()
-         WHERE id = $4 AND client_id = $5`,
-        [currentBody, currentSubject, `Code gate: ${codeGateResult.reason}`, msg.id, clientId]
-      );
-      await logsService.createLog(clientId, {
-        agent: 'enforcer_beaver',
-        action: 'message_rejected',
-        target_type: 'message',
-        target_id: msg.id,
-        metadata: { channel: msg.channel, reason: codeGateResult.reason, method: 'code_enforcer_gate' },
-      });
-      rejectedCount++;
-      execStatus.beavers.enforcer.rejected++;
-      execStatus.beavers.enforcer.status = 'done';
-      return;
+    // ── Final pre-save auto-fix pass (catches anything that slipped through) ──
+    // Phase A: we no longer reject here. We run autoFixMessage again as a safety net.
+    const finalFix = autoFixMessage(currentBody, { touchNumber, maxWords: 80 });
+    if (finalFix.fixes.length > 0) {
+      console.log(`[enforcer] Final pass fixes for ${msg.id}: ${finalFix.fixes.join(', ')}`);
+      currentBody = finalFix.body;
     }
 
     // ── AI Enforcer approved + code gates passed — push to approval queue ──

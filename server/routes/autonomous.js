@@ -586,7 +586,12 @@ async function _runAutonomousKickoffInner(clientId) {
             [
               clientId, followUp.lead_id, draft.subject || null, cleanBody,
               JSON.stringify({ ...draft, is_followup: true, touch_number: followUp.touch_number, gate_failures: gateFailures }),
-              originalChannel, followUp.touch_number === 2 ? 2 : followUp.touch_number === 3 ? 4 : 7,
+              originalChannel,
+              followUp.touch_number === 2 ? 2
+                : followUp.touch_number === 3 ? 5
+                : followUp.touch_number === 4 ? 10
+                : followUp.touch_number === 5 ? 18
+                : followUp.touch_number === 6 ? 30 : 7,
             ]
           );
           await pool.query(`UPDATE followup_queue SET status = 'skipped', message_id = $1 WHERE id = $2`, [savedMsg.id, followUp.id]);
@@ -601,7 +606,12 @@ async function _runAutonomousKickoffInner(clientId) {
           [
             clientId, followUp.lead_id, draft.subject || null, cleanBody,
             JSON.stringify({ ...draft, is_followup: true, touch_number: followUp.touch_number }),
-            originalChannel, followUp.touch_number === 2 ? 2 : followUp.touch_number === 3 ? 4 : 7,
+            originalChannel,
+            followUp.touch_number === 2 ? 2
+              : followUp.touch_number === 3 ? 5
+              : followUp.touch_number === 4 ? 10
+              : followUp.touch_number === 5 ? 18
+              : followUp.touch_number === 6 ? 30 : 7,
           ]
         );
 
@@ -634,9 +644,9 @@ async function _runAutonomousKickoffInner(clientId) {
           [enforcerApproved ? 'sent' : 'skipped', savedMsg.id, followUp.id]
         );
 
-        // Calculate next follow-up date
+        // Calculate next follow-up date (extended to touch 6 per Phase D)
         const nextTouch = followUp.touch_number + 1;
-        const nextDate = nextTouch <= 4
+        const nextDate = nextTouch <= 6
           ? (await pool.query(`SELECT scheduled_for FROM followup_queue WHERE lead_id=$1 AND touch_number=$2 AND client_id=$3`, [followUp.lead_id, nextTouch, clientId])).rows[0]?.scheduled_for
           : null;
 
@@ -728,44 +738,139 @@ async function _runAutonomousKickoffInner(clientId) {
     gap: remainingGap, sent: sentAfterFollowUps, target, brief: brief.substring(0, 200),
   });
 
-  // ── Loop scheduler ────────────────────────────────────────
-  // Captain Beaver keeps batching until the daily target is met.
-  // Each batch sources up to 10 leads. Recalculates gap after each pass.
-  // Safety cap: 8 batches max (~80 leads) to prevent runaway costs.
-  const MAX_BATCHES = 8;
-  const BATCH_SIZE = 10;
+  // ── Phase C: Signal-first pass (runs BEFORE cold research) ──────────
+  // Signal is the input, not a filter. Run signal hunt first and feed the
+  // results straight into Sales/Enforcer. Whatever gap remains after signal
+  // is filled by the cold research loop below.
+  try {
+    const { runSignalHunt, saveSignalLeads } = require('../services/signalHunt');
+    const signalTarget = Math.min(remainingGap, 30); // don't exceed daily gap
+    console.log(`[Autonomous] Phase C: Running signal hunt for up to ${signalTarget} P1/P2 leads`);
 
-  for (let batch = 1; batch <= MAX_BATCHES; batch++) {
-    // Recalculate live gap: count sent + pending_approval today
+    const signalLeads = await runSignalHunt(clientId, { maxLeads: signalTarget, icp });
+    if (signalLeads.length > 0) {
+      const saved = await saveSignalLeads(clientId, signalLeads);
+      console.log(`[Autonomous] Signal hunt saved ${saved.length} pre-qualified leads (P1=${saved.filter(l => l.signal_tier === 'P1').length})`);
+
+      // Trigger directorExecute with signal-sourced leads already in the DB.
+      // The command is a signal-specific brief so Captain gates are naturally
+      // bypassed (leads were pre-qualified by signal detection).
+      if (saved.length > 0) {
+        const signalBrief = `SIGNAL-SOURCED BATCH: Process ${saved.length} pre-qualified leads already saved with P1/P2 signals. These are not cold — they have real buying triggers (hiring, funding, expansion). Draft outreach that references the specific signal for each lead. Do NOT re-run research, use the leads already saved today.`;
+        try {
+          await directorExecute(clientId, {
+            plan_id: uuidv4(),
+            command: signalBrief,
+            batchIndex: 0,
+            limit: saved.length,
+            use_existing_leads: saved.map(l => l.id), // NEW: hint to directorExecute
+          });
+        } catch (err) {
+          console.warn('[Autonomous] Signal batch directorExecute failed:', err.message);
+        }
+      }
+    } else {
+      console.log('[Autonomous] Signal hunt returned 0 leads — falling through to cold research');
+    }
+  } catch (err) {
+    console.warn('[Autonomous] Signal hunt phase failed, continuing with cold research:', err.message);
+  }
+
+  // ── Loop scheduler (Phase B1 fix) ────────────────────────────
+  // Gap is SENT-based, not sent+pending. If messages stack up in pending_approval
+  // we either auto-approve high-score messages OR alert MJ — we do NOT treat
+  // pending as "done". Target: 80 actually-sent messages per day.
+  //
+  // Ceiling is a circuit breaker, not a target:
+  //   - PENDING_CEILING: if > PENDING_CEILING messages waiting approval, alert and stop
+  //     (MJ is the bottleneck, more drafting won't help)
+  //   - HARD_CEILING: absolute max batches to cap API spend
+  //   - ZERO_STREAK: 3 consecutive batches with zero new leads → stop (pool exhausted)
+  const HARD_CEILING = 15;
+  const PENDING_CEILING = 30;
+  const BATCH_SIZE = 20; // raised from 10 — auto-fix means more drafts survive
+  let zeroStreak = 0;
+
+  for (let batch = 1; batch <= HARD_CEILING; batch++) {
+    // Recalculate live counts
     const { rows: liveCount } = await pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE status = 'sent'            AND DATE(COALESCE(sent_at, created_at)) = $2) AS sent,
-         COUNT(*) FILTER (WHERE status = 'pending_approval' AND DATE(created_at) = $2)                   AS pending
+         COUNT(*) FILTER (WHERE status = 'sent'             AND DATE(COALESCE(sent_at, created_at)) = $2) AS sent,
+         COUNT(*) FILTER (WHERE status = 'pending_approval' AND DATE(created_at) = $2)                     AS pending,
+         COUNT(*) FILTER (WHERE status = 'approved'         AND DATE(created_at) = $2)                     AS approved_awaiting_send
        FROM messages WHERE client_id = $1`,
       [clientId, today]
     );
-    const liveSent    = parseInt(liveCount[0].sent)    || 0;
-    const livePending = parseInt(liveCount[0].pending) || 0;
-    const liveGap     = target - liveSent - livePending;
+    const liveSent      = parseInt(liveCount[0].sent) || 0;
+    const livePending   = parseInt(liveCount[0].pending) || 0;
+    const liveApproved  = parseInt(liveCount[0].approved_awaiting_send) || 0;
+    const inFlight      = livePending + liveApproved;  // count as "in the queue, not yet sent"
+    const liveGap       = target - liveSent;           // ← SENT-based gap
 
     if (liveGap <= 0) {
-      console.log(`[Autonomous] Client ${clientId} batch ${batch}: target met (${liveSent} sent + ${livePending} pending). Stopping loop.`);
-      await logAction(clientId, 'director', 'kpi_target_met', 'system', null, { batch, liveSent, livePending, target });
+      console.log(`[Autonomous] Client ${clientId} batch ${batch}: SENT target met (${liveSent}/${target}). Stopping.`);
+      await logAction(clientId, 'director', 'kpi_target_met', 'system', null, { batch, liveSent, target });
       break;
     }
 
-    console.log(`[Autonomous] Client ${clientId} batch ${batch}/${MAX_BATCHES}: gap=${liveGap}, sent=${liveSent}, pending=${livePending}`);
+    // Circuit breaker: if approval queue is swamped, stop drafting and alert
+    if (livePending >= PENDING_CEILING) {
+      console.warn(`[Autonomous] Client ${clientId} batch ${batch}: approval queue swamped (${livePending} pending). Alerting + stopping drafts.`);
+      await logAction(clientId, 'director', 'approval_queue_swamped', 'system', null, {
+        batch, livePending, liveApproved, liveSent, target,
+        message: `${livePending} messages waiting for MJ approval — stop drafting, clear the queue`,
+      });
+      // Alert via Discord bot (sendTelegramAlert not available in this codebase)
+      try {
+        const { postDiscordAlert } = require('../services/discordBot');
+        if (postDiscordAlert) {
+          await postDiscordAlert('approval queue swamped', `${livePending} messages waiting approval for client ${clientId}. Pipeline paused.`).catch(() => {});
+        }
+      } catch {}
+      break;
+    }
+
+    console.log(`[Autonomous] Client ${clientId} batch ${batch}/${HARD_CEILING}: sent=${liveSent}/${target}, pending=${livePending}, approved=${liveApproved}, gap=${liveGap}`);
+
+    // Draft size = min(batch size, gap, remaining queue headroom)
+    const queueHeadroom = PENDING_CEILING - livePending;
+    const draftSize = Math.min(liveGap, BATCH_SIZE, queueHeadroom);
 
     const batchBrief = buildAutonomousBrief({
-      gap: Math.min(liveGap, BATCH_SIZE),
-      icp, lastLearnings, rejectionPatterns,
+      gap: draftSize, icp, lastLearnings, rejectionPatterns,
       sent: liveSent, target,
     });
 
-    await directorExecute(clientId, { plan_id: uuidv4(), command: batchBrief });
+    const beforeSaved = (await pool.query(
+      `SELECT COUNT(*) AS c FROM leads WHERE client_id=$1 AND DATE(created_at)=$2`,
+      [clientId, today]
+    )).rows[0].c;
 
-    // Brief pause between batches — avoids hammering Apollo/Serper/Claude
-    if (batch < MAX_BATCHES) {
+    await directorExecute(clientId, {
+      plan_id: uuidv4(),
+      command: batchBrief,
+      batchIndex: batch - 1,
+      limit: draftSize,
+    });
+
+    // Zero-streak detection — stop if research yields nothing new
+    const afterSaved = (await pool.query(
+      `SELECT COUNT(*) AS c FROM leads WHERE client_id=$1 AND DATE(created_at)=$2`,
+      [clientId, today]
+    )).rows[0].c;
+    if (parseInt(afterSaved) === parseInt(beforeSaved)) {
+      zeroStreak++;
+      console.warn(`[Autonomous] Batch ${batch} added 0 leads (zero streak: ${zeroStreak}/3)`);
+      if (zeroStreak >= 3) {
+        console.warn(`[Autonomous] 3 consecutive zero-lead batches — stopping. Pool exhausted.`);
+        await logAction(clientId, 'director', 'research_pool_exhausted', 'system', null, { batch, liveSent, target });
+        break;
+      }
+    } else {
+      zeroStreak = 0;
+    }
+
+    if (batch < HARD_CEILING) {
       await new Promise(r => setTimeout(r, 3000));
     }
   }

@@ -57,10 +57,164 @@ router.get('/status', (req, res) => {
     data: {
       connected: true,
       role: 'director',
-      capabilities: ['approve', 'reject', 'read_approvals', 'write_memory', 'read_memory', 'create_leads', 'update_leads'],
+      capabilities: ['chat', 'approve', 'reject', 'read_approvals', 'write_memory', 'read_memory', 'create_leads', 'update_leads', 'signal_search'],
       timestamp: new Date().toISOString(),
     },
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/captain/chat — Phase D: Director chat bot round-trip
+// ─────────────────────────────────────────────────────────────────────────────
+// Single entry point for Claw to have a conversation with The Dam.
+// Handles three types of input:
+//   1. Commands (find leads, send outreach, kickoff) → triggers directorExecute
+//   2. Questions (what's my KPI, who replied, status) → DB query, returns data
+//   3. Instructions (update ICP, pause campaign) → writes to agent_memory
+//
+// Body: { client_id, message, thread_id?, context? }
+// Returns: { reply, actions_taken, data, thread_id }
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/chat', async (req, res, next) => {
+  try {
+    const { client_id, message, thread_id = null, context = {} } = req.body;
+    if (!client_id || !message) {
+      return res.status(400).json({ error: 'client_id and message required', code: 'MISSING_FIELDS' });
+    }
+
+    // Log the inbound chat message
+    await logsService.createLog(client_id, {
+      agent: 'captain',
+      action: 'chat_inbound',
+      metadata: { message: message.substring(0, 500), thread_id, source: 'myclaw_chat' },
+    });
+
+    const lowerMsg = message.toLowerCase().trim();
+    const response = {
+      reply: '',
+      actions_taken: [],
+      data: {},
+      thread_id: thread_id || `thread_${Date.now()}`,
+    };
+
+    // ── Intent 1: KPI / STATUS queries ────────────────────────────────
+    if (/\b(kpi|status|progress|sent today|how (many|much)|dashboard|stats)\b/i.test(lowerMsg)) {
+      const today = new Date().toISOString().split('T')[0];
+      const { rows: [counts] } = await pool.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE status = 'sent' AND DATE(sent_at) = $2)                   AS sent_today,
+           COUNT(*) FILTER (WHERE status = 'pending_approval' AND DATE(created_at) = $2)    AS pending,
+           COUNT(*) FILTER (WHERE status = 'approved' AND DATE(created_at) = $2)            AS approved_awaiting_send,
+           COUNT(*) FILTER (WHERE status = 'ranger_rejected' AND DATE(created_at) = $2)     AS rejected,
+           COUNT(*) FILTER (WHERE status = 'replied')                                       AS total_replied
+         FROM messages WHERE client_id = $1`,
+        [client_id, today]
+      );
+      const { rows: [leadCounts] } = await pool.query(
+        `SELECT COUNT(*) FILTER (WHERE DATE(created_at) = $2) AS leads_today
+         FROM leads WHERE client_id = $1 AND deleted_at IS NULL`,
+        [client_id, today]
+      );
+      const { rows: [kpiRow] } = await pool.query(
+        `SELECT target FROM daily_kpi WHERE client_id = $1 AND date = $2`,
+        [client_id, today]
+      );
+      const target = kpiRow?.target || 80;
+
+      response.data = {
+        date: today,
+        target,
+        sent_today: parseInt(counts.sent_today) || 0,
+        pending_approval: parseInt(counts.pending) || 0,
+        approved_awaiting_send: parseInt(counts.approved_awaiting_send) || 0,
+        rejected_today: parseInt(counts.rejected) || 0,
+        leads_today: parseInt(leadCounts.leads_today) || 0,
+        total_replied_lifetime: parseInt(counts.total_replied) || 0,
+      };
+      response.reply = `Status for ${today}: ${response.data.sent_today}/${target} sent. ${response.data.pending_approval} waiting approval. ${response.data.leads_today} leads sourced today.`;
+      response.actions_taken.push('queried_daily_stats');
+    }
+
+    // ── Intent 2: KICKOFF / EXECUTE command ───────────────────────────
+    else if (/\b(kickoff|kick off|start|run|execute|fire|begin|find.*(lead|founder|ceo|director))\b/i.test(lowerMsg)) {
+      const { directorExecute } = require('../services/agents');
+      const { v4: uuidv4 } = require('uuid');
+      const planId = uuidv4();
+
+      // Respond immediately — directorExecute runs in background
+      response.reply = 'Dispatching to the crew. Captain is briefing Research Beaver now. Poll /api/captain/chat again in 60s for results, or check /api/myclaw/approvals.';
+      response.actions_taken.push('triggered_director_execute');
+      response.data = { plan_id: planId };
+
+      // Fire-and-forget in background, don't block the chat response
+      directorExecute(client_id, { plan_id: planId, command: message }).catch(err => {
+        console.error(`[chat] directorExecute failed for plan ${planId}:`, err.message);
+      });
+    }
+
+    // ── Intent 3: APPROVALS query ─────────────────────────────────────
+    else if (/\b(approval|pending|awaiting|queue)\b/i.test(lowerMsg)) {
+      const { rows } = await pool.query(
+        `SELECT a.id, m.subject, m.body, l.name AS lead_name, l.company, m.ranger_score
+         FROM approvals a
+         JOIN messages m ON m.id = a.message_id
+         JOIN leads l ON l.id = m.lead_id
+         WHERE a.client_id = $1 AND a.status = 'pending'
+         ORDER BY a.created_at DESC LIMIT 10`,
+        [client_id]
+      );
+      response.data = { approvals: rows, count: rows.length };
+      response.reply = `${rows.length} messages waiting for your approval.`;
+      response.actions_taken.push('listed_pending_approvals');
+    }
+
+    // ── Intent 4: SIGNAL HUNT ─────────────────────────────────────────
+    else if (/\b(signal|hunt|hiring|funding|trigger)\b/i.test(lowerMsg)) {
+      const { runSignalHunt, saveSignalLeads } = require('../services/signalHunt');
+      const icp = context.icp || {};
+
+      response.reply = 'Running signal hunt in the background. This scans news + LinkedIn jobs for buying triggers. Check back in 2-3 minutes.';
+      response.actions_taken.push('triggered_signal_hunt');
+
+      runSignalHunt(client_id, { maxLeads: 20, icp }).then(async leads => {
+        if (leads.length > 0) {
+          await saveSignalLeads(client_id, leads);
+          console.log(`[chat] Signal hunt saved ${leads.length} leads for ${client_id}`);
+        }
+      }).catch(err => console.error('[chat] Signal hunt failed:', err.message));
+    }
+
+    // ── Intent 5: MEMORY / ICP update ─────────────────────────────────
+    else if (/\b(update|set|save|remember)\b.*\b(icp|memory|target|industry|geography)\b/i.test(lowerMsg)) {
+      response.reply = 'To update ICP, POST to /api/myclaw/memory with { key: "icp", content: {...} }. I can\'t parse natural language ICP updates reliably — use the structured endpoint.';
+      response.actions_taken.push('deferred_to_structured_endpoint');
+    }
+
+    // ── Intent 6: Fallback — route to director for LLM interpretation ─
+    else {
+      // Free-form chat goes to directorBrief for a contextual reply
+      try {
+        const { directorBrief } = require('../services/agents');
+        const brief = await directorBrief(client_id);
+        response.data = { brief };
+        response.reply = `I'm Captain Beaver. I understand commands like: "kickoff for today", "status", "find 20 founders", "show approvals", "run signal hunt". What do you need?`;
+      } catch (err) {
+        response.reply = `I'm Captain Beaver. I understand commands like: "kickoff for today", "status", "find 20 founders", "show approvals", "run signal hunt".`;
+      }
+      response.actions_taken.push('returned_help_text');
+    }
+
+    await logsService.createLog(client_id, {
+      agent: 'captain',
+      action: 'chat_reply',
+      metadata: { actions: response.actions_taken, thread_id: response.thread_id },
+    });
+
+    res.json({ data: response });
+  } catch (err) {
+    console.error('[chat] Error:', err.message);
+    next(err);
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
