@@ -362,4 +362,80 @@ async function searchBySignal(query, limit = 5) {
   return results.slice(0, limit);
 }
 
-module.exports = { searchLinkedInProfiles, searchLinkedInCompanies, searchBySignal, parallelSearch };
+/**
+ * searchOpenWeb(query, limit)
+ *
+ * Searches the open web (NOT LinkedIn) for news, articles, press releases.
+ * Used by signal hunting to find buying signals (funding, hiring, expansion).
+ * Returns raw search results with title, link, snippet — no LinkedIn parsing.
+ */
+async function searchOpenWeb(query, limit = 5) {
+  if (!axios) return [];
+  console.log('[search] Open web search:', query, '| Limit:', limit);
+
+  // Try Serper first (general web search, no site: restriction)
+  try {
+    const apiKey = process.env.SERPER_API_KEY;
+    if (!apiKey) throw new Error('SERPER_API_KEY not set');
+
+    const resp = await axios.post(
+      SERPER_URL,
+      { q: query, num: Math.min(limit, 10), gl: 'my', hl: 'en' },
+      { headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' }, timeout: 10000 }
+    );
+
+    const organic = resp.data?.organic || [];
+    const news = resp.data?.news || [];
+
+    // Combine organic + news results, prioritise news
+    const combined = [
+      ...news.map(r => ({
+        title: r.title || '',
+        link: r.link || '',
+        snippet: r.snippet || '',
+        date: r.date || '',
+        source: r.source || '',
+        type: 'news',
+      })),
+      ...organic.map(r => ({
+        title: r.title || '',
+        link: r.link || '',
+        snippet: r.snippet || '',
+        date: '',
+        source: '',
+        type: 'organic',
+      })),
+    ];
+
+    return combined.slice(0, limit);
+  } catch (err) {
+    console.warn(`[search] Serper open web failed: ${err.message}`);
+  }
+
+  // Fallback to Google CSE (unrestricted — no site: filter)
+  try {
+    const apiKey = process.env.GOOGLE_CSE_API_KEY;
+    const cx     = process.env.GOOGLE_CSE_CX;
+    if (!apiKey || !cx) throw new Error('GOOGLE_CSE not configured');
+
+    const resp = await axios.get(GOOGLE_CSE_URL, {
+      params: { key: apiKey, cx, q: query, num: Math.min(limit, 10), gl: 'MY', hl: 'en' },
+      timeout: 10000,
+    });
+
+    return (resp.data?.items || []).map(r => ({
+      title: r.title || '',
+      link: r.link || '',
+      snippet: r.snippet || '',
+      date: '',
+      source: '',
+      type: 'organic',
+    })).slice(0, limit);
+  } catch (err) {
+    console.warn(`[search] Google CSE open web failed: ${err.message}`);
+  }
+
+  return [];
+}
+
+module.exports = { searchLinkedInProfiles, searchLinkedInCompanies, searchBySignal, parallelSearch, searchOpenWeb };

@@ -525,4 +525,162 @@ router.get('/qualified-leads', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/myclaw/signal-search — Signal-first search for buying signals
+// Searches open web for funding, hiring, expansion, leadership changes.
+// Returns raw signals with company extraction — MyClaw decides what to do next.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/signal-search', async (req, res, next) => {
+  try {
+    const { client_id, queries, max_results_per_query = 5 } = req.body;
+    if (!client_id || !queries || !Array.isArray(queries) || queries.length === 0) {
+      return res.status(400).json({ error: 'client_id and queries[] required', code: 'MISSING_FIELDS' });
+    }
+
+    // Limit queries per request to control costs
+    const capped = queries.slice(0, 10);
+
+    const { searchOpenWeb, searchLinkedInProfiles } = require('../services/searchService');
+
+    let claudeClient;
+    try {
+      const Anthropic = require('@anthropic-ai/sdk');
+      claudeClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    } catch (err) {
+      console.warn('[signal-search] Anthropic SDK not available, skipping AI parsing');
+    }
+
+    const allSignals = [];
+    const queriesUsed = [];
+
+    for (const q of capped) {
+      const { query, signal_type = 'general' } = q;
+      if (!query) continue;
+
+      queriesUsed.push(query);
+
+      // Person-search queries go through LinkedIn search
+      if (signal_type === 'person_search') {
+        const profiles = await searchLinkedInProfiles(query, max_results_per_query);
+        for (const p of profiles) {
+          allSignals.push({
+            company: p.company || '',
+            signal_type: 'person_found',
+            signal_summary: `${p.name} — ${p.title} at ${p.company}`,
+            signal_date: '',
+            source_url: p.linkedin_url || '',
+            raw_snippet: p.snippet || '',
+            confidence: p.name && p.company && p.company !== 'Unknown' ? 0.8 : 0.5,
+            person: { name: p.name, title: p.title, linkedin_url: p.linkedin_url },
+          });
+        }
+        continue;
+      }
+
+      // Signal queries go through open web search
+      const results = await searchOpenWeb(query, max_results_per_query);
+
+      if (results.length === 0) continue;
+
+      // Use Haiku to parse signals from search results if available
+      if (claudeClient) {
+        try {
+          const snippets = results.map((r, i) =>
+            `[${i + 1}] ${r.title}\n${r.snippet}\nURL: ${r.link}${r.date ? `\nDate: ${r.date}` : ''}`
+          ).join('\n\n');
+
+          const aiResp = await claudeClient.messages.create({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 1024,
+            messages: [{
+              role: 'user',
+              content: `You are a buying signal detector. Analyse these search results and extract real buying signals.
+
+Signal type being searched: ${signal_type}
+
+Search results:
+${snippets}
+
+For each result that contains a REAL buying signal (company doing something that indicates they might need services — funding, hiring, expanding, launching, leadership change), return a JSON array:
+
+[{
+  "company": "Company Name",
+  "signal_type": "${signal_type}",
+  "signal_summary": "One sentence: what happened",
+  "signal_date": "YYYY-MM-DD or empty string if unknown",
+  "source_url": "the URL",
+  "raw_snippet": "original snippet",
+  "confidence": 0.0-1.0
+}]
+
+Rules:
+- Only include REAL signals — companies actually doing something
+- Ignore generic articles, listicles, or ads
+- Confidence 0.9 = very clear signal, 0.5 = weak/ambiguous
+- If no real signals found, return empty array []
+- Return ONLY the JSON array, nothing else`
+            }],
+          });
+
+          const content = aiResp.content[0]?.text || '[]';
+          // Extract JSON from response (handle markdown code blocks)
+          const jsonMatch = content.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            allSignals.push(...parsed);
+          }
+        } catch (err) {
+          console.warn(`[signal-search] Haiku parsing failed for "${query}": ${err.message}`);
+          // Fallback: return raw results without AI parsing
+          for (const r of results) {
+            allSignals.push({
+              company: '',
+              signal_type,
+              signal_summary: r.title,
+              signal_date: r.date || '',
+              source_url: r.link,
+              raw_snippet: r.snippet,
+              confidence: 0.4,
+            });
+          }
+        }
+      } else {
+        // No AI — return raw results
+        for (const r of results) {
+          allSignals.push({
+            company: '',
+            signal_type,
+            signal_summary: r.title,
+            signal_date: r.date || '',
+            source_url: r.link,
+            raw_snippet: r.snippet,
+            confidence: 0.4,
+          });
+        }
+      }
+    }
+
+    // Log the signal hunt
+    await logsService.createLog(client_id, {
+      agent: 'research_beaver',
+      action: 'signal_search',
+      target_type: 'signal',
+      metadata: {
+        queries_used: queriesUsed.length,
+        signals_found: allSignals.length,
+        signal_types: [...new Set(allSignals.map(s => s.signal_type))],
+        source: 'myclaw_signal_hunt',
+      },
+    });
+
+    res.json({
+      data: {
+        signals: allSignals,
+        queries_used: queriesUsed.length,
+        signals_found: allSignals.length,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

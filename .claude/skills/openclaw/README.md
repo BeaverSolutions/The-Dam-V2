@@ -37,6 +37,25 @@ Gmail → Lead
 | `dam-approval-notify` | Every 30 min, 9AM–7PM | Nudge Roy when messages await approval |
 | `dam-reply-check` | Every 15 min, 8AM–9PM | Alert Roy when leads reply |
 | `dam-followup` | Weekdays 9:00 AM | Trigger follow-up sequences |
+| `dam-signal-hunt` | Every 6 hours | Proactive buying signal detection → lead creation |
+| `dam-weekly-export` | Sundays 11:00 PM | Master database + per-client tracker export |
+
+## Shared Memory Contract
+
+MyClaw and Claude share the same `agent_memory` table via `/api/myclaw/memory`. Both systems read and write to the same keys. This is how they stay aligned without direct communication.
+
+| Memory Key | Owner | Purpose |
+|------------|-------|---------|
+| `icp` | Claude / MJ | Client ICP — industries, titles, geographies |
+| `signal_hunt_config` | MJ / Claude | Signal types to prioritise, excluded companies |
+| `signal_hunt_log` | MyClaw | Last run results, queries used, signals found |
+| `signal_patterns` | MyClaw | Which signal types produce best leads (auto-learned) |
+| `used_signal_queries` | MyClaw | Query dedup — prevents repeating same searches |
+| `used_queries` | Claude | Research Beaver query dedup |
+| `schema_facts` | Claude | Verified DB columns and API facts |
+| `myclaw_rejections` | MyClaw | Enforcer rejection patterns |
+
+**Rule:** Before writing to a shared key, always READ it first to avoid overwriting the other system's data. Merge, don't replace.
 
 ## Golden Rule
 
