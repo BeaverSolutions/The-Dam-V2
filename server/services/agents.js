@@ -2201,25 +2201,56 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       currentBody = finalFix.body;
     }
 
-    // ── AI Enforcer approved + code gates passed — push to approval queue ──
+    // ── AI Enforcer approved — decide: auto-approve or human queue? ──
+    // Phase Wave 1: Auto-approval threshold
+    // Read the client's auto_approve_threshold. If the Enforcer score is >= threshold
+    // AND no brand-safety failures, skip the human queue and go straight to pending_send.
+    // This keeps the machine running when MJ is AFK.
+    const rangerScore = rangerResult?.score || 80;
+    let autoApproved = false;
+    let approvalStatus = 'pending_approval';
+    let nextMessageStatus = 'pending_approval';
+
+    try {
+      const { rows: [clientRow] } = await pool.query(
+        `SELECT auto_approve_threshold FROM clients WHERE id = $1 LIMIT 1`,
+        [clientId]
+      );
+      const threshold = clientRow?.auto_approve_threshold;
+
+      if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
+        autoApproved = true;
+        approvalStatus = 'approved';
+        nextMessageStatus = 'pending_send'; // goes directly to send queue
+        console.log(`[enforcer] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold}`);
+      }
+    } catch (err) {
+      console.warn('[enforcer] Failed to read auto_approve_threshold, defaulting to manual:', err.message);
+    }
+
     await pool.query(
       `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
-       ranger_breakdown = $5, status = 'pending_approval', updated_at = NOW()
-       WHERE id = $6 AND client_id = $7`,
-      [currentBody, currentSubject, rangerResult?.score || 80, rangerResult?.notes || 'Enforcer approved', JSON.stringify(rangerResult?.breakdown || null), msg.id, clientId]
+       ranger_breakdown = $5, status = $6, updated_at = NOW()
+       WHERE id = $7 AND client_id = $8`,
+      [currentBody, currentSubject, rangerScore,
+       autoApproved ? `Auto-approved (score ${rangerScore})` : (rangerResult?.notes || 'Enforcer approved'),
+       JSON.stringify(rangerResult?.breakdown || null), nextMessageStatus, msg.id, clientId]
     );
 
     await pool.query(
-      `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`,
-      [clientId, msg.id]
+      `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [clientId, msg.id, autoApproved ? 'auto_approval' : 'system',
+       autoApproved ? 'approved' : 'pending',
+       autoApproved ? new Date() : null]
     );
 
     await logsService.createLog(clientId, {
       agent: 'enforcer_beaver',
-      action: 'message_approved',
+      action: autoApproved ? 'message_auto_approved' : 'message_approved',
       target_type: 'message',
       target_id: msg.id,
-      metadata: { channel: msg.channel, score: rangerResult?.score, method: 'ai_enforcer' },
+      metadata: { channel: msg.channel, score: rangerScore, method: autoApproved ? 'auto_threshold' : 'ai_enforcer' },
     });
 
     approvedCount++;

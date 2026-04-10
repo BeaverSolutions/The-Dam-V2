@@ -67,6 +67,12 @@ export default function Settings() {
   const [nameSaving, setNameSaving] = useState(false);
   const [nameSaved, setNameSaved] = useState(false);
 
+  // Auto-approval threshold (Wave 1)
+  const [autoApproveThreshold, setAutoApproveThreshold] = useState('');
+  const [autoApproveLoading, setAutoApproveLoading] = useState(true);
+  const [autoApproveSaving, setAutoApproveSaving] = useState(false);
+  const [autoApproveSaved, setAutoApproveSaved] = useState(false);
+
   const handleSaveName = async () => {
     setNameSaving(true);
     setNameSaved(false);
@@ -80,6 +86,38 @@ export default function Settings() {
       }
     } catch {}
     setNameSaving(false);
+  };
+
+  // Load + save auto-approval threshold
+  useEffect(() => {
+    if (!user?.client_id) { setAutoApproveLoading(false); return; }
+    request(`/admin/clients/${user.client_id}`)
+      .then(res => {
+        const t = res?.data?.auto_approve_threshold;
+        setAutoApproveThreshold(t === null || t === undefined ? '' : String(t));
+      })
+      .catch(() => {})
+      .finally(() => setAutoApproveLoading(false));
+  }, []);
+
+  const handleSaveAutoApprove = async (newValue) => {
+    setAutoApproveThreshold(newValue);
+    setAutoApproveSaving(true);
+    setAutoApproveSaved(false);
+    try {
+      const body = {
+        auto_approve_threshold: newValue === '' ? null : parseInt(newValue, 10),
+      };
+      await request(`/admin/clients/${user.client_id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+      setAutoApproveSaved(true);
+      setTimeout(() => setAutoApproveSaved(false), 2500);
+    } catch (err) {
+      console.error('Failed to save auto-approval threshold:', err);
+    }
+    setAutoApproveSaving(false);
   };
 
   const loadIntegrations = () => {
@@ -311,6 +349,41 @@ export default function Settings() {
             {nameSaved ? <><CheckCircle size={14} /> Saved</> : <><Save size={14} /> Save</>}
           </button>
         </div>
+      </Section>
+
+      {/* Auto-approval threshold (Wave 1) */}
+      <Section title="Auto-approval threshold">
+        {autoApproveLoading ? (
+          <div className="skeleton" style={{ height: 80, borderRadius: 'var(--radius)' }} />
+        ) : (
+          <div style={{ maxWidth: 560 }}>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+              Messages scoring at or above this threshold auto-send without human approval.
+              Keeps the machine running when you're AFK. Brand-safety failures (wrong name,
+              fabricated claims, prompt injection) are always blocked regardless of score.
+            </p>
+            <div className="form-group">
+              <label className="form-label">Threshold</label>
+              <select
+                className="form-input"
+                value={autoApproveThreshold}
+                onChange={e => handleSaveAutoApprove(e.target.value)}
+                disabled={autoApproveSaving}
+                style={{ maxWidth: 320 }}
+              >
+                <option value="">Off — manual approval only</option>
+                <option value="85">85 — conservative (near-perfect only)</option>
+                <option value="75">75 — balanced (recommended)</option>
+                <option value="65">65 — aggressive (most pass)</option>
+              </select>
+              {autoApproveSaved && (
+                <span style={{ fontSize: '0.72rem', color: 'var(--lime)', marginTop: '0.5rem', display: 'block' }}>
+                  <CheckCircle size={12} style={{ verticalAlign: 'middle' }} /> Saved
+                </span>
+              )}
+            </div>
+          </div>
+        )}
       </Section>
 
       {/* Integrations */}

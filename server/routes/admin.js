@@ -136,6 +136,7 @@ router.patch('/clients/:id',
     body('name').optional().trim().isLength({ min: 1, max: 200 }),
     body('plan').optional().isIn(['starter', 'growth', 'enterprise']),
     body('onboarding_completed').optional().isBoolean(),
+    body('auto_approve_threshold').optional({ nullable: true }).isInt({ min: 50, max: 100 }),
     validate,
   ],
   async (req, res, next) => {
@@ -148,6 +149,10 @@ router.patch('/clients/:id',
       if (req.body.name !== undefined) { fields.push(`name = $${idx++}`); values.push(req.body.name); }
       if (req.body.plan !== undefined) { fields.push(`plan = $${idx++}`); values.push(req.body.plan); }
       if (req.body.onboarding_completed !== undefined) { fields.push(`onboarding_completed = $${idx++}`); values.push(req.body.onboarding_completed); }
+      if (req.body.auto_approve_threshold !== undefined) {
+        fields.push(`auto_approve_threshold = $${idx++}`);
+        values.push(req.body.auto_approve_threshold); // null explicitly allowed
+      }
 
       if (fields.length === 0) return res.status(400).json({ error: 'No fields to update', code: 'NO_FIELDS' });
 
