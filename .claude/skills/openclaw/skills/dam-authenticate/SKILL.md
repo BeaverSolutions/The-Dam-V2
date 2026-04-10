@@ -1,3 +1,8 @@
+---
+name: dam-authenticate
+description: Authenticate with The Dam API and store the JWT token for all subsequent skill calls. Runs on startup, every 6 days (before token expires), and automatically whenever any Dam API call returns 401.
+---
+
 # dam-authenticate
 
 ## Purpose

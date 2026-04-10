@@ -1,3 +1,8 @@
+---
+name: dam-run-campaign
+description: Parse MJ's natural-language campaign command from Telegram, create a Director plan in The Dam, present it for approval, then execute end-to-end (find leads → draft → Enforcer QA → queue for approval). Triggered by commands like "find N leads", "start outreach to", "reach out to", "run a campaign", "prospect [industry/role]", "generate messages for".
+---
+
 # dam-run-campaign
 
 ## Purpose
@@ -105,11 +110,16 @@ Send Telegram:
 
 ### Step 8 — Write journal entry
 ```
-POST {DAM_URL}/api/agents/memory/journal
+POST {DAM_URL}/api/myclaw/memory
 Authorization: Bearer {DAM_TOKEN}
+Content-Type: application/json
 
 {
-  "entry": "Campaign run: '{command}'. Results: {leads_found} leads, {ranger_approved} approved messages, {pending_approvals} pending approval."
+  "client_id": "{DAM_CLIENT_ID}",
+  "agent": "captain_beaver",
+  "memory_type": "journal",
+  "key": "campaign_log",
+  "content": "Campaign run: '{command}'. Results: {leads_found} leads, {ranger_approved} approved messages, {pending_approvals} pending approval."
 }
 ```
 

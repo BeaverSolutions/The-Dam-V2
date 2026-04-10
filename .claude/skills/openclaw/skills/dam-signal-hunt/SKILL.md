@@ -1,3 +1,8 @@
+---
+name: dam-signal-hunt
+description: Proactively hunt for buying signals (funding, hiring, expansion, leadership changes) every 6 hours. Traces signals back to companies, finds decision makers, enriches emails, and creates leads in The Dam. Use when MJ says "hunt signals", "find signals", or on the 6-hour schedule.
+---
+
 # dam-signal-hunt
 
 ## Purpose

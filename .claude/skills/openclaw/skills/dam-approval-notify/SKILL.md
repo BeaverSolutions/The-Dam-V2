@@ -1,3 +1,8 @@
+---
+name: dam-approval-notify
+description: Poll for pending approvals every 30 minutes during business hours (Mon-Sat 9AM-7PM) and nudge MJ via Telegram if messages are waiting. Also triggered by commands "any approvals?" or "what's pending?". Skips notification if count unchanged in last 2 hours.
+---
+
 # dam-approval-notify
 
 ## Purpose

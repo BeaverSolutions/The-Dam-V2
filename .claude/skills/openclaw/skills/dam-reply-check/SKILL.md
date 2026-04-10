@@ -1,3 +1,8 @@
+---
+name: dam-reply-check
+description: Detect when leads reply to outreach emails and alert MJ via Telegram immediately so he can respond while the lead is warm. Runs every 15 minutes 8AM-9PM daily. Also triggered by "any replies?", "check replies", "did anyone respond?".
+---
+
 # dam-reply-check
 
 ## Purpose

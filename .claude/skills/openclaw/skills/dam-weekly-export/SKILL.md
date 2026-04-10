@@ -1,3 +1,8 @@
+---
+name: dam-weekly-export
+description: Export the master database (combining all clients) and per-client trackers to .xlsx files every Sunday night. Keeps the in-house database bank current. Use when MJ says "export data", "update master database", or on the Sunday 11pm schedule.
+---
+
 # dam-weekly-export
 
 ## Purpose

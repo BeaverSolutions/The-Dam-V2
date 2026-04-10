@@ -1,3 +1,8 @@
+---
+name: dam-followup
+description: Trigger The Dam's autonomous follow-up queue (Day 2, 4, 7) — Sales Beaver drafts, Enforcer QAs, then queues for MJ's approval. Never sends without approval. Runs weekdays 9:00 AM, or on commands "check follow-ups", "any follow-ups due?".
+---
+
 # dam-followup
 
 ## Purpose

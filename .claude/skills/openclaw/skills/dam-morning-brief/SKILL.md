@@ -1,3 +1,8 @@
+---
+name: dam-morning-brief
+description: Deliver a daily morning briefing to MJ via Telegram. Covers pipeline health, pending approvals, and today's recommended actions. Runs weekdays 8:00 AM local time, or on command "morning brief", "what's the status", "dam status".
+---
+
 # dam-morning-brief
 
 ## Purpose
@@ -53,11 +58,16 @@ Deliver a daily morning briefing to Roy via Telegram. Covers pipeline health, pe
 
 5. Log to journal:
    ```
-   POST {DAM_URL}/api/agents/memory/journal
+   POST {DAM_URL}/api/myclaw/memory
    Authorization: Bearer {DAM_TOKEN}
+   Content-Type: application/json
 
    {
-     "entry": "Morning brief delivered. Pending: {PENDING_COUNT}. Pipeline: {stats summary}"
+     "client_id": "{DAM_CLIENT_ID}",
+     "agent": "captain_beaver",
+     "memory_type": "journal",
+     "key": "morning_brief_log",
+     "content": "Morning brief delivered. Pending: {PENDING_COUNT}. Pipeline: {stats summary}"
    }
    ```
 
