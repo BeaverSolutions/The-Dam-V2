@@ -259,7 +259,9 @@ async function runAllSerperQueries(queries) {
       const items = await callSerper(q, 10);
       results.push(...parseProfileItems(items, 'serper'));
     } catch (err) {
-      console.warn(`[search] Serper query failed for "${q}": ${err.message}`);
+      const status = err.response?.status || 'no-status';
+      const body   = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+      console.warn(`[search] Serper query failed for "${q}": [${status}] ${body}`);
     }
   }
   return results;
