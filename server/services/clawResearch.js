@@ -167,22 +167,13 @@ Return valid JSON only. No markdown, no explanation.`;
 
   try {
     const response = await client.messages.create({
-      model: 'claude-haiku-4.5-20250101',
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: 4000,
       tools: [
         {
+          type: 'web_search_20250305',
           name: 'web_search',
-          description: 'Search the web for current information',
-          input_schema: {
-            type: 'object',
-            properties: {
-              query: {
-                type: 'string',
-                description: 'The search query',
-              },
-            },
-            required: ['query'],
-          },
+          max_uses: 8,
         },
       ],
       messages: [
@@ -219,7 +210,7 @@ Return valid JSON only. No markdown, no explanation.`;
 /**
  * Verify lead + extract/enrich email via Hunter.
  */
-async function verifyLead(lead) {
+async function verifyLead(clientId, lead) {
   const verification = {
     score: 0,
     pass: true,
@@ -252,18 +243,24 @@ async function verifyLead(lead) {
   }
 
   // Try Hunter for email enrichment
-  if (lead.company) {
+  if (lead.company && lead.name) {
     try {
-      const domain = await hunterService.findDomain(lead.company);
-      if (domain) {
-        verification.hunterMatch = domain;
-        const email = await hunterService.findEmail(lead.name, domain);
-        if (email && email.email) {
-          lead.email = email.email;
-          score += 20;
-          verification.score = score;
-          return { verified: true, verification, email_verified: 90, email_source: 'hunter', ...lead };
-        }
+      const nameParts = lead.name.trim().split(/\s+/);
+      const firstName = nameParts[0];
+      const lastName = nameParts.slice(1).join(' ');
+
+      const result = await hunterService.findEmail(clientId, {
+        firstName,
+        lastName,
+        company: lead.company,
+      });
+
+      if (result && result.email) {
+        lead.email = result.email;
+        score += 20;
+        verification.score = score;
+        verification.hunterMatch = result;
+        return { verified: true, verification, email_verified: result.verified || 80, email_source: 'hunter', ...lead };
       }
     } catch (err) {
       console.warn('[clawResearch] Hunter lookup failed for', lead.company, err.message);
@@ -312,7 +309,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
 
     // 4. Verify each lead + enrich emails
     const verificationResults = await Promise.all(
-      candidates.map(c => verifyLead(normaliseLead(c)))
+      candidates.map(c => verifyLead(clientId, normaliseLead(c)))
     );
 
     const verified = verificationResults.filter(l => l.verified);
