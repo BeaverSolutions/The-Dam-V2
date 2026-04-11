@@ -1244,14 +1244,61 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       const finalBody = rangerResult?.body || fixed.body;
 
       if (rangerResult?.approved) {
+        // ── Wave 1 auto-approval threshold (mirror of runRangerPipeline logic) ──
+        // Read the client's auto_approve_threshold. If Enforcer score >= threshold,
+        // skip the human queue and mark the approval as already-approved so the
+        // send queue worker picks it up. Keeps the machine running when MJ is AFK.
+        // Non-email channels still move through the flow — the Approvals UI
+        // shows auto-approved messages in the Approved tab for manual send.
+        const rangerScore = rangerResult.score || 70;
+        let autoApproved = false;
+        let nextMessageStatus = 'pending_approval';
+        let approvalStatus = 'pending';
+        let resolvedAt = null;
+
+        try {
+          const { rows: [clientRow] } = await pool.query(
+            `SELECT auto_approve_threshold FROM clients WHERE id = $1 LIMIT 1`,
+            [clientId]
+          );
+          const threshold = clientRow?.auto_approve_threshold;
+          if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
+            autoApproved = true;
+            // For email channel, go straight to pending_send so the queue worker sends it.
+            // For LinkedIn/other channels, stop at 'approved' — it's a manual-send channel.
+            nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
+            approvalStatus = 'approved';
+            resolvedAt = new Date();
+            console.log(`[pipeline] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold} (channel=${msg.channel}, next=${nextMessageStatus})`);
+          }
+        } catch (err) {
+          console.warn('[pipeline] Failed to read auto_approve_threshold, defaulting to manual:', err.message);
+        }
+
         await pool.query(
-          `UPDATE messages SET body = $1, status = 'pending_approval', ranger_score = $2, ranger_notes = $3 WHERE id = $4`,
-          [finalBody, rangerResult.score || 70, rangerResult.notes || 'Signal-sourced, approved', msg.id]
+          `UPDATE messages SET body = $1, status = $2, ranger_score = $3, ranger_notes = $4, updated_at = NOW() WHERE id = $5`,
+          [finalBody, nextMessageStatus, rangerScore,
+           autoApproved ? `Auto-approved (score ${rangerScore})` : (rangerResult.notes || 'Signal-sourced, approved'),
+           msg.id]
         );
+
         await pool.query(
-          `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'signal_hunt')`,
-          [clientId, msg.id]
+          `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [clientId, msg.id,
+           autoApproved ? 'auto_approval' : 'signal_hunt',
+           approvalStatus,
+           resolvedAt]
         );
+
+        await logsService.createLog(clientId, {
+          agent: 'enforcer_beaver',
+          action: autoApproved ? 'message_auto_approved' : 'message_approved',
+          target_type: 'message',
+          target_id: msg.id,
+          metadata: { channel: msg.channel, score: rangerScore, method: autoApproved ? 'auto_threshold' : 'pipeline_approved' },
+        }).catch(() => {});
+
         approvedCount++;
       } else {
         await pool.query(
