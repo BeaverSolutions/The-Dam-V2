@@ -226,6 +226,7 @@ async function sendMessageById(clientId, message_id, provider) {
       to: message.lead_email,
       subject: message.subject || '(no subject)',
       body: message.body,
+      messageDbId: message_id, // for List-Unsubscribe URL — lets us track unsub clicks
     };
 
     if (usedProvider === 'gmail') {

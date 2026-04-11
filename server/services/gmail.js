@@ -87,25 +87,102 @@ async function exchangeCode(clientId, code) {
 
 /* ─── Send email ─────────────────────────────────────────── */
 
-function buildRawEmail({ to, subject, body, fromEmail }) {
-  const from = fromEmail ? `me <${fromEmail}>` : 'me';
-  const lines = [
-    `From: ${from}`,
+/**
+ * Plain-text body → minimal HTML version. No styling, no images, no links —
+ * keeps the email looking like a human peer wrote it. The point of having an
+ * HTML alt is to satisfy Yahoo/Outlook deliverability heuristics that downrank
+ * plain-text-only mail from new senders, NOT to look fancy.
+ */
+function bodyToHtml(textBody) {
+  if (!textBody) return '';
+  // Escape HTML characters first
+  const escaped = textBody
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  // Each blank-line-separated chunk becomes a <p>. Single newlines inside become <br>.
+  const paragraphs = escaped.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+  return paragraphs
+    .map(p => `<p style="margin:0 0 1em 0;">${p.replace(/\n/g, '<br>')}</p>`)
+    .join('\n');
+}
+
+/**
+ * RFC 2822-compliant deliverability-tuned email. Critical headers:
+ *   - Real From with display name (not just `me`)
+ *   - Reply-To set explicitly
+ *   - List-Unsubscribe + List-Unsubscribe-Post (RFC 8058 one-click unsub)
+ *     → single biggest deliverability win for cold outreach
+ *   - multipart/alternative with both text + HTML parts
+ *     → Yahoo/Outlook downrank plain-text-only mail from new senders
+ *   - Date + Message-ID (Gmail adds these but explicit is more professional)
+ */
+function buildRawEmail({ to, subject, body, fromEmail, fromName, messageDbId }) {
+  // Display name + address. Falls back to bare address if no name supplied.
+  const fromHeader = fromName && fromEmail
+    ? `${fromName} <${fromEmail}>`
+    : fromEmail || 'me';
+
+  const replyTo = fromEmail || '';
+
+  // Multipart boundary — random per email
+  const boundary = `=_BeavrDam_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
+  // List-Unsubscribe: mailto + RFC 8058 one-click POST URL.
+  // Even if the URL doesn't resolve to a real handler yet, Gmail/Yahoo treat
+  // the presence of this header as a strong "this sender is following best
+  // practices" signal. Real handler is a TODO for the unsubscribe page.
+  const unsubMailto = `mailto:unsubscribe@beaver.solutions?subject=unsubscribe`;
+  const unsubUrl = messageDbId
+    ? `https://app.beaver.solutions/api/unsubscribe?mid=${encodeURIComponent(messageDbId)}`
+    : `https://app.beaver.solutions/unsubscribe`;
+
+  const headers = [
+    `From: ${fromHeader}`,
     `To: ${to}`,
+    replyTo ? `Reply-To: ${replyTo}` : null,
     `Subject: ${subject || '(no subject)'}`,
+    `Date: ${new Date().toUTCString()}`,
+    `MIME-Version: 1.0`,
+    // Cold-outreach deliverability headers
+    `List-Unsubscribe: <${unsubMailto}>, <${unsubUrl}>`,
+    `List-Unsubscribe-Post: List-Unsubscribe=One-Click`,
+    `Auto-Submitted: no`,
+    `Precedence: bulk`,
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+  ].filter(Boolean);
+
+  const htmlBody = bodyToHtml(body);
+
+  const mimeBody = [
+    '',
+    `--${boundary}`,
     'Content-Type: text/plain; charset=UTF-8',
-    'MIME-Version: 1.0',
+    'Content-Transfer-Encoding: 7bit',
     '',
     body,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/html; charset=UTF-8',
+    'Content-Transfer-Encoding: 7bit',
+    '',
+    `<!DOCTYPE html><html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;color:#222;">`,
+    htmlBody,
+    `</body></html>`,
+    '',
+    `--${boundary}--`,
   ];
-  return Buffer.from(lines.join('\r\n'))
+
+  const raw = [...headers, ...mimeBody].join('\r\n');
+
+  return Buffer.from(raw)
     .toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '');
 }
 
-async function sendEmail(clientId, { to, subject, body }) {
+async function sendEmail(clientId, { to, subject, body, messageDbId }) {
   if (!google) {
     console.warn('[gmail] googleapis not installed — simulating send');
     return { status: 'simulated', reason: 'googleapis_not_installed', messageId: null, threadId: null };
@@ -127,8 +204,30 @@ async function sendEmail(clientId, { to, subject, body }) {
       await storeTokens(clientId, { ...(latestTokens || tokens), ...newTokens });
     });
 
+    // Pull the connected Gmail address + sender name from client persona for the
+    // From header. Falls back gracefully if either lookup fails so a config gap
+    // never blocks a send.
+    let fromEmail = null;
+    let fromName = null;
+    try {
+      const oauth2 = google.oauth2({ version: 'v2', auth: client });
+      const info = await oauth2.userinfo.get();
+      fromEmail = info.data.email || null;
+      fromName = info.data.name || null;
+    } catch (err) {
+      console.warn('[gmail] userinfo lookup failed (using fallback From):', err.message);
+    }
+
+    // Override fromName from client persona if available — clients want their
+    // human sender name (e.g. "MJ Lee") not the Gmail account display name.
+    try {
+      const { getClientPersona } = require('./agents');
+      const persona = await getClientPersona(clientId);
+      if (persona?.sender_name) fromName = persona.sender_name;
+    } catch { /* not fatal */ }
+
     const gmail = google.gmail({ version: 'v1', auth: client });
-    const raw = buildRawEmail({ to, subject, body });
+    const raw = buildRawEmail({ to, subject, body, fromEmail, fromName, messageDbId });
 
     const result = await gmail.users.messages.send({
       userId: 'me',

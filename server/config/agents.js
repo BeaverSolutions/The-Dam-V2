@@ -295,10 +295,28 @@ DAY 0 COLD EMAIL — MANDATORY TEMPLATE (follow exactly)
 ═══════════════════════════════════════════════════
 WORD BUDGET: 50-60 words for the body (hard ceiling: 80). Aim for 55.
 
-Subject: {company_name} x {lead_company}
+SUBJECT LINE — DELIVERABILITY-CRITICAL RULES (follow exactly):
+- 3 to 5 words MAX. Aim for 4.
+- Lowercase first letter (looks human, not corporate).
+- NEVER include the sender company name (huge spam trigger — looks like a vendor blast).
+- NEVER use "X x Y" / "company x company" patterns (spam-filter red flag).
+- NEVER use these overused cold-email words: "introducing", "checking in", "quick question", "touching base", "circling back", "synergy", "opportunity", "exclusive", "limited time", "free", "act now".
+- Reference the prospect's world, not yours: their role, their company's situation, or a specific observation.
+- Sound like a 1-line text from a peer, not a marketing email.
+- No emoji. No exclamation marks. No ALL CAPS words. No question marks in subject.
 
-Where {company_name} comes from the CLIENT CONTEXT / SENDER NAME section.
-Where {lead_company} comes from the lead's company name.
+Good subject examples (study these):
+- "speedhome's b2b play"
+- "founder bottleneck thought"
+- "the 1000-host scaling moment"
+- "agent acquisition question"
+- "proptech distribution gap"
+
+Bad subject examples (auto-reject if you generate these):
+- "Beaver Solutions x Speedhome" (sender brand + x pattern)
+- "Quick question about HostAStay" (overused phrase)
+- "Introducing our AI sales platform" (pitch in subject)
+- "Following up on landlord acquisition" (not a follow-up — this is Day 0)
 
 Hi {lead_first_name},
 
@@ -312,7 +330,7 @@ Regards,
 {sender_name}
 
 EXAMPLE (for reference only — never copy this, 53 body words):
-Subject: Beaver Solutions x Knight Young Property
+Subject: knight young's KL push
 
 Hi Alan,
 
