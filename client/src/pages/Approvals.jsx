@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle, XCircle, Edit2, Save, X, Shield, Send, AlertTriangle } from 'lucide-react';
+import { CheckCircle, XCircle, Edit2, Save, X, Shield, Send, AlertTriangle, Copy, ExternalLink } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { useNavigate } from 'react-router-dom';
 import BeaverAvatar from '../components/BeaverAvatar';
@@ -24,19 +24,46 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, tab, gmail
   const [editBody, setEditBody]   = useState(approval.body || '');
   const [saving, setSaving]       = useState(false);
   const [acting, setActing]       = useState(false);
+  const [copied, setCopied]       = useState(false);
   const resolved = tab !== 'pending';
+
+  // A message is "auto-sendable" only if the channel is email AND we have an email.
+  // LinkedIn / Instagram / any other channel is MANUAL SEND — user copies the message
+  // and delivers it themselves via the platform. This is expected behaviour, not an error.
+  const isEmailChannel = approval.channel === 'email';
+  const hasEmail = !!(approval.lead_email && approval.lead_email !== 'unknown@example.com');
+  const isManualSend = !isEmailChannel; // LinkedIn / Instagram / etc.
+  const emailMissing = isEmailChannel && !hasEmail;
+
+  const handleCopyBody = async () => {
+    try {
+      await navigator.clipboard.writeText(approval.body || '');
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      onError('Copy failed — select the message text manually.');
+    }
+  };
 
   const handleApproveAndSend = async () => {
     if (acting) return; // prevent double-click
-    // Block if Gmail connected but no email — send would fail silently after approval
-    if (gmailConnected && (!approval.lead_email || approval.lead_email === 'unknown@example.com')) {
-      onError('No email address for this lead. Add their email before approving.');
+
+    // ONLY block if this is an EMAIL-channel message and the lead has no email.
+    // LinkedIn / other channels are expected to be manual-send and pass this gate.
+    if (emailMissing) {
+      onError('No email address for this lead. Add their email before approving, or reject and resend later.');
       return;
     }
+
     setActing(true);
     try {
       await onResolve(approval.id, 'approved');
-      if (gmailConnected) await onSend(approval.message_id);
+      // Only auto-send when channel is email AND Gmail is wired. For manual-send
+      // channels (LinkedIn, Instagram), approval moves it to the Approved tab
+      // where you can copy the message and send it yourself.
+      if (isEmailChannel && gmailConnected) {
+        await onSend(approval.message_id);
+      }
     } finally {
       setActing(false);
     }
@@ -59,9 +86,11 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, tab, gmail
     setEditing(false);
   };
 
-  const actionLabel = gmailConnected
-    ? (acting ? 'Sending…' : 'Approve & Send')
-    : (acting ? 'Queuing…' : 'Approve & Queue');
+  const actionLabel = isManualSend
+    ? (acting ? 'Approving…' : 'Approve (Manual Send)')
+    : gmailConnected
+      ? (acting ? 'Sending…' : 'Approve & Send')
+      : (acting ? 'Queuing…' : 'Approve & Queue');
 
   return (
     <div className={`card approval-card fade-in${resolved ? ' approval-card--resolved' : ''}`}>
@@ -111,6 +140,52 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, tab, gmail
         <span className="badge badge-muted" style={{ textTransform: 'capitalize', fontSize: '0.7rem' }}>{approval.channel}</span>
         {approval.subject && <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{approval.subject}</span>}
       </div>
+
+      {/* Manual-send note — shown for LinkedIn / Instagram / any non-email channel.
+          Tells the user this message won't auto-send; they need to copy it and
+          deliver it themselves via the platform. Shown before AND after approval. */}
+      {isManualSend && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '0.5rem',
+          padding: '0.6rem 0.75rem',
+          marginBottom: '0.75rem',
+          background: 'rgba(0,180,255,0.08)',
+          border: '1px solid rgba(0,180,255,0.25)',
+          borderRadius: 'var(--radius)',
+          fontSize: '0.78rem',
+          color: 'var(--text)',
+          lineHeight: 1.5,
+        }}>
+          <AlertTriangle size={14} style={{ color: 'var(--blue)', flexShrink: 0, marginTop: 2 }} />
+          <div style={{ flex: 1 }}>
+            <strong style={{ color: 'var(--blue)' }}>Manual send required.</strong>
+            {' '}This is a <strong style={{ textTransform: 'capitalize' }}>{approval.channel}</strong> message — BeavrDam doesn't auto-deliver on this channel. After you approve it, copy the message below and send it yourself via the prospect's {approval.channel} profile.
+            {approval.lead_linkedin && approval.channel === 'linkedin' && (
+              <>
+                {' '}
+                <a
+                  href={approval.lead_linkedin}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ color: 'var(--blue)', textDecoration: 'underline', whiteSpace: 'nowrap' }}
+                >
+                  Open LinkedIn profile <ExternalLink size={11} style={{ verticalAlign: 'middle' }} />
+                </a>
+              </>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={handleCopyBody}
+            style={{ flexShrink: 0, fontSize: '0.72rem', padding: '0.25rem 0.5rem' }}
+          >
+            <Copy size={12} /> {copied ? 'Copied!' : 'Copy message'}
+          </button>
+        </div>
+      )}
 
       {/* Message body / edit textarea */}
       {editing ? (
