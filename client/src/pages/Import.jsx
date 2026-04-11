@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Upload, FileText, CheckCircle, AlertCircle, ChevronDown, ArrowRight, RotateCcw } from 'lucide-react';
+import { Upload, FileText, CheckCircle, AlertCircle, ChevronDown, ArrowRight, RotateCcw, Download } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 
 const LEAD_FIELDS = [
@@ -11,7 +11,11 @@ const LEAD_FIELDS = [
   { key: 'website',      label: 'Website' },
   { key: 'industry',     label: 'Industry' },
   { key: 'company_size', label: 'Company Size' },
-  { key: 'signal',       label: 'Signal / Why Now' },
+  { key: 'signal',       label: 'Signal (specific buying trigger)' },
+  { key: 'why_now',      label: 'Why Now (timing reason)' },
+  { key: 'angle',        label: 'Angle (opening hook)' },
+  { key: 'friction',     label: 'Friction (operational pain)' },
+  { key: 'signal_tier',  label: 'Signal Tier (P1/P2/P3)' },
   { key: 'notes',        label: 'Notes' },
 ];
 
@@ -28,7 +32,11 @@ function autoMap(headers) {
     website:      ['website', 'url', 'domain', 'web', 'websiteurl'],
     industry:     ['industry', 'sector', 'vertical'],
     company_size: ['companysize', 'employees', 'headcount', 'size', 'numberofemployees'],
-    signal:       ['signal', 'whynow', 'trigger', 'notes', 'reason'],
+    signal:       ['signal', 'trigger', 'reason', 'buyingsignal'],
+    why_now:      ['whynow', 'timing', 'urgency'],
+    angle:        ['angle', 'hook', 'opener', 'pitch'],
+    friction:     ['friction', 'pain', 'painpoint', 'problem', 'challenge'],
+    signal_tier:  ['signaltier', 'tier', 'priority'],
     notes:        ['notes', 'comments', 'description', 'memo'],
   };
   for (const [field, patterns] of Object.entries(matchers)) {
@@ -148,11 +156,21 @@ export default function Import() {
           <h1 className="page-title">Import Leads</h1>
           <p className="page-subtitle">Upload a CSV from WaveLeads, Apollo, LinkedIn, or any source</p>
         </div>
-        {step !== 'upload' && (
-          <button className="btn btn-secondary" onClick={reset}>
-            <RotateCcw size={14} /> Start over
-          </button>
-        )}
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <a
+            href="/beaver-lead-template.csv"
+            download="beaver-lead-template.csv"
+            className="btn btn-secondary"
+            style={{ textDecoration: 'none' }}
+          >
+            <Download size={14} /> Download template
+          </a>
+          {step !== 'upload' && (
+            <button className="btn btn-secondary" onClick={reset}>
+              <RotateCcw size={14} /> Start over
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Step indicators */}
@@ -202,6 +220,9 @@ export default function Import() {
           <Upload size={36} style={{ color: 'var(--lime)', marginBottom: '1rem' }} />
           <div style={{ fontWeight: 600, marginBottom: '0.5rem' }}>Drop your CSV here or click to browse</div>
           <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>WaveLeads · Apollo · LinkedIn Sales Nav · Any CSV · Max 500 rows</div>
+          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.75rem' }}>
+            Using Excel? File → Save As → CSV UTF-8 before uploading. Click <strong>Download template</strong> above for the recommended format.
+          </div>
         </div>
       )}
 

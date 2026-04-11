@@ -60,15 +60,25 @@ router.post('/leads', async (req, res, next) => {
       if (get(row, mapping.industry))     meta.industry     = get(row, mapping.industry);
       if (get(row, mapping.company_size)) meta.company_size = get(row, mapping.company_size);
       if (get(row, mapping.signal))       meta.signal       = get(row, mapping.signal);
+      if (get(row, mapping.angle))        meta.angle        = get(row, mapping.angle);
+      if (get(row, mapping.why_now))      meta.why_now      = get(row, mapping.why_now);
+      if (get(row, mapping.friction))     meta.friction     = get(row, mapping.friction);
       if (get(row, mapping.notes))        meta.notes        = get(row, mapping.notes);
       meta.source = 'csv_import';
+      meta.data_source = 'csv_import';
+      meta.verified = true; // user-curated data is trusted by default
+
+      // Optional signal_tier from CSV — default P2 for imported leads (mid-priority).
+      // P1 = active signal, P2 = some signal, P3 = no signal. Captain's gates use this.
+      const tierRaw = (get(row, mapping.signal_tier) || '').toUpperCase();
+      const signalTier = ['P1', 'P2', 'P3'].includes(tierRaw) ? tierRaw : 'P2';
 
       try {
         await pool.query(
           `INSERT INTO leads
              (client_id, name, email, company, title, linkedin_url,
-              source, pipeline_stage, status, metadata)
-           VALUES ($1,$2,$3,$4,$5,$6,'csv_import','prospecting','new',$7)`,
+              source, pipeline_stage, status, signal_tier, metadata)
+           VALUES ($1,$2,$3,$4,$5,$6,'csv_import','prospecting','new',$7,$8)`,
           [
             clientId,
             name,
@@ -76,6 +86,7 @@ router.post('/leads', async (req, res, next) => {
             company,
             get(row, mapping.title)        || null,
             get(row, mapping.linkedin_url) || null,
+            signalTier,
             JSON.stringify(meta),
           ]
         );
