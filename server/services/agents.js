@@ -9,7 +9,7 @@ const logsService = require('./logs');
 const pool = require('../db/pool');
 const apolloService = require('./apollo');
 const hunterService = require('./hunter');
-const researchModule = require('./research');
+const clawResearch = require('./clawResearch');  // NEW: clawResearch replaces Serper pipeline
 const { getClientConfig, buildClientContext } = require('./clientConfig');
 
 let callAgent;
@@ -168,11 +168,11 @@ async function researchSearch(clientId, { query, filters = {} }) {
 
   let leads = [];
 
-  // Primary: Multi-source research — Serper (people, signal, company) + Hunter domain search
-  // Rotates through 300+ query variations so dedup never exhausts the pool
+  // Primary: clawResearch — Claude Haiku + web_search (replaces Serper pipeline)
+  // Cheaper, no API credits needed, uses native web_search tool
   try {
-    console.log(`[research_beaver] Running multi-source research (batch ${batchIndex})`);
-    const result = await researchModule.researchLeads(clientId, {
+    console.log(`[research_beaver] Running clawResearch (batch ${batchIndex})`);
+    const result = await clawResearch.researchLeads(clientId, {
       icpMemory,
       targetCount: filters.limit || 5,
       batchIndex,
@@ -180,18 +180,18 @@ async function researchSearch(clientId, { query, filters = {} }) {
     });
 
     const leads = result.leads || [];
-    console.log(`[research_beaver] Multi-source returned ${leads.length} leads via ${result.queriesUsed?.length || 0} queries`);
+    console.log(`[research_beaver] clawResearch returned ${leads.length} leads via ${result.queriesUsed?.length || 0} queries`);
 
     if (leads.length > 0) {
       return {
         success: true,
-        data: { leads, query: result.queriesUsed?.join(' | ') || query, filters, source: 'multi' },
+        data: { leads, query: result.queriesUsed?.join(' | ') || query, filters, source: 'web_search' },
       };
     }
 
-    console.warn('[research_beaver] Multi-source returned 0 leads — trying Apollo fallback');
+    console.warn('[research_beaver] clawResearch returned 0 leads — trying Apollo fallback');
   } catch (err) {
-    console.warn('[research_beaver] Multi-source research failed, trying Apollo:', err.message);
+    console.warn('[research_beaver] clawResearch failed, trying Apollo:', err.message);
   }
 
   // Fallback: Apollo (when configured — 275M verified contacts)
@@ -212,15 +212,15 @@ async function researchSearch(clientId, { query, filters = {} }) {
     agent: 'research_beaver',
     action: 'research_no_results',
     target_type: 'system',
-    metadata: { query: query?.substring?.(0, 200), source: 'multi', note: 'All sources returned 0 results' },
+    metadata: { query: query?.substring?.(0, 200), source: 'web_search', note: 'All sources returned 0 results' },
   });
-  const serperConfigured = !!process.env.SERPER_API_KEY;
+  const claudeConfigured = !!process.env.ANTHROPIC_API_KEY;
   const missingKeys = [];
-  if (!serperConfigured) missingKeys.push('SERPER_API_KEY');
+  if (!claudeConfigured) missingKeys.push('ANTHROPIC_API_KEY');
   const keyDiagnostic = missingKeys.length > 0
     ? ` Missing API keys: ${missingKeys.join(', ')}.`
     : ' API keys present — try different ICP keywords or a broader location.';
-  return { success: true, data: { leads: [], query, filters, source: 'multi', note: `No results from any source.${keyDiagnostic}`, missing_keys: missingKeys } };
+  return { success: true, data: { leads: [], query, filters, source: 'web_search', note: `No results from any source.${keyDiagnostic}`, missing_keys: missingKeys } };
 
   /* ── Claude fallback (DISABLED — fabricates companies) ──────────
    * Kept for potential re-enablement for enrichment (not sourcing).
