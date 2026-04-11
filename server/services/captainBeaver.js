@@ -599,12 +599,25 @@ async function toolReprocessMessage(clientId, { message_id }) {
     [clientId, msg.id, autoApproved ? 'auto_approval' : 'reprocess_tool', approvalStatus, resolvedAt]
   );
 
+  // If auto-approved AND email channel, push to send queue. Channel guard inside
+  // enqueueMessage skips LinkedIn / Instagram (manual send).
+  let enqueueResult = null;
+  if (autoApproved) {
+    try {
+      const { enqueueMessage } = require('./sendQueueWorker');
+      enqueueResult = await enqueueMessage(clientId, msg.id);
+    } catch (err) {
+      console.warn(`[reprocess] enqueueMessage failed for ${msg.id}:`, err.message);
+      enqueueResult = { enqueued: false, reason: err.message };
+    }
+  }
+
   await logsService.createLog(clientId, {
     agent: 'enforcer_beaver',
     action: autoApproved ? 'message_auto_approved' : 'message_approved',
     target_type: 'message',
     target_id: msg.id,
-    metadata: { channel: msg.channel, score: rangerScore, method: 'reprocess_tool' },
+    metadata: { channel: msg.channel, score: rangerScore, method: 'reprocess_tool', enqueued: !!enqueueResult?.enqueued },
   }).catch(() => {});
 
   return {
@@ -616,6 +629,8 @@ async function toolReprocessMessage(clientId, { message_id }) {
     new_status: nextMessageStatus,
     literal_question_count: literalQuestionCount,
     fixes_applied: fixed.fixes,
+    enqueued_for_send: !!enqueueResult?.enqueued,
+    enqueue_skip_reason: enqueueResult?.reason || null,
   };
 }
 

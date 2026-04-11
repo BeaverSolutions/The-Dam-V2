@@ -136,10 +136,17 @@ router.post('/send',
 async function sendMessageById(clientId, message_id, provider) {
   // Use a transaction with FOR UPDATE to prevent duplicate sends under concurrent requests.
   // The atomic status flip from 'approved' → 'sent' ensures only one request can win.
+  //
+  // IMPORTANT: db.release() lives ONLY in the finally block. Inner error branches
+  // throw and let the catch+finally clean up. Releasing inside a branch + relying on
+  // the catch to also release caused "Release called on client which has already
+  // been released to the pool" errors that bricked the send queue.
   const db = await pool.connect();
   let message;
+  let txOpen = false;
   try {
     await db.query('BEGIN');
+    txOpen = true;
 
     const msgRes = await db.query(
       `SELECT m.*, l.email as lead_email, l.name as lead_name
@@ -151,8 +158,6 @@ async function sendMessageById(clientId, message_id, provider) {
     );
 
     if (msgRes.rows.length === 0) {
-      await db.query('ROLLBACK');
-      db.release();
       const err = new Error('Message not found');
       err.status = 404;
       throw err;
@@ -160,31 +165,29 @@ async function sendMessageById(clientId, message_id, provider) {
 
     message = msgRes.rows[0];
     if (message.status === 'sent') {
-      await db.query('ROLLBACK');
-      db.release();
       const err = new Error('Message already sent');
       err.status = 409;
       throw err;
     }
-    if (message.status !== 'approved') {
-      await db.query('ROLLBACK');
-      db.release();
-      const err = new Error('Message must be approved before sending');
+    // Accept BOTH 'approved' and 'pending_send'. Wave 1 auto-approval lands
+    // messages directly in 'pending_send' (skipping 'approved'). The worker
+    // and Approvals UI both call this function, so it must accept both states.
+    if (message.status !== 'approved' && message.status !== 'pending_send') {
+      const err = new Error(`Message must be approved before sending (current status: ${message.status})`);
       err.status = 400;
       throw err;
     }
 
     // Block send if no real email — check INSIDE transaction before status flip
     if (!message.lead_email || message.lead_email === 'unknown@example.com') {
-      await db.query('ROLLBACK');
-      db.release();
+      // Log the block, then throw — the catch+finally will clean up the txn.
       await logsService.createLog(clientId, {
         agent: 'system',
         action: 'email_blocked',
         target_type: 'message',
         target_id: message_id,
         metadata: { lead_name: message.lead_name, reason: 'no_email' },
-      });
+      }).catch(() => {});
       const err = new Error('No email address for this lead. Find their email before sending.');
       err.status = 400;
       err.code = 'NO_EMAIL';
@@ -198,8 +201,11 @@ async function sendMessageById(clientId, message_id, provider) {
     );
 
     await db.query('COMMIT');
+    txOpen = false;
   } catch (err) {
-    try { await db.query('ROLLBACK'); } catch {}
+    if (txOpen) {
+      try { await db.query('ROLLBACK'); } catch {}
+    }
     db.release();
     throw err;
   }

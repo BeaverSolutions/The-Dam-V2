@@ -113,14 +113,43 @@ async function processJob(job) {
 /**
  * Enqueue an approved message for auto-send.
  * Called from the approvals route when a message is approved.
+ *
+ * Channel guard: only EMAIL messages get enqueued. LinkedIn / Instagram
+ * messages are manual-send by design (BeavrDam has no Playwright automation
+ * per Phase 1 scope) — they live in the Approved tab with a copy button.
+ * Returns { enqueued: bool, reason?: string } so callers can log.
  */
 async function enqueueMessage(clientId, messageId) {
+  // Look up the channel + lead email before enqueuing.
+  const { rows } = await pool.query(
+    `SELECT m.channel, l.email AS lead_email
+     FROM messages m
+     LEFT JOIN leads l ON l.id = m.lead_id
+     WHERE m.id = $1 AND m.client_id = $2 LIMIT 1`,
+    [messageId, clientId]
+  );
+  if (rows.length === 0) {
+    console.warn(`[send_queue] enqueueMessage: message ${messageId} not found`);
+    return { enqueued: false, reason: 'not_found' };
+  }
+
+  const { channel, lead_email } = rows[0];
+  if (channel !== 'email') {
+    console.log(`[send_queue] Skip enqueue: ${messageId} is ${channel} (manual-send channel)`);
+    return { enqueued: false, reason: `manual_send_channel:${channel}` };
+  }
+  if (!lead_email || lead_email === 'unknown@example.com') {
+    console.log(`[send_queue] Skip enqueue: ${messageId} has no lead email`);
+    return { enqueued: false, reason: 'no_email' };
+  }
+
   await pool.query(
     `INSERT INTO send_queue (client_id, message_id, status, next_retry_at)
      VALUES ($1, $2, 'pending', NOW())
      ON CONFLICT (message_id) DO NOTHING`,
     [clientId, messageId]
   );
+  return { enqueued: true };
 }
 
 module.exports = { processSendQueue, enqueueMessage };

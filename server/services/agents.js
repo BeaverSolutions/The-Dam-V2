@@ -1291,6 +1291,21 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
            resolvedAt]
         );
 
+        // If auto-approved AND email channel, push it into the send queue.
+        // Channel guard inside enqueueMessage ensures non-email messages are skipped
+        // (LinkedIn / Instagram are manual-send by design).
+        if (autoApproved) {
+          try {
+            const { enqueueMessage } = require('./sendQueueWorker');
+            const enqResult = await enqueueMessage(clientId, msg.id);
+            if (enqResult?.enqueued) {
+              console.log(`[pipeline] Auto-approved ${msg.id} → enqueued for send`);
+            }
+          } catch (err) {
+            console.warn(`[pipeline] enqueueMessage failed for ${msg.id}:`, err.message);
+          }
+        }
+
         await logsService.createLog(clientId, {
           agent: 'enforcer_beaver',
           action: autoApproved ? 'message_auto_approved' : 'message_approved',
@@ -2268,8 +2283,12 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
         autoApproved = true;
         approvalStatus = 'approved';
-        nextMessageStatus = 'pending_send'; // goes directly to send queue
-        console.log(`[enforcer] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold}`);
+        // Channel-aware: email goes straight to send queue. LinkedIn / other
+        // channels are manual-send by design (no Playwright in Phase 1) — they
+        // stop at 'approved' and live in the Approvals UI Approved tab with
+        // a Copy button.
+        nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
+        console.log(`[enforcer] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold} (channel=${msg.channel}, next=${nextMessageStatus})`);
       }
     } catch (err) {
       console.warn('[enforcer] Failed to read auto_approve_threshold, defaulting to manual:', err.message);
@@ -2291,6 +2310,20 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
        autoApproved ? 'approved' : 'pending',
        autoApproved ? new Date() : null]
     );
+
+    // If auto-approved AND email channel, push to send queue. Channel guard
+    // inside enqueueMessage skips LinkedIn / Instagram automatically.
+    if (autoApproved) {
+      try {
+        const { enqueueMessage } = require('./sendQueueWorker');
+        const enqResult = await enqueueMessage(clientId, msg.id);
+        if (enqResult?.enqueued) {
+          console.log(`[enforcer] Auto-approved ${msg.id} → enqueued for send`);
+        }
+      } catch (err) {
+        console.warn(`[enforcer] enqueueMessage failed for ${msg.id}:`, err.message);
+      }
+    }
 
     await logsService.createLog(clientId, {
       agent: 'enforcer_beaver',
