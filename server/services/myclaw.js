@@ -175,6 +175,65 @@ Return valid JSON only:
 }
 
 /**
+ * MyClaw as Director Chat brain.
+ *
+ * Sends a freeform user command + full context, asks MyClaw to interpret
+ * intent and return a structured action JSON. BeavrDam dispatches based on
+ * the action.
+ *
+ * Returns:
+ *   { action: 'research' | 'check_leads' | 'check_approvals' | 'do_outreach'
+ *           | 'check_status' | 'pipeline_summary' | 'chat',
+ *     query: string,
+ *     filters: object,
+ *     reply: string }
+ *
+ * Or null on failure → caller should fall back to local Haiku classifier.
+ */
+async function myClawChat(payload) {
+  if (!isConfigured()) return null;
+
+  const message = `You are Captain Beaver — the director of BeavrDam, an outbound B2B sales machine.
+
+A user just typed this in Director Chat:
+"${payload.command}"
+
+CLIENT CONTEXT:
+- Client ID: ${payload.clientId}
+${payload.icp ? `- ICP: ${JSON.stringify(payload.icp)}` : ''}
+${payload.persona ? `- Persona: ${JSON.stringify(payload.persona)}` : ''}
+${payload.recentActivity ? `- Recent activity: ${payload.recentActivity}` : ''}
+
+YOUR JOB:
+Decide what action to take. Available actions:
+
+- research: Find/source NEW leads. User examples: "20 b2b founders in KL", "marketing agency CEOs", "find 10 SaaS directors in Singapore", "anyone in proptech malaysia"
+- check_leads: View existing leads in pipeline (NOT find new ones). "show my leads", "what do I have"
+- show_linkedin: Get LinkedIn URLs of existing leads
+- check_approvals: View pending message approvals
+- do_outreach: Draft/send messages to existing leads
+- check_status: System health / KPI / daily stats
+- pipeline_summary: Pipeline overview / dashboard / stats
+- check_memory: View agent memory entries
+- chat: Greeting, unclear, or conversational reply (no action needed)
+
+CRITICAL RULES:
+- A message that contains a job title + a country/city/industry is ALWAYS research, even without verbs like "find"
+- Be decisive. Don't ask clarifying questions. Pick the closest action.
+- If the user is greeting or chatting, set action to "chat" and put your reply in the reply field
+
+Return JSON only, no markdown:
+{
+  "action": "research",
+  "query": "<the original user command, untouched>",
+  "filters": {},
+  "reply": "<short Captain-Beaver-voice acknowledgement, 1 sentence>"
+}`;
+
+  return callAgent(message, { timeoutSeconds: 25, name: 'BeavrDam-Chat' });
+}
+
+/**
  * Ask MyClaw to review campaign results and suggest next actions.
  */
 async function myClawReview(payload) {
@@ -195,6 +254,7 @@ module.exports = {
   isConfigured,
   callAgent,
   myClawPlan,
+  myClawChat,
   myClawBrief,
   myClawReview,
 };

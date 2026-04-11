@@ -828,21 +828,11 @@ function formatResponse(content) {
   };
 }
 
-// ── Main handler ────────────────────────────────────────────────────────────
-async function handleChat(clientId, command) {
-  // Log the MyClaw interaction
-  await logsService.createLog(clientId, {
-    agent: 'captain_beaver',
-    action: 'chat_command',
-    metadata: { command, source: 'director_chat' },
-  }).catch(() => {});
-
-  const intent = await classifyIntent(command);
-  console.log(`[chat] Intent: ${intent.intent}${intent.query ? ` query="${intent.query}"` : ''}`);
-
+// ── Dispatch a pre-classified intent (used when MyClaw already classified) ──
+async function dispatchIntent(clientId, command, intent) {
   switch (intent.intent) {
     case 'research_execute':
-      return handleResearchExecute(clientId, intent.query);
+      return handleResearchExecute(clientId, intent.query || command);
     case 'show_linkedin':
       return handleShowLinkedin(clientId, intent.filters || {});
     case 'do_outreach':
@@ -863,14 +853,40 @@ async function handleChat(clientId, command) {
       return handlePipelineSummary(clientId);
     case 'general':
     default:
-      // If Captain Beaver can't classify, use Claude as the brain
       if (intent.reply) return formatResponse(intent.reply);
       return handleWithClaude(clientId, command);
   }
 }
 
+// Public: dispatch with a pre-built intent (for MyClaw to skip local classification)
+async function handleChatWithIntent(clientId, command, intent) {
+  await logsService.createLog(clientId, {
+    agent: 'captain_beaver',
+    action: 'chat_command',
+    metadata: { command, source: 'director_chat', intent: intent.intent, classifier: 'myclaw' },
+  }).catch(() => {});
+  console.log(`[chat] MyClaw-classified intent: ${intent.intent} query="${intent.query || command}"`);
+  return dispatchIntent(clientId, command, intent);
+}
+
+// ── Main handler ────────────────────────────────────────────────────────────
+async function handleChat(clientId, command) {
+  // Log the MyClaw interaction
+  await logsService.createLog(clientId, {
+    agent: 'captain_beaver',
+    action: 'chat_command',
+    metadata: { command, source: 'director_chat', classifier: 'local' },
+  }).catch(() => {});
+
+  const intent = await classifyIntent(command);
+  console.log(`[chat] Local intent: ${intent.intent}${intent.query ? ` query="${intent.query}"` : ''}`);
+
+  return dispatchIntent(clientId, command, intent);
+}
+
 module.exports = {
   handleChat,
+  handleChatWithIntent,
   // Backward compat — old MyClaw prefix still works, plus new @captain prefix
   isCaptainMessage: (cmd) => /^(?:@?(?:my)?claw|hey\s+claw|@?captain|hey\s+captain|@?lodge(?:\s*master)?)[,:\s]*/i.test(cmd.trim()),
   // Legacy alias

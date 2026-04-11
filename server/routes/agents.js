@@ -115,17 +115,85 @@ router.post('/director/plan',
     try {
       const { command } = req.body;
       const captainChat = require('../services/myClawChat');
+      const myclaw = require('../services/myclaw');
 
       // Strip @captain / @claw prefix if present
       const cleanCommand = hasCaptainPrefix(command) ? stripCaptainPrefix(command) : command;
 
       // ── Full pipeline activation (kickoff, start campaign, etc.) ──
+      // These are explicit verbs that should fire the structured plan flow.
       if (isPipelineCommand(cleanCommand)) {
         const result = await agentsService.directorPlan(req.clientId, req.body);
         return res.json({ data: result });
       }
 
-      // ── Everything else → Captain Beaver (the unified brain) ──
+      // ── PRIMARY BRAIN: MyClaw chat interpretation (if configured) ──
+      // MyClaw understands natural language, has shared memory + persona,
+      // and decides what action to take. Falls back to local Captain Beaver
+      // (Haiku classifier) if MyClaw is unavailable.
+      if (myclaw.isConfigured()) {
+        try {
+          // Pull context for MyClaw
+          const [icpRow, personaRow] = await Promise.all([
+            pool.query(`SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`, [req.clientId]).catch(() => ({ rows: [] })),
+            pool.query(`SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'director' AND key = 'persona' LIMIT 1`, [req.clientId]).catch(() => ({ rows: [] })),
+          ]);
+
+          const myclawResult = await myclaw.myClawChat({
+            command: cleanCommand,
+            clientId: req.clientId,
+            icp: icpRow.rows[0]?.content || null,
+            persona: personaRow.rows[0]?.content || null,
+          });
+
+          if (myclawResult && myclawResult.action) {
+            console.log(`[director/plan] MyClaw → action=${myclawResult.action} query="${myclawResult.query || cleanCommand}"`);
+
+            // Translate MyClaw action → captainChat intent + dispatch
+            const intentMap = {
+              research:         'research_execute',
+              check_leads:      'check_leads',
+              show_linkedin:    'show_linkedin',
+              check_approvals:  'check_approvals',
+              do_outreach:      'do_outreach',
+              check_status:     'check_status',
+              pipeline_summary: 'pipeline_summary',
+              check_memory:     'check_memory',
+              check_qualified:  'check_qualified',
+              lead_count:       'lead_count',
+              chat:             'general',
+            };
+
+            const mappedIntent = intentMap[myclawResult.action] || 'general';
+
+            // For 'chat' action, return MyClaw's reply directly (no handler needed)
+            if (mappedIntent === 'general' && myclawResult.reply) {
+              const result = {
+                plan_id: require('uuid').v4(),
+                status: 'captain_response',
+                source: 'myclaw',
+                message: myclawResult.reply,
+              };
+              return res.json({ data: result });
+            }
+
+            // Otherwise dispatch to existing captain handler with MyClaw-classified intent
+            const dispatchCommand = myclawResult.query || cleanCommand;
+            const result = await captainChat.handleChatWithIntent(
+              req.clientId,
+              dispatchCommand,
+              { intent: mappedIntent, query: dispatchCommand, filters: myclawResult.filters || {} }
+            );
+            return res.json({ data: result });
+          }
+
+          console.warn('[director/plan] MyClaw returned no action — falling back to Haiku');
+        } catch (err) {
+          console.warn('[director/plan] MyClaw failed — falling back to Haiku:', err.message);
+        }
+      }
+
+      // ── FALLBACK: local Captain Beaver (Haiku classifier) ──
       const result = await captainChat.handleChat(req.clientId, cleanCommand);
       res.json({ data: result });
     } catch (err) { next(err); }
