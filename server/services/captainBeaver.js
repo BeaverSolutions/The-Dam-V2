@@ -33,6 +33,9 @@ const { callAgentWithTools } = require('./claude');
 const { searchOpenWeb } = require('./searchService');
 const {
   processExistingLeadsPipeline,
+  autoFixMessage,
+  brandSafetyCheck,
+  rangerReview,
   getMemory,
   directorGetICP,
   getClientPersona,
@@ -231,6 +234,17 @@ const TOOLS = [
     name: 'get_client_config',
     description: 'Read the client\'s ICP (industries, geographies, job titles, excluded roles) and persona (tone, value prop). Call this at the start of any new request so you understand who you\'re targeting.',
     input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'reprocess_message',
+    description: 'Re-run a specific message through autoFix + Enforcer (Sonnet review) and update its status. Use this after a prompt or rule change to re-evaluate previously rejected messages, OR when the user explicitly asks you to reprocess a message. The current message body is fetched from the DB — you don\'t need to pass it. Returns the new Enforcer score, decision, notes, and final status. If approved and the score meets the client\'s auto_approve_threshold, the message is auto-approved.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        message_id: { type: 'string', description: 'The UUID of the message to reprocess' },
+      },
+      required: ['message_id'],
+    },
   },
 ];
 
@@ -477,6 +491,134 @@ async function toolGetClientConfig(clientId) {
   return { icp, persona };
 }
 
+async function toolReprocessMessage(clientId, { message_id }) {
+  if (!message_id) return { ok: false, error: 'message_id is required' };
+
+  // Load message + lead context
+  const { rows } = await pool.query(
+    `SELECT m.*, l.name AS lead_name, l.company AS lead_company, l.title AS lead_title,
+            l.email AS lead_email, l.linkedin_url AS lead_linkedin,
+            l.metadata->>'signal' AS signal, l.metadata->>'angle' AS angle,
+            l.metadata->>'why_now' AS why_now, l.metadata->>'friction' AS friction
+     FROM messages m
+     JOIN leads l ON l.id = m.lead_id
+     WHERE m.id = $1 AND m.client_id = $2`,
+    [message_id, clientId]
+  );
+  if (rows.length === 0) return { ok: false, error: 'Message not found for this client' };
+
+  const msg = rows[0];
+  const leadCtx = {
+    name: msg.lead_name, company: msg.lead_company, title: msg.lead_title,
+    signal: msg.signal, why_now: msg.why_now, angle: msg.angle, friction: msg.friction,
+  };
+  const literalQuestionCount = ((msg.body || '').match(/\?/g) || []).length;
+  const previousStatus = msg.status;
+
+  // 1. Auto-fix
+  const fixed = autoFixMessage(msg.body, { touchNumber: 0, maxWords: 80 });
+  if (fixed.fixes.length > 0) {
+    await pool.query(`UPDATE messages SET body = $1 WHERE id = $2`, [fixed.body, msg.id]);
+  }
+
+  // 2. Brand safety
+  const safety = brandSafetyCheck(fixed.body, leadCtx);
+  if (!safety.safe) {
+    await pool.query(
+      `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
+      [`Brand safety: ${safety.reason}`, msg.id]
+    );
+    return {
+      ok: true, decision: 'rejected', reason: `brand_safety: ${safety.reason}`,
+      previous_status: previousStatus, new_status: 'ranger_rejected',
+      literal_question_count: literalQuestionCount,
+    };
+  }
+
+  // 3. Enforcer (Sonnet) review
+  let rangerResult;
+  try {
+    rangerResult = await rangerReview(clientId, {
+      message_id: msg.id, message_body: fixed.body, lead_context: leadCtx,
+    });
+  } catch (err) {
+    return { ok: false, error: `Enforcer call failed: ${err.message}` };
+  }
+
+  const finalBody = rangerResult?.body || fixed.body;
+  const rangerScore = rangerResult?.score || 70;
+
+  if (!rangerResult?.approved) {
+    await pool.query(
+      `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
+      [rangerResult?.notes || 'Re-rejected by Enforcer', msg.id]
+    );
+    return {
+      ok: true, decision: 'rejected', score: rangerScore,
+      notes: rangerResult?.notes || 'unknown reason',
+      previous_status: previousStatus, new_status: 'ranger_rejected',
+      literal_question_count: literalQuestionCount,
+      fixes_applied: fixed.fixes,
+    };
+  }
+
+  // 4. Approved → check auto-approval threshold (mirror processExistingLeadsPipeline)
+  let autoApproved = false;
+  let nextMessageStatus = 'pending_approval';
+  let approvalStatus = 'pending';
+  let resolvedAt = null;
+
+  try {
+    const { rows: [clientRow] } = await pool.query(
+      `SELECT auto_approve_threshold FROM clients WHERE id = $1 LIMIT 1`,
+      [clientId]
+    );
+    const threshold = clientRow?.auto_approve_threshold;
+    if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
+      autoApproved = true;
+      nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
+      approvalStatus = 'approved';
+      resolvedAt = new Date();
+    }
+  } catch (err) {
+    console.warn('[reprocess] threshold lookup failed:', err.message);
+  }
+
+  await pool.query(
+    `UPDATE messages SET body = $1, status = $2, ranger_score = $3, ranger_notes = $4, updated_at = NOW() WHERE id = $5`,
+    [finalBody, nextMessageStatus, rangerScore,
+     autoApproved ? `Auto-approved (score ${rangerScore})` : (rangerResult.notes || 'Reprocess approved'),
+     msg.id]
+  );
+
+  // Replace any existing approval row for this message (the old rejected one is irrelevant)
+  await pool.query(`DELETE FROM approvals WHERE message_id = $1 AND client_id = $2`, [msg.id, clientId]);
+  await pool.query(
+    `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [clientId, msg.id, autoApproved ? 'auto_approval' : 'reprocess_tool', approvalStatus, resolvedAt]
+  );
+
+  await logsService.createLog(clientId, {
+    agent: 'enforcer_beaver',
+    action: autoApproved ? 'message_auto_approved' : 'message_approved',
+    target_type: 'message',
+    target_id: msg.id,
+    metadata: { channel: msg.channel, score: rangerScore, method: 'reprocess_tool' },
+  }).catch(() => {});
+
+  return {
+    ok: true,
+    decision: autoApproved ? 'auto_approved' : 'approved',
+    score: rangerScore,
+    notes: rangerResult.notes,
+    previous_status: previousStatus,
+    new_status: nextMessageStatus,
+    literal_question_count: literalQuestionCount,
+    fixes_applied: fixed.fixes,
+  };
+}
+
 // ─── Tool dispatcher ──────────────────────────────────────────────────────
 
 function buildToolHandler(clientId) {
@@ -492,6 +634,7 @@ function buildToolHandler(clientId) {
         case 'write_memory':          return await toolWriteMemory(clientId, input || {});
         case 'web_search_brave':      return await toolWebSearchBrave(clientId, input || {});
         case 'get_client_config':     return await toolGetClientConfig(clientId);
+        case 'reprocess_message':     return await toolReprocessMessage(clientId, input || {});
         default:                      return { error: `Unknown tool: ${toolName}` };
       }
     } catch (err) {
