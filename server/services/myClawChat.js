@@ -20,52 +20,130 @@ const serperService = require('./searchService');
 const agentsService = require('./agents');
 const queryGenerator = require('./queryGenerator');
 const leadScorer = require('./leadScorer');
+const myclaw = require('./myclaw');  // NEW: route chat through real MyClaw if configured
+const Anthropic = require('@anthropic-ai/sdk');
 
 let callAgent;
 try { callAgent = require('./claude').callAgent; } catch { callAgent = null; }
 
-// ── Intent classification — fast keyword matching ───────────────────────────
-// No Claude call needed here. Keeps it instant and saves tokens.
-function classifyIntent(command) {
+// Direct Anthropic client for fast intent classification (cheaper than callAgent overhead)
+let anthropic;
+try {
+  anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: 15_000 });
+} catch (err) {
+  console.warn('[chat] Failed to init Anthropic client:', err.message);
+}
+
+// ── Intent classification — regex shortcuts + Haiku/MyClaw fallback ────────
+// Layer 1: cheap regex for obvious commands ("show approvals", "Find 10 founders")
+// Layer 2: Haiku LLM classifier for natural language ("20 b2b founders KL")
+// Layer 3 (optional): MyClaw if configured — true Claw persona
+
+const VALID_INTENTS = [
+  'research_execute', 'show_linkedin', 'do_outreach',
+  'check_approvals', 'check_leads', 'check_qualified',
+  'check_memory', 'check_status', 'lead_count',
+  'pipeline_summary', 'general',
+];
+
+function classifyIntentRegex(command) {
   const lower = command.toLowerCase();
 
-  // Extract filters from command
   const filters = {};
   const tierMatch = lower.match(/\b(p[123])\b/i);
   if (tierMatch) filters.signal_tier = tierMatch[1].toUpperCase();
   const limitMatch = lower.match(/\b(\d+)\s*(?:leads?|results?)\b/);
   if (limitMatch) filters.limit = parseInt(limitMatch[1], 10);
 
-  // ── RESEARCH COMMANDS (priority) ──
-  // "find 20 b2b founders in KL", "search for marketing managers", etc.
-  if (/\b(?:find|search|look\s*for|get\s*me|discover)\b/i.test(lower)) {
-    return { intent: 'research_execute', query: command };
+  // Research commands (explicit verbs)
+  if (/\b(?:find|search|look\s*for|get\s*me|discover|source|hunt\s*for)\b/i.test(lower)) {
+    return { intent: 'research_execute', query: command, confident: true };
   }
 
-  // ── Follow-up: LinkedIn URLs of recent leads ──
   if (/linkedin/i.test(lower) && /provid|show|give|get|their|url|link/i.test(lower)) {
-    return { intent: 'show_linkedin', filters };
+    return { intent: 'show_linkedin', filters, confident: true };
   }
-
-  // ── Outreach / Sales trigger ──
   if (/\b(?:outreach|draft|message|email|send|contact|reach out|write to|do outreach)\b/i.test(lower)) {
-    return { intent: 'do_outreach', filters };
+    return { intent: 'do_outreach', filters, confident: true };
+  }
+  if (/approv|queue|review|pending\s*message/i.test(lower)) return { intent: 'check_approvals', filters, confident: true };
+  if (/qualif|ready\s*(?:for|to)\s*(?:outreach|contact)/i.test(lower)) return { intent: 'check_qualified', filters, confident: true };
+  if (/\b(?:count|how\s*many|total)\b.*lead/i.test(lower) || /lead.*\b(?:count|how\s*many|total)\b/i.test(lower)) return { intent: 'lead_count', filters, confident: true };
+  if (/^check\s+(my\s+)?leads?\b/i.test(lower)) return { intent: 'check_leads', filters, confident: true };
+  if (/memor|learn|mistake|pattern/i.test(lower)) return { intent: 'check_memory', filters, confident: true };
+  if (/status|health|ping|alive|connect/i.test(lower)) return { intent: 'check_status', filters, confident: true };
+  if (/pipeline|summary|overview|dashboard|stats|numbers/i.test(lower)) return { intent: 'pipeline_summary', filters, confident: true };
+
+  // Not confident — caller should fall through to LLM
+  return { intent: 'general', confident: false };
+}
+
+async function classifyIntentWithHaiku(command) {
+  if (!anthropic) return null;
+
+  const prompt = `You are Captain Beaver, the director of an outbound B2B sales machine called BeavrDam. The user just typed a command in your Director Chat. Classify their intent.
+
+USER COMMAND: "${command}"
+
+INTENTS (pick exactly ONE):
+- research_execute: User wants to FIND/SOURCE NEW leads. Examples: "20 b2b founders in KL", "marketing agency CEOs Malaysia", "fintech founders Singapore", "10 SaaS directors", "anyone in proptech"
+- show_linkedin: User wants LinkedIn URLs of EXISTING leads
+- do_outreach: User wants to draft/send messages to existing leads
+- check_approvals: User wants to see pending message approvals
+- check_leads: User wants to view existing leads (NOT find new ones)
+- check_qualified: Lead readiness check
+- check_memory: View agent memory entries
+- check_status: System health check
+- lead_count: How many leads do I have
+- pipeline_summary: Pipeline stats / dashboard / overview
+- general: Greeting, unclear, or chitchat
+
+CRITICAL: If the user mentions a job title (founder, CEO, director, manager) + a country/city/industry without saying "find", they STILL want research_execute.
+
+Return JSON only, no markdown:
+{"intent":"research_execute","query":"<the original command>","filters":{}}`;
+
+  try {
+    const resp = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 200,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const text = resp.content[0]?.text || '';
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (!VALID_INTENTS.includes(parsed.intent)) return null;
+
+    console.log(`[chat] Haiku classified "${command}" → ${parsed.intent}`);
+    return parsed;
+  } catch (err) {
+    console.warn('[chat] Haiku intent classifier failed:', err.message);
+    return null;
+  }
+}
+
+async function classifyIntent(command) {
+  // Layer 1: regex shortcut for obvious commands (instant, cheap)
+  const regex = classifyIntentRegex(command);
+  if (regex.confident) {
+    delete regex.confident;
+    return regex;
   }
 
-  if (/approv|queue|review|pending\s*message/i.test(lower)) return { intent: 'check_approvals', filters };
-  if (/qualif|ready\s*(?:for|to)\s*(?:outreach|contact)/i.test(lower)) return { intent: 'check_qualified', filters };
-  if (/\b(?:count|how\s*many|total)\b.*lead/i.test(lower) || /lead.*\b(?:count|how\s*many|total)\b/i.test(lower)) return { intent: 'lead_count', filters };
-  if (/lead|prospect|contact/i.test(lower)) return { intent: 'check_leads', filters };
-  if (/memor|learn|mistake|pattern/i.test(lower)) return { intent: 'check_memory', filters };
-  if (/status|health|ping|alive|connect/i.test(lower)) return { intent: 'check_status', filters };
-  if (/pipeline|summary|overview|dashboard|stats|numbers/i.test(lower)) return { intent: 'pipeline_summary', filters };
+  // Layer 2: Haiku for natural language understanding
+  const haiku = await classifyIntentWithHaiku(command);
+  if (haiku) return haiku;
 
-  // Greetings and general chat
-  if (/^(hi|hey|hello|sup|yo|what'?s?\s*up|how\s*are)/i.test(lower)) {
-    return { intent: 'general', reply: "Hey! I'm Captain Beaver, your pipeline assistant. I can find leads, check your approvals, pipeline stats, and agent memory. What do you need?" };
+  // Layer 3: greeting fallback
+  if (/^(hi|hey|hello|sup|yo|what'?s?\s*up|how\s*are)/i.test(command)) {
+    return { intent: 'general', reply: "Hey. What do you need — leads, outreach, approvals, or pipeline stats?" };
   }
 
-  return { intent: 'general', reply: "I'm Captain Beaver. Try asking me to:\n- Find 20 b2b founders in KL\n- Check my leads\n- Show approvals\n- Pipeline summary\n- Check agent memory\n- Show status" };
+  // Last resort: route to handleWithClaude (smart fallback) instead of canned reply
+  return { intent: 'general' };
 }
 
 // ── Intent handlers ─────────────────────────────────────────────────────────
@@ -759,7 +837,8 @@ async function handleChat(clientId, command) {
     metadata: { command, source: 'director_chat' },
   }).catch(() => {});
 
-  const intent = classifyIntent(command);
+  const intent = await classifyIntent(command);
+  console.log(`[chat] Intent: ${intent.intent}${intent.query ? ` query="${intent.query}"` : ''}`);
 
   switch (intent.intent) {
     case 'research_execute':
