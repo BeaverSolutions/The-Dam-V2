@@ -159,7 +159,9 @@ async function callAgent(agentKey, userMessage, context = {}) {
  * @param {string}   userMessage   The user's message to start the conversation
  * @param {Array}    tools         Anthropic tool definitions (name, description, input_schema)
  * @param {Function} toolHandler   async (toolName, input) => any — executes each tool call
- * @param {object}   [context]     { clientId } for budget attribution
+ * @param {object}   [context]     { clientId, systemPrompt } — systemPrompt overrides the
+ *                                 default agent.systemPrompt (used by Captain Beaver to
+ *                                 load myclaw/*.md persona files instead of config/agents.js)
  * @returns {Promise<{ text: string, toolCalls: Array, iterations: number }>}
  */
 async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, context = {}) {
@@ -172,6 +174,9 @@ async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, con
 
   const model = agent.model || CLAUDE_MODEL;
   const maxTokens = agent.maxTokens || MAX_TOKENS;
+  // Optional per-call override — lets callers inject a dynamically-built system prompt
+  // (e.g. Captain Beaver loading myclaw/*.md persona files). Falls back to the config prompt.
+  const systemPromptText = context?.systemPrompt || agent.systemPrompt;
 
   const clientId = context?.clientId || getCurrentClientId() || null;
 
@@ -204,7 +209,7 @@ async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, con
         system: [
           {
             type: 'text',
-            text: agent.systemPrompt,
+            text: systemPromptText,
             cache_control: { type: 'ephemeral' },
           },
         ],

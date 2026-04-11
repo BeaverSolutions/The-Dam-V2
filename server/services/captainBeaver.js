@@ -4,9 +4,9 @@
  * Captain Beaver — the Director Chat brain (tool-using Sonnet agent).
  *
  * This is the in-Dam twin of Jarvis (the Telegram/OpenClaw instance).
- * Same persona prompt (from config/agents.js director), same shared memory
- * (agent_memory DB table), but running inside BeavrDam with direct in-process
- * tool access instead of HTTP round-trips.
+ * Loads the SAME persona files Jarvis loads (clients/{slug}/myclaw/*.md)
+ * and the SAME shared memory (agent_memory DB table), but runs inside
+ * BeavrDam with direct in-process tool access instead of HTTP round-trips.
  *
  * Entry point: handleChat(clientId, message) → { status, source, message }
  *
@@ -24,6 +24,8 @@
  * Added 2026-04-12. Replaces services/myClawChat.js as the web chat brain.
  */
 
+const fs = require('fs');
+const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
 const logsService = require('./logs');
@@ -35,6 +37,95 @@ const {
   directorGetICP,
   getClientPersona,
 } = require('./agents');
+
+// ─── Persona loader ────────────────────────────────────────────────────────
+// Loads the same files Jarvis loads: IDENTITY, SOUL, USER, AGENTS, MEMORY, TOOLS.
+// Wraps them in a short environment-adapter preamble + suffix so Sonnet knows
+// this is the in-Dam twin (direct in-process tools, not HTTP to BeavrDam API).
+// Cached in-memory per client slug; invalidates on process restart.
+
+const personaCache = new Map();
+const PERSONA_FILES = ['IDENTITY.md', 'SOUL.md', 'USER.md', 'AGENTS.md', 'MEMORY.md', 'TOOLS.md'];
+
+function loadPersona(clientSlug = 'beaver-solutions') {
+  if (personaCache.has(clientSlug)) return personaCache.get(clientSlug);
+
+  const baseDir = path.join(__dirname, '..', '..', 'clients', clientSlug, 'myclaw');
+  const sections = [];
+
+  for (const file of PERSONA_FILES) {
+    try {
+      const content = fs.readFileSync(path.join(baseDir, file), 'utf8').trim();
+      if (content) sections.push(`# ${file}\n\n${content}`);
+    } catch (err) {
+      console.warn(`[captainBeaver] persona file ${clientSlug}/${file} missing — skipping`);
+    }
+  }
+
+  if (sections.length === 0) {
+    console.warn(`[captainBeaver] no persona files loaded for ${clientSlug}, falling back to config/agents.js director prompt`);
+    personaCache.set(clientSlug, null); // signal caller to use default
+    return null;
+  }
+
+  // Environment adapter — sits at the top so Sonnet reads it first
+  const PREAMBLE = `You are Claw — the on-ground executor of Beaver Solutions.
+
+You live in TWO bodies: Jarvis (the Telegram/OpenClaw twin) and Captain Beaver (this instance, running inside BeavrDam's web chat). You are the SAME PERSON. Same identity. Same soul. Same rules. Same memory. The only difference is your environment.
+
+ENVIRONMENT: You are running INSIDE BeavrDam, not outside it calling in.
+- You do NOT call the BeavrDam HTTP API with x-internal-key headers. You ARE BeavrDam. You call tools directly in-process.
+- You do NOT talk to MJ through Telegram. You talk to him in BeavrDam's web chat at app.beaver.solutions/chat. Treat every chat here as a private DM with MJ — the same confidentiality tier as his Telegram private chat.
+- You do NOT run cron jobs, heartbeats, or bootstrap sequences. You respond to each user message in real time. Skills like dam-morning-brief, dam-reply-check, dam-approval-notify are Jarvis-specific — in the Dam you execute the underlying actions directly via your tools.
+- Time: all displayed times in GMT+8 (Malaysia). Current database is UTC; convert before displaying.
+
+TOOLS (Anthropic tool_use — call directly, no HTTP):
+- search_internal_leads    check the DB for existing leads BEFORE any new research
+- get_pipeline_status      live KPIs: sent today, pending approval, leads today, rejected today
+- get_approvals_pending    list messages awaiting approval with Enforcer notes
+- create_lead              INSERT a lead AND auto-run the full Sales→Enforcer→approval pipeline on it
+- check_lead_status        trace a specific lead's journey through the pipeline
+- read_memory              read agent_memory entries (ICP, learnings, rejection patterns)
+- write_memory             write a durable learning back to agent_memory
+- web_search_brave         open-web search (Brave → Serper → CSE fallback) — ONLY after search_internal_leads returns empty
+- get_client_config        read the client's ICP and persona
+
+Always use your tools. Do not claim facts about the pipeline without calling the relevant tool first.
+
+Below is your full persona as loaded from clients/beaver-solutions/myclaw/. It is IDENTICAL to what Jarvis loads on Telegram. Where the files reference Telegram, cron, heartbeats, or HTTP API calls, apply the SPIRIT not the literal text — your tool_use calls replace HTTP, and the Dam web chat is equivalent to a private Telegram DM with MJ.
+
+---
+
+`;
+
+  const SUFFIX = `
+
+---
+
+FINAL REMINDER: You are the in-Dam Claw. You have direct DB and tool access. No hallucinations. No HTTP API calls. Use your tools. Speak in Claw's voice. Give MJ the answer first, details only if asked.`;
+
+  const prompt = PREAMBLE + sections.join('\n\n---\n\n') + SUFFIX;
+
+  personaCache.set(clientSlug, prompt);
+  console.log(`[captainBeaver] loaded persona for ${clientSlug} — ${sections.length} files, ${prompt.length} chars`);
+  return prompt;
+}
+
+// Look up client slug from clientId (needed for loadPersona).
+// Cached because client rows don't change during a session.
+const slugCache = new Map();
+async function getClientSlug(clientId) {
+  if (slugCache.has(clientId)) return slugCache.get(clientId);
+  try {
+    const { rows } = await pool.query('SELECT slug FROM clients WHERE id = $1 LIMIT 1', [clientId]);
+    const slug = rows[0]?.slug || 'beaver-solutions';
+    slugCache.set(clientId, slug);
+    return slug;
+  } catch (err) {
+    console.warn(`[captainBeaver] getClientSlug failed for ${clientId}: ${err.message}`);
+    return 'beaver-solutions';
+  }
+}
 
 // ─── Tool schemas (Anthropic tool_use format) ──────────────────────────────
 
@@ -433,13 +524,18 @@ async function handleChat(clientId, command) {
     metadata: { command: command.substring(0, 500), source: 'director_chat' },
   }).catch(() => {});
 
+  // Load the same persona files Jarvis loads — makes Captain a true file-synced twin.
+  // Falls back to config/agents.js director prompt if files are missing.
+  const slug = await getClientSlug(clientId);
+  const systemPrompt = loadPersona(slug);
+
   try {
     const result = await callAgentWithTools(
       'director',
       command,
       TOOLS,
       buildToolHandler(clientId),
-      { clientId }
+      { clientId, systemPrompt }
     );
 
     // Log what happened
@@ -477,4 +573,6 @@ module.exports = {
   // Exported for tests / reuse
   TOOLS,
   buildToolHandler,
+  loadPersona,
+  getClientSlug,
 };
