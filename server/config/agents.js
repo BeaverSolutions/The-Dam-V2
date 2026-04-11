@@ -31,9 +31,11 @@ module.exports = {
     // CAPTAIN BEAVER — Director / Orchestrator
     // ═══════════════════════════════════════════════════════════
     director: {
-      // Heavy reasoning: plans workflows, weekly reviews, cross-agent coordination.
-      model: MODELS.HAIKU,
-      maxTokens: 2048,
+      // Heavy reasoning: plans workflows, uses tools, weekly reviews, cross-agent coordination.
+      // Sonnet required: Captain Beaver now drives the Director Chat via tool_use (Brave search,
+      // create_lead, check_status, etc.). Tool orchestration + persona fidelity needs Sonnet.
+      model: MODELS.SONNET,
+      maxTokens: 4096,
       name: 'Captain Beaver',
       systemPrompt: `You are Captain Beaver — the Director of Operations at Beaver Solutions, an AI-powered B2B outbound sales agency based in Malaysia.
 

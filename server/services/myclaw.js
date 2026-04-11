@@ -46,81 +46,58 @@ function isConfigured() {
  * @param {object} options  - { timeoutSeconds, name }
  * @returns {object|null}   - MyClaw's response or null on failure
  */
-// Cache the path that worked so we don't probe on every call
-let WORKING_PATH = process.env.MYCLAW_HOOK_PATH || null;
-const CANDIDATE_PATHS = ['/hooks/agent', '/hooks/wake', '/api/hooks/agent', '/api/v1/hooks/agent'];
-
-async function tryEndpoint(path, body, headers) {
-  const url = `${MYCLAW_BASE_URL}${path}`;
-  return axios.post(url, body, { headers, timeout: MYCLAW_TIMEOUT, validateStatus: () => true });
-}
-
 async function callAgent(message, options = {}) {
   if (!isConfigured()) return null;
 
-  const body = {
-    message,
-    name: options.name || 'BeavrDam',
-    timeoutSeconds: options.timeoutSeconds || 55,
-  };
-  const headers = {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${MYCLAW_TOKEN}`,
-    'x-openclaw-token': MYCLAW_TOKEN,
-  };
+  const endpoint = `${MYCLAW_BASE_URL}/hooks/agent`;
 
-  // Build path order: cached working path first (if any), then probe candidates
-  const pathsToTry = WORKING_PATH
-    ? [WORKING_PATH, ...CANDIDATE_PATHS.filter(p => p !== WORKING_PATH)]
-    : CANDIDATE_PATHS;
+  try {
+    console.log(`[myclaw] POST ${endpoint} — ${message.substring(0, 100)}...`);
 
-  let lastError = null;
-  for (const path of pathsToTry) {
-    try {
-      console.log(`[myclaw] POST ${MYCLAW_BASE_URL}${path} — ${message.substring(0, 80)}...`);
-      const resp = await tryEndpoint(path, body, headers);
-
-      // 404 → wrong path, try the next one
-      if (resp.status === 404) {
-        console.warn(`[myclaw] 404 on ${path}, trying next path...`);
-        lastError = `404 on ${path}`;
-        continue;
+    const resp = await axios.post(
+      endpoint,
+      {
+        message,
+        name: options.name || 'BeavrDam',
+        timeoutSeconds: options.timeoutSeconds || 55,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${MYCLAW_TOKEN}`,
+          'x-openclaw-token': MYCLAW_TOKEN,
+        },
+        timeout: MYCLAW_TIMEOUT,
       }
+    );
 
-      // Non-2xx that isn't 404 → this is the right path but something else broke
-      if (resp.status >= 400) {
-        console.warn(`[myclaw] HTTP ${resp.status} on ${path}: ${typeof resp.data === 'string' ? resp.data.substring(0, 200) : JSON.stringify(resp.data).substring(0, 200)}`);
-        lastError = `HTTP ${resp.status} on ${path}`;
-        // Cache this path anyway — non-404 means the endpoint exists
-        WORKING_PATH = path;
-        return null;
+    const data = resp.data;
+
+    // OpenClaw may return different shapes — normalise
+    const result = data?.response || data?.result || data?.data || data;
+
+    console.log(`[myclaw] Response: status=${resp.status}, type=${typeof result}`);
+
+    // If result is a string, try to parse as JSON (MyClaw might return a JSON string)
+    if (typeof result === 'string') {
+      try {
+        const trimmed = result.trim();
+        // Strip markdown code fences if present
+        const cleaned = trimmed
+          .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '')
+          .trim();
+        return JSON.parse(cleaned);
+      } catch {
+        // Not JSON — return as a text response
+        return { interpretation: result, raw: result };
       }
-
-      // 2xx — cache the working path and parse the response
-      WORKING_PATH = path;
-      const data = resp.data;
-      const result = data?.response || data?.result || data?.data || data;
-      console.log(`[myclaw] Response from ${path}: status=${resp.status}, type=${typeof result}`);
-
-      if (typeof result === 'string') {
-        try {
-          const cleaned = result.trim()
-            .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '')
-            .trim();
-          return JSON.parse(cleaned);
-        } catch {
-          return { interpretation: result, raw: result };
-        }
-      }
-      return result;
-    } catch (err) {
-      console.warn(`[myclaw] Network error on ${path}: ${err.message}`);
-      lastError = err.message;
     }
-  }
 
-  console.warn(`[myclaw] All endpoint paths failed. Last error: ${lastError}`);
-  return null;
+    return result;
+  } catch (err) {
+    console.warn(`[myclaw] Call failed:`, err.message);
+    return null;
+  }
 }
 
 /**
@@ -198,65 +175,6 @@ Return valid JSON only:
 }
 
 /**
- * MyClaw as Director Chat brain.
- *
- * Sends a freeform user command + full context, asks MyClaw to interpret
- * intent and return a structured action JSON. BeavrDam dispatches based on
- * the action.
- *
- * Returns:
- *   { action: 'research' | 'check_leads' | 'check_approvals' | 'do_outreach'
- *           | 'check_status' | 'pipeline_summary' | 'chat',
- *     query: string,
- *     filters: object,
- *     reply: string }
- *
- * Or null on failure → caller should fall back to local Haiku classifier.
- */
-async function myClawChat(payload) {
-  if (!isConfigured()) return null;
-
-  const message = `You are Captain Beaver — the director of BeavrDam, an outbound B2B sales machine.
-
-A user just typed this in Director Chat:
-"${payload.command}"
-
-CLIENT CONTEXT:
-- Client ID: ${payload.clientId}
-${payload.icp ? `- ICP: ${JSON.stringify(payload.icp)}` : ''}
-${payload.persona ? `- Persona: ${JSON.stringify(payload.persona)}` : ''}
-${payload.recentActivity ? `- Recent activity: ${payload.recentActivity}` : ''}
-
-YOUR JOB:
-Decide what action to take. Available actions:
-
-- research: Find/source NEW leads. User examples: "20 b2b founders in KL", "marketing agency CEOs", "find 10 SaaS directors in Singapore", "anyone in proptech malaysia"
-- check_leads: View existing leads in pipeline (NOT find new ones). "show my leads", "what do I have"
-- show_linkedin: Get LinkedIn URLs of existing leads
-- check_approvals: View pending message approvals
-- do_outreach: Draft/send messages to existing leads
-- check_status: System health / KPI / daily stats
-- pipeline_summary: Pipeline overview / dashboard / stats
-- check_memory: View agent memory entries
-- chat: Greeting, unclear, or conversational reply (no action needed)
-
-CRITICAL RULES:
-- A message that contains a job title + a country/city/industry is ALWAYS research, even without verbs like "find"
-- Be decisive. Don't ask clarifying questions. Pick the closest action.
-- If the user is greeting or chatting, set action to "chat" and put your reply in the reply field
-
-Return JSON only, no markdown:
-{
-  "action": "research",
-  "query": "<the original user command, untouched>",
-  "filters": {},
-  "reply": "<short Captain-Beaver-voice acknowledgement, 1 sentence>"
-}`;
-
-  return callAgent(message, { timeoutSeconds: 25, name: 'BeavrDam-Chat' });
-}
-
-/**
  * Ask MyClaw to review campaign results and suggest next actions.
  */
 async function myClawReview(payload) {
@@ -277,7 +195,6 @@ module.exports = {
   isConfigured,
   callAgent,
   myClawPlan,
-  myClawChat,
   myClawBrief,
   myClawReview,
 };

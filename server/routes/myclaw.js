@@ -511,15 +511,32 @@ router.post('/leads', async (req, res, next) => {
        signal_tier || 'P1', JSON.stringify(metadata)]
     );
 
+    const lead = result.rows[0];
+
     await logsService.createLog(client_id, {
       agent: 'captain_beaver',
       action: 'lead_created',
       target_type: 'lead',
-      target_id: result.rows[0].id,
-      metadata: { name, company, signal_tier, source: 'captain_api' },
+      target_id: lead.id,
+      metadata: { name, company, signal_tier, source: 'myclaw_api' },
     });
 
-    res.status(201).json({ data: result.rows[0] });
+    // ── Auto-trigger the Sales → Enforcer → approval pipeline on this new lead ──
+    // This is the missing link: before today, POST /leads only inserted the row.
+    // Now it runs the full draft + QA chain the same way captainBeaver.create_lead does.
+    // If the pipeline call fails, we log but still return 201 — the lead is saved
+    // and can be re-processed later.
+    let pipeline_result = null;
+    try {
+      const { processExistingLeadsPipeline } = require('../services/agents');
+      const { v4: uuidv4 } = require('uuid');
+      pipeline_result = await processExistingLeadsPipeline(client_id, uuidv4(), [lead]);
+    } catch (err) {
+      console.warn('[myclaw/leads] Auto-trigger Sales pipeline failed:', err.message);
+      pipeline_result = { error: err.message };
+    }
+
+    res.status(201).json({ data: { lead, pipeline_result } });
   } catch (err) { next(err); }
 });
 

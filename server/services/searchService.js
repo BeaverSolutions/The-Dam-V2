@@ -368,14 +368,55 @@ async function searchBySignal(query, limit = 5) {
  * searchOpenWeb(query, limit)
  *
  * Searches the open web (NOT LinkedIn) for news, articles, press releases.
- * Used by signal hunting to find buying signals (funding, hiring, expansion).
+ * Used by signal hunting AND by Captain Beaver's web_search_brave tool.
  * Returns raw search results with title, link, snippet — no LinkedIn parsing.
+ *
+ * Fallback chain: Brave → Serper → Google CSE.
+ * Brave is preferred because it doesn't require Google's restrictive CSE setup
+ * and has a reasonable free tier. Added 2026-04-12 for Captain Beaver.
  */
 async function searchOpenWeb(query, limit = 5) {
   if (!axios) return [];
   console.log('[search] Open web search:', query, '| Limit:', limit);
 
-  // Try Serper first (general web search, no site: restriction)
+  // Brave Search (primary) — fast, no site: restrictions, gentle rate limits
+  try {
+    const braveKey = process.env.BRAVE_API_KEY;
+    if (!braveKey) throw new Error('BRAVE_API_KEY not set');
+
+    const resp = await axios.get('https://api.search.brave.com/res/v1/web/search', {
+      params: {
+        q: query,
+        count: Math.min(limit, 20),
+        country: 'MY',
+        search_lang: 'en',
+        safesearch: 'moderate',
+      },
+      headers: {
+        'X-Subscription-Token': braveKey,
+        Accept: 'application/json',
+        'Accept-Encoding': 'gzip',
+      },
+      timeout: 10000,
+    });
+
+    const results = resp.data?.web?.results || [];
+    if (results.length > 0) {
+      console.log(`[search] Brave returned ${results.length} results`);
+      return results.slice(0, limit).map(r => ({
+        title: r.title || '',
+        link: r.url || '',
+        snippet: r.description || '',
+        date: r.age || '',
+        source: r.profile?.name || new URL(r.url).hostname,
+        type: 'organic',
+      }));
+    }
+  } catch (err) {
+    console.warn(`[search] Brave open web failed: ${err.message}`);
+  }
+
+  // Try Serper (general web search, no site: restriction)
   try {
     const apiKey = process.env.SERPER_API_KEY;
     if (!apiKey) throw new Error('SERPER_API_KEY not set');

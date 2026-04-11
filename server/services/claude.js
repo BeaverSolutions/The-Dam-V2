@@ -151,4 +151,136 @@ async function callAgent(agentKey, userMessage, context = {}) {
   }
 }
 
-module.exports = { callAgent };
+/**
+ * Call an agent with tool use. Multi-turn loop: model may call tools, we execute,
+ * feed results back, and repeat until stop_reason === 'end_turn' OR max iterations.
+ *
+ * @param {string}   agentKey      Key into AGENTS (director, research_beaver, etc.)
+ * @param {string}   userMessage   The user's message to start the conversation
+ * @param {Array}    tools         Anthropic tool definitions (name, description, input_schema)
+ * @param {Function} toolHandler   async (toolName, input) => any — executes each tool call
+ * @param {object}   [context]     { clientId } for budget attribution
+ * @returns {Promise<{ text: string, toolCalls: Array, iterations: number }>}
+ */
+async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, context = {}) {
+  if (!client) throw new Error('Anthropic client not initialised');
+  if (!Array.isArray(tools) || tools.length === 0) throw new Error('callAgentWithTools requires a non-empty tools array');
+  if (typeof toolHandler !== 'function') throw new Error('callAgentWithTools requires a toolHandler function');
+
+  const agent = AGENTS[agentKey];
+  if (!agent) throw new Error(`Unknown agent: ${agentKey}`);
+
+  const model = agent.model || CLAUDE_MODEL;
+  const maxTokens = agent.maxTokens || MAX_TOKENS;
+
+  const clientId = context?.clientId || getCurrentClientId() || null;
+
+  // Budget gate (reuse single-shot logic)
+  if (clientId) {
+    const { allowed, spend, budget, pct } = await checkBudget(clientId);
+    if (!allowed) {
+      console.warn(`[claude:budget] BLOCKED client=${clientId} agent=${agentKey} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);
+      notifyBudgetExceeded({ clientId, spend, budget }).catch(() => {});
+      throw new BudgetExceededError({ clientId, spend, budget });
+    }
+    if (pct >= 0.8) {
+      console.warn(`[claude:budget] WARN client=${clientId} agent=${agentKey} at ${Math.round(pct * 100)}% of daily cap`);
+    }
+  }
+
+  const MAX_ITERATIONS = 8;
+  const messages = [{ role: 'user', content: userMessage }];
+  const toolCalls = [];
+  let finalText = '';
+  let iteration = 0;
+  const t0 = Date.now();
+
+  for (iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+    let response;
+    try {
+      response = await client.messages.create({
+        model,
+        max_tokens: maxTokens,
+        system: [
+          {
+            type: 'text',
+            text: agent.systemPrompt,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+        tools,
+        messages,
+      });
+    } catch (err) {
+      const elapsed = Date.now() - t0;
+      const status = err?.status || 'unknown';
+      console.warn(`[claude:tools] ${agentKey} via ${model} failed after ${elapsed}ms iter=${iteration}: ${status} ${err?.message || ''}`);
+      throw err;
+    }
+
+    // Log usage for this turn
+    try {
+      const u = response?.usage || {};
+      console.log(
+        `[claude:usage] client=${clientId || 'n/a'} agent=${agentKey} model=${model} iter=${iteration} ` +
+        `in=${u.input_tokens || 0} out=${u.output_tokens || 0} ` +
+        `cache_write=${u.cache_creation_input_tokens || 0} cache_read=${u.cache_read_input_tokens || 0} ` +
+        `stop=${response.stop_reason}`
+      );
+      logUsage({ clientId, agent: agentKey, model, usage: u, elapsedMs: Date.now() - t0 })
+        .catch(e => console.warn('[claude:usage] persist failed:', e.message));
+    } catch { /* never break on logging failure */ }
+
+    // Collect any text blocks from this turn (model may emit text before tool_use)
+    const textBlocks = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+    if (textBlocks) finalText = textBlocks; // keep the latest text (usually the final one)
+
+    // If there are no tool_use blocks, we're done
+    const toolUses = response.content.filter(b => b.type === 'tool_use');
+    if (toolUses.length === 0 || response.stop_reason === 'end_turn') {
+      return { text: finalText, toolCalls, iterations: iteration + 1, stop_reason: response.stop_reason };
+    }
+
+    // Record the assistant message so the model sees its own tool_use blocks next turn
+    messages.push({ role: 'assistant', content: response.content });
+
+    // Execute each tool call and build tool_result blocks
+    const toolResults = [];
+    for (const tu of toolUses) {
+      const callRecord = { name: tu.name, input: tu.input, id: tu.id };
+      try {
+        const result = await toolHandler(tu.name, tu.input);
+        callRecord.result = result;
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: typeof result === 'string' ? result : JSON.stringify(result),
+        });
+      } catch (err) {
+        callRecord.error = err.message;
+        console.warn(`[claude:tools] tool ${tu.name} failed: ${err.message}`);
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: JSON.stringify({ error: err.message }),
+          is_error: true,
+        });
+      }
+      toolCalls.push(callRecord);
+    }
+
+    // Feed tool results back as a user-role message
+    messages.push({ role: 'user', content: toolResults });
+  }
+
+  // Max iterations reached — return what we have with a warning
+  console.warn(`[claude:tools] ${agentKey} hit MAX_ITERATIONS=${MAX_ITERATIONS}, returning partial result`);
+  return {
+    text: finalText || 'I ran out of reasoning steps before reaching a final answer. Here is what I got so far.',
+    toolCalls,
+    iterations: MAX_ITERATIONS,
+    stop_reason: 'max_iterations',
+  };
+}
+
+module.exports = { callAgent, callAgentWithTools };
