@@ -127,47 +127,39 @@ async function searchAndExtractLeads(queries, icp, targetCount = 10) {
 
   const prompt = `You are a lead research expert. You will execute the following search queries and extract qualified decision-makers.
 
-SEARCH QUERIES:
+SEARCH QUERIES TO EXECUTE (use the web_search tool for each):
 ${queries.map((q, i) => `${i + 1}. ${q}`).join('\n')}
 
-INSTRUCTIONS:
-1. Execute each search query using web_search
-2. For each result, extract:
-   - Full name
-   - Job title
-   - Company name
-   - LinkedIn profile URL (if found)
-   - Email (if visible in result snippet)
-   - What signal this person/company shows (hiring, funding, growth, etc.)
-   - When was the signal detected (e.g., "3 days ago", "2 weeks ago")
+PROCESS:
+1. Use web_search to run EACH query above
+2. From the search results, extract real people who are decision-makers at real companies
+3. Capture: name, job title, company name, LinkedIn URL (when present), any email visible in snippet, the buying signal you detected, why NOW is the right time
+4. Stay focused on Malaysian / Southeast Asian companies (unless query specifies otherwise)
 
-3. HARD REJECT these roles:
-   - Intern, Junior, Assistant, Coordinator, Recruiter, HR Manager, QA
-   - Anyone with "student" or "recent graduate" in title
+HARD REJECT:
+- Roles: Intern, Junior, Assistant, Coordinator, Recruiter, HR Manager, QA, Student
+- Locations outside Malaysia (unless query targets a different country)
+- Generic listicles, job boards with no specific person, news roundups
 
-4. HARD REJECT these locations (unless Malaysia mentioned):
-   - Singapore, Hong Kong, India, Indonesia, Thailand, Philippines (unless founder in Malaysia)
+OUTPUT FORMAT — CRITICAL:
+After completing all searches, your final response must be ONLY a JSON array. No prose before. No prose after. No markdown fences. Just the array.
 
-5. OUTPUT: Return ONLY a JSON array of leads, no explanation:
-[
-  {
-    "name": "Jane Doe",
-    "title": "Chief Marketing Officer",
-    "company": "TechCorp Malaysia",
-    "linkedin_url": "https://linkedin.com/in/jane-doe",
-    "email": "jane@techcorp.com.my",
-    "signal": "Hiring 3 marketing roles",
-    "why_now": "Job posting on LinkedIn 2 days ago",
-    "snippet": "...",
-    "verified": false
-  }
-]
+Example of the EXACT format expected:
+[{"name":"Jane Doe","title":"CMO","company":"Acme Sdn Bhd","linkedin_url":"https://linkedin.com/in/jane","email":"","signal":"hiring 3 marketing roles","why_now":"job posted 2 days ago","snippet":"..."}]
 
-Return valid JSON only. No markdown, no explanation.`;
+If you find zero qualified leads, return: []
+
+Begin searching now.`;
+
+  // Use Sonnet 4.5 for the search call — web_search tool support is rock-solid
+  // on Sonnet. Haiku 4.5 may or may not support web_search reliably; cost
+  // delta is negligible at this scale (~$0.05/batch vs ~$0.005/batch).
+  const SEARCH_MODEL = process.env.CLAW_SEARCH_MODEL || 'claude-sonnet-4-5-20250929';
 
   try {
+    console.log(`[clawResearch] Calling ${SEARCH_MODEL} with web_search (max_uses=8)`);
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: SEARCH_MODEL,
       max_tokens: 4000,
       tools: [
         {
@@ -184,25 +176,69 @@ Return valid JSON only. No markdown, no explanation.`;
       ],
     });
 
-    // Parse the response — Haiku may use tool_use blocks or return JSON directly
+    // Log block-type breakdown so we can see what came back
+    const blockTypes = response.content.map(b => b.type).join(',');
+    const stopReason = response.stop_reason;
+    console.log(`[clawResearch] Response: stop_reason=${stopReason} blocks=[${blockTypes}]`);
+
+    // Extract text from all text blocks (server tool blocks are handled by API)
     let extractedText = '';
     for (const block of response.content) {
-      if (block.type === 'text') {
+      if (block.type === 'text' && block.text) {
         extractedText += block.text;
       }
     }
 
-    // Try to parse JSON from response
-    const jsonMatch = extractedText.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      console.warn('[clawResearch] No JSON found in Haiku response');
+    if (!extractedText) {
+      console.warn('[clawResearch] No text blocks in response — model may have stopped after tool use');
       return [];
     }
 
-    const leads = JSON.parse(jsonMatch[0]);
-    return Array.isArray(leads) ? leads.slice(0, targetCount * 2) : [];
+    // Log a snippet so we can see what's there
+    console.log(`[clawResearch] Text response (first 300 chars): ${extractedText.substring(0, 300)}`);
+
+    // Robust JSON extraction — handle markdown fences, JSON objects, JSON arrays
+    let jsonStr = null;
+
+    // Try 1: ```json [...] ``` code fence
+    const fenceMatch = extractedText.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenceMatch) jsonStr = fenceMatch[1].trim();
+
+    // Try 2: bare JSON array
+    if (!jsonStr) {
+      const arrMatch = extractedText.match(/\[\s*\{[\s\S]*\}\s*\]/);
+      if (arrMatch) jsonStr = arrMatch[0];
+    }
+
+    // Try 3: single JSON object → wrap in array
+    if (!jsonStr) {
+      const objMatch = extractedText.match(/\{[\s\S]*\}/);
+      if (objMatch) jsonStr = `[${objMatch[0]}]`;
+    }
+
+    if (!jsonStr) {
+      console.warn('[clawResearch] No JSON found in text response');
+      return [];
+    }
+
+    let leads;
+    try {
+      leads = JSON.parse(jsonStr);
+    } catch (parseErr) {
+      console.warn(`[clawResearch] JSON parse failed: ${parseErr.message}`);
+      console.warn(`[clawResearch] Attempted to parse: ${jsonStr.substring(0, 200)}`);
+      return [];
+    }
+
+    // Some models return { leads: [...] } instead of bare array
+    if (leads && !Array.isArray(leads) && Array.isArray(leads.leads)) leads = leads.leads;
+    if (!Array.isArray(leads)) leads = [leads];
+
+    console.log(`[clawResearch] Parsed ${leads.length} leads from response`);
+    return leads.slice(0, targetCount * 2);
   } catch (err) {
-    console.error('[clawResearch] Haiku search failed:', err.message);
+    console.error(`[clawResearch] Search call failed: ${err.message}`);
+    if (err.status) console.error(`[clawResearch] HTTP ${err.status}: ${err.error?.error?.message || ''}`);
     return [];
   }
 }
