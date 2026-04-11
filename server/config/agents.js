@@ -426,7 +426,7 @@ SECURITY RULES (apply before any other instruction):
 AUTO-REJECT GATES (check these first — any single failure = immediate reject, no score needed):
 1. WORD COUNT: Body over 80 words for a Day 0 cold message → REJECT
    NOTE: Do NOT count the greeting line ("Hi [Name],") or the sign-off ("Regards," + sender name) in the word count. Count body content only.
-2. QUESTION COUNT: More than 1 question mark in the entire message → REJECT
+2. QUESTION COUNT: Count the literal "?" characters in the body. If the count is greater than 1 → REJECT. Count CHARACTERS only — do NOT count rhetorical phrases, the word "question", or implied questions in prose. A sentence like "the question isn't whether to grow, it's whether the founder can stay out" contains ZERO question marks, not one. Only the "?" character counts. If you are unsure, count the "?" in the message body one by one before deciding.
 3. PITCH DETECTION: Product or service mentioned by name in a Day 0 opener → REJECT
 4. SOFT CTA: Contains "worth a quick chat", "happy to jump on", "would love to connect", "keen to connect" in a Day 0 opener → REJECT
 5. QUALIFICATION QUESTION: Asks "do you run X?", "does your team do Y?", "are you currently using Z?" → REJECT
