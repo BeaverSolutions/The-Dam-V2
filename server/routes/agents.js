@@ -113,7 +113,7 @@ router.post('/director/plan',
   [body('command').notEmpty().trim(), validate],
   async (req, res, next) => {
     try {
-      const { command } = req.body;
+      const { command, history } = req.body;
       const captainBeaver = require('../services/captainBeaver');
 
       // Strip @captain / @claw prefix if present
@@ -127,7 +127,9 @@ router.post('/director/plan',
       }
 
       // ── Everything else → Captain Beaver (tool-using Sonnet agent) ──
-      const result = await captainBeaver.handleChat(req.clientId, cleanCommand);
+      // history (optional) is the prior chat turns sent by the frontend so Captain
+      // has multi-turn memory. Frontend strips it to {role, content} and caps at 20.
+      const result = await captainBeaver.handleChat(req.clientId, cleanCommand, { history });
       res.json({ data: result });
     } catch (err) { next(err); }
   }

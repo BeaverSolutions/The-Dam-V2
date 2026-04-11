@@ -288,10 +288,23 @@ export default function Chat() {
     const cmd = input;
     setInput('');
 
+    // Build conversation history for the backend so Captain Beaver has multi-turn memory.
+    // Send the last 20 turns BEFORE the current user message. Strip plan/source/UI metadata —
+    // backend only needs { role, content }. Skip the welcome message and any plan-shaped
+    // messages whose `content` is empty (those are UI cards, not real text).
+    const history = messages
+      .filter(m => m.id !== 1) // skip welcome
+      .filter(m => typeof m.content === 'string' && m.content.trim().length > 0)
+      .slice(-20)
+      .map(m => ({
+        role: m.role === 'user' ? 'user' : 'assistant',
+        content: m.content,
+      }));
+
     try {
       const res = await request('/agents/director/plan', {
         method: 'POST',
-        body: JSON.stringify({ command: cmd }),
+        body: JSON.stringify({ command: cmd, history }),
       });
 
       if (res?.data) {

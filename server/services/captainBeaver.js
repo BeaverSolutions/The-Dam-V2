@@ -516,12 +516,28 @@ function formatResponse(content, meta = {}) {
 
 // ─── Public entry point ───────────────────────────────────────────────────
 
-async function handleChat(clientId, command) {
+async function handleChat(clientId, command, options = {}) {
+  // history: array of { role: 'user'|'assistant', content: string } from the frontend.
+  // Captain Beaver is otherwise stateless — without this, every chat turn starts fresh.
+  // Sanitise and clamp to a sane size so a malformed payload can't blow up token budget.
+  let history = [];
+  if (Array.isArray(options.history)) {
+    history = options.history
+      .filter(m => m && (m.role === 'user' || m.role === 'assistant'))
+      .filter(m => typeof m.content === 'string' && m.content.trim().length > 0)
+      .slice(-20)
+      .map(m => ({ role: m.role, content: m.content.slice(0, 8000) }));
+  }
+
   // Log inbound
   await logsService.createLog(clientId, {
     agent: 'captain_beaver',
     action: 'chat_command',
-    metadata: { command: command.substring(0, 500), source: 'director_chat' },
+    metadata: {
+      command: command.substring(0, 500),
+      source: 'director_chat',
+      history_turns: history.length,
+    },
   }).catch(() => {});
 
   // Load the same persona files Jarvis loads — makes Captain a true file-synced twin.
@@ -535,7 +551,7 @@ async function handleChat(clientId, command) {
       command,
       TOOLS,
       buildToolHandler(clientId),
-      { clientId, systemPrompt }
+      { clientId, systemPrompt, history }
     );
 
     // Log what happened

@@ -194,7 +194,13 @@ async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, con
   }
 
   const MAX_ITERATIONS = 8;
-  const messages = [{ role: 'user', content: userMessage }];
+
+  // Seed the conversation with prior turns if the caller provided them.
+  // history is an array of { role: 'user'|'assistant', content: string } already
+  // sanitised by the caller (captainBeaver.handleChat clamps to 20 turns / 8k chars each).
+  // The CURRENT user message is always appended as the last user turn.
+  const priorHistory = Array.isArray(context?.history) ? context.history : [];
+  const messages = [...priorHistory, { role: 'user', content: userMessage }];
   const toolCalls = [];
   let finalText = '';
   let iteration = 0;
