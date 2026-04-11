@@ -15,6 +15,7 @@ const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
 const logsService = require('./logs');
 const { researchLeads, verifyBatch } = require('./research');
+const clawResearch = require('./clawResearch');  // NEW: Haiku + web_search replaces Serper
 const serperService = require('./searchService');
 const agentsService = require('./agents');
 const queryGenerator = require('./queryGenerator');
@@ -568,75 +569,35 @@ function buildIcpFromCommand(command, baseIcp = {}) {
   };
 }
 
-// ── Research execution (V1 quality pipeline) ────────────────────────────────
-// queryGenerator → parallelSearch → leadScorer → verifyBatch (Hunter + Haiku) → saveLeadsToDB
+// ── Research execution (clawResearch: Haiku + web_search) ──────────────────
+// Replaces queryGenerator → parallelSearch → leadScorer → verifyBatch
+// with a single clawResearch call using Claude Haiku and native web_search.
 async function handleResearchExecute(clientId, query) {
   try {
     const targetCount = extractLimit(query) || 10;
 
-    // 1. Build ICP from command keywords
+    // 1. Build ICP from command keywords (same logic as before)
     const icp = buildIcpFromCommand(query);
 
-    // 2. Generate queries (role synonym rotation + region expansion)
-    console.log(`[query-gen] Building queries for: "${query}"`);
-    const { serperQueries, cseQueries } = queryGenerator.generateQueries(query, icp);
+    // 2. Run clawResearch — single call replaces Serper + CSE + scorer + verify
+    console.log(`[clawResearch] Running for: "${query}" (target: ${targetCount})`);
+    const result = await clawResearch.researchLeads(clientId, {
+      icpMemory: icp,
+      targetCount,
+      batchIndex: 0,
+      commandOverride: query,
+    });
 
-    // 3. Parallel search (Serper + CSE simultaneously; DDG only if both return 0)
-    console.log(`[search] Running parallel search — ${serperQueries.length} Serper + ${cseQueries.length} CSE queries`);
-    const rawResults = await serperService.parallelSearch(serperQueries, cseQueries);
-    console.log(`[search] ${rawResults.length} raw results`);
+    const verified = result?.leads || [];
+    console.log(`[clawResearch] Returned ${verified.length} verified leads via ${result?.queriesUsed?.length || 0} searches`);
 
-    // 4. Lead scorer pipeline
-    console.log('[scorer] normalize → filter → dedup → rank → threshold');
-    const normalized = leadScorer.normalize(rawResults);
-
-    // Extract signal keyword from command if present (hiring, growing, etc.)
-    const signalMatch = query.match(/\b(hir\w+|grow\w+|expan\w+|launch\w+|rais\w+)\b/i);
-    const signalKeyword = signalMatch ? signalMatch[1] : null;
-
-    const filtered = leadScorer.filterResults(normalized, signalKeyword);
-    const deduped  = leadScorer.deduplicate(filtered);
-
-    const criteria = {
-      role:     Array.isArray(icp.job_titles)  ? icp.job_titles[0]  : (icp.job_titles  || ''),
-      location: icp.geographies || '',
-      signal:   signalKeyword || '',
-    };
-    const ranked    = leadScorer.rankLeads(deduped, criteria);
-    // Use threshold 25 for the chat path — enough to require a LinkedIn URL (+20) + any extra signal
-    const qualified = leadScorer.thresholdFilter(ranked, 25);
-
-    console.log(`[scorer] ${rawResults.length} raw → ${normalized.length} normalized → ${filtered.length} filtered → ${deduped.length} deduped → ${qualified.length} qualified (threshold 25)`);
-
-    if (qualified.length === 0) {
+    if (verified.length === 0) {
       return formatResponse(
         `No leads found for "${query}". Try being more specific — e.g. "Find 10 marketing agency founders KL".`
       );
     }
 
-    // 5. Convert scorer format back to lead format for verifyBatch
-    const candidates = qualified.map(r => ({
-      name:        r.name,
-      title:       r.title,
-      company:     r.company,
-      linkedin_url: r.url,
-      snippet:     r.snippet,
-      data_source: r.source,
-      email:       '',
-    }));
-
-    // 6. Verify with Hunter + Haiku (reuse research.js Layer 2)
-    console.log(`[verify] Verifying ${Math.min(candidates.length, 20)} candidates (Hunter + Haiku)`);
-    const { verified, rejected } = await verifyBatch(candidates, icp, clientId);
-    console.log(`[verify] ${verified.length} verified, ${rejected.length} rejected`);
-
-    if (verified.length === 0) {
-      return formatResponse(
-        `Found ${qualified.length} candidate${qualified.length !== 1 ? 's' : ''} but none passed ICP verification for "${query}". Try different criteria.`
-      );
-    }
-
-    // 7. Save only verified leads to DB
+    // 3. Save verified leads to DB
     const toSave = verified.slice(0, targetCount);
     const { saved, skipped } = await saveLeadsToDB(clientId, toSave);
 
@@ -653,7 +614,7 @@ async function handleResearchExecute(clientId, query) {
       `Found ${verified.length} verified lead${verified.length !== 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}\n\n${parts.join(' ')}`
     );
   } catch (err) {
-    console.error('[captain] Research failed:', err.message);
+    console.error('[clawResearch] Research failed:', err.message);
     return formatResponse(`Research failed: ${err.message}`);
   }
 }
