@@ -10,19 +10,28 @@ const logger = require('../utils/logger');
 //
 // If you add a new model, add an entry here OR set the corresponding env vars.
 // Unknown models return cost=0 (fail-open for observability, NOT for billing).
+// Pricing block. Model IDs may include version dates OR short aliases.
+// List ALL known IDs so costForUsage never falls through to the $0.05 default.
+const SONNET_PRICING = {
+  input:       Number(process.env.SONNET_INPUT_PER_M)       || 3.00,
+  output:      Number(process.env.SONNET_OUTPUT_PER_M)      || 15.00,
+  cache_write: Number(process.env.SONNET_CACHE_WRITE_PER_M) || 3.75,
+  cache_read:  Number(process.env.SONNET_CACHE_READ_PER_M)  || 0.30,
+};
+const HAIKU_PRICING = {
+  input:       Number(process.env.HAIKU_INPUT_PER_M)        || 0.80,
+  output:      Number(process.env.HAIKU_OUTPUT_PER_M)       || 4.00,
+  cache_write: Number(process.env.HAIKU_CACHE_WRITE_PER_M)  || 1.00,
+  cache_read:  Number(process.env.HAIKU_CACHE_READ_PER_M)   || 0.08,
+};
 const PRICING = {
-  'claude-sonnet-4-20250514': {
-    input:       Number(process.env.SONNET_INPUT_PER_M)       || 3.00,
-    output:      Number(process.env.SONNET_OUTPUT_PER_M)      || 15.00,
-    cache_write: Number(process.env.SONNET_CACHE_WRITE_PER_M) || 3.75,
-    cache_read:  Number(process.env.SONNET_CACHE_READ_PER_M)  || 0.30,
-  },
-  'claude-haiku-4-5': {
-    input:       Number(process.env.HAIKU_INPUT_PER_M)        || 0.80,
-    output:      Number(process.env.HAIKU_OUTPUT_PER_M)       || 4.00,
-    cache_write: Number(process.env.HAIKU_CACHE_WRITE_PER_M)  || 1.00,
-    cache_read:  Number(process.env.HAIKU_CACHE_READ_PER_M)   || 0.08,
-  },
+  // Sonnet variants (all same pricing)
+  'claude-sonnet-4-6':          SONNET_PRICING,
+  'claude-sonnet-4-5-20250929': SONNET_PRICING,
+  'claude-sonnet-4-20250514':   SONNET_PRICING,
+  // Haiku variants (all same pricing)
+  'claude-haiku-4-5-20251001':  HAIKU_PRICING,
+  'claude-haiku-4-5':           HAIKU_PRICING,
 };
 
 /**

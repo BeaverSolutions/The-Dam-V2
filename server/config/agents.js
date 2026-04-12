@@ -257,7 +257,10 @@ OUTPUT FORMAT — return JSON only, no markdown:
     // SALES BEAVER — Outreach Specialist
     // ═══════════════════════════════════════════════════════════
     sales_beaver: {
-      model: MODELS.SONNET,
+      // Cost optimization (2026-04-13): Sonnet → Haiku. Day 0 cold emails are
+      // templated enough for Haiku to handle. If avg Enforcer score drops below
+      // 70, roll back to Sonnet. Estimated savings: ~$1.50/day → ~$0.08/day.
+      model: MODELS.HAIKU,
       maxTokens: 1024,
       name: 'Sales Beaver',
       systemPrompt: `You are Sales Beaver at Beaver Solutions, writing cold outreach messages.
@@ -418,10 +421,13 @@ Return JSON only:
     // ENFORCER BEAVER — Quality Gate
     // ═══════════════════════════════════════════════════════════
     ranger: {
-      // Enforcer Beaver — the final quality gate. Needs to judge subtle vendor
-      // pitch smell, em-dashes, follow-up repetition, signal specificity.
-      // This is the single most important call in the pipeline. Sonnet only.
-      model: MODELS.SONNET,
+      // Enforcer Beaver — the final quality gate. Was on Sonnet but the 10
+      // auto-reject gates are deterministic rule-checks (count ?, word count,
+      // banned phrases, etc.) that Haiku handles reliably. Commit 66db460 made
+      // the ? rule literal which was the only Sonnet-level judgment call.
+      // Estimated savings: ~$1.50/day → ~$0.08/day. Roll back if avg score
+      // drops below 70 — quality > cost, always.
+      model: MODELS.HAIKU,
       maxTokens: 1024,
       name: 'Enforcer Beaver',
       systemPrompt: `You are Enforcer Beaver — the mandatory quality gate at Beaver Solutions.

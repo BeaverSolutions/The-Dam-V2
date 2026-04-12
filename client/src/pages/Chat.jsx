@@ -295,7 +295,7 @@ export default function Chat() {
     const history = messages
       .filter(m => m.id !== 1) // skip welcome
       .filter(m => typeof m.content === 'string' && m.content.trim().length > 0)
-      .slice(-20)
+      .slice(-10)
       .map(m => ({
         role: m.role === 'user' ? 'user' : 'assistant',
         content: m.content,

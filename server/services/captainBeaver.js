@@ -683,7 +683,7 @@ async function handleChat(clientId, command, options = {}) {
     history = options.history
       .filter(m => m && (m.role === 'user' || m.role === 'assistant'))
       .filter(m => typeof m.content === 'string' && m.content.trim().length > 0)
-      .slice(-20)
+      .slice(-10)
       .map(m => ({ role: m.role, content: m.content.slice(0, 8000) }));
   }
 
