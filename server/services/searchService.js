@@ -253,6 +253,11 @@ async function withFallback(label, searchQuery, num, parseItems) {
  * Never throws — failed queries are logged and skipped.
  */
 async function runAllSerperQueries(queries) {
+  // Cap at 10 queries to prevent cost explosion (Serper charges per query)
+  if (queries.length > 10) {
+    console.log(`[search] Capping Serper queries from ${queries.length} to 10`);
+    queries = queries.slice(0, 10);
+  }
   const results = [];
   for (const q of queries) {
     try {
@@ -274,6 +279,11 @@ async function runAllSerperQueries(queries) {
  * Never throws — failed queries are logged and skipped.
  */
 async function runAllCSEQueries(queries) {
+  // Cap at 10 queries (same as Serper — prevents cost explosion on CSE)
+  if (queries.length > 10) {
+    console.log(`[search] Capping CSE queries from ${queries.length} to 10`);
+    queries = queries.slice(0, 10);
+  }
   const results = [];
   for (const q of queries) {
     try {

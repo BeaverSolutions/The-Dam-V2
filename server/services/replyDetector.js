@@ -125,8 +125,17 @@ async function checkRepliesForClient(clientId) {
 
 /**
  * Run reply detection for all clients with unreplied sent messages.
+ * Singleton guard prevents overlapping runs if a cycle takes >5 minutes.
  */
+let _replyCheckRunning = false;
+
 async function checkAllClients() {
+  if (_replyCheckRunning) {
+    console.log('[replyDetector] Skipping — previous run still active');
+    return;
+  }
+  _replyCheckRunning = true;
+
   // Lazy-require to avoid circular import between middleware/clientContext
   // and any service that depends on this one.
   const { runWithClientContext } = require('../middleware/clientContext');
@@ -148,6 +157,8 @@ async function checkAllClients() {
     }
   } catch (err) {
     console.error('[replyDetector] checkAllClients failed:', err.message);
+  } finally {
+    _replyCheckRunning = false;
   }
 }
 

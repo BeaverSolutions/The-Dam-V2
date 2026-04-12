@@ -12,6 +12,12 @@ const logsService = require('./logs');
 const RETRY_INTERVALS = ['5 minutes', '30 minutes', '2 hours'];
 const MAX_ATTEMPTS = 3;
 
+// Safety: max emails per client per day (prevents rogue agent runs from spamming)
+const MAX_DAILY_SENDS_PER_CLIENT = parseInt(process.env.MAX_DAILY_SENDS || '200', 10);
+
+// Basic email domain validation — rejects obviously invalid addresses
+const EMAIL_DOMAIN_RE = /^[^@]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+
 // Lazy-load sendMessageById to avoid circular deps
 let _sendMessageById = null;
 function getSendFn() {
@@ -141,6 +147,23 @@ async function enqueueMessage(clientId, messageId) {
   if (!lead_email || lead_email === 'unknown@example.com') {
     console.log(`[send_queue] Skip enqueue: ${messageId} has no lead email`);
     return { enqueued: false, reason: 'no_email' };
+  }
+
+  // P0 gate: reject obviously invalid email addresses
+  if (!EMAIL_DOMAIN_RE.test(lead_email)) {
+    console.warn(`[send_queue] Skip enqueue: ${messageId} — invalid email format`);
+    return { enqueued: false, reason: 'invalid_email_format' };
+  }
+
+  // P0 gate: enforce daily send cap per client (prevents rogue agent spam)
+  const { rows: [{ count: dailyCount }] } = await pool.query(
+    `SELECT COUNT(*)::int AS count FROM send_queue
+     WHERE client_id = $1 AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')`,
+    [clientId]
+  );
+  if (dailyCount >= MAX_DAILY_SENDS_PER_CLIENT) {
+    console.warn(`[send_queue] DAILY LIMIT HIT — client ${clientId} has ${dailyCount} sends today (cap: ${MAX_DAILY_SENDS_PER_CLIENT})`);
+    return { enqueued: false, reason: 'daily_limit_reached' };
   }
 
   await pool.query(
