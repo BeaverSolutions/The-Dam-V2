@@ -246,6 +246,57 @@ const TOOLS = [
       required: ['message_id'],
     },
   },
+
+  // ─── Deep-data tools (introspection) ────────────────────────────────────
+  {
+    name: 'query_messages',
+    description: 'Query the messages table with flexible filters. Use when the user asks about drafts, rejection reasons, scores, or message history. Returns message body, status, Enforcer score/notes, channel, lead context.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        status:     { type: 'string', description: 'Filter by status: draft, pending_ranger, ranger_rejected, pending_approval, approved, pending_send, sent, failed, rejected, replied' },
+        channel:    { type: 'string', enum: ['email', 'linkedin', 'instagram'], description: 'Filter by channel' },
+        min_score:  { type: 'number', description: 'Minimum Enforcer score (e.g. 70)' },
+        max_score:  { type: 'number', description: 'Maximum Enforcer score (e.g. 80)' },
+        lead_name:  { type: 'string', description: 'Partial match on lead name' },
+        limit:      { type: 'number', description: 'Max results (default 20, max 50)' },
+      },
+    },
+  },
+  {
+    name: 'query_rejection_history',
+    description: 'List the most recent Enforcer-rejected messages with rejection reasons, score, and breakdown. Use when diagnosing why messages are failing or looking for patterns in rejections.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Number of rejections to return (default 10, max 30)' },
+      },
+    },
+  },
+  {
+    name: 'query_logs',
+    description: 'Tail the activity log. Use when the user asks "what happened today", "show me errors", or wants to trace agent actions. Returns timestamped entries with agent, action, and metadata.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        agent:  { type: 'string', description: 'Filter by agent (e.g. captain_beaver, enforcer_beaver, sales_beaver, system)' },
+        action: { type: 'string', description: 'Filter by action (e.g. lead_created, send_failed_permanent, message_auto_approved)' },
+        hours:  { type: 'number', description: 'Look back N hours (default 24, max 168)' },
+        limit:  { type: 'number', description: 'Max entries (default 30, max 100)' },
+      },
+    },
+  },
+  {
+    name: 'query_agent_memory_raw',
+    description: 'Dump raw JSONB content from the agent_memory table. Use when the user asks about stored ICP, weekly learnings, rejection patterns, or any agent\'s remembered state.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        agent: { type: 'string', description: 'Agent name (director, research_beaver, sales_beaver, ranger, captain_beaver)' },
+        key:   { type: 'string', description: 'Specific memory key (e.g. icp, weekly_learnings, mistakes, schema_facts). Omit to list all keys for the agent.' },
+      },
+    },
+  },
 ];
 
 // ─── Tool handler implementations ──────────────────────────────────────────
@@ -634,6 +685,81 @@ async function toolReprocessMessage(clientId, { message_id }) {
   };
 }
 
+// ─── Deep-data tool handlers ──────────────────────────────────────────────
+
+async function toolQueryMessages(clientId, { status, channel, min_score, max_score, lead_name, limit }) {
+  const conditions = ['m.client_id = $1', 'l.deleted_at IS NULL'];
+  const params = [clientId];
+
+  if (status)    conditions.push(`m.status = $${params.push(status)}`);
+  if (channel)   conditions.push(`m.channel = $${params.push(channel)}`);
+  if (min_score) conditions.push(`m.ranger_score >= $${params.push(min_score)}`);
+  if (max_score) conditions.push(`m.ranger_score <= $${params.push(max_score)}`);
+  if (lead_name) conditions.push(`LOWER(l.name) LIKE $${params.push(`%${lead_name.toLowerCase()}%`)}`);
+
+  const cap = Math.min(Number(limit) || 20, 50);
+  const { rows } = await pool.query(
+    `SELECT m.id, m.status, m.channel, m.subject, m.body, m.ranger_score, m.ranger_notes,
+            m.ranger_breakdown, m.created_at, m.sent_at,
+            l.name AS lead_name, l.company AS lead_company, l.title AS lead_title
+     FROM messages m
+     JOIN leads l ON l.id = m.lead_id
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY m.created_at DESC LIMIT $${params.push(cap)}`,
+    params
+  );
+  return { count: rows.length, messages: rows };
+}
+
+async function toolQueryRejectionHistory(clientId, { limit } = {}) {
+  const cap = Math.min(Number(limit) || 10, 30);
+  const { rows } = await pool.query(
+    `SELECT m.id, m.subject, m.body, m.channel, m.ranger_score, m.ranger_notes,
+            m.ranger_breakdown, m.created_at,
+            l.name AS lead_name, l.company AS lead_company
+     FROM messages m
+     JOIN leads l ON l.id = m.lead_id
+     WHERE m.client_id = $1 AND m.status = 'ranger_rejected' AND l.deleted_at IS NULL
+     ORDER BY m.created_at DESC LIMIT $2`,
+    [clientId, cap]
+  );
+  return { count: rows.length, rejections: rows };
+}
+
+async function toolQueryLogs(clientId, { agent, action, hours, limit } = {}) {
+  const lookback = Math.min(Number(hours) || 24, 168);
+  const cap = Math.min(Number(limit) || 30, 100);
+  const conditions = ['client_id = $1', `created_at >= NOW() - INTERVAL '${lookback} hours'`];
+  const params = [clientId];
+
+  if (agent)  conditions.push(`agent = $${params.push(agent)}`);
+  if (action) conditions.push(`action = $${params.push(action)}`);
+
+  const { rows } = await pool.query(
+    `SELECT agent, action, target_type, target_id, metadata, created_at
+     FROM logs WHERE ${conditions.join(' AND ')}
+     ORDER BY created_at DESC LIMIT $${params.push(cap)}`,
+    params
+  );
+  return { count: rows.length, hours_back: lookback, entries: rows };
+}
+
+async function toolQueryAgentMemoryRaw(clientId, { agent, key } = {}) {
+  const conditions = ['client_id = $1', "memory_type != 'secret'"];
+  const params = [clientId];
+
+  if (agent) conditions.push(`agent = $${params.push(agent)}`);
+  if (key)   conditions.push(`key = $${params.push(key)}`);
+
+  const { rows } = await pool.query(
+    `SELECT agent, memory_type, key, content, updated_at
+     FROM agent_memory WHERE ${conditions.join(' AND ')}
+     ORDER BY updated_at DESC LIMIT 50`,
+    params
+  );
+  return { count: rows.length, entries: rows };
+}
+
 // ─── Tool dispatcher ──────────────────────────────────────────────────────
 
 function buildToolHandler(clientId) {
@@ -649,8 +775,12 @@ function buildToolHandler(clientId) {
         case 'write_memory':          return await toolWriteMemory(clientId, input || {});
         case 'web_search_brave':      return await toolWebSearchBrave(clientId, input || {});
         case 'get_client_config':     return await toolGetClientConfig(clientId);
-        case 'reprocess_message':     return await toolReprocessMessage(clientId, input || {});
-        default:                      return { error: `Unknown tool: ${toolName}` };
+        case 'reprocess_message':       return await toolReprocessMessage(clientId, input || {});
+        case 'query_messages':          return await toolQueryMessages(clientId, input || {});
+        case 'query_rejection_history': return await toolQueryRejectionHistory(clientId, input || {});
+        case 'query_logs':              return await toolQueryLogs(clientId, input || {});
+        case 'query_agent_memory_raw':  return await toolQueryAgentMemoryRaw(clientId, input || {});
+        default:                        return { error: `Unknown tool: ${toolName}` };
       }
     } catch (err) {
       console.error(`[captainBeaver] tool ${toolName} threw:`, err.message);
