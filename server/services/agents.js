@@ -1540,10 +1540,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
   // ── Step 0: DB-first — process uncontacted leads already in pipeline ──
   // Check for existing leads that haven't had messages drafted yet.
-  // These are leads from prior research, CSV import, or signal hunts.
-  // Process them through Sales → Enforcer → Send BEFORE doing external research.
+  // Hand DB leads to Sales Beaver WHILE simultaneously doing external research
+  // for the remaining gap. Both run in parallel.
   const cmdCountMatch = command && command.match(/\b(\d+)\b/);
   const targetLimit = limit || (cmdCountMatch ? parseInt(cmdCountMatch[1], 10) : 50);
+
+  let dbLeadsPromise = null;
+  let dbLeadsCount = 0;
 
   try {
     const { rows: uncontactedLeads } = await pool.query(
@@ -1551,6 +1554,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
        WHERE l.client_id = $1
          AND l.deleted_at IS NULL
          AND l.status = 'new'
+         AND (l.email IS NOT NULL OR l.linkedin_url IS NOT NULL)
          AND NOT EXISTS (
            SELECT 1 FROM messages m WHERE m.lead_id = l.id AND m.client_id = $1
          )
@@ -1562,33 +1566,38 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     );
 
     if (uncontactedLeads.length > 0) {
-      console.log(`[director] DB-first: found ${uncontactedLeads.length} uncontacted leads in pipeline — processing before external research`);
+      dbLeadsCount = uncontactedLeads.length;
+      console.log(`[director] DB-first: found ${dbLeadsCount} uncontacted leads — handing to Sales Beaver while researching gap`);
       diagnostics.research_source = 'database_first';
 
       await updateExecStatus(clientId, plan_id, {
         status: 'executing',
         phase: 'sales',
         beavers: {
-          research: { status: 'done', task: `Found ${uncontactedLeads.length} existing leads in DB`, found: uncontactedLeads.length, passed: uncontactedLeads.length },
+          research: { status: 'working', task: `Processing ${dbLeadsCount} DB leads + searching for more`, found: dbLeadsCount, passed: dbLeadsCount },
           sales:    { status: 'working', task: 'Drafting messages for existing leads', drafted: 0, approved: 0 },
           enforcer: { status: 'idle', task: 'Waiting', reviewed: 0, rejected: 0 },
-          captain:  { status: 'done', task: 'DB-first path', approved: 0 },
+          captain:  { status: 'done', task: 'DB-first + parallel research', approved: 0 },
         },
-        progress: { total: uncontactedLeads.length, complete: 0 },
+        progress: { total: dbLeadsCount, complete: 0 },
       });
 
-      const dbResult = await processExistingLeadsPipeline(clientId, plan_id, uncontactedLeads);
-      const dbProcessed = uncontactedLeads.length;
-      const remainingGap = targetLimit - dbProcessed;
+      // Start Sales pipeline for DB leads in background (non-blocking)
+      dbLeadsPromise = processExistingLeadsPipeline(clientId, plan_id, uncontactedLeads)
+        .catch(err => {
+          console.error('[director] DB-first pipeline failed:', err.message);
+          return null;
+        });
 
-      // If DB leads fulfilled the target, return without external research
-      if (remainingGap <= 0) {
-        console.log(`[director] DB-first: ${dbProcessed} leads processed — target met, skipping external research`);
+      // If DB leads fully satisfy target, await result and skip research
+      if (dbLeadsCount >= targetLimit) {
+        const dbResult = await dbLeadsPromise;
+        console.log(`[director] DB-first: ${dbLeadsCount} leads processed — target met, skipping external research`);
         return dbResult;
       }
 
-      // Otherwise, continue to external research for the remaining gap
-      console.log(`[director] DB-first: ${dbProcessed} leads processed, ${remainingGap} more needed — continuing to external research`);
+      // Otherwise: DB pipeline runs in background while we continue to external research below
+      console.log(`[director] DB-first: ${dbLeadsCount} leads processing in parallel, ${targetLimit - dbLeadsCount} more needed from research`);
     } else {
       console.log('[director] DB-first: no uncontacted leads in pipeline — proceeding to external research');
     }
@@ -1872,6 +1881,14 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           continue;
         }
       }
+    }
+
+    // Contact channel gate: lead MUST have at least 1 channel (email or LinkedIn)
+    const hasAnyChannel = !!(lead.email || lead.linkedin_url);
+    if (!hasAnyChannel) {
+      console.warn(`[save] Rejecting ${lead.name} at ${lead.company} — no email or LinkedIn URL`);
+      diagnostics.reason = (diagnostics.reason || '') + ` Rejected ${lead.name}: no contact channel.`;
+      continue;
     }
 
     try {
@@ -2448,30 +2465,41 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     started_at: new Date().toISOString(),
   });
 
+  // Await DB-first pipeline if it was running in parallel
+  if (dbLeadsPromise) {
+    console.log(`[director] Awaiting DB-first pipeline completion (${dbLeadsCount} leads)...`);
+    await dbLeadsPromise;
+  }
+
+  // Combine DB-first + research counts for final summary
+  const totalLeadsFound = savedLeads.length + dbLeadsCount;
+
   await logsService.createLog(clientId, {
     agent: 'director',
     action: 'plan_completed',
-    metadata: { plan_id, leads_found: savedLeads.length, messages_drafted: savedMessages.length, approved: approvedCount },
+    metadata: { plan_id, leads_found: totalLeadsFound, db_leads: dbLeadsCount, research_leads: savedLeads.length, messages_drafted: savedMessages.length, approved: approvedCount },
   });
 
   const summary = {
-    leads_found: savedLeads.length,
+    leads_found: totalLeadsFound,
     messages_drafted: savedMessages.length,
     approved: approvedCount,
     pending_your_approval: approvedCount,
+    db_leads_processed: dbLeadsCount,
   };
 
   return {
     plan_id,
     status: 'completed',
     leads: savedLeads.map(l => ({ name: l.name, company: l.company, title: l.title })),
-    leads_found: savedLeads.length,
+    leads_found: totalLeadsFound,
     messages_drafted: diagnostics.messages_drafted,
     messages_failed: diagnostics.messages_failed,
     summary,
     diagnostics,
     results: [
-      { step: 1, agent: 'research_beaver', status: 'completed', result: `${savedLeads.length} lead${savedLeads.length !== 1 ? 's' : ''} found & saved` },
+      ...(dbLeadsCount > 0 ? [{ step: 0, agent: 'research_beaver', status: 'completed', result: `${dbLeadsCount} existing lead${dbLeadsCount !== 1 ? 's' : ''} processed from DB` }] : []),
+      { step: 1, agent: 'research_beaver', status: 'completed', result: `${savedLeads.length} new lead${savedLeads.length !== 1 ? 's' : ''} found via research` },
       { step: 2, agent: 'sales_beaver', status: 'completed', result: `${savedMessages.length} message${savedMessages.length !== 1 ? 's' : ''} drafted (1 message per lead, best channel)` },
       { step: 3, agent: 'ranger', status: 'completed', result: `${approvedCount} approved${rejectedCount > 0 ? `, ${rejectedCount} rejected by server gates` : ''}` },
       { step: 4, agent: 'director', status: approvedCount > 0 ? 'completed' : 'pending', result: approvedCount > 0 ? `${approvedCount} message${approvedCount !== 1 ? 's' : ''} in approval queue` : 'All messages failed Ranger QA — check Memory for rejection patterns' },
