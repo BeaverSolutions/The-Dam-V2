@@ -117,9 +117,41 @@ async function resolveApproval(clientId, approvalId, { status, notes, userId }) 
 
   // Auto-enqueue approved messages for send (with retry on failure)
   if (status === 'approved') {
-    await enqueueMessage(clientId, existing.rows[0].message_id).catch(err => {
+    const enqueueResult = await enqueueMessage(clientId, existing.rows[0].message_id).catch(err => {
       console.warn('[approvals] Failed to enqueue message for send:', err.message);
+      return { enqueued: false, reason: err.message };
     });
+
+    // For manual-send channels (LinkedIn, Instagram): "Approve (Manual Send)" means
+    // the user has already copied + sent the message. Mark as 'sent' and schedule follow-ups.
+    if (enqueueResult && !enqueueResult.enqueued && enqueueResult.reason?.startsWith('manual_send_channel')) {
+      await pool.query(
+        `UPDATE messages SET status = 'sent', sent_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND client_id = $2`,
+        [existing.rows[0].message_id, clientId]
+      );
+
+      // Schedule follow-ups for this lead (Day 2/5/10/18/30 cadence)
+      try {
+        const { rows: [msg] } = await pool.query(
+          `SELECT lead_id FROM messages WHERE id = $1`, [existing.rows[0].message_id]
+        );
+        if (msg?.lead_id) {
+          const { rows: prevSent } = await pool.query(
+            `SELECT COUNT(*) AS cnt FROM messages
+             WHERE lead_id = $1 AND client_id = $2 AND status = 'sent'`,
+            [msg.lead_id, clientId]
+          );
+          if (parseInt(prevSent[0].cnt) <= 1) {
+            const { scheduleFollowUps } = require('./followupSequence');
+            await scheduleFollowUps(clientId, msg.lead_id, new Date());
+            console.log(`[approvals] Scheduled follow-ups for manual-send lead ${msg.lead_id}`);
+          }
+        }
+      } catch (err) {
+        console.warn('[approvals] Follow-up scheduling failed for manual send:', err.message);
+      }
+    }
   }
 
   await logsService.createLog(clientId, {
