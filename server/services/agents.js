@@ -1505,10 +1505,65 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     started_at: new Date().toISOString(),
   });
 
-  // ── Step 1: Research Beaver (with retry loop) ───────────
-  // Extract requested count from command if not passed explicitly
+  // ── Step 0: DB-first — process uncontacted leads already in pipeline ──
+  // Check for existing leads that haven't had messages drafted yet.
+  // These are leads from prior research, CSV import, or signal hunts.
+  // Process them through Sales → Enforcer → Send BEFORE doing external research.
   const cmdCountMatch = command && command.match(/\b(\d+)\b/);
   const targetLimit = limit || (cmdCountMatch ? parseInt(cmdCountMatch[1], 10) : 20);
+
+  try {
+    const { rows: uncontactedLeads } = await pool.query(
+      `SELECT l.* FROM leads l
+       WHERE l.client_id = $1
+         AND l.deleted_at IS NULL
+         AND l.status = 'new'
+         AND NOT EXISTS (
+           SELECT 1 FROM messages m WHERE m.lead_id = l.id AND m.client_id = $1
+         )
+       ORDER BY
+         CASE l.signal_tier WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
+         l.created_at DESC
+       LIMIT $2`,
+      [clientId, targetLimit]
+    );
+
+    if (uncontactedLeads.length > 0) {
+      console.log(`[director] DB-first: found ${uncontactedLeads.length} uncontacted leads in pipeline — processing before external research`);
+      diagnostics.research_source = 'database_first';
+
+      await updateExecStatus(clientId, plan_id, {
+        status: 'executing',
+        phase: 'sales',
+        beavers: {
+          research: { status: 'done', task: `Found ${uncontactedLeads.length} existing leads in DB`, found: uncontactedLeads.length, passed: uncontactedLeads.length },
+          sales:    { status: 'working', task: 'Drafting messages for existing leads', drafted: 0, approved: 0 },
+          enforcer: { status: 'idle', task: 'Waiting', reviewed: 0, rejected: 0 },
+          captain:  { status: 'done', task: 'DB-first path', approved: 0 },
+        },
+        progress: { total: uncontactedLeads.length, complete: 0 },
+      });
+
+      const dbResult = await processExistingLeadsPipeline(clientId, plan_id, uncontactedLeads);
+      const dbProcessed = uncontactedLeads.length;
+      const remainingGap = targetLimit - dbProcessed;
+
+      // If DB leads fulfilled the target, return without external research
+      if (remainingGap <= 0) {
+        console.log(`[director] DB-first: ${dbProcessed} leads processed — target met, skipping external research`);
+        return dbResult;
+      }
+
+      // Otherwise, continue to external research for the remaining gap
+      console.log(`[director] DB-first: ${dbProcessed} leads processed, ${remainingGap} more needed — continuing to external research`);
+    } else {
+      console.log('[director] DB-first: no uncontacted leads in pipeline — proceeding to external research');
+    }
+  } catch (err) {
+    console.warn('[director] DB-first check failed, proceeding to external research:', err.message);
+  }
+
+  // ── Step 1: Research Beaver (with retry loop) ───────────
 
   // Retry loop: keep searching until we have enough leads that pass ALL Director gates
   // Max 3 rounds to cap API spend (each round = 1 Serper batch + verification)
