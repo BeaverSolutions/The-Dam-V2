@@ -147,6 +147,35 @@ function parseCompanyItems(items) {
 
 // ── Provider calls (throw on failure so the fallback chain can catch) ────────
 
+async function callBrave(searchQuery, num) {
+  const apiKey = process.env.BRAVE_API_KEY;
+  if (!apiKey) throw new Error('BRAVE_API_KEY not set');
+
+  const resp = await axios.get('https://api.search.brave.com/res/v1/web/search', {
+    params: {
+      q: searchQuery,
+      count: Math.min(num, 20),
+      country: 'MY',
+      search_lang: 'en',
+      safesearch: 'moderate',
+    },
+    headers: {
+      'X-Subscription-Token': apiKey,
+      Accept: 'application/json',
+      'Accept-Encoding': 'gzip',
+    },
+    timeout: 10000,
+  });
+
+  const results = resp.data?.web?.results || [];
+  // Map Brave format to match Serper/CSE format (title, link, snippet)
+  return results.map(r => ({
+    title: r.title || '',
+    link: r.url || '',
+    snippet: r.description || '',
+  }));
+}
+
 async function callSerper(searchQuery, num) {
   const apiKey = process.env.SERPER_API_KEY;
   if (!apiKey) throw new Error('SERPER_API_KEY not set');
@@ -207,7 +236,15 @@ async function callDuckDuckGo(searchQuery) {
 // ── Fallback chain ───────────────────────────────────────────────────────────
 
 async function withFallback(label, searchQuery, num, parseItems) {
-  // 1. Serper
+  // 1. Brave (primary — agreed with MJ 2026-04-13)
+  try {
+    const items = await callBrave(searchQuery, num);
+    if (items.length > 0) return parseItems(items);
+  } catch (err) {
+    console.warn(`[search] Brave failed: ${err.message}, falling back to Serper`);
+  }
+
+  // 2. Serper (secondary)
   try {
     const items = await callSerper(searchQuery, num);
     return parseItems(items);
@@ -217,7 +254,7 @@ async function withFallback(label, searchQuery, num, parseItems) {
     console.warn(`[search] Serper failed${status}: ${detail}, falling back to Google CSE`);
   }
 
-  // 2. Google CSE
+  // 3. Google CSE (tertiary)
   try {
     const items = await callGoogleCSE(searchQuery, num);
     console.log('[search] Using fallback: Google CSE');
@@ -235,7 +272,7 @@ async function withFallback(label, searchQuery, num, parseItems) {
     console.warn(`[search] Google CSE failed${status}: ${detail}, falling back to DuckDuckGo`);
   }
 
-  // 3. DuckDuckGo (last resort — never throws)
+  // 4. DuckDuckGo (last resort — never throws)
   try {
     const items = await callDuckDuckGo(searchQuery);
     console.log('[search] Using fallback: DuckDuckGo');
@@ -253,20 +290,30 @@ async function withFallback(label, searchQuery, num, parseItems) {
  * Never throws — failed queries are logged and skipped.
  */
 async function runAllSerperQueries(queries) {
-  // Cap at 10 queries to prevent cost explosion (Serper charges per query)
+  // Cap at 10 queries to prevent cost explosion
   if (queries.length > 10) {
-    console.log(`[search] Capping Serper queries from ${queries.length} to 10`);
+    console.log(`[search] Capping search queries from ${queries.length} to 10`);
     queries = queries.slice(0, 10);
   }
   const results = [];
   for (const q of queries) {
+    // Try Brave first (primary), fall back to Serper
+    try {
+      const items = await callBrave(q, 10);
+      if (items.length > 0) {
+        results.push(...parseProfileItems(items, 'brave'));
+        continue;
+      }
+    } catch (err) {
+      // Brave failed, try Serper
+    }
     try {
       const items = await callSerper(q, 10);
       results.push(...parseProfileItems(items, 'serper'));
     } catch (err) {
       const status = err.response?.status || 'no-status';
       const body   = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-      console.warn(`[search] Serper query failed for "${q}": [${status}] ${body}`);
+      console.warn(`[search] Query failed for "${q}": [${status}] ${body}`);
     }
   }
   return results;
