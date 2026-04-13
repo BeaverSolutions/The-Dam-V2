@@ -4,7 +4,8 @@ const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
-const { directorExecute, rangerReview } = require('../services/agents');
+const agentsService = require('../services/agents');
+const { directorExecute, rangerReview } = agentsService;
 const { runWithClientContext } = require('../middleware/clientContext');
 const logger = require('../utils/logger');
 
@@ -105,13 +106,35 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
       const hasNumber = /\b\d+\b/.test(message);
       const effectiveLimit = hasNumber ? undefined : 20;
 
+      // Build an ICP-rich brief (same as autonomous kickoff) so Research Beaver
+      // gets real context instead of the bare word "KICKOFF".
+      let effectiveCommand = message;
+      const isBareKickoff = /^(kickoff|kick\s*off|start|execute|fire|begin)[\s!.]*$/i.test(message.trim());
+      if (isBareKickoff) {
+        try {
+          const icp = await agentsService.directorGetICP(client_id);
+          const gap = effectiveLimit || 20;
+          effectiveCommand = buildAutonomousBrief({
+            gap,
+            icp,
+            lastLearnings: null,
+            rejectionPatterns: null,
+            sent: 0,
+            target: gap,
+          });
+          console.log(`[chat] Bare kickoff → built ICP brief (${effectiveCommand.length} chars)`);
+        } catch (err) {
+          console.warn('[chat] Failed to build ICP brief, using raw command:', err.message);
+        }
+      }
+
       response.reply = `Dispatching to the crew. Captain is briefing Research Beaver now with your command. Poll back with "status" in 60s, or check /api/autonomous/pending-approvals.`;
       response.actions_taken.push('triggered_director_execute');
       response.data = { plan_id: planId };
 
       // Background execution
       runWithClientContext(client_id, () =>
-        directorExecute(client_id, { plan_id: planId, command: message, limit: effectiveLimit }).catch(err => {
+        directorExecute(client_id, { plan_id: planId, command: effectiveCommand, limit: effectiveLimit }).catch(err => {
           console.error(`[chat] directorExecute failed for plan ${planId}:`, err.message);
         })
       );
