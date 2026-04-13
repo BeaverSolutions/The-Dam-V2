@@ -13,6 +13,7 @@ const authMiddleware = require('./middleware/auth');
 const tenantScope = require('./middleware/tenantScope');
 const { clientContext } = require('./middleware/clientContext');
 const rateLimiter = require('./middleware/rateLimiter');
+const pool = require('./db/pool');
 const adminOnly = require('./middleware/adminOnly');
 const superAdminOnly = require('./middleware/superAdminOnly');
 const config = require('./config');
