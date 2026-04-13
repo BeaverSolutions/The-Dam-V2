@@ -899,8 +899,9 @@ async function directorPlan(clientId, { command }) {
   }
 
   // Extract requested lead count from command — e.g. "Find 3 leads" → 3
+  // Default to 20 (not 5) so bare "kickoff" produces a meaningful batch.
   const countMatch = command.match(/\b(\d+)\b/);
-  const requestedCount = countMatch ? parseInt(countMatch[1], 10) : 5;
+  const requestedCount = countMatch ? parseInt(countMatch[1], 10) : 20;
 
   const planId = uuidv4();
   const [icp, persona, fileConfig, memoryBrief] = await Promise.all([
@@ -1507,7 +1508,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // ── Step 1: Research Beaver (with retry loop) ───────────
   // Extract requested count from command if not passed explicitly
   const cmdCountMatch = command && command.match(/\b(\d+)\b/);
-  const targetLimit = limit || (cmdCountMatch ? parseInt(cmdCountMatch[1], 10) : 5);
+  const targetLimit = limit || (cmdCountMatch ? parseInt(cmdCountMatch[1], 10) : 20);
 
   // Retry loop: keep searching until we have enough leads that pass ALL Director gates
   // Max 3 rounds to cap API spend (each round = 1 Serper batch + verification)

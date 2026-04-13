@@ -99,13 +99,19 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
     // ── Intent 2: KICKOFF / EXECUTE ──────────────────────────────────
     else if (/\b(kickoff|kick off|start|execute|fire|begin|find.*(lead|founder|ceo|director|agency|agencies))\b/i.test(lowerMsg)) {
       const planId = uuidv4();
+
+      // If command has a number (e.g. "find 20 leads"), directorExecute parses it.
+      // If bare "kickoff" with no number, default to 20 leads instead of 5.
+      const hasNumber = /\b\d+\b/.test(message);
+      const effectiveLimit = hasNumber ? undefined : 20;
+
       response.reply = `Dispatching to the crew. Captain is briefing Research Beaver now with your command. Poll back with "status" in 60s, or check /api/autonomous/pending-approvals.`;
       response.actions_taken.push('triggered_director_execute');
       response.data = { plan_id: planId };
 
       // Background execution
       runWithClientContext(client_id, () =>
-        directorExecute(client_id, { plan_id: planId, command: message }).catch(err => {
+        directorExecute(client_id, { plan_id: planId, command: message, limit: effectiveLimit }).catch(err => {
           console.error(`[chat] directorExecute failed for plan ${planId}:`, err.message);
         })
       );
