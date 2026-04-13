@@ -857,10 +857,46 @@ async function _runAutonomousKickoffInner(clientId) {
         }
 
         if (enforcerApproved) {
+          // Auto-approve follow-ups if score meets threshold (same as initial outreach)
+          let autoApproved = false;
+          try {
+            const { rows: [clientRow] } = await pool.query(
+              `SELECT auto_approve_threshold FROM clients WHERE id = $1 LIMIT 1`,
+              [clientId]
+            );
+            const rangerScore = (await pool.query(`SELECT ranger_score FROM messages WHERE id = $1`, [savedMsg.id])).rows[0]?.ranger_score || 0;
+            const threshold = clientRow?.auto_approve_threshold;
+            if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
+              autoApproved = true;
+              const sendStatus = (originalChannel === 'email') ? 'pending_send' : 'approved';
+              await pool.query(
+                `UPDATE messages SET status = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
+                [sendStatus, savedMsg.id, clientId]
+              );
+            }
+          } catch (err) {
+            console.warn('[FollowUp] Auto-approve threshold check failed:', err.message);
+          }
+
           await pool.query(
-            `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`,
-            [clientId, savedMsg.id]
+            `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [clientId, savedMsg.id,
+             autoApproved ? 'auto_approval' : 'system',
+             autoApproved ? 'approved' : 'pending',
+             autoApproved ? new Date() : null]
           );
+
+          // Auto-enqueue email follow-ups for send queue
+          if (autoApproved && originalChannel === 'email') {
+            try {
+              const { enqueueMessage } = require('../services/sendQueueWorker');
+              await enqueueMessage(clientId, savedMsg.id);
+              console.log(`[FollowUp] Auto-approved + enqueued touch ${followUp.touch_number} for ${followUp.name}`);
+            } catch (err) {
+              console.warn(`[FollowUp] enqueueMessage failed for ${savedMsg.id}:`, err.message);
+            }
+          }
         }
 
         await pool.query(

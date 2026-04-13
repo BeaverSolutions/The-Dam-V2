@@ -203,6 +203,119 @@ async function start() {
       });
     }, 60 * 1000); // Every 60 seconds
     logger.info({ msg: 'Send queue worker started (60s interval)' });
+
+    // Follow-up scheduler — checks for due follow-ups every 30 minutes
+    // Independent of n8n so follow-ups never get missed even if external scheduler is down.
+    const { runWithClientContext } = require('./middleware/clientContext');
+    const { getDueFollowUps, draftFollowUp } = require('./services/followupSequence');
+    const { rangerReview } = require('./services/agents');
+    const { enqueueMessage } = require('./services/sendQueueWorker');
+    let _followUpRunning = false;
+
+    async function processFollowUps() {
+      if (_followUpRunning) return;
+      _followUpRunning = true;
+      try {
+        // Get all clients with due follow-ups
+        const { rows: clients } = await pool.query(
+          `SELECT DISTINCT client_id FROM followup_queue
+           WHERE status = 'pending' AND scheduled_for <= CURRENT_DATE`
+        );
+
+        for (const { client_id } of clients) {
+          await runWithClientContext(client_id, async () => {
+            const dueFollowUps = await getDueFollowUps(client_id);
+            if (dueFollowUps.length === 0) return;
+            console.log(`[followup-scheduler] ${dueFollowUps.length} due follow-ups for client ${client_id}`);
+
+            for (const fu of dueFollowUps) {
+              try {
+                // Get previous messages for context
+                const { rows: prevMessages } = await pool.query(
+                  `SELECT subject, body, metadata, channel FROM messages
+                   WHERE lead_id = $1 AND client_id = $2 AND status IN ('sent', 'pending_send', 'approved')
+                   ORDER BY created_at ASC`,
+                  [fu.lead_id, client_id]
+                );
+                const originalChannel = prevMessages[0]?.channel || 'email';
+
+                const draft = await draftFollowUp(fu, fu.touch_number, prevMessages);
+                if (!draft?.body) { console.warn(`[followup-scheduler] No draft for lead ${fu.lead_id} touch ${fu.touch_number}`); continue; }
+
+                const cleanBody = draft.body.replace(/\s*\u2014\s*/g, ', ').replace(/\u2014/g, ' ');
+
+                // Server-side hard gates
+                const bodyText = cleanBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
+                const wordCount = bodyText.trim().split(/\s+/).length;
+                const questionCount = (cleanBody.match(/\?/g) || []).length;
+                if ((originalChannel === 'email' && wordCount > 80) || questionCount > 1 || /\u2014/.test(cleanBody)) {
+                  await pool.query(`UPDATE followup_queue SET status = 'skipped' WHERE id = $1`, [fu.id]);
+                  continue;
+                }
+
+                // Insert message + run Enforcer
+                const { rows: [savedMsg] } = await pool.query(
+                  `INSERT INTO messages (client_id, lead_id, subject, body, status, metadata, channel, follow_up_day)
+                   VALUES ($1, $2, $3, $4, 'pending_ranger', $5, $6, $7) RETURNING id`,
+                  [client_id, fu.lead_id, draft.subject || null, cleanBody,
+                   JSON.stringify({ ...draft, is_followup: true, touch_number: fu.touch_number }),
+                   originalChannel,
+                   fu.touch_number === 2 ? 2 : fu.touch_number === 3 ? 5 : fu.touch_number === 4 ? 10 : fu.touch_number === 5 ? 18 : 30]
+                );
+
+                let approved = false;
+                try {
+                  const result = await rangerReview(client_id, { message_id: savedMsg.id, message_body: cleanBody });
+                  approved = !!result?.approved;
+                  await pool.query(
+                    `UPDATE messages SET status = $1, ranger_score = $2, ranger_notes = $3, updated_at = NOW() WHERE id = $4`,
+                    [approved ? 'pending_approval' : 'ranger_rejected', result?.score || 0, result?.notes || 'Enforcer review', savedMsg.id]
+                  );
+                } catch (err) {
+                  await pool.query(`UPDATE messages SET status = 'ranger_rejected', ranger_notes = 'Enforcer unavailable', updated_at = NOW() WHERE id = $1`, [savedMsg.id]);
+                }
+
+                if (approved) {
+                  // Auto-approve if meets threshold
+                  const { rows: [clientRow] } = await pool.query(`SELECT auto_approve_threshold FROM clients WHERE id = $1`, [client_id]);
+                  const score = (await pool.query(`SELECT ranger_score FROM messages WHERE id = $1`, [savedMsg.id])).rows[0]?.ranger_score || 0;
+                  const threshold = clientRow?.auto_approve_threshold;
+                  const autoApproved = threshold != null && score >= threshold;
+
+                  if (autoApproved) {
+                    const sendStatus = (originalChannel === 'email') ? 'pending_send' : 'approved';
+                    await pool.query(`UPDATE messages SET status = $1, updated_at = NOW() WHERE id = $2`, [sendStatus, savedMsg.id]);
+                    await pool.query(
+                      `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at) VALUES ($1, $2, 'auto_approval', 'approved', NOW())`,
+                      [client_id, savedMsg.id]
+                    );
+                    if (originalChannel === 'email') {
+                      await enqueueMessage(client_id, savedMsg.id).catch(() => {});
+                    }
+                  } else {
+                    await pool.query(`INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`, [client_id, savedMsg.id]);
+                  }
+                }
+
+                await pool.query(`UPDATE followup_queue SET status = $1, message_id = $2 WHERE id = $3`, [approved ? 'sent' : 'skipped', savedMsg.id, fu.id]);
+                console.log(`[followup-scheduler] Touch ${fu.touch_number} for ${fu.name}: ${approved ? 'approved' : 'rejected'}`);
+              } catch (err) {
+                console.error(`[followup-scheduler] Error processing follow-up ${fu.id}:`, err.message);
+              }
+            }
+          });
+        }
+      } catch (err) {
+        console.error('[followup-scheduler] Failed:', err.message);
+      } finally {
+        _followUpRunning = false;
+      }
+    }
+
+    setInterval(() => { processFollowUps().catch(() => {}); }, 30 * 60 * 1000); // Every 30 minutes
+    // Run once on startup after a 2-minute delay (let DB migrations complete first)
+    setTimeout(() => { processFollowUps().catch(() => {}); }, 2 * 60 * 1000);
+    logger.info({ msg: 'Follow-up scheduler started (30 min interval)' });
   } catch (err) {
     logger.error({ msg: 'Failed to start server', err: err.message, stack: err.stack });
     process.exit(1);
