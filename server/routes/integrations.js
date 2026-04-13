@@ -169,10 +169,10 @@ async function sendMessageById(clientId, message_id, provider) {
       err.status = 409;
       throw err;
     }
-    // Accept BOTH 'approved' and 'pending_send'. Wave 1 auto-approval lands
-    // messages directly in 'pending_send' (skipping 'approved'). The worker
-    // and Approvals UI both call this function, so it must accept both states.
-    if (message.status !== 'approved' && message.status !== 'pending_send') {
+    // Accept 'approved', 'pending_send', and 'sending' (atomic lock from send-approved).
+    // Wave 1 auto-approval lands messages in 'pending_send'. The autonomous
+    // send-approved endpoint sets 'sending' as a concurrent-worker lock.
+    if (message.status !== 'approved' && message.status !== 'pending_send' && message.status !== 'sending') {
       const err = new Error(`Message must be approved before sending (current status: ${message.status})`);
       err.status = 400;
       throw err;

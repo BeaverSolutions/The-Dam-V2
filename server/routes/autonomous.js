@@ -925,6 +925,114 @@ async function _runAutonomousKickoffInner(clientId) {
         console.error(`[FollowUp] Error drafting follow-up for lead ${followUp.lead_id}:`, err.message);
       }
     }
+
+    // ── Channel escalation: after touch 3+, try alternate channel ──
+    // If a lead has had 3+ touches on one channel with no reply,
+    // auto-draft a message on a different channel for approval.
+    try {
+      const { escalateChannel } = require('../services/followupSequence');
+      const { rows: escalationCandidates } = await pool.query(
+        `SELECT DISTINCT l.id AS lead_id FROM leads l
+         WHERE l.client_id = $1
+           AND l.sequence_status = 'active'
+           AND l.sequence_touch >= 3
+           AND l.last_reply_at IS NULL
+           AND l.deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM messages m
+             WHERE m.lead_id = l.id AND m.client_id = $1
+               AND m.metadata->>'is_channel_escalation' = 'true'
+           )`,
+        [clientId]
+      );
+
+      for (const { lead_id } of escalationCandidates) {
+        try {
+          const escalation = await escalateChannel(clientId, lead_id);
+          if (!escalation) continue;
+
+          console.log(`[ChannelEscalation] ${escalation.lead_name}: ${escalation.original_channel} → ${escalation.new_channel}`);
+
+          // Draft message on new channel via Sales Beaver
+          const { rows: prevMessages } = await pool.query(
+            `SELECT subject, body, metadata, channel FROM messages
+             WHERE lead_id = $1 AND client_id = $2 AND status IN ('sent', 'pending_send', 'approved')
+             ORDER BY created_at ASC`,
+            [lead_id, clientId]
+          );
+
+          const channelInstructions = escalation.new_channel === 'email'
+            ? `FORMAT (email — new channel intro): Hi ${escalation.lead_name?.split(' ')[0]}, {body — max 60 words}. Regards, {sender}. This is the FIRST email to this person (previous outreach was on ${escalation.original_channel}). Reference that you've reached out before but keep it natural, not desperate.`
+            : `FORMAT (${escalation.new_channel} DM — new channel intro): {body — max 40 words. No greeting, no sign-off.} This is a NEW channel (previous was ${escalation.original_channel}). Keep it fresh, not a copy of the ${escalation.original_channel} messages.`;
+
+          const previousSummary = prevMessages.map((m, i) =>
+            `Message ${i + 1} (${m.channel}): ${(m.body || '').substring(0, 120)}`
+          ).join('\n');
+
+          const prompt = `You are Sales Beaver writing a channel escalation message on ${escalation.new_channel}.
+
+CONTEXT: Lead was contacted ${prevMessages.length}x on ${escalation.original_channel} with no reply. Now trying ${escalation.new_channel}.
+
+LEAD: ${escalation.lead_name} - ${escalation.lead?.title || 'Unknown'} at ${escalation.lead_company}
+
+PREVIOUS MESSAGES (different channel — do NOT copy these, use a fresh angle):
+${previousSummary}
+
+${channelInstructions}
+
+HARD RULES: No em dashes. Max 1 question mark. No bullets. No fabricated details.
+
+Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'},"body":"..."}`;
+
+          const { callAgent } = require('../services/claude');
+          const draft = await callAgent('sales_beaver', prompt);
+          if (!draft?.body) continue;
+
+          const cleanBody = draft.body.replace(/\s*\u2014\s*/g, ', ').replace(/\u2014/g, ' ');
+
+          // Insert as pending_ranger with channel escalation flag
+          const { rows: [savedMsg] } = await pool.query(
+            `INSERT INTO messages (client_id, lead_id, subject, body, status, channel, metadata)
+             VALUES ($1, $2, $3, $4, 'pending_ranger', $5, $6)
+             RETURNING id`,
+            [clientId, lead_id, draft.subject || null, cleanBody, escalation.new_channel,
+             JSON.stringify({ is_channel_escalation: true, original_channel: escalation.original_channel, new_channel: escalation.new_channel })]
+          );
+
+          // Run through Enforcer
+          let enforcerApproved = false;
+          try {
+            const rangerResult = await rangerReview(clientId, { message_id: savedMsg.id, message_body: cleanBody });
+            enforcerApproved = !!rangerResult?.approved;
+            await pool.query(
+              `UPDATE messages SET status = $1, ranger_score = $2, ranger_notes = $3, updated_at = NOW() WHERE id = $4`,
+              [enforcerApproved ? 'pending_approval' : 'ranger_rejected', rangerResult?.score || 0, rangerResult?.notes || 'Channel escalation review', savedMsg.id]
+            );
+          } catch (err) {
+            await pool.query(`UPDATE messages SET status = 'ranger_rejected', ranger_notes = 'Enforcer unavailable', updated_at = NOW() WHERE id = $1`, [savedMsg.id]);
+          }
+
+          if (enforcerApproved) {
+            await pool.query(
+              `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'channel_escalation')`,
+              [clientId, savedMsg.id]
+            );
+          }
+
+          await logAction(clientId, 'sales_beaver', 'channel_escalation_drafted', 'lead', lead_id, {
+            original_channel: escalation.original_channel,
+            new_channel: escalation.new_channel,
+            approved: enforcerApproved,
+          });
+
+          console.log(`[ChannelEscalation] Drafted ${escalation.new_channel} message for ${escalation.lead_name}: ${enforcerApproved ? 'approved' : 'rejected'}`);
+        } catch (err) {
+          console.error(`[ChannelEscalation] Error for lead ${lead_id}:`, err.message);
+        }
+      }
+    } catch (err) {
+      console.warn('[ChannelEscalation] Channel escalation phase skipped:', err.message);
+    }
   } catch (err) {
     console.warn('[Autonomous] Follow-up processing skipped:', err.message);
   }
