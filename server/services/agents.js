@@ -899,9 +899,34 @@ async function directorPlan(clientId, { command }) {
   }
 
   // Extract requested lead count from command — e.g. "Find 3 leads" → 3
-  // Default to 20 (not 5) so bare "kickoff" produces a meaningful batch.
+  // Default: pull daily target from DB, fallback to 50 if not set.
   const countMatch = command.match(/\b(\d+)\b/);
-  const requestedCount = countMatch ? parseInt(countMatch[1], 10) : 20;
+  let requestedCount;
+  if (countMatch) {
+    requestedCount = parseInt(countMatch[1], 10);
+  } else {
+    // Use daily KPI target as default lead count for bare "kickoff"
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const { rows } = await pool.query(
+        `SELECT target FROM daily_kpi WHERE client_id = $1 AND date = $2 LIMIT 1`,
+        [clientId, today]
+      );
+      requestedCount = rows[0]?.target || 50;
+    } catch { requestedCount = 50; }
+  }
+
+  // Check how many uncontacted leads already exist in DB (DB-first info for plan)
+  let uncontactedCount = 0;
+  try {
+    const { rows: [{ count }] } = await pool.query(
+      `SELECT COUNT(*)::int AS count FROM leads l
+       WHERE l.client_id = $1 AND l.deleted_at IS NULL AND l.status = 'new'
+         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.lead_id = l.id AND m.client_id = $1)`,
+      [clientId]
+    );
+    uncontactedCount = count;
+  } catch { /* ignore */ }
 
   const planId = uuidv4();
   const [icp, persona, fileConfig, memoryBrief] = await Promise.all([
@@ -997,19 +1022,27 @@ async function directorPlan(clientId, { command }) {
     }
   }
 
+  // Build plan steps — mention DB-first if there are uncontacted leads
+  const steps = [];
+  if (uncontactedCount > 0) {
+    steps.push({ step: 1, agent: 'research_beaver', action: `Process ${uncontactedCount} existing leads from database first`, status: 'pending' });
+    steps.push({ step: 2, agent: 'research_beaver', action: 'Search for additional leads if needed (Brave)', status: 'pending' });
+  } else {
+    steps.push({ step: 1, agent: 'research_beaver', action: 'Search for companies matching ICP (Brave)', status: 'pending' });
+  }
+  steps.push({ step: steps.length + 1, agent: 'sales_beaver', action: 'Generate personalised outreach for each lead', status: 'pending' });
+  steps.push({ step: steps.length + 1, agent: 'ranger', action: 'QA review all generated messages', status: 'pending' });
+  steps.push({ step: steps.length + 1, agent: 'director', action: 'Auto-approve + enqueue for send', status: 'pending' });
+
   return {
     plan_id: planId,
     command,
     interpretation: command,
-    steps: [
-      { step: 1, agent: 'research_beaver', action: 'Search for companies matching query', status: 'pending' },
-      { step: 2, agent: 'sales_beaver', action: 'Generate personalised outreach for each lead', status: 'pending' },
-      { step: 3, agent: 'ranger', action: 'QA review all generated messages', status: 'pending' },
-      { step: 4, agent: 'director', action: 'Queue approved messages for user review', status: 'pending' },
-    ],
+    steps,
     status: 'pending_approval',
     estimated_leads: requestedCount,
-    estimated_time: '~5 min',
+    estimated_time: uncontactedCount > 0 ? `~${Math.ceil(requestedCount / 5)} min (${uncontactedCount} from DB)` : `~${Math.ceil(requestedCount / 5)} min`,
+    db_leads_available: uncontactedCount,
   };
 }
 
@@ -1510,7 +1543,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // These are leads from prior research, CSV import, or signal hunts.
   // Process them through Sales → Enforcer → Send BEFORE doing external research.
   const cmdCountMatch = command && command.match(/\b(\d+)\b/);
-  const targetLimit = limit || (cmdCountMatch ? parseInt(cmdCountMatch[1], 10) : 20);
+  const targetLimit = limit || (cmdCountMatch ? parseInt(cmdCountMatch[1], 10) : 50);
 
   try {
     const { rows: uncontactedLeads } = await pool.query(
