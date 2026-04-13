@@ -522,13 +522,20 @@ router.post('/send-approved', requireInternalKey, async (req, res) => {
   try {
     const { sendMessageById } = require('./integrations');
 
-    // Atomically claim approved messages to prevent double-sends on concurrent calls
+    // Atomically claim approved EMAIL messages only — LinkedIn/Instagram are manual-send.
+    // Without the channel filter, this endpoint grabs LinkedIn messages every 5 min,
+    // fails with "No email", reverts to approved, and loops forever.
     const { rows: approved } = await pool.query(
       `UPDATE messages SET status = 'sending', updated_at = NOW()
        WHERE id IN (
-         SELECT id FROM messages
-         WHERE client_id = $1 AND status = 'approved'
-         ORDER BY created_at ASC
+         SELECT m.id FROM messages m
+         JOIN leads l ON l.id = m.lead_id
+         WHERE m.client_id = $1
+           AND m.status = 'approved'
+           AND m.channel = 'email'
+           AND l.email IS NOT NULL
+           AND l.email != 'unknown@example.com'
+         ORDER BY m.created_at ASC
          LIMIT 20
        )
        RETURNING id, channel, lead_id`,
