@@ -146,8 +146,10 @@ router.post('/chat', async (req, res, next) => {
       response.actions_taken.push('triggered_director_execute');
       response.data = { plan_id: planId };
 
-      // Fire-and-forget in background, don't block the chat response
-      directorExecute(client_id, { plan_id: planId, command: message }).catch(err => {
+      // Fire-and-forget in background, don't block the chat response.
+      // source: 'myclaw' prevents directorExecute from calling MyClaw back for planning —
+      // Jarvis already processed the intent, calling MyClaw again would double-charge OpenAI.
+      directorExecute(client_id, { plan_id: planId, command: message, source: 'myclaw' }).catch(err => {
         console.error(`[chat] directorExecute failed for plan ${planId}:`, err.message);
       });
     }
@@ -190,17 +192,12 @@ router.post('/chat', async (req, res, next) => {
       response.actions_taken.push('deferred_to_structured_endpoint');
     }
 
-    // ── Intent 6: Fallback — route to director for LLM interpretation ─
+    // ── Intent 6: Fallback ────────────────────────────────────────
     else {
-      // Free-form chat goes to directorBrief for a contextual reply
-      try {
-        const { directorBrief } = require('../services/agents');
-        const brief = await directorBrief(client_id);
-        response.data = { brief };
-        response.reply = `I'm Captain Beaver. I understand commands like: "kickoff for today", "status", "find 20 founders", "show approvals", "run signal hunt". What do you need?`;
-      } catch (err) {
-        response.reply = `I'm Captain Beaver. I understand commands like: "kickoff for today", "status", "find 20 founders", "show approvals", "run signal hunt".`;
-      }
+      // Return structured help — no LLM call needed here.
+      // directorBrief() was previously called but its output was never used in the reply,
+      // and it triggered a myClawBrief() callback → double-charged MyClaw for nothing.
+      response.reply = `I'm Captain Beaver. I understand: "kickoff for today", "status", "find 20 founders", "show approvals", "run signal hunt". What do you need?`;
       response.actions_taken.push('returned_help_text');
     }
 

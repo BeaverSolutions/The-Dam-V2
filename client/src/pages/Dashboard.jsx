@@ -222,11 +222,12 @@ function StatCard({ label, value, icon: Icon, color, loading, onClick, sub }) {
 function IntegrationChips({ integrations, loading }) {
   if (loading) return null;
   const chips = [
-    { key: 'gmail',      label: 'Gmail',      icon: Mail,         info: integrations?.gmail },
-    { key: 'agentmail',  label: 'AgentMail',  icon: Send,         info: integrations?.agentmail },
-    { key: 'apollo',     label: 'Apollo',     icon: Search,       info: integrations?.apollo },
-    { key: 'hunter',     label: 'Hunter',     icon: AtSign,       info: integrations?.hunter },
-    { key: 'calendly',   label: 'Calendly',   icon: ExternalLink, info: integrations?.calendly },
+    { key: 'gmail',           label: 'Gmail',          icon: Mail,         info: integrations?.gmail },
+    { key: 'google_calendar', label: 'Google Calendar',icon: Calendar,     info: integrations?.google_calendar },
+    { key: 'agentmail',       label: 'AgentMail',      icon: Send,         info: integrations?.agentmail },
+    { key: 'apollo',          label: 'Apollo',         icon: Search,       info: integrations?.apollo },
+    { key: 'hunter',          label: 'Hunter',         icon: AtSign,       info: integrations?.hunter },
+    { key: 'calendly',        label: 'Calendly',       icon: ExternalLink, info: integrations?.calendly },
   ];
   return (
     <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
@@ -764,6 +765,7 @@ export default function Dashboard() {
 
   const [stats, setStats] = useState({});
   const [statsLoading, setStatsLoading] = useState(true);
+  const [sentToday, setSentToday] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const [agentLogs, setAgentLogs] = useState({});
@@ -786,8 +788,12 @@ export default function Dashboard() {
 
   const loadStats = useCallback(async () => {
     try {
-      const res = await request('/dashboard/stats');
-      setStats(res?.data || {});
+      const [statsRes, kpiRes] = await Promise.all([
+        request('/dashboard/stats'),
+        request('/dashboard/daily-progress').catch(() => null),
+      ]);
+      setStats(statsRes?.data || {});
+      if (kpiRes?.data) setSentToday(kpiRes.data.sent ?? null);
     } catch (err) { setError('Failed to load data'); }
     setStatsLoading(false);
   }, []);
@@ -806,7 +812,19 @@ export default function Dashboard() {
   }, []);
 
   const byStage = stats.leads_by_stage || {};
-  const totalLeads = stats.total_leads || 0;
+  const totalLeads = Object.values(byStage).reduce((a, b) => a + parseInt(b, 10), 0);
+  const sentiments = stats.reply_sentiments || {};
+  const sentimentTotal = Object.values(sentiments).reduce((a, b) => a + b, 0);
+
+  // Reply rate hero
+  const replyRateLifetime = stats.reply_rate_lifetime ?? null;
+  const replyRate30d = stats.reply_rate_30d ?? null;
+  const trend = stats.reply_rate_trend;
+  const trendArrow = trend === 'up' ? '↑' : trend === 'down' ? '↓' : '';
+  const trendColor = trend === 'up' ? 'var(--lime)' : trend === 'down' ? 'var(--orange)' : 'var(--text-muted)';
+
+  // Calendar gate banner
+  const calendarConnected = stats.integrations?.google_calendar?.connected || stats.integrations?.calendly?.connected;
 
   return (
     <div className="fade-in">
@@ -816,83 +834,156 @@ export default function Dashboard() {
           <button onClick={() => { setError(null); loadStats(); loadLogs(); }} style={{ background: 'var(--danger)', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 'var(--radius)', cursor: 'pointer' }}>Retry</button>
         </div>
       )}
+
       <GreetingHeader onBriefOpen={() => setBriefOpen(true)} onRefresh={handleRefresh} refreshing={refreshing} />
 
-      {/* KPI Progress */}
-      <KpiCard onDirectorCommand={(cmd) => setDirectorCommand(cmd)} />
+      {/* Calendar gate banner */}
+      {!statsLoading && !calendarConnected && (
+        <div style={{ padding: '0.75rem 1rem', background: 'rgba(255,140,0,0.1)', border: '1px solid rgba(255,140,0,0.3)', borderRadius: 'var(--radius)', marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <Calendar size={16} style={{ color: 'var(--orange)', flexShrink: 0 }} />
+          <span style={{ fontSize: '0.82rem', color: 'var(--text)' }}>
+            Connect <strong>Google Calendar</strong> or <strong>Calendly</strong> in Settings to enable campaign kickoffs.
+          </span>
+          <button className="btn btn-secondary" style={{ marginLeft: 'auto', fontSize: '0.75rem', padding: '0.3rem 0.75rem', flexShrink: 0 }} onClick={() => navigate('/settings')}>
+            Go to Settings →
+          </button>
+        </div>
+      )}
 
-      {/* Integration chips */}
-      <IntegrationChips integrations={stats.integrations} loading={statsLoading} />
+      {/* ── Hero: Reply Rate ── */}
+      <div className="card fade-in" style={{ marginBottom: '1.25rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.875rem' }}>
+          <TrendingUp size={14} style={{ color: 'var(--lime)' }} />
+          <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Reply Rate</span>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+          <div style={{ background: 'var(--bg)', borderRadius: 8, padding: '1rem 1.25rem' }}>
+            {statsLoading
+              ? <div className="skeleton" style={{ height: 40, width: 80 }} />
+              : <div style={{ fontSize: '2.5rem', fontWeight: 800, color: replyRateLifetime >= 5 ? 'var(--lime)' : replyRateLifetime >= 2 ? 'var(--orange)' : 'var(--text)', lineHeight: 1 }}>{replyRateLifetime !== null ? `${replyRateLifetime}%` : '—'}</div>
+            }
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>Lifetime</div>
+          </div>
+          <div style={{ background: 'var(--bg)', borderRadius: 8, padding: '1rem 1.25rem' }}>
+            {statsLoading
+              ? <div className="skeleton" style={{ height: 40, width: 80 }} />
+              : <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.4rem' }}>
+                  <div style={{ fontSize: '2.5rem', fontWeight: 800, color: replyRate30d >= 5 ? 'var(--lime)' : replyRate30d >= 2 ? 'var(--orange)' : 'var(--text)', lineHeight: 1 }}>{replyRate30d !== null ? `${replyRate30d}%` : '—'}</div>
+                  {trendArrow && <span style={{ fontSize: '1.1rem', color: trendColor, fontWeight: 700 }}>{trendArrow}</span>}
+                </div>
+            }
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>Last 30 days</div>
+          </div>
+        </div>
+      </div>
 
-      {/* Crew Status — KPI cards + live feed */}
-      <BeaverStatusBoard execStatus={null} agentLogs={agentLogs} liveLogs={liveLogs} />
-
-      {/* Stats Row */}
+      {/* ── Stat Row: 4 outcome cards ── */}
       <div className="grid-4" style={{ marginBottom: '1.25rem' }}>
         <StatCard
-          label="Total Leads"
-          value={totalLeads}
-          icon={Users}
-          color="var(--blue)"
-          loading={statsLoading}
-          onClick={() => navigate('/pipeline')}
-          sub={stats.leads_this_week > 0 ? `+${stats.leads_this_week} this week` : undefined}
-        />
-        <StatCard
-          label="Messages Sent"
-          value={stats.messages_sent || 0}
-          icon={MessageSquare}
-          color="var(--lime)"
-          loading={statsLoading}
-          onClick={() => navigate('/messages')}
-          sub={stats.leads_replied > 0 ? `${stats.leads_replied} replied` : undefined}
-        />
-        <StatCard
           label="Pending Approvals"
-          value={stats.pending_approvals || 0}
+          value={stats.pending_approvals ?? 0}
           icon={CheckCircle}
           color="var(--orange)"
           loading={statsLoading}
           onClick={() => navigate('/approvals')}
+          sub={stats.pending_approvals > 0 ? 'Needs your review' : 'Queue clear'}
         />
         <StatCard
-          label="Meetings Today"
-          value={stats.meetings_today || 0}
+          label="Sent Today"
+          value={sentToday ?? 0}
+          icon={MessageSquare}
+          color="var(--lime)"
+          loading={statsLoading}
+          onClick={() => navigate('/messages')}
+          sub="vs 80 target"
+        />
+        <StatCard
+          label="Meetings Booked"
+          value={stats.meetings_booked ?? 0}
           icon={Calendar}
           color="var(--purple)"
           loading={statsLoading}
           onClick={() => navigate('/calendar')}
         />
+        <StatCard
+          label="Pool Health"
+          value={stats.pool_health ?? 0}
+          icon={Users}
+          color="var(--blue)"
+          loading={statsLoading}
+          onClick={() => navigate('/pipeline')}
+          sub="leads ready to contact"
+        />
       </div>
 
-      {/* AI Spend */}
-      <LlmSpendCard />
+      {/* ── KPI bar ── */}
+      <KpiCard onDirectorCommand={(cmd) => setDirectorCommand(cmd)} />
 
-      {/* Weekly Learnings */}
-      <WeeklyLearningsCard />
+      {/* ── Middle: Sentiment + Enforcer | Funnel + Schedule ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.25rem' }}>
 
-      {/* Pipeline Analytics */}
-      <AnalyticsCard />
-
-      {/* Bottom Row */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 240px', gap: '1rem' }} className="dashboard-bottom">
-        {/* Pipeline funnel */}
+        {/* Left: Reply sentiment + enforcer pass rate */}
         <div className="card">
-          <PipelineFunnel byStage={byStage} total={totalLeads} loading={statsLoading} />
-          {!statsLoading && stats.conversion_rate !== undefined && (
-            <div style={{ marginTop: '0.875rem', paddingTop: '0.875rem', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <CornerDownRight size={12} style={{ color: 'var(--text-muted)' }} />
-              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Conversion rate</span>
-              <span style={{ fontSize: '0.875rem', fontWeight: 700, color: 'var(--lime)' }}>{stats.conversion_rate}%</span>
+          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.75rem' }}>
+            Reply Breakdown <span style={{ fontWeight: 400 }}>(last 30 days)</span>
+          </div>
+          {statsLoading ? (
+            Array.from({ length: 4 }).map((_, i) => <div key={i} className="skeleton" style={{ height: 18, borderRadius: 4, marginBottom: 8 }} />)
+          ) : sentimentTotal === 0 ? (
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>No replies classified yet</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginBottom: '0.875rem' }}>
+              {[
+                { key: 'positive',  label: 'Positive',   color: 'var(--lime)' },
+                { key: 'neutral',   label: 'Neutral',    color: 'var(--blue)' },
+                { key: 'objection', label: 'Objection',  color: 'var(--orange)' },
+                { key: 'no_fit',    label: 'No Fit',     color: 'var(--text-muted)' },
+              ].map(({ key, label, color }) => {
+                const count = sentiments[key] || 0;
+                const pct = sentimentTotal > 0 ? Math.round((count / sentimentTotal) * 100) : 0;
+                return (
+                  <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <span style={{ fontSize: '0.7rem', color, fontWeight: 600, width: 62 }}>{label}</span>
+                    <div style={{ flex: 1, height: 6, background: 'var(--bg)', borderRadius: 3, overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 3 }} />
+                    </div>
+                    <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', width: 28, textAlign: 'right' }}>{count}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Enforcer pass rate */}
+          {!statsLoading && stats.enforcer_pass_rate !== null && stats.enforcer_pass_rate !== undefined && (
+            <div style={{ paddingTop: '0.75rem', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Enforcer pass rate (7d)</span>
+              <span style={{ fontSize: '0.875rem', fontWeight: 700, color: stats.enforcer_pass_rate >= 70 ? 'var(--lime)' : stats.enforcer_pass_rate >= 50 ? 'var(--orange)' : 'var(--danger)', marginLeft: 'auto' }}>
+                {stats.enforcer_pass_rate}%
+              </span>
             </div>
           )}
         </div>
 
-        {/* Today's Schedule */}
-        <div className="card">
-          <TodaySchedule events={stats.today_events || []} loading={statsLoading} />
+        {/* Right: Pipeline funnel + today's schedule */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          <div className="card" style={{ flex: 1 }}>
+            <PipelineFunnel byStage={byStage} total={totalLeads} loading={statsLoading} />
+          </div>
+          <div className="card">
+            <TodaySchedule events={stats.today_events || []} loading={statsLoading} />
+          </div>
         </div>
       </div>
+
+      {/* ── Integration chips ── */}
+      <IntegrationChips integrations={stats.integrations} loading={statsLoading} />
+
+      {/* ── Weekly Learnings ── */}
+      <WeeklyLearningsCard />
+
+      {/* ── Crew Status (operational detail) ── */}
+      <BeaverStatusBoard execStatus={null} agentLogs={agentLogs} liveLogs={liveLogs} />
 
       <MorningBriefModal open={briefOpen} onClose={() => setBriefOpen(false)} />
       <DirectorBubble prefilledCommand={directorCommand} onCommandUsed={() => setDirectorCommand(null)} />

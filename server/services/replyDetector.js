@@ -119,6 +119,36 @@ async function checkRepliesForClient(clientId) {
     notifyDiscordNewReplies(clientId, newReplyIds).catch((err) =>
       console.warn('[replyDetector] Discord notify error:', err.message)
     );
+
+    // Notify Telegram — send a short preview so MJ sees replies immediately.
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+    if (chatId) {
+      try {
+        const telegramService = require('./telegram');
+        const appUrl = process.env.FRONTEND_URL || 'https://app.beaver.solutions';
+
+        // Build a compact preview from the leads that replied
+        let preview = '';
+        if (newReplyIds.length > 0) {
+          const { rows } = await pool.query(
+            `SELECT l.name, l.company, m.channel
+               FROM messages m
+               JOIN leads l ON l.id = m.lead_id
+              WHERE m.id = ANY($1) AND m.client_id = $2`,
+            [newReplyIds, clientId]
+          );
+          preview = rows.slice(0, 3).map(r => `• ${r.name} (${r.company}) via ${r.channel}`).join('\n');
+          if (rows.length > 3) preview += `\n+ ${rows.length - 3} more`;
+        }
+
+        const text = `<b>${repliesFound} new repl${repliesFound === 1 ? 'y' : 'ies'}</b>\n\n${preview}\n\n<a href="${appUrl}/approvals">Review replies →</a>`;
+        telegramService.sendMessage(chatId, text).catch(err =>
+          console.warn('[replyDetector] Telegram notify error:', err.message)
+        );
+      } catch (err) {
+        console.warn('[replyDetector] Telegram notify setup error:', err.message);
+      }
+    }
   }
   return repliesFound;
 }

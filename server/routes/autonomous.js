@@ -114,6 +114,15 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
 
     // ── Intent 2: KICKOFF / EXECUTE ──────────────────────────────────
     else if (/\b(kickoff|kick off|start|execute|fire|begin|find.*(lead|founder|ceo|director|agency|agencies))\b/i.test(lowerMsg)) {
+      // Calendar gate — must have Google Calendar OR Calendly connected
+      const calendarService = require('../services/googleCalendar');
+      const hasCalendar = await calendarService.hasAnyCalendar(client_id);
+      if (!hasCalendar) {
+        return res.status(403).json({
+          error: 'Connect Google Calendar or Calendly in Settings before running campaigns',
+          code: 'CALENDAR_REQUIRED',
+        });
+      }
       const planId = uuidv4();
 
       // If command has a number (e.g. "find 20 leads"), directorExecute parses it.
@@ -312,6 +321,16 @@ router.post('/kickoff', requireInternalKey, async (req, res) => {
   const { client_id } = req.body;
   if (!client_id || (typeof client_id === 'string' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(client_id))) {
     return res.status(400).json({ error: 'Valid client_id (UUID) required', code: 'INVALID_CLIENT_ID' });
+  }
+
+  // Calendar gate — must have Google Calendar OR Calendly connected
+  const calendarService = require('../services/googleCalendar');
+  const hasCalendar = await calendarService.hasAnyCalendar(client_id);
+  if (!hasCalendar) {
+    return res.status(403).json({
+      error: 'Connect Google Calendar or Calendly in Settings before running campaigns',
+      code: 'CALENDAR_REQUIRED',
+    });
   }
 
   // Respond immediately so scheduler doesn't time out

@@ -928,7 +928,7 @@ function screenCommand(command) {
   return null;
 }
 
-async function directorPlan(clientId, { command }) {
+async function directorPlan(clientId, { command, source }) {
   // Pre-screen before calling AI or building a plan
   const rejection = screenCommand(command);
   if (rejection) {
@@ -985,55 +985,8 @@ async function directorPlan(clientId, { command }) {
   ]);
 
   // ── MyClaw as Captain Beaver (Option B) ──────────────────
-  // When MYCLAW_WEBHOOK_URL is configured, MyClaw handles planning
-  // with full strategic context. Falls back to Claude if unavailable.
-  const myclaw = require('./myclaw');
-
-  if (myclaw.isConfigured()) {
-    try {
-      const result = await myclaw.myClawPlan({
-        command,
-        clientId,
-        icp,
-        persona,
-        memory_brief: memoryBrief,
-        requested_count: requestedCount,
-      });
-
-      if (result?.status === 'clarification_needed') {
-        return {
-          plan_id: planId,
-          command,
-          status: 'clarification_needed',
-          message: result.question || result.message || 'Need more context before briefing the crew.',
-        };
-      }
-
-      if (result?.steps || result?.interpretation) {
-        return {
-          plan_id: planId,
-          command,
-          interpretation: result.interpretation || command,
-          steps: result.steps || [
-            { step: 1, agent: 'research_beaver', action: 'Search for leads', status: 'pending' },
-            { step: 2, agent: 'sales_beaver', action: 'Generate outreach', status: 'pending' },
-            { step: 3, agent: 'ranger', action: 'Quality check', status: 'pending' },
-            { step: 4, agent: 'director', action: 'Queue for approval', status: 'pending' },
-          ],
-          status: 'pending_approval',
-          estimated_leads: result.estimated_leads || requestedCount,
-          estimated_time: result.estimated_time || '~5 min',
-          source: 'myclaw',
-        };
-      }
-
-      console.warn('[myclaw] Plan response missing steps/interpretation, falling back to Claude');
-    } catch (err) {
-      console.warn('[myclaw] Plan failed, falling back to Claude:', err.message);
-    }
-  }
-
-  // ── Claude fallback (original Captain Beaver) ─────────────
+  // ── Captain Beaver (Claude) handles all planning ─────────────
+  // MyClaw (OpenClaw/OpenAI) has been retired. Captain Beaver is the sole brain.
   if (callAgent) {
     try {
       const icpContext = Object.keys(icp).length > 0
@@ -2567,6 +2520,18 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     db_leads_processed: dbLeadsCount,
   };
 
+  // Post-campaign learning — fire-and-forget, never blocks the response
+  try {
+    const { postCampaignDebrief } = require('./learningEngine');
+    postCampaignDebrief(clientId, {
+      planId: plan_id,
+      leadsFound: totalLeadsFound,
+      messagesDrafted: diagnostics.messages_drafted,
+      enforcerPassed: approvedCount,
+      enforcerFailed: rejectedCount,
+    }).catch(() => {});
+  } catch { /* learningEngine optional */ }
+
   return {
     plan_id,
     status: 'completed',
@@ -2621,9 +2586,8 @@ async function directorBrief(clientId) {
   if (summary === `You have ${stats.total_leads} leads in the pipeline, ${stats.messages_sent} messages generated, and ${stats.pending_approvals} approval${stats.pending_approvals !== 1 ? 's' : ''} waiting for your review.` && callAgent) {
     try {
       const result = await callAgent(
-        'director',
-        `Generate a concise morning brief. Stats: ${JSON.stringify(stats)}. Recent activity: ${JSON.stringify(logsRes.rows.map(l => `${l.agent}: ${l.action}`))}.
-Return JSON: { "summary": string (2-3 sentences, conversational), "stats": { "total_leads": number, "messages_sent": number, "pending_approvals": number } }`,
+        'brief_writer',
+        `Stats: ${JSON.stringify(stats)}. Recent activity: ${JSON.stringify(logsRes.rows.map(l => `${l.agent}: ${l.action}`))}.`,
         { stats }
       );
       if (result?.summary) summary = result.summary;

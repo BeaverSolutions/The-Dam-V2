@@ -87,6 +87,33 @@ app.get('/api/integrations/gmail/callback', async (req, res) => {
   }
 });
 
+// Google Calendar OAuth callback — public (no auth, clientId from HMAC-signed state param)
+app.get('/api/integrations/calendar/callback', async (req, res) => {
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+  try {
+    const { code, state } = req.query;
+    if (!code || !state) return res.redirect(`${frontendUrl}/settings?calendar=error`);
+    let clientId;
+    try {
+      const decoded = JSON.parse(Buffer.from(state, 'base64').toString('utf8'));
+      clientId = decoded?.clientId;
+      const sig = decoded?.sig;
+      if (!clientId || typeof clientId !== 'string' || !/^[0-9a-f-]{36}$/i.test(clientId)) throw new Error('invalid');
+      const crypto = require('crypto');
+      const { safeCompare } = require('./utils/crypto');
+      const expectedSig = crypto.createHmac('sha256', config.jwt.secret).update(clientId).digest('hex');
+      if (!safeCompare(sig, expectedSig)) throw new Error('invalid signature');
+    } catch {
+      return res.redirect(`${frontendUrl}/settings?calendar=error`);
+    }
+    const calendarService = require('./services/googleCalendar');
+    await calendarService.exchangeCode(clientId, code);
+    res.redirect(`${frontendUrl}/settings?calendar=connected`);
+  } catch {
+    res.redirect(`${frontendUrl}/settings?calendar=error`);
+  }
+});
+
 // Routes - protected
 // clientContext must come AFTER tenantScope so req.clientId is populated;
 // it binds an AsyncLocalStorage context so services (e.g. services/claude.js)
@@ -182,8 +209,9 @@ async function start() {
       postDiscordAlert('Discord bot startup', err.message).catch(() => {});
     });
 
-    // Reply detection + Discord approvals notify — poll every 5 minutes
+    // Reply detection + Discord approvals notify + calendar sync — poll every 5 minutes
     const { checkAllClients } = require('./services/replyDetector');
+    const calendarService = require('./services/googleCalendar');
     setInterval(() => {
       checkAllClients().catch(err => {
         logger.warn({ msg: 'Reply detector error', err: err.message });
@@ -193,8 +221,14 @@ async function start() {
         logger.warn({ msg: 'Discord approvals notify error', err: err.message });
         postDiscordAlert('approvals polling', err.message).catch(() => {});
       });
+      // Sync Google Calendar meetings → auto-advance leads to meeting_booked
+      pool.query(`SELECT id FROM clients WHERE deleted_at IS NULL`).then(({ rows }) => {
+        for (const { id } of rows) {
+          calendarService.syncMeetings(id).catch(() => {});
+        }
+      }).catch(() => {});
     }, 5 * 60 * 1000);
-    logger.info({ msg: 'Reply detector + Discord approvals polling started (5 min interval)' });
+    logger.info({ msg: 'Reply detector + Discord approvals + calendar sync polling started (5 min interval)' });
 
     // Send queue worker — auto-sends approved messages, retries on failure
     const { processSendQueue } = require('./services/sendQueueWorker');
@@ -324,6 +358,101 @@ async function start() {
       setInterval(() => runDbBuilder().catch(err => logger.warn({ msg: 'DB Builder error', err: err.message })), 15 * 60 * 1000);
       logger.info({ msg: 'DB Builder started (15 min interval)' });
     }, 3 * 60 * 1000); // 3min delay after startup
+
+    // ── Captain Beaver cron jobs ─────────────────────────────────────────────
+    // Morning brief: daily at 9:00 AM MYT (01:00 UTC). Sent via Telegram.
+    // Weekly review: every Sunday at 8:00 PM MYT (12:00 UTC). Full self-review.
+    // Dedup: each run checks agent_memory before running to avoid double-send on restart.
+    const { generateWeeklyReview } = require('./services/learningEngine');
+    const telegramService = require('./services/telegram');
+    const { directorBrief } = require('./services/agents');
+
+    async function runMorningBrief() {
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+      const utcMin  = now.getUTCMinutes();
+      if (utcHour !== 1 || utcMin > 10) return; // only fire in the 1:00–1:10 UTC window
+
+      const dedupeKey = `morning_brief_${now.toISOString().slice(0, 10)}`;
+      const { rows } = await pool.query(
+        `SELECT 1 FROM agent_memory WHERE agent = 'captain' AND key = $1 LIMIT 1`,
+        [dedupeKey]
+      );
+      if (rows.length > 0) return; // already ran today
+
+      // Mark as ran before the API call so a restart can't double-send
+      await pool.query(
+        `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+         SELECT id, 'captain', $1, '"sent"'::jsonb, 'config' FROM clients WHERE slug = $2`,
+        [dedupeKey, process.env.TELEGRAM_CLIENT_SLUG || 'beaver-solutions']
+      ).catch(() => {});
+
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (!chatId) return;
+
+      try {
+        const { rows: [clientRow] } = await pool.query(
+          `SELECT id FROM clients WHERE slug = $1 LIMIT 1`,
+          [process.env.TELEGRAM_CLIENT_SLUG || 'beaver-solutions']
+        );
+        if (!clientRow) return;
+
+        const brief = await directorBrief(clientRow.id);
+        const text = brief?.summary || brief || 'Morning. Pipeline ready.';
+        await telegramService.sendMessage(chatId, `<b>Morning brief</b>\n\n${text}`);
+        logger.info({ msg: 'Morning brief sent via Telegram' });
+      } catch (err) {
+        logger.warn({ msg: 'Morning brief failed', err: err.message });
+      }
+    }
+
+    async function runWeeklyReview() {
+      const now = new Date();
+      if (now.getUTCDay() !== 0) return;  // Sunday only
+      const utcHour = now.getUTCHours();
+      const utcMin  = now.getUTCMinutes();
+      if (utcHour !== 12 || utcMin > 10) return; // 12:00–12:10 UTC = 8:00 PM MYT
+
+      const dedupeKey = `weekly_review_${now.toISOString().slice(0, 10)}`;
+      const { rows } = await pool.query(
+        `SELECT 1 FROM agent_memory WHERE agent = 'captain' AND key = $1 LIMIT 1`,
+        [dedupeKey]
+      );
+      if (rows.length > 0) return;
+
+      await pool.query(
+        `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+         SELECT id, 'captain', $1, '"sent"'::jsonb, 'config' FROM clients WHERE slug = $2`,
+        [dedupeKey, process.env.TELEGRAM_CLIENT_SLUG || 'beaver-solutions']
+      ).catch(() => {});
+
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (!chatId) return;
+
+      try {
+        const { rows: [clientRow] } = await pool.query(
+          `SELECT id FROM clients WHERE slug = $1 LIMIT 1`,
+          [process.env.TELEGRAM_CLIENT_SLUG || 'beaver-solutions']
+        );
+        if (!clientRow) return;
+
+        const brief = await generateWeeklyReview(clientRow.id);
+        if (brief) {
+          await telegramService.sendMessage(chatId, `<b>Weekly review</b>\n\n${brief}`);
+          logger.info({ msg: 'Weekly review sent via Telegram' });
+        }
+      } catch (err) {
+        logger.warn({ msg: 'Weekly review failed', err: err.message });
+      }
+    }
+
+    // Poll every 10 minutes — each function self-guards against running outside its window
+    setInterval(() => {
+      runMorningBrief().catch(err => logger.warn({ msg: 'Morning brief poll error', err: err.message }));
+      runWeeklyReview().catch(err => logger.warn({ msg: 'Weekly review poll error', err: err.message }));
+    }, 10 * 60 * 1000);
+    logger.info({ msg: 'Captain Beaver cron jobs registered (10 min poll, 9am MYT brief, Sunday 8pm MYT review)' });
+
   } catch (err) {
     logger.error({ msg: 'Failed to start server', err: err.message, stack: err.stack });
     process.exit(1);

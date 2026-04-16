@@ -40,6 +40,10 @@ const {
   directorGetICP,
   getClientPersona,
 } = require('./agents');
+const {
+  injectMemoryContext,
+  postSessionLearning,
+} = require('./learningEngine');
 
 // ─── Persona loader ────────────────────────────────────────────────────────
 // Loads the same files Jarvis loads: IDENTITY, SOUL, USER, AGENTS, MEMORY, TOOLS.
@@ -296,6 +300,18 @@ const TOOLS = [
         agent: { type: 'string', description: 'Agent name (director, research_beaver, sales_beaver, ranger, captain_beaver)' },
         key:   { type: 'string', description: 'Specific memory key (e.g. icp, weekly_learnings, mistakes, schema_facts). Omit to list all keys for the agent.' },
       },
+    },
+  },
+  {
+    name: 'run_campaign',
+    description: 'Trigger a full outreach campaign via directorExecute. Use when MJ asks to "run kickoff", "start outreach", "find and message N leads", or similar. Fires the Research → Sales → Enforcer → approval pipeline asynchronously. Returns a plan_id you can use to track progress.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'The campaign command in plain English (e.g. "Find 20 SaaS founders in KL and send outreach")' },
+        plan_id: { type: 'string', description: 'Optional pre-generated plan_id. Leave blank to auto-generate.' },
+      },
+      required: ['command'],
     },
   },
 ];
@@ -760,6 +776,26 @@ async function toolQueryLogs(clientId, { agent, action, hours, limit } = {}) {
   return { count: rows.length, hours_back: lookback, entries: rows };
 }
 
+async function toolRunCampaign(clientId, { command, plan_id }) {
+  const { v4: uuidV4 } = require('uuid');
+  const planId = plan_id || uuidV4();
+  // Fire-and-forget — directorExecute can take minutes, don't block the chat turn
+  try {
+    const { directorExecute } = require('./agents');
+    directorExecute(clientId, { plan_id: planId, command }).catch(err => {
+      console.error(`[captainBeaver:run_campaign] directorExecute failed: ${err.message}`);
+    });
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  return {
+    ok: true,
+    plan_id: planId,
+    status: 'running',
+    message: `Campaign started (plan_id: ${planId}). I'll run Research → Sales → Enforcer in the background. Check approvals in a few minutes.`,
+  };
+}
+
 async function toolQueryAgentMemoryRaw(clientId, { agent, key } = {}) {
   const conditions = ['client_id = $1', "memory_type != 'secret'"];
   const params = [clientId];
@@ -796,6 +832,7 @@ function buildToolHandler(clientId) {
         case 'query_rejection_history': return await toolQueryRejectionHistory(clientId, input || {});
         case 'query_logs':              return await toolQueryLogs(clientId, input || {});
         case 'query_agent_memory_raw':  return await toolQueryAgentMemoryRaw(clientId, input || {});
+        case 'run_campaign':            return await toolRunCampaign(clientId, input || {});
         default:                        return { error: `Unknown tool: ${toolName}` };
       }
     } catch (err) {
@@ -818,6 +855,54 @@ function formatResponse(content, meta = {}) {
   };
 }
 
+// ─── Fast-path helpers (avoid Sonnet for simple read queries) ────────────────
+
+// Keywords that signal complex tasks requiring full Sonnet reasoning
+const COMPLEX_KEYWORDS = /\b(create|find|search|run|send|start|kickoff|outreach|message|draft|plan|write|generate|source|research|campaign|approve|reject|reprocess|fix|update|edit|schedule|book|analyse|analyze|review|check all|go through|strategy|suggest|recommend)\b/i;
+
+// Returns true if the command is a simple status read that doesn't need Sonnet
+function isSimpleReadQuery(cmd) {
+  if (cmd.length > 200) return false;              // Long messages = complex
+  if (COMPLEX_KEYWORDS.test(cmd)) return false;    // Action verb = needs reasoning
+  return /\b(pending|approvals?|pipeline|status|how many|leads?|today|kpi|numbers?|stats?|summary|what.s|show me|tell me|give me)\b/i.test(cmd);
+}
+
+// Lightweight Haiku-powered handler for simple reads
+async function handleSimpleReadQuery(clientId, command) {
+  try {
+    const handler = buildToolHandler(clientId);
+
+    // Decide which tool to call based on keywords
+    let toolResult;
+    let toolName;
+
+    if (/\b(approvals?|pending|queue)\b/i.test(command)) {
+      toolName = 'get_approvals_pending';
+      toolResult = await handler('get_approvals_pending', { limit: 10 });
+    } else {
+      // Default: pipeline status (covers KPI, leads, sent today, etc.)
+      toolName = 'get_pipeline_status';
+      toolResult = await handler('get_pipeline_status', {});
+    }
+
+    const { callAgent } = require('./claude');
+    const { AGENTS } = require('../config/agents');
+
+    // Use Haiku with a minimal prompt — no persona, just format the data
+    const reply = await callAgent(
+      'brief_writer',
+      `The user asked: "${command}"\n\nData from ${toolName}:\n${JSON.stringify(toolResult, null, 2)}\n\nAnswer concisely in 1–3 sentences. Return JSON: {"summary":"your answer"}`,
+      { clientId }
+    );
+
+    const message = reply?.summary || JSON.stringify(toolResult);
+    return formatResponse(message, { fast_path: true, tool: toolName });
+  } catch (err) {
+    console.warn('[captainBeaver:fastPath] failed, falling through to Sonnet:', err.message);
+    return null; // signal caller to use full path
+  }
+}
+
 // ─── Public entry point ───────────────────────────────────────────────────
 
 async function handleChat(clientId, command, options = {}) {
@@ -829,8 +914,8 @@ async function handleChat(clientId, command, options = {}) {
     history = options.history
       .filter(m => m && (m.role === 'user' || m.role === 'assistant'))
       .filter(m => typeof m.content === 'string' && m.content.trim().length > 0)
-      .slice(-10)
-      .map(m => ({ role: m.role, content: m.content.slice(0, 8000) }));
+      .slice(-6)
+      .map(m => ({ role: m.role, content: m.content.slice(0, 4000) }));
   }
 
   // Log inbound
@@ -844,6 +929,21 @@ async function handleChat(clientId, command, options = {}) {
     },
   }).catch(() => {});
 
+  // ── Fast-path: simple read queries bypass Sonnet + full persona ──────────
+  // "what's pending?", "pipeline status", "how many leads" etc. are pure DB
+  // reads — no reasoning, no orchestration needed. We call the tool directly
+  // and return a formatted answer via Haiku (~10x cheaper than Sonnet).
+  if (isSimpleReadQuery(command) && history.length === 0) {
+    const fastResult = await handleSimpleReadQuery(clientId, command);
+    if (fastResult) return fastResult;
+    // If fast-path produced nothing, fall through to full Sonnet path
+  }
+
+  // ── Memory injection: prepend recent learnings so Captain has context ─────
+  // Keeps the conversation history short while giving persistent awareness.
+  const memoryContext = await injectMemoryContext(clientId);
+  const commandWithMemory = memoryContext ? `${memoryContext}\n\n${command}` : command;
+
   // Load the same persona files Jarvis loads — makes Captain a true file-synced twin.
   // Falls back to config/agents.js director prompt if files are missing.
   const slug = await getClientSlug(clientId);
@@ -852,7 +952,7 @@ async function handleChat(clientId, command, options = {}) {
   try {
     const result = await callAgentWithTools(
       'director',
-      command,
+      commandWithMemory,
       TOOLS,
       buildToolHandler(clientId),
       { clientId, systemPrompt, history }
@@ -870,6 +970,13 @@ async function handleChat(clientId, command, options = {}) {
         tools_used: toolNames,
         stop_reason: result.stop_reason,
       },
+    }).catch(() => {});
+
+    // Post-session learning — fire-and-forget, never blocks the response
+    postSessionLearning(clientId, {
+      command: command.slice(0, 200),
+      toolsUsed: (result.toolCalls || []).map(t => t.name),
+      outcome: result.stop_reason === 'end_turn' ? 'ok' : result.stop_reason || 'ok',
     }).catch(() => {});
 
     const message = result.text && result.text.trim()

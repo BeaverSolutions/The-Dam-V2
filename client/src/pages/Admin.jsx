@@ -2,9 +2,52 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Users, Building2, Activity, Key, Plus, RefreshCw,
   ChevronRight, ChevronLeft, Eye, EyeOff, Copy, Check,
-  ShieldCheck, AlertTriangle, MoreVertical, Loader, Link,
+  ShieldCheck, AlertTriangle, MoreVertical, Loader, Link, Zap,
 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
+
+// ─── AI Spend Card (admin-only) ───────────────────────────────
+function LlmSpendCard() {
+  const { request } = useApi();
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    request('/dashboard/llm-usage').then(r => setData(r?.data)).catch(() => {});
+  }, []);
+
+  if (!data) return null;
+
+  const { today } = data;
+  const pct = today.percentage;
+  const barColor = pct >= 80 ? 'var(--orange)' : 'var(--lime)';
+
+  return (
+    <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 8, padding: '1rem', marginBottom: '1.5rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <Zap size={14} style={{ color: 'var(--purple)' }} />
+          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>AI Spend Today</span>
+        </div>
+        <span style={{ fontSize: '0.8rem', fontWeight: 600, color: barColor }}>
+          ${today.spend_usd.toFixed(2)} / ${today.budget_usd.toFixed(2)}
+        </span>
+      </div>
+      <div style={{ height: 6, background: 'var(--bg)', borderRadius: 3, overflow: 'hidden', marginBottom: '0.75rem' }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: barColor, borderRadius: 3, transition: 'width 0.3s ease' }} />
+      </div>
+      {data.by_agent.length > 0 && (
+        <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+          {data.by_agent.map(a => (
+            <div key={a.agent} style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+              <span style={{ color: 'var(--text)', fontWeight: 500 }}>{(a.agent || 'unknown').replace(/_/g, ' ')}</span>
+              {' '}${a.cost_usd.toFixed(3)} ({a.calls} calls)
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ─── helpers ──────────────────────────────────────────────────
 const fmt = (n) => (n ?? 0).toLocaleString();
@@ -517,6 +560,9 @@ export default function Admin() {
           </div>
         ))}
       </div>
+
+      {/* AI Spend */}
+      <LlmSpendCard />
 
       {/* Error */}
       {error && <div style={errorBanner}><AlertTriangle size={14} /> {error}</div>}

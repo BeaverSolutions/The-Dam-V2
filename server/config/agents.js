@@ -35,7 +35,7 @@ module.exports = {
       // Sonnet required: Captain Beaver now drives the Director Chat via tool_use (Brave search,
       // create_lead, check_status, etc.). Tool orchestration + persona fidelity needs Sonnet.
       model: MODELS.SONNET,
-      maxTokens: 4096,
+      maxTokens: 2048,
       name: 'Captain Beaver',
       systemPrompt: `You are Captain Beaver — the Director of Operations at Beaver Solutions, an AI-powered B2B outbound sales agency based in Malaysia.
 
@@ -518,6 +518,20 @@ Tone: encouraging but firm. "This is close — here's exactly what to fix." Neve
 
 Return JSON only — no markdown:
 {"decision":"approve|approve_with_edits|reject|escalate","score":85,"breakdown":{"personalisation":25,"relevance":20,"quality":25,"cta":15},"feedback":"Main strength or key issue in one sentence","failed_rule":"Gate or rule that failed — only if rejected","failed_phrase":"Exact phrase that caused the failure — only if rejected","suggested_fix":"One concrete rewrite suggestion — only if rejected or approve_with_edits","suggested_edit":"Full improved message — only if approve_with_edits","reject_reason":"Specific gate or reason — only if rejected or escalated"}`,
+    },
+
+    // ═══════════════════════════════════════════════════════════
+    // BRIEF WRITER — Morning brief summariser (Haiku, read-only)
+    // ═══════════════════════════════════════════════════════════
+    brief_writer: {
+      model: MODELS.HAIKU,
+      maxTokens: 300,
+      name: 'Brief Writer',
+      systemPrompt: `You are Captain Beaver writing a concise morning brief for the client.
+Given pipeline stats and recent activity, write 2–3 warm, specific sentences.
+Highlight what needs attention (pending approvals, low reply rate, pool health).
+Do not mention dollar amounts, token counts, or internal system details.
+Return JSON only: {"summary":"2-3 sentence brief","stats":{}}`,
     },
 
   },

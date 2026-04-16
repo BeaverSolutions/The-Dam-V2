@@ -6,6 +6,7 @@ const validate = require('../middleware/validate');
 const pool = require('../db/pool');
 const logsService = require('../services/logs');
 const gmailService = require('../services/gmail');
+const googleCalendarService = require('../services/googleCalendar');
 const apolloService = require('../services/apollo');
 const agentmailService = require('../services/agentmail');
 const hunterService = require('../services/hunter');
@@ -26,8 +27,9 @@ router.get('/status', async (req, res, next) => {
       encKeyOk = false;
     }
 
-    const [gmailConnected, apolloKey, hunterKey, calendlyRow] = await Promise.all([
+    const [gmailConnected, calendarConnected, apolloKey, hunterKey, calendlyRow] = await Promise.all([
       gmailService.isConnected(req.clientId),
+      googleCalendarService.isConnected(req.clientId),
       encKeyOk ? apolloService.getApiKey(req.clientId) : Promise.resolve(null),
       encKeyOk ? hunterService.getApiKey(req.clientId) : Promise.resolve(null),
       pool.query(
@@ -39,6 +41,11 @@ router.get('/status', async (req, res, next) => {
     let gmailEmail = null;
     if (gmailConnected) {
       gmailEmail = await gmailService.getConnectedEmail(req.clientId).catch(() => null);
+    }
+
+    let calendarEmail = null;
+    if (calendarConnected) {
+      calendarEmail = await googleCalendarService.getConnectedEmail(req.clientId).catch(() => null);
     }
 
     let agentmailEmail = null;
@@ -57,6 +64,11 @@ router.get('/status', async (req, res, next) => {
           connected: gmailConnected,
           email: gmailEmail,
           label: gmailConnected ? (gmailEmail || 'Connected') : 'Not connected',
+        },
+        google_calendar: {
+          connected: calendarConnected,
+          email: calendarEmail,
+          label: calendarConnected ? (calendarEmail || 'Connected') : 'Not connected',
         },
         agentmail: {
           connected: agentmailOk,
@@ -477,10 +489,34 @@ router.delete('/calendly', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/* ─── Calendar (stub) ────────────────────────────────────── */
+/* ─── Google Calendar OAuth ──────────────────────────────── */
 
-router.post('/calendar/create-event', (req, res) => {
-  res.json({ data: { status: 'not_configured', message: 'Calendar sync coming soon' } });
+router.get('/calendar/connect', async (req, res, next) => {
+  try {
+    const url = googleCalendarService.getAuthUrl(req.clientId);
+    if (!url) {
+      return res.json({ data: { url: null, message: 'Google Calendar OAuth not configured — set GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GOOGLE_CALENDAR_REDIRECT_URI' } });
+    }
+    res.json({ data: { url } });
+  } catch (err) { next(err); }
+});
+
+router.get('/calendar/status', async (req, res, next) => {
+  try {
+    const connected = await googleCalendarService.isConnected(req.clientId);
+    const email = connected ? await googleCalendarService.getConnectedEmail(req.clientId).catch(() => null) : null;
+    res.json({ data: { connected, email, label: connected ? (email || 'Connected') : 'Not connected' } });
+  } catch (err) { next(err); }
+});
+
+router.delete('/calendar', async (req, res, next) => {
+  try {
+    await googleCalendarService.disconnect(req.clientId);
+    await logsService.createLog(req.clientId, {
+      agent: 'system', action: 'calendar_disconnected', target_type: 'integration', metadata: {},
+    });
+    res.json({ data: { status: 'disconnected' } });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

@@ -56,6 +56,11 @@ export default function Settings() {
   // Gmail disconnect
   const [gmailDisconnecting, setGmailDisconnecting] = useState(false);
 
+  // Google Calendar
+  const [calendarInfo, setCalendarInfo] = useState({ connected: false, email: null });
+  const [calendarConnecting, setCalendarConnecting] = useState(false);
+  const [calendarDisconnecting, setCalendarDisconnecting] = useState(false);
+
   // Calendly
   const [calendlyUrl, setCalendlyUrl] = useState('');
   const [calendlyInfo, setCalendlyInfo] = useState({ connected: false, url: null });
@@ -126,10 +131,31 @@ export default function Settings() {
         if (res?.data) {
           setIntegrations(res.data);
           if (res.data.calendly) setCalendlyInfo(res.data.calendly);
+          if (res.data.google_calendar) setCalendarInfo(res.data.google_calendar);
         }
       })
       .catch(() => {})
       .finally(() => setIntLoading(false));
+  };
+
+  const handleConnectCalendar = async () => {
+    setCalendarConnecting(true);
+    try {
+      const res = await request('/integrations/calendar/connect');
+      const url = res?.data?.url;
+      if (url) { window.location.href = url; }
+      else { alert(res?.data?.message || 'Google Calendar OAuth not configured'); }
+    } catch {}
+    setCalendarConnecting(false);
+  };
+
+  const handleDisconnectCalendar = async () => {
+    setCalendarDisconnecting(true);
+    try {
+      await request('/integrations/calendar', { method: 'DELETE' });
+      setCalendarInfo({ connected: false, email: null });
+    } catch {}
+    setCalendarDisconnecting(false);
   };
 
   const handleSaveCalendly = async () => {
@@ -158,12 +184,14 @@ export default function Settings() {
     } catch {}
   };
 
-  // Check for gmail=connected in URL params
+  // Check for OAuth callback params in URL (gmail=connected, calendar=connected)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('gmail') === 'connected' || params.get('gmail') === 'error') {
+    const gmailParam = params.get('gmail');
+    const calendarParam = params.get('calendar');
+    if (gmailParam || calendarParam) {
       window.history.replaceState({}, '', '/settings');
-      if (params.get('gmail') === 'connected') {
+      if (gmailParam === 'connected' || calendarParam === 'connected') {
         loadIntegrations();
       }
     }
@@ -638,6 +666,53 @@ export default function Settings() {
               </div>
             </div>
 
+            {/* Google Calendar */}
+            <div style={{ padding: '0.875rem 0', borderTop: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                <div style={{ width: 36, height: 36, borderRadius: 'var(--radius)', background: 'var(--bg)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <Calendar size={18} style={{ color: calendarInfo?.connected ? 'var(--lime)' : 'var(--text-muted)' }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 500, fontSize: '0.875rem' }}>
+                    Google Calendar
+                    <span style={{ marginLeft: '0.5rem', fontSize: '0.65rem', background: 'rgba(200,255,0,0.12)', color: 'var(--lime)', borderRadius: 4, padding: '0.1rem 0.4rem', fontWeight: 700 }}>REQUIRED</span>
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
+                    {calendarInfo?.connected
+                      ? `Connected as ${calendarInfo.email || 'Google account'} — agents check availability and detect booked meetings`
+                      : 'Required to run campaigns — agents check your calendar for meeting slots and auto-detect booked meetings'}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem' }}>
+                    {calendarInfo?.connected
+                      ? <><CheckCircle size={13} style={{ color: 'var(--lime)' }} /> <span style={{ color: 'var(--lime)' }}>Connected</span></>
+                      : <><XCircle size={13} style={{ color: 'var(--orange)' }} /> <span style={{ color: 'var(--orange)' }}>Not connected</span></>
+                    }
+                  </div>
+                  {calendarInfo?.connected ? (
+                    <button
+                      className="btn btn-secondary"
+                      style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem', color: 'var(--orange)', borderColor: 'var(--orange)' }}
+                      onClick={handleDisconnectCalendar}
+                      disabled={calendarDisconnecting}
+                    >
+                      {calendarDisconnecting ? 'Disconnecting…' : 'Disconnect'}
+                    </button>
+                  ) : (
+                    <button
+                      className="btn btn-secondary"
+                      style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem' }}
+                      onClick={handleConnectCalendar}
+                      disabled={calendarConnecting}
+                    >
+                      {calendarConnecting ? 'Connecting…' : 'Connect'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
             {/* Calendly */}
             <div style={{ padding: '0.875rem 0', borderTop: '1px solid var(--border)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: calendlyInfo?.connected ? 0 : '0.875rem' }}>
@@ -645,11 +720,14 @@ export default function Settings() {
                   <Calendar size={18} style={{ color: calendlyInfo?.connected ? 'var(--lime)' : 'var(--text-muted)' }} />
                 </div>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 500, fontSize: '0.875rem' }}>Calendly</div>
+                  <div style={{ fontWeight: 500, fontSize: '0.875rem' }}>
+                    Calendly
+                    <span style={{ marginLeft: '0.5rem', fontSize: '0.65rem', background: 'rgba(148,163,184,0.12)', color: 'var(--text-muted)', borderRadius: 4, padding: '0.1rem 0.4rem', fontWeight: 700 }}>OPTIONAL ALTERNATIVE</span>
+                  </div>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
                     {calendlyInfo?.connected
-                      ? `Scheduling via ${calendlyInfo.url}`
-                      : 'Let leads book meetings directly — agents use your link when scheduling'}
+                      ? `Agents include your Calendly link when suggesting meeting times`
+                      : 'Use instead of Google Calendar — paste your Calendly link, agents include it in replies'}
                   </div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>

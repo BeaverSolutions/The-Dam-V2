@@ -12,52 +12,84 @@ router.get('/stats', async (req, res, next) => {
   try {
     const clientId = req.clientId;
 
+    const googleCalendarService = require('../services/googleCalendar');
+
     const [statsRes, calRes, integrationsResult] = await Promise.all([
       pool.query(`
         WITH
-          leads_total AS (
-            SELECT COUNT(*) AS total FROM leads WHERE client_id = $1 AND deleted_at IS NULL
-          ),
-          leads_week AS (
-            SELECT COUNT(*) AS total FROM leads
-            WHERE client_id = $1 AND deleted_at IS NULL
-              AND created_at >= NOW() - INTERVAL '7 days'
-          ),
           leads_by_stage AS (
             SELECT pipeline_stage, COUNT(*) AS cnt
             FROM leads WHERE client_id = $1 AND deleted_at IS NULL
             GROUP BY pipeline_stage
           ),
-          leads_replied AS (
+          msgs_sent_all AS (
+            SELECT COUNT(*) AS total FROM messages WHERE client_id = $1 AND status = 'sent'
+          ),
+          msgs_sent_30d AS (
+            SELECT COUNT(*) AS total FROM messages
+            WHERE client_id = $1 AND status = 'sent' AND sent_at >= NOW() - INTERVAL '30 days'
+          ),
+          replies_all AS (
             SELECT COUNT(DISTINCT lead_id) AS total
             FROM messages WHERE client_id = $1 AND reply_detected_at IS NOT NULL
           ),
-          msgs_sent AS (
-            SELECT COUNT(*) AS total FROM messages WHERE client_id = $1 AND status = 'sent'
-          ),
-          msgs_all AS (
-            SELECT COUNT(*) AS total FROM messages WHERE client_id = $1
+          replies_30d AS (
+            SELECT COUNT(DISTINCT lead_id) AS total
+            FROM messages WHERE client_id = $1 AND reply_detected_at IS NOT NULL
+              AND reply_detected_at >= NOW() - INTERVAL '30 days'
           ),
           msgs_pending AS (
             SELECT COUNT(*) AS total FROM approvals WHERE client_id = $1 AND status = 'pending'
           ),
-          activity_today AS (
-            SELECT COUNT(*) AS total FROM logs
-            WHERE client_id = $1 AND created_at::date = CURRENT_DATE
+          meetings_booked AS (
+            SELECT COUNT(*) AS total FROM leads
+            WHERE client_id = $1 AND pipeline_stage = 'meeting_booked' AND deleted_at IS NULL
           ),
-          activity_week AS (
+          pool_health AS (
+            SELECT COUNT(*) AS total FROM leads
+            WHERE client_id = $1 AND deleted_at IS NULL
+              AND pipeline_stage = 'prospecting'
+              AND status = 'new'
+              AND first_contacted_at IS NULL
+          ),
+          enforcer_reviewed_7d AS (
             SELECT COUNT(*) AS total FROM logs
-            WHERE client_id = $1 AND created_at >= NOW() - INTERVAL '7 days'
+            WHERE client_id = $1
+              AND agent = 'ranger'
+              AND action IN ('message_approved', 'message_rejected')
+              AND created_at >= NOW() - INTERVAL '7 days'
+          ),
+          enforcer_passed_7d AS (
+            SELECT COUNT(*) AS total FROM logs
+            WHERE client_id = $1
+              AND agent = 'ranger'
+              AND action = 'message_approved'
+              AND created_at >= NOW() - INTERVAL '7 days'
+          ),
+          sentiment_counts AS (
+            SELECT
+              COUNT(*) FILTER (WHERE metadata->>'reply_sentiment' = 'positive')  AS positive,
+              COUNT(*) FILTER (WHERE metadata->>'reply_sentiment' = 'neutral')   AS neutral,
+              COUNT(*) FILTER (WHERE metadata->>'reply_sentiment' = 'objection') AS objection,
+              COUNT(*) FILTER (WHERE metadata->>'reply_sentiment' = 'no_fit')    AS no_fit
+            FROM messages
+            WHERE client_id = $1 AND metadata->>'reply_sentiment' IS NOT NULL
+              AND created_at >= NOW() - INTERVAL '30 days'
           )
         SELECT
-          (SELECT total FROM leads_total)   AS total_leads,
-          (SELECT total FROM leads_week)    AS leads_this_week,
-          (SELECT total FROM leads_replied) AS leads_replied,
-          (SELECT total FROM msgs_sent)     AS messages_sent,
-          (SELECT total FROM msgs_all)      AS total_messages,
-          (SELECT total FROM msgs_pending)  AS pending_approvals,
-          (SELECT total FROM activity_today) AS activity_today,
-          (SELECT total FROM activity_week)  AS activity_week,
+          (SELECT total FROM msgs_sent_all)       AS sent_all_time,
+          (SELECT total FROM msgs_sent_30d)        AS sent_30d,
+          (SELECT total FROM replies_all)          AS replies_all_time,
+          (SELECT total FROM replies_30d)          AS replies_30d,
+          (SELECT total FROM msgs_pending)         AS pending_approvals,
+          (SELECT total FROM meetings_booked)      AS meetings_booked,
+          (SELECT total FROM pool_health)          AS pool_health,
+          (SELECT total FROM enforcer_reviewed_7d) AS enforcer_reviewed,
+          (SELECT total FROM enforcer_passed_7d)   AS enforcer_passed,
+          (SELECT positive  FROM sentiment_counts) AS sentiment_positive,
+          (SELECT neutral   FROM sentiment_counts) AS sentiment_neutral,
+          (SELECT objection FROM sentiment_counts) AS sentiment_objection,
+          (SELECT no_fit    FROM sentiment_counts) AS sentiment_no_fit,
           (SELECT json_object_agg(pipeline_stage, cnt) FROM leads_by_stage) AS leads_by_stage
       `, [clientId]),
 
@@ -69,44 +101,70 @@ router.get('/stats', async (req, res, next) => {
       Promise.all([
         gmailService.isConnected(clientId).catch(() => false),
         gmailService.getConnectedEmail(clientId).catch(() => null),
+        googleCalendarService.isConnected(clientId).catch(() => false),
+        googleCalendarService.getConnectedEmail(clientId).catch(() => null),
         apolloService.getApiKey(clientId).then(k => !!k).catch(() => false),
         Promise.resolve(agentmailService.isConnected()),
         agentmailService.getInboxEmail(clientId).catch(() => null),
         hunterService.getApiKey(clientId).then(k => !!k).catch(() => false),
+        googleCalendarService.getCalendlyUrl(clientId).catch(() => null),
       ]),
     ]);
 
     const stats = statsRes.rows[0];
-    const [gmailConnected, gmailEmail, apolloConnected, agentmailConnected, agentmailEmail, hunterConnected] = integrationsResult;
+    const [gmailConnected, gmailEmail, calendarConnected, calendarEmail, apolloConnected, agentmailConnected, agentmailEmail, hunterConnected, calendlyUrl] = integrationsResult;
 
     const byStage = stats.leads_by_stage || {};
 
-    // Conversion rate: leads that moved past prospecting / total leads
-    const totalLeads = parseInt(stats.total_leads, 10);
-    const prospecting = parseInt(byStage.prospecting || 0, 10);
-    const conversionRate = totalLeads > 0
-      ? Math.round(((totalLeads - prospecting) / totalLeads) * 100)
-      : 0;
+    // Reply rates
+    const sentAll = parseInt(stats.sent_all_time, 10) || 0;
+    const sent30d = parseInt(stats.sent_30d, 10) || 0;
+    const repliesAll = parseInt(stats.replies_all_time, 10) || 0;
+    const replies30d = parseInt(stats.replies_30d, 10) || 0;
+    const replyRateLifetime = sentAll > 0 ? +((repliesAll / sentAll) * 100).toFixed(1) : 0;
+    const replyRate30d = sent30d > 0 ? +((replies30d / sent30d) * 100).toFixed(1) : 0;
+    const replyRateTrend = replyRate30d > replyRateLifetime ? 'up' : replyRate30d < replyRateLifetime ? 'down' : 'flat';
+
+    // Enforcer pass rate
+    const enforcerReviewed = parseInt(stats.enforcer_reviewed, 10) || 0;
+    const enforcerPassed = parseInt(stats.enforcer_passed, 10) || 0;
+    const enforcerPassRate = enforcerReviewed > 0 ? Math.round((enforcerPassed / enforcerReviewed) * 100) : null;
 
     res.json({
       data: {
-        total_leads: totalLeads,
-        leads_this_week: parseInt(stats.leads_this_week, 10),
-        leads_replied: parseInt(stats.leads_replied, 10),
-        messages_sent: parseInt(stats.messages_sent, 10),
-        total_messages: parseInt(stats.total_messages, 10),
+        // Outcome metrics (primary)
+        reply_rate_lifetime: replyRateLifetime,
+        reply_rate_30d: replyRate30d,
+        reply_rate_trend: replyRateTrend,
+        meetings_booked: parseInt(stats.meetings_booked, 10),
         pending_approvals: parseInt(stats.pending_approvals, 10),
-        activity_today: parseInt(stats.activity_today, 10),
-        activity_week: parseInt(stats.activity_week, 10),
+        pool_health: parseInt(stats.pool_health, 10),
+        enforcer_pass_rate: enforcerPassRate,
+
+        // Sentiment split (last 30d)
+        reply_sentiments: {
+          positive:  parseInt(stats.sentiment_positive, 10)  || 0,
+          neutral:   parseInt(stats.sentiment_neutral, 10)   || 0,
+          objection: parseInt(stats.sentiment_objection, 10) || 0,
+          no_fit:    parseInt(stats.sentiment_no_fit, 10)    || 0,
+        },
+
+        // Pipeline
+        leads_by_stage: byStage,
         meetings_today: calRes.rows.length,
         today_events: calRes.rows,
-        leads_by_stage: byStage,
-        conversion_rate: conversionRate,
+
+        // Legacy fields kept for backward compat
+        messages_sent: sentAll,
+        leads_replied: repliesAll,
+
         integrations: {
-          gmail: { connected: gmailConnected, email: gmailEmail },
-          agentmail: { connected: agentmailConnected, email: agentmailEmail },
-          apollo: { connected: apolloConnected },
-          hunter: { connected: hunterConnected },
+          gmail:            { connected: gmailConnected,     email: gmailEmail },
+          google_calendar:  { connected: calendarConnected,  email: calendarEmail },
+          agentmail:        { connected: agentmailConnected, email: agentmailEmail },
+          apollo:           { connected: apolloConnected },
+          hunter:           { connected: hunterConnected },
+          calendly:         { connected: !!calendlyUrl,      url: calendlyUrl },
         },
       },
     });

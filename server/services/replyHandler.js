@@ -119,6 +119,28 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
     // ── Step 3: Draft response via Sales Beaver ─────────────
     const { salesGenerate } = require('./agents');
 
+    // For positive replies, inject calendar availability so Sales Beaver can suggest a time
+    let calendarContext = '';
+    if (sentiment === 'positive') {
+      try {
+        const calendarService = require('./googleCalendar');
+        const gcConnected = await calendarService.isConnected(clientId);
+        if (gcConnected) {
+          const slots = await calendarService.suggestSlots(clientId);
+          if (slots.length > 0) {
+            calendarContext = `\nAvailable meeting slots (suggest one or two of these, don't list all): ${slots.join(' / ')}`;
+          }
+        } else {
+          const calendlyUrl = await calendarService.getCalendlyUrl(clientId);
+          if (calendlyUrl) {
+            calendarContext = `\nCalendly booking link: ${calendlyUrl} — include this naturally when suggesting a time to connect`;
+          }
+        }
+      } catch (err) {
+        console.warn('[replyHandler] Calendar context fetch failed:', err.message);
+      }
+    }
+
     const draftContext = [
       `Name: ${lead.name}`,
       `Company: ${lead.company}`,
@@ -128,7 +150,8 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       `Director instruction: ${classification.draft_instruction || classification.next_action}`,
       `Previous messages sent: ${history.length}`,
       `IMPORTANT: This is a REPLY message, not a cold outreach. Write a conversational response to their reply. Do not start from scratch — continue the conversation naturally.`,
-    ].join('\n');
+      calendarContext,
+    ].filter(Boolean).join('\n');
 
     const draft = await salesGenerate(clientId, {
       lead_id: leadId,

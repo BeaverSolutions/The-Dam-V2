@@ -19,24 +19,30 @@ Individual agent behaviour is tuned in each client's config.md — not here.
 ## Mandatory Pipeline (cannot be skipped)
 
 ```
-8:30am MYT — n8n triggers daily kickoff
+8:30am MYT — n8n triggers daily kickoff (gated: AUTONOMOUS_ENABLED_CLIENTS env var)
   → Captain Beaver: pre-flight check (ICP defined? Signal identified?)
   → Captain Beaver: daily priority order
       1. Open conversations (reply handling)
       2. Due follow-ups
       3. New outreach to fill gap
       4. Sourcing new leads (only if 1–3 are done)
-  → Research Beaver: find leads (P1 first, P2 only if P1 exhausted, P3 skip)
-  → Sales Beaver: draft messages per lead
+  → DB-first check: draw uncontacted leads from pool (14-day cooldown, NOT IN pipeline)
+      If pool has ≥5 ready leads → use pool, skip cold research
+      If pool insufficient → Research Beaver runs cold search
+  → Research Beaver: DB Builder runs every 15min in background (separate from kickoff)
+      Maintains pool of 200 ready leads per client. P1 first, P2 only if P1 exhausted, P3 skip.
+  → Sales Beaver: personalisation search (Brave) per lead → draft message
   → Enforcer Beaver: review every message (hard gates — see ranger-rules.md)
   → Approved messages → approval queue
   → Client approves/rejects each message in The Dam UI
-  → Approved → sent via AgentMail
+  → Approved → sent via Gmail (AgentMail as fallback)
   → All actions logged to activity log
   → Dashboard updates
 ```
 
 **NO message ever sends without passing Enforcer Beaver AND client approval.**
+
+**Don't-approach-twice rule:** Leads with `first_contacted_at` within 14 days OR with in-pipeline messages (pending_ranger / pending_approval / approved / pending_send / sending / sent) are excluded from all pool draws and Captain's `search_internal_leads` tool.
 
 ---
 
@@ -50,6 +56,15 @@ Individual agent behaviour is tuned in each client's config.md — not here.
 
 ---
 
+## Background Jobs (always running, independent of n8n)
+
+| Job | Interval | Purpose |
+|-----|----------|---------|
+| DB Builder | Every 15min (3min startup delay) | Research Beaver maintains lead pool. Checks pool health per enabled client, sources new leads when pool < 200. Env: `DB_BUILDER_ENABLED_CLIENTS` |
+| Reply detector | Every 5min | Checks for incoming replies, classifies response type |
+| Send queue worker | Every 60s | Sends approved messages via Gmail |
+| Follow-up scheduler | Every 30min | Drafts and submits due follow-ups through Enforcer |
+
 ## Weekly Cadence (n8n scheduled)
 
 | Day | Task |
@@ -61,4 +76,4 @@ Individual agent behaviour is tuned in each client's config.md — not here.
 
 ---
 
-_Last updated: 2026-04-03_
+_Last updated: 2026-04-16_

@@ -193,7 +193,7 @@ async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, con
     }
   }
 
-  const MAX_ITERATIONS = 12;
+  const MAX_ITERATIONS = 6;
 
   // Seed the conversation with prior turns if the caller provided them.
   // history is an array of { role: 'user'|'assistant', content: string } already

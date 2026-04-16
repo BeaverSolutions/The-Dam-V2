@@ -32,24 +32,31 @@ Set `DATABASE_URL` in the root `.env` file (not server/.env).
 
 ## Current State
 
-- 25 migrations applied (001-025) + 2 audit fixes (026-027)
+- 39 migrations applied (001-039)
 - AI Enforcer (rangerReview) active on all messages and follow-ups
 - Captain validation gate active before Enforcer
 - Timing-safe secret comparisons on all auth endpoints
 - RLS enabled on all tenant-scoped tables
 - 5 pilot clients onboarded (3 seeded + 3 manual)
-- Autonomous pipeline: n8n triggers → Captain → Research → Sales → Enforcer → Approval → Send
+- DB Builder running every 15min — Research Beaver continuously maintains lead pool (target: 200 ready leads per client)
+- DB-first pipeline: impromptu chat/kickoff requests draw from pool before triggering cold research
+- Don't-approach-twice: 14-day cooldown + NOT EXISTS check on in-pipeline messages
+- Search stack: Brave → Google CSE → DuckDuckGo (Serper removed)
+- n8n gated: only clients in `AUTONOMOUS_ENABLED_CLIENTS` env var receive n8n-triggered daily kickoffs
+- LLM spend visible: `llm_usage` table, `/api/dashboard/llm-usage` endpoint, dashboard widget
 
 ## Key Files
 
 | Area | Files |
 |------|-------|
-| Pipeline orchestration | `server/services/agents.js` (directorExecute, rangerReview, captainValidate) |
-| Autonomous endpoints | `server/routes/autonomous.js` (kickoff, approve, reject, send-approved) |
+| Pipeline orchestration | `server/services/agents.js` (directorExecute, rangerReview, captainValidate, searchPersonalisationSignals) |
+| Autonomous endpoints | `server/routes/autonomous.js` (kickoff, approve, reject, send-approved, chat) |
 | Agent config/prompts | `server/config/agents.js` |
 | Client configs | `clients/[slug]/config.md` |
 | Shared agent rules | `clients/_core/agent-roles.md`, `clients/_core/ranger-rules.md` |
-| Migrations | `server/db/migrations/001-027` |
+| DB Builder | `server/services/dbBuilder.js` |
+| Search service | `server/services/searchService.js` (Brave → CSE → DDG chain) |
+| Migrations | `server/db/migrations/001-039` |
 
 ## What NOT to build yet
 
