@@ -1226,38 +1226,82 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     const queueHeadroom = PENDING_CEILING - livePending;
     const draftSize = Math.min(liveGap, BATCH_SIZE, queueHeadroom);
 
-    const batchBrief = buildAutonomousBrief({
-      gap: draftSize, icp, lastLearnings, rejectionPatterns,
-      sent: liveSent, target,
-    });
+    // ── DB-first: pull uncontacted leads from pool before cold research ──
+    // The DB Builder keeps this pool healthy in the background. Kickoff
+    // draws from it, avoiding expensive real-time research when possible.
+    let usedDbPool = false;
+    try {
+      const { rows: poolLeads } = await pool.query(
+        `SELECT id FROM leads
+         WHERE client_id = $1
+           AND pipeline_stage = 'prospecting'
+           AND status = 'new'
+           AND deleted_at IS NULL
+         ORDER BY
+           CASE WHEN signal_tier = 'P1' THEN 1
+                WHEN signal_tier = 'P2' THEN 2
+                ELSE 3 END,
+           CASE WHEN email IS NOT NULL THEN 0 ELSE 1 END,
+           score DESC,
+           created_at ASC
+         LIMIT $2`,
+        [clientId, draftSize]
+      );
 
-    const beforeSaved = (await pool.query(
-      `SELECT COUNT(*) AS c FROM leads WHERE client_id=$1 AND DATE(created_at)=$2`,
-      [clientId, today]
-    )).rows[0].c;
+      if (poolLeads.length >= Math.min(draftSize, 5)) {
+        console.log(`[Autonomous] DB pool has ${poolLeads.length} leads — using pool instead of cold research`);
+        await logAction(clientId, 'director', 'db_pool_draw', 'system', null, {
+          batch, pool_size: poolLeads.length, draft_size: draftSize,
+        });
 
-    await directorExecute(clientId, {
-      plan_id: uuidv4(),
-      command: batchBrief,
-      batchIndex: batch - 1,
-      limit: draftSize,
-    });
-
-    // Zero-streak detection — stop if research yields nothing new
-    const afterSaved = (await pool.query(
-      `SELECT COUNT(*) AS c FROM leads WHERE client_id=$1 AND DATE(created_at)=$2`,
-      [clientId, today]
-    )).rows[0].c;
-    if (parseInt(afterSaved) === parseInt(beforeSaved)) {
-      zeroStreak++;
-      console.warn(`[Autonomous] Batch ${batch} added 0 leads (zero streak: ${zeroStreak}/3)`);
-      if (zeroStreak >= 3) {
-        console.warn(`[Autonomous] 3 consecutive zero-lead batches — stopping. Pool exhausted.`);
-        await logAction(clientId, 'director', 'research_pool_exhausted', 'system', null, { batch, liveSent, target });
-        break;
+        await directorExecute(clientId, {
+          plan_id: uuidv4(),
+          command: `DB-POOL BATCH: Process ${poolLeads.length} pre-researched leads from the lead pool. These are already verified and saved. Draft outreach using any signal/angle data in their metadata. Do NOT re-run research.`,
+          batchIndex: batch - 1,
+          limit: draftSize,
+          use_existing_leads: poolLeads.map(l => l.id),
+        });
+        usedDbPool = true;
       }
-    } else {
-      zeroStreak = 0;
+    } catch (err) {
+      console.warn(`[Autonomous] DB pool query failed, falling back to cold research:`, err.message);
+    }
+
+    // ── Fallback: cold research via directorExecute (original path) ──
+    if (!usedDbPool) {
+      const batchBrief = buildAutonomousBrief({
+        gap: draftSize, icp, lastLearnings, rejectionPatterns,
+        sent: liveSent, target,
+      });
+
+      const beforeSaved = (await pool.query(
+        `SELECT COUNT(*) AS c FROM leads WHERE client_id=$1 AND DATE(created_at)=$2`,
+        [clientId, today]
+      )).rows[0].c;
+
+      await directorExecute(clientId, {
+        plan_id: uuidv4(),
+        command: batchBrief,
+        batchIndex: batch - 1,
+        limit: draftSize,
+      });
+
+      // Zero-streak detection — stop if research yields nothing new
+      const afterSaved = (await pool.query(
+        `SELECT COUNT(*) AS c FROM leads WHERE client_id=$1 AND DATE(created_at)=$2`,
+        [clientId, today]
+      )).rows[0].c;
+      if (parseInt(afterSaved) === parseInt(beforeSaved)) {
+        zeroStreak++;
+        console.warn(`[Autonomous] Batch ${batch} added 0 leads (zero streak: ${zeroStreak}/3)`);
+        if (zeroStreak >= 3) {
+          console.warn(`[Autonomous] 3 consecutive zero-lead batches — stopping. Pool exhausted.`);
+          await logAction(clientId, 'director', 'research_pool_exhausted', 'system', null, { batch, liveSent, target });
+          break;
+        }
+      } else {
+        zeroStreak = 0;
+      }
     }
 
     if (batch < HARD_CEILING) {
