@@ -143,16 +143,60 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
         }
       }
 
-      response.reply = `Dispatching to the crew. Captain is briefing Research Beaver now with your command. Poll back with "status" in 60s, or check /api/autonomous/pending-approvals.`;
-      response.actions_taken.push('triggered_director_execute');
       response.data = { plan_id: planId };
 
-      // Background execution
-      runWithClientContext(client_id, () =>
-        directorExecute(client_id, { plan_id: planId, command: effectiveCommand, limit: effectiveLimit }).catch(err => {
-          console.error(`[chat] directorExecute failed for plan ${planId}:`, err.message);
-        })
-      );
+      // DB-first: check if we already have uncontacted leads in the pool
+      let usedDbPool = false;
+      try {
+        const poolLimit = effectiveLimit || 20;
+        const { rows: poolLeads } = await pool.query(
+          `SELECT id, name, company, title, signal_tier, email, linkedin_url
+           FROM leads
+           WHERE client_id = $1
+             AND pipeline_stage = 'prospecting'
+             AND status = 'new'
+             AND (first_contacted_at IS NULL OR first_contacted_at < NOW() - INTERVAL '14 days')
+             AND deleted_at IS NULL
+           ORDER BY
+             CASE WHEN signal_tier = 'P1' THEN 1 WHEN signal_tier = 'P2' THEN 2 ELSE 3 END,
+             CASE WHEN email IS NOT NULL THEN 0 ELSE 1 END,
+             score DESC
+           LIMIT $2`,
+          [client_id, poolLimit]
+        );
+
+        if (poolLeads.length >= 5) {
+          usedDbPool = true;
+          console.log(`[chat] DB pool has ${poolLeads.length} leads — using pool instead of fresh research`);
+          response.reply = `Found ${poolLeads.length} leads in the database. Processing through Sales → Enforcer now. No fresh research needed.`;
+          response.actions_taken.push('db_pool_draw');
+
+          runWithClientContext(client_id, () =>
+            directorExecute(client_id, {
+              plan_id: planId,
+              command: `DB-POOL BATCH: Process ${poolLeads.length} pre-researched leads from the lead pool. Draft outreach using any signal/angle data in their metadata.`,
+              use_existing_leads: poolLeads.map(l => l.id),
+              limit: poolLeads.length,
+            }).catch(err => {
+              console.error(`[chat] DB pool directorExecute failed:`, err.message);
+            })
+          );
+        }
+      } catch (err) {
+        console.warn('[chat] DB pool check failed, falling back to research:', err.message);
+      }
+
+      // Fallback: cold research if DB pool insufficient
+      if (!usedDbPool) {
+        response.reply = `Dispatching to the crew. Captain is briefing Research Beaver now. Poll back with "status" in 60s.`;
+        response.actions_taken.push('triggered_director_execute');
+
+        runWithClientContext(client_id, () =>
+          directorExecute(client_id, { plan_id: planId, command: effectiveCommand, limit: effectiveLimit }).catch(err => {
+            console.error(`[chat] directorExecute failed for plan ${planId}:`, err.message);
+          })
+        );
+      }
     }
 
     // ── Intent 3: APPROVALS query ────────────────────────────────────

@@ -143,6 +143,7 @@ const TOOLS = [
         location: { type: 'string', description: 'Location keyword (e.g. "Kuala Lumpur", "Malaysia")' },
         signal_tier: { type: 'string', enum: ['P1', 'P2', 'P3'], description: 'Filter by signal tier' },
         limit: { type: 'number', description: 'Max leads to return (default 10, max 50)' },
+        include_contacted: { type: 'boolean', description: 'Set true to include recently contacted leads. Default false — only shows fresh/uncontacted leads.' },
       },
     },
   },
@@ -301,9 +302,15 @@ const TOOLS = [
 
 // ─── Tool handler implementations ──────────────────────────────────────────
 
-async function toolSearchInternalLeads(clientId, { industry, location, signal_tier, limit }) {
+async function toolSearchInternalLeads(clientId, { industry, location, signal_tier, limit, include_contacted }) {
   const conditions = ['client_id = $1', 'deleted_at IS NULL'];
   const params = [clientId];
+
+  // By default, exclude recently contacted leads (within 14 days)
+  if (!include_contacted) {
+    conditions.push(`(first_contacted_at IS NULL OR first_contacted_at < NOW() - INTERVAL '14 days')`);
+    conditions.push(`status NOT IN ('contacted', 'replied', 'meeting_booked', 'closed_won', 'closed_lost')`);
+  }
 
   if (industry) {
     const idx = params.push(`%${industry.toLowerCase()}%`);
@@ -320,9 +327,13 @@ async function toolSearchInternalLeads(clientId, { industry, location, signal_ti
   const cap = Math.min(Number(limit) || 10, 50);
   const { rows } = await pool.query(
     `SELECT id, name, company, title, email, linkedin_url, signal_tier, pipeline_stage, status,
-            metadata->>'signal' AS signal, created_at
+            metadata->>'signal' AS signal, first_contacted_at, created_at
      FROM leads WHERE ${conditions.join(' AND ')}
-     ORDER BY created_at DESC LIMIT $${params.push(cap)}`,
+     ORDER BY
+       CASE WHEN signal_tier = 'P1' THEN 1 WHEN signal_tier = 'P2' THEN 2 ELSE 3 END,
+       score DESC,
+       created_at DESC
+     LIMIT $${params.push(cap)}`,
     params
   );
 
