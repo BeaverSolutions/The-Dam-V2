@@ -282,6 +282,53 @@ async function researchSearch(clientId, { query, filters = {} }) {
 }
 
 /**
+ * Pre-draft personalisation: search the web for recent signals about
+ * the lead's company/person. Returns 0-3 signal snippets that Sales
+ * Beaver can reference. Uses Brave (no LLM cost). Skips if lead
+ * already has strong signal data from Research Beaver.
+ */
+async function searchPersonalisationSignals(lead) {
+  const meta = lead.metadata || {};
+  // Skip if we already have strong signal data
+  if (meta.signal && meta.why_now) return [];
+
+  const { searchOpenWeb } = require('./searchService');
+  const queries = [];
+
+  if (lead.company && lead.company !== 'Unknown Company') {
+    queries.push(`"${lead.company}" news OR hiring OR funding OR launch 2026`);
+  }
+  if (lead.name && lead.name !== 'Unknown Contact' && lead.company && lead.company !== 'Unknown Company') {
+    queries.push(`"${lead.name}" "${lead.company}"`);
+  }
+
+  if (queries.length === 0) return [];
+
+  const signals = [];
+  for (const q of queries.slice(0, 2)) {
+    try {
+      const results = await searchOpenWeb(q, 3);
+      for (const r of results) {
+        if (r.snippet && r.snippet.length > 30) {
+          let source = r.source || '';
+          if (!source && r.link) {
+            try { source = new URL(r.link).hostname; } catch {}
+          }
+          signals.push({
+            text: r.snippet.substring(0, 150),
+            source,
+            date: r.date || '',
+          });
+        }
+      }
+    } catch (err) {
+      console.warn(`[sales-personalise] Search failed for "${q}":`, err.message);
+    }
+  }
+  return signals.slice(0, 3);
+}
+
+/**
  * =========================
  * SALES BEAVER
  * =========================
@@ -1215,6 +1262,22 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       if (meta.angle)    contextParts.push(`Angle to lead with: ${meta.angle}`);
       if (meta.signal_type) contextParts.push(`Signal type: ${meta.signal_type}`);
 
+      // Search for personalisation signals before drafting
+      try {
+        const signals = await searchPersonalisationSignals(lead);
+        if (signals.length > 0) {
+          contextParts.push('');
+          contextParts.push('RECENT SIGNALS (from web search — reference these if relevant):');
+          for (const s of signals) {
+            const dateStr = s.date ? ` (${s.date})` : '';
+            contextParts.push(`- ${s.text}${dateStr} [source: ${s.source}]`);
+          }
+          console.log(`[sales-personalise] Found ${signals.length} signals for ${lead.name} at ${lead.company}`);
+        }
+      } catch (err) {
+        console.warn(`[sales-personalise] Skipped for ${lead.name}:`, err.message);
+      }
+
       const channel = lead.email ? 'email' : 'linkedin';
       const salesResult = await salesGenerate(clientId, {
         lead_id: lead.id,
@@ -2043,6 +2106,22 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     if (meta.search_query) contextParts.push(`Search context: ${meta.search_query}`);
     // Campaign command gives Sales Beaver the targeting intent
     if (command) contextParts.push(`Campaign intent: "${command}"`);
+
+    // Search for personalisation signals before drafting
+    try {
+      const signals = await searchPersonalisationSignals(lead);
+      if (signals.length > 0) {
+        contextParts.push('');
+        contextParts.push('RECENT SIGNALS (from web search — reference these if relevant):');
+        for (const s of signals) {
+          const dateStr = s.date ? ` (${s.date})` : '';
+          contextParts.push(`- ${s.text}${dateStr} [source: ${s.source}]`);
+        }
+        console.log(`[sales-personalise] Found ${signals.length} signals for ${lead.name} at ${lead.company}`);
+      }
+    } catch (err) {
+      console.warn(`[sales-personalise] Skipped for ${lead.name}:`, err.message);
+    }
 
     // Sales Beaver status update
     execStatus.beavers.sales.task = `Drafting for ${lead.name} @ ${lead.company}`;
