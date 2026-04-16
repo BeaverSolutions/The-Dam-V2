@@ -2340,28 +2340,47 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
               },
             });
 
-            // If approved on retry, fall through to approval block below
-            if (rangerResult?.approved) {
-              // Will continue to approval queue
-            } else {
-              // Still rejected after redraft — mark final rejection
-              await pool.query(
-                `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
-                 ranger_breakdown = $5, status = 'ranger_rejected', updated_at = NOW()
-                 WHERE id = $6 AND client_id = $7`,
-                [currentBody, currentSubject, rangerResult?.score || 0, `Rejected after ${attemptCount + 1} attempts: ${rangerResult?.notes || rangerResult?.reject_reason || 'Quality gates failed'}`, JSON.stringify(rangerResult?.breakdown || null), msg.id, clientId]
-              );
-              await logsService.createLog(clientId, {
-                agent: 'enforcer_beaver',
-                action: 'message_rejected',
-                target_type: 'message',
-                target_id: msg.id,
-                metadata: { channel: msg.channel, score: rangerResult?.score, notes: rangerResult?.notes, attempts: attemptCount + 1, method: 'ai_enforcer_retry' },
+            // If still rejected after redraft → Enforcer drafts it himself
+            if (!rangerResult?.approved) {
+              const enforcerBody = await rangerDraft(clientId, {
+                lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
+                lead_angle: lead.metadata?.angle, lead_friction: lead.metadata?.friction,
+                rejected_body: currentBody,
               });
-              rejectedCount++;
-              execStatus.beavers.enforcer.rejected++;
-              execStatus.beavers.enforcer.status = 'done';
-              return;
+              if (enforcerBody) {
+                currentBody = enforcerBody;
+                currentSubject = currentSubject || `${lead.company}`;
+                await pool.query(
+                  `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval',
+                   ranger_score = 70, ranger_notes = $3, updated_at = NOW()
+                   WHERE id = $4 AND client_id = $5`,
+                  [currentBody, currentSubject,
+                   'Enforcer-drafted fallback — Sales Beaver failed after 2 attempts. Review before sending.',
+                   msg.id, clientId]
+                );
+                await pool.query(
+                  `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'enforcer_fallback')`,
+                  [clientId, msg.id]
+                );
+                await logsService.createLog(clientId, {
+                  agent: 'enforcer_beaver', action: 'enforcer_fallback_draft',
+                  target_type: 'message', target_id: msg.id,
+                  metadata: { channel: msg.channel, lead_name: lead.name, attempts: attemptCount + 1 },
+                }).catch(() => {});
+                approvedCount++;
+                execStatus.beavers.enforcer.status = 'done';
+                rangerResult = { approved: true, score: 70 }; // continue to approval block
+              } else {
+                // rangerDraft itself failed — last resort, mark rejected
+                await pool.query(
+                  `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
+                  [`Sales Beaver failed ${attemptCount + 1} attempts; Enforcer draft also failed.`, msg.id]
+                );
+                rejectedCount++;
+                execStatus.beavers.enforcer.rejected++;
+                execStatus.beavers.enforcer.status = 'done';
+                return;
+              }
             }
           }
         } catch (redraftErr) {
@@ -2371,25 +2390,46 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         }
       }
 
-      // Final rejection — no more retries
+      // Final rejection — Sales exhausted all retries, Enforcer drafts his own version
       if (!rangerResult?.approved) {
-        await pool.query(
-          `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
-           ranger_breakdown = $5, status = 'ranger_rejected', updated_at = NOW()
-           WHERE id = $6 AND client_id = $7`,
-          [currentBody, currentSubject, rangerResult?.score || 0, rangerResult?.notes || rangerResult?.reject_reason || 'Enforcer rejected', JSON.stringify(rangerResult?.breakdown || null), msg.id, clientId]
-        );
-        await logsService.createLog(clientId, {
-          agent: 'enforcer_beaver',
-          action: 'message_rejected',
-          target_type: 'message',
-          target_id: msg.id,
-          metadata: { channel: msg.channel, score: rangerResult?.score, notes: rangerResult?.notes, method: 'ai_enforcer' },
+        const enforcerBody = await rangerDraft(clientId, {
+          lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
+          lead_angle: lead.metadata?.angle, lead_friction: lead.metadata?.friction,
+          rejected_body: currentBody,
         });
-        rejectedCount++;
-        execStatus.beavers.enforcer.rejected++;
-        execStatus.beavers.enforcer.status = 'done';
-        return;
+        if (enforcerBody) {
+          currentBody = enforcerBody;
+          currentSubject = currentSubject || `${lead.company}`;
+          await pool.query(
+            `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval',
+             ranger_score = 70, ranger_notes = $3, updated_at = NOW()
+             WHERE id = $4 AND client_id = $5`,
+            [currentBody, currentSubject,
+             'Enforcer-drafted fallback — Sales Beaver failed all attempts. Review before sending.',
+             msg.id, clientId]
+          );
+          await pool.query(
+            `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'enforcer_fallback')`,
+            [clientId, msg.id]
+          );
+          await logsService.createLog(clientId, {
+            agent: 'enforcer_beaver', action: 'enforcer_fallback_draft',
+            target_type: 'message', target_id: msg.id,
+            metadata: { channel: msg.channel, lead_name: lead.name, method: 'enforcer_fallback' },
+          }).catch(() => {});
+          approvedCount++;
+          execStatus.beavers.enforcer.status = 'done';
+        } else {
+          // Last resort — both Sales and Enforcer failed
+          await pool.query(
+            `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
+            ['Sales and Enforcer both failed to draft. Manual message required.', msg.id]
+          );
+          rejectedCount++;
+          execStatus.beavers.enforcer.rejected++;
+          execStatus.beavers.enforcer.status = 'done';
+          return;
+        }
       }
     }
 
