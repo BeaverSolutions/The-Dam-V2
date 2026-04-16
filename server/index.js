@@ -317,6 +317,13 @@ async function start() {
     // Run once on startup after a 2-minute delay (let DB migrations complete first)
     setTimeout(() => { processFollowUps().catch(() => {}); }, 2 * 60 * 1000);
     logger.info({ msg: 'Follow-up scheduler started (30 min interval)' });
+
+    // DB Builder — Research Beaver maintains lead pool health
+    const { runDbBuilder } = require('./services/dbBuilder');
+    setTimeout(() => {
+      setInterval(() => runDbBuilder().catch(err => logger.warn({ msg: 'DB Builder error', err: err.message })), 15 * 60 * 1000);
+      logger.info({ msg: 'DB Builder started (15 min interval)' });
+    }, 3 * 60 * 1000); // 3min delay after startup
   } catch (err) {
     logger.error({ msg: 'Failed to start server', err: err.message, stack: err.stack });
     process.exit(1);
