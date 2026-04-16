@@ -163,12 +163,12 @@ async function researchSearch(clientId, { query, filters = {} }) {
     metadata: { query, filters, batchIndex },
   });
 
-  // Load ICP memory upfront — used by both Serper query builder and Claude fallback
+  // Load ICP memory upfront — used by both search query builder and Claude fallback
   const icpMemory = await getMemory(clientId, 'director', 'icp');
 
   let leads = [];
 
-  // Primary: Multi-source research — Serper (people, signal, company) + Hunter domain search
+  // Primary: Multi-source research — Brave (people, signal, company) + Hunter domain search
   // Rotates through 300+ query variations so dedup never exhausts the pool
   try {
     console.log(`[research_beaver] Running multi-source research (batch ${batchIndex})`);
@@ -214,9 +214,9 @@ async function researchSearch(clientId, { query, filters = {} }) {
     target_type: 'system',
     metadata: { query: query?.substring?.(0, 200), source: 'multi', note: 'All sources returned 0 results' },
   });
-  const serperConfigured = !!process.env.SERPER_API_KEY;
+  const braveConfigured = !!process.env.BRAVE_API_KEY;
   const missingKeys = [];
-  if (!serperConfigured) missingKeys.push('SERPER_API_KEY');
+  if (!braveConfigured) missingKeys.push('BRAVE_API_KEY');
   const keyDiagnostic = missingKeys.length > 0
     ? ` Missing API keys: ${missingKeys.join(', ')}.`
     : ' API keys present — try different ICP keywords or a broader location.';
@@ -1413,7 +1413,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // ── Diagnostics: track counts at each filtering stage ──
   const diagnostics = {
     research_source: null,
-    serper_query: null,
+    search_query: null,
     raw_from_research: 0,
     after_title_filter: 0,
     after_verification_gate: 0,
@@ -1608,11 +1608,11 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // ── Step 1: Research Beaver (with retry loop) ───────────
 
   // Retry loop: keep searching until we have enough leads that pass ALL Director gates
-  // Max 3 rounds to cap API spend (each round = 1 Serper batch + verification)
+  // Max 3 rounds to cap API spend (each round = 1 search batch + verification)
   const MAX_RESEARCH_ROUNDS = 3;
   let rawLeads = [];
   let currentBatchIndex = batchIndex;
-  let allSerperQueries = [];
+  let allSearchQueries = [];
 
   for (let round = 0; round < MAX_RESEARCH_ROUNDS; round++) {
     const researchResult = command
@@ -1620,7 +1620,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       : { data: { leads: [] } };
 
     const roundLeads = researchResult?.data?.leads || [];
-    if (researchResult?.data?.query) allSerperQueries.push(researchResult.data.query);
+    if (researchResult?.data?.query) allSearchQueries.push(researchResult.data.query);
     diagnostics.research_source = researchResult?.data?.source || 'unknown';
 
     // Deduplicate against leads already collected in previous rounds
@@ -1646,13 +1646,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
   diagnostics.raw_from_research = rawLeads.length;
   diagnostics.research_rounds = Math.min(currentBatchIndex - batchIndex + 1, MAX_RESEARCH_ROUNDS);
-  diagnostics.serper_query = allSerperQueries.join(' | ') || null;
+  diagnostics.search_query = allSearchQueries.join(' | ') || null;
 
   // ── Step 1b: Captain Beaver verification gate ────────────
   // If a lead came from Claude fallback (not Apollo) and has no linkedin_url,
   // it cannot be verified and must be skipped to prevent hallucinated outreach.
   const researchSource = diagnostics.research_source || 'claude';
-  const isVerifiedSource = researchSource === 'apollo' || researchSource === 'serper' || researchSource === 'multi';
+  const isVerifiedSource = researchSource === 'apollo' || researchSource === 'brave' || researchSource === 'multi';
   // ══════════════════════════════════════════════════════════════
   // CAPTAIN'S QUALITY GATE — strict filtering, fewer but real leads
   // Philosophy: 3 verified leads > 20 garbage leads
@@ -1662,7 +1662,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // Philosophy: 3 real leads > 20 garbage, BUT "real" != "perfect title match".
   // If the title is clearly wrong (intern, assistant, support, recruiter) → reject.
   // If the title is missing or non-standard → ACCEPT, let downstream filters decide.
-  // Serper often returns profiles without titles, or titles in unusual formats.
+  // Search often returns profiles without titles, or titles in unusual formats.
   const EXCLUDED_TITLES = /intern|\bjunior\b|executive assistant|test engineer|\bqa\b|quality assurance|trainee|receptionist|talent acquisition|recruiter|recruitment specialist|human resource|clerk/i;
 
   const titledLeads = rawLeads.filter(lead => {
@@ -1722,7 +1722,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
   // ── Command intent industry filter — DISABLED ──
   // Previously rejected leads whose profile text didn't contain the exact industry name
-  // (e.g. "marketing agency"). This killed valid leads because LinkedIn/Serper snippets
+  // (e.g. "marketing agency"). This killed valid leads because LinkedIn/Brave snippets
   // rarely include the industry name verbatim. The search query itself already targets
   // the right industry — requiring double-confirmation was too aggressive.
   // Kept as comment for reference; re-enable only with broader matching (e.g. NLP).
@@ -1741,7 +1741,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     const locationText = [lead.location || '', lead.snippet || ''].join(' ');
 
     // Geography check (Phase B2: loosened — hard-reject foreign, trust search for rest)
-    // Serper gl:'my' already biases toward Malaysian results. Second-guessing that
+    // Brave country:'MY' already biases toward Malaysian results. Second-guessing that
     // via regex on snippets is circular validation and kills valid leads.
     if (isKLFocused) {
       // Only hard-reject if the lead explicitly shows they're based in a foreign country.
@@ -1900,9 +1900,9 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       if (lead.friction)     meta.friction     = lead.friction;
       if (lead.why_now)      meta.why_now      = lead.why_now;
       if (lead.notes)        meta.notes        = lead.notes;
-      // Preserve Serper snippet + search query as fallback context for Sales Beaver
+      // Preserve search snippet + query as fallback context for Sales Beaver
       if (lead.snippet)      meta.snippet      = lead.snippet;
-      if (diagnostics.serper_query) meta.search_query = diagnostics.serper_query;
+      if (diagnostics.search_query) meta.search_query = diagnostics.search_query;
       if (lead.current_tools?.length)  meta.current_tools = lead.current_tools;
       if (lead.evaluating?.length)     meta.evaluating    = lead.evaluating;
       if (lead.apollo_person_id) {
@@ -2038,7 +2038,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     if (meta.why_now) contextParts.push(`Why now: ${meta.why_now}`);
     if (meta.friction) contextParts.push(`Friction point: ${meta.friction}`);
     if (meta.notes) contextParts.push(`Personalisation hook: ${meta.notes}`);
-    // Serper context fallback: if no signal, use the Google snippet + search query
+    // Search context fallback: if no signal, use the snippet + search query
     if (!meta.signal && meta.snippet) contextParts.push(`LinkedIn profile snippet: ${meta.snippet}`);
     if (meta.search_query) contextParts.push(`Search context: ${meta.search_query}`);
     // Campaign command gives Sales Beaver the targeting intent

@@ -99,7 +99,7 @@ function SummaryCard({ summary, diagnostics, onGoToApprovals }) {
           <div style={{ fontSize: '0.6rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.35rem' }}>Pipeline Funnel</div>
           <div style={{ fontSize: '0.7rem', color: 'var(--text)', lineHeight: 1.8 }}>
             {diagnostics.research_source && <div>Source: <span style={{ color: 'var(--blue)' }}>{diagnostics.research_source}</span></div>}
-            {diagnostics.serper_query && <div>Query: <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>"{diagnostics.serper_query}"</span></div>}
+            {diagnostics.search_query && <div>Query: <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>"{diagnostics.search_query}"</span></div>}
             <div>Raw results: <b>{diagnostics.raw_from_research ?? '?'}</b>
               {diagnostics.after_title_filter != null && <> → Title filter: <b>{diagnostics.after_title_filter}</b></>}
               {diagnostics.after_verification_gate != null && <> → Verified: <b>{diagnostics.after_verification_gate}</b></>}
@@ -124,7 +124,7 @@ function SummaryCard({ summary, diagnostics, onGoToApprovals }) {
 
       {leads_found === 0 && !diagnostics?.reason && (
         <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-          Try different keywords, broader ICP, or check that your Serper API key is configured.
+          Try different keywords, broader ICP, or check that your Brave API key is configured.
         </div>
       )}
     </div>

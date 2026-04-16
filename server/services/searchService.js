@@ -2,12 +2,9 @@
 
 /**
  * Search service with automatic fallback chain:
- *   1. Serper (primary)        — 200 queries/month free tier
- *   2. Google Custom Search    — 100 queries/day free (optional: needs GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX)
- *   3. DuckDuckGo Instant API  — no key, always available (last resort, results will be sparse)
- *
- * Drop-in replacement for serper.js — exports the same three functions.
- * Callers don't need to change anything except the require path.
+ *   1. Brave Search (primary)    — fast, generous free tier
+ *   2. Google Custom Search      — 100 queries/day free (needs GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX)
+ *   3. DuckDuckGo Instant API    — no key, always available (last resort, results will be sparse)
  */
 
 let axios;
@@ -17,11 +14,10 @@ try {
   console.warn('[search] axios not installed');
 }
 
-const SERPER_URL     = 'https://google.serper.dev/search';
 const GOOGLE_CSE_URL = 'https://www.googleapis.com/customsearch/v1';
 const DDG_URL        = 'https://api.duckduckgo.com/';
 
-// ── Shared parsing helpers (ported from serper.js) ──────────────────────────
+// ── Shared parsing helpers ──────────────────────────────────────────────────
 
 const TITLE_KEYWORDS = '(?:CEO|Founder|Co-Founder|Director|MD|Managing Director|Owner|CTO|COO|CMO|CFO|CRO|CPO|Partner|Head|VP|Vice President|President|Manager|General Manager|Principal|Lead|Chief)';
 
@@ -58,10 +54,10 @@ function extractCompanyFromSnippet(snippet, name, title) {
 }
 
 /**
- * Parse raw search result items (Serper organic[] or Google CSE items[]) into
+ * Parse raw search result items (Brave results or Google CSE items[]) into
  * normalised profile leads. Works for both providers — same field shape.
  */
-function parseProfileItems(items, dataSource = 'serper') {
+function parseProfileItems(items, dataSource = 'brave') {
   const parsed = items
     .filter(r => r.link?.includes('linkedin.com/in/'))
     .map(r => {
@@ -168,24 +164,12 @@ async function callBrave(searchQuery, num) {
   });
 
   const results = resp.data?.web?.results || [];
-  // Map Brave format to match Serper/CSE format (title, link, snippet)
+  // Map Brave format to normalised format (title, link, snippet)
   return results.map(r => ({
     title: r.title || '',
     link: r.url || '',
     snippet: r.description || '',
   }));
-}
-
-async function callSerper(searchQuery, num) {
-  const apiKey = process.env.SERPER_API_KEY;
-  if (!apiKey) throw new Error('SERPER_API_KEY not set');
-
-  const resp = await axios.post(
-    SERPER_URL,
-    { q: searchQuery, num: Math.min(num, 10), gl: 'my', hl: 'en' },
-    { headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' }, timeout: 10000 }
-  );
-  return resp.data?.organic || [];
 }
 
 async function callGoogleCSE(searchQuery, num) {
@@ -203,7 +187,7 @@ async function callGoogleCSE(searchQuery, num) {
     params: { key: apiKey, cx, q: cseQuery, num: Math.min(num, 10), gl: 'MY', hl: 'en' },
     timeout: 10000,
   });
-  // Google CSE uses `items[]` with same { link, title, snippet } shape as Serper organic[]
+  // Google CSE uses `items[]` with same { link, title, snippet } shape
   return resp.data?.items || [];
 }
 
@@ -236,25 +220,15 @@ async function callDuckDuckGo(searchQuery) {
 // ── Fallback chain ───────────────────────────────────────────────────────────
 
 async function withFallback(label, searchQuery, num, parseItems) {
-  // 1. Brave (primary — agreed with MJ 2026-04-13)
+  // 1. Brave (primary)
   try {
     const items = await callBrave(searchQuery, num);
     if (items.length > 0) return parseItems(items);
   } catch (err) {
-    console.warn(`[search] Brave failed: ${err.message}, falling back to Serper`);
+    console.warn(`[search] Brave failed: ${err.message}, falling back to Google CSE`);
   }
 
-  // 2. Serper (secondary)
-  try {
-    const items = await callSerper(searchQuery, num);
-    return parseItems(items);
-  } catch (err) {
-    const status = err.response?.status ? ` (${err.response.status})` : '';
-    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-    console.warn(`[search] Serper failed${status}: ${detail}, falling back to Google CSE`);
-  }
-
-  // 3. Google CSE (tertiary)
+  // 2. Google CSE
   try {
     const items = await callGoogleCSE(searchQuery, num);
     console.log('[search] Using fallback: Google CSE');
@@ -286,10 +260,10 @@ async function withFallback(label, searchQuery, num, parseItems) {
 // ── Parallel search helpers ──────────────────────────────────────────────────
 
 /**
- * Run all Serper queries and collect profile results.
+ * Run all Brave queries and collect profile results.
  * Never throws — failed queries are logged and skipped.
  */
-async function runAllSerperQueries(queries) {
+async function runAllBraveQueries(queries) {
   // Cap at 10 queries to prevent cost explosion
   if (queries.length > 10) {
     console.log(`[search] Capping search queries from ${queries.length} to 10`);
@@ -297,23 +271,13 @@ async function runAllSerperQueries(queries) {
   }
   const results = [];
   for (const q of queries) {
-    // Try Brave first (primary), fall back to Serper
     try {
       const items = await callBrave(q, 10);
       if (items.length > 0) {
         results.push(...parseProfileItems(items, 'brave'));
-        continue;
       }
     } catch (err) {
-      // Brave failed, try Serper
-    }
-    try {
-      const items = await callSerper(q, 10);
-      results.push(...parseProfileItems(items, 'serper'));
-    } catch (err) {
-      const status = err.response?.status || 'no-status';
-      const body   = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-      console.warn(`[search] Query failed for "${q}": [${status}] ${body}`);
+      console.warn(`[search] Brave query failed for "${q}": ${err.message}`);
     }
   }
   return results;
@@ -326,7 +290,7 @@ async function runAllSerperQueries(queries) {
  * Never throws — failed queries are logged and skipped.
  */
 async function runAllCSEQueries(queries) {
-  // Cap at 10 queries (same as Serper — prevents cost explosion on CSE)
+  // Cap at 10 queries to prevent cost explosion on CSE
   if (queries.length > 10) {
     console.log(`[search] Capping CSE queries from ${queries.length} to 10`);
     queries = queries.slice(0, 10);
@@ -344,29 +308,29 @@ async function runAllCSEQueries(queries) {
 }
 
 /**
- * parallelSearch(serperQueries, cseQueries)
+ * parallelSearch(braveQueries, cseQueries)
  *
- * Runs Serper + CSE in parallel (not cascade). Combines fulfilled results.
- * DuckDuckGo runs only if BOTH Serper AND CSE return 0 results.
+ * Runs Brave + CSE in parallel (not cascade). Combines fulfilled results.
+ * DuckDuckGo runs only if BOTH Brave AND CSE return 0 results.
  *
  * Returns a flat array of parsed profile leads (scorer format not applied here —
  * callers should pass through leadScorer.normalize() if needed).
  */
-async function parallelSearch(serperQueries, cseQueries) {
-  console.log(`[search] parallelSearch — Serper: ${serperQueries.length} queries, CSE: ${cseQueries.length} queries`);
+async function parallelSearch(braveQueries, cseQueries) {
+  console.log(`[search] parallelSearch — Brave: ${braveQueries.length} queries, CSE: ${cseQueries.length} queries`);
 
-  const [serperSettled, cseSettled] = await Promise.allSettled([
-    runAllSerperQueries(serperQueries),
+  const [braveSettled, cseSettled] = await Promise.allSettled([
+    runAllBraveQueries(braveQueries),
     runAllCSEQueries(cseQueries),
   ]);
 
   const combined = [];
 
-  if (serperSettled.status === 'fulfilled') {
-    combined.push(...serperSettled.value);
-    console.log(`[search] Serper batch: ${serperSettled.value.length} results`);
+  if (braveSettled.status === 'fulfilled') {
+    combined.push(...braveSettled.value);
+    console.log(`[search] Brave batch: ${braveSettled.value.length} results`);
   } else {
-    console.warn(`[search] Serper batch rejected: ${serperSettled.reason?.message}`);
+    console.warn(`[search] Brave batch rejected: ${braveSettled.reason?.message}`);
   }
 
   if (cseSettled.status === 'fulfilled') {
@@ -376,10 +340,10 @@ async function parallelSearch(serperQueries, cseQueries) {
     console.warn(`[search] CSE batch rejected: ${cseSettled.reason?.message}`);
   }
 
-  // DDG only runs if BOTH Serper AND CSE returned 0 results
+  // DDG only runs if BOTH Brave AND CSE returned 0 results
   if (combined.length === 0) {
-    console.log('[search] Both Serper and CSE returned 0 results — falling back to DuckDuckGo');
-    const fallbackQuery = serperQueries[0] || cseQueries[0];
+    console.log('[search] Both Brave and CSE returned 0 results — falling back to DuckDuckGo');
+    const fallbackQuery = braveQueries[0] || cseQueries[0];
     if (fallbackQuery) {
       try {
         const ddgItems = await callDuckDuckGo(fallbackQuery);
@@ -395,13 +359,13 @@ async function parallelSearch(serperQueries, cseQueries) {
   return combined;
 }
 
-// ── Public API (same signatures as serper.js) ─────────────────────────────
+// ── Public API ──────────────────────────────────────────────────────────────
 
 async function searchLinkedInProfiles(query, limit = 5) {
   if (!axios) return [];
   console.log('[search] Profile search:', query, '| Limit:', limit);
   const searchQuery = `site:linkedin.com/in ${query}`;
-  const results = await withFallback('profiles', searchQuery, limit * 2, items => parseProfileItems(items, 'serper'));
+  const results = await withFallback('profiles', searchQuery, limit * 2, items => parseProfileItems(items, 'brave'));
   return results.slice(0, limit);
 }
 
@@ -417,7 +381,7 @@ async function searchBySignal(query, limit = 5) {
   if (!axios) return [];
   console.log('[search] Signal search:', query, '| Limit:', limit);
   const searchQuery = `site:linkedin.com/in ${query}`;
-  const results = await withFallback('signal', searchQuery, limit * 2, items => parseProfileItems(items, 'serper_signal'));
+  const results = await withFallback('signal', searchQuery, limit * 2, items => parseProfileItems(items, 'brave_signal'));
   return results.slice(0, limit);
 }
 
@@ -428,9 +392,7 @@ async function searchBySignal(query, limit = 5) {
  * Used by signal hunting AND by Captain Beaver's web_search_brave tool.
  * Returns raw search results with title, link, snippet — no LinkedIn parsing.
  *
- * Fallback chain: Brave → Serper → Google CSE.
- * Brave is preferred because it doesn't require Google's restrictive CSE setup
- * and has a reasonable free tier. Added 2026-04-12 for Captain Beaver.
+ * Fallback chain: Brave → Google CSE.
  */
 async function searchOpenWeb(query, limit = 5) {
   if (!axios) return [];
@@ -473,46 +435,7 @@ async function searchOpenWeb(query, limit = 5) {
     console.warn(`[search] Brave open web failed: ${err.message}`);
   }
 
-  // Try Serper (general web search, no site: restriction)
-  try {
-    const apiKey = process.env.SERPER_API_KEY;
-    if (!apiKey) throw new Error('SERPER_API_KEY not set');
-
-    const resp = await axios.post(
-      SERPER_URL,
-      { q: query, num: Math.min(limit, 10), gl: 'my', hl: 'en' },
-      { headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' }, timeout: 10000 }
-    );
-
-    const organic = resp.data?.organic || [];
-    const news = resp.data?.news || [];
-
-    // Combine organic + news results, prioritise news
-    const combined = [
-      ...news.map(r => ({
-        title: r.title || '',
-        link: r.link || '',
-        snippet: r.snippet || '',
-        date: r.date || '',
-        source: r.source || '',
-        type: 'news',
-      })),
-      ...organic.map(r => ({
-        title: r.title || '',
-        link: r.link || '',
-        snippet: r.snippet || '',
-        date: '',
-        source: '',
-        type: 'organic',
-      })),
-    ];
-
-    return combined.slice(0, limit);
-  } catch (err) {
-    console.warn(`[search] Serper open web failed: ${err.message}`);
-  }
-
-  // Fallback to Google CSE (unrestricted — no site: filter)
+  // 2. Google CSE (no site: filter for open web)
   try {
     const apiKey = process.env.GOOGLE_CSE_API_KEY;
     const cx     = process.env.GOOGLE_CSE_CX;

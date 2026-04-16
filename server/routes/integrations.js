@@ -16,7 +16,7 @@ const secrets = require('../services/secrets');
 router.get('/status', async (req, res, next) => {
   try {
     const agentmailOk = agentmailService.isConnected();
-    const serperOk = !!process.env.SERPER_API_KEY;
+    const braveOk = !!process.env.BRAVE_API_KEY;
 
     // Check if ENCRYPTION_KEY is valid (needed for Apollo/Hunter/Gmail)
     let encKeyOk = true;
@@ -71,9 +71,9 @@ router.get('/status', async (req, res, next) => {
           connected: !!hunterKey,
           label: !encKeyOk ? 'Encryption key error' : hunterKey ? 'Connected' : 'Not configured',
         },
-        serper: {
-          connected: serperOk,
-          label: serperOk ? 'Connected (env var)' : 'SERPER_API_KEY not set',
+        brave: {
+          connected: braveOk,
+          label: braveOk ? 'Connected (env var)' : 'BRAVE_API_KEY not set',
         },
         calendly: {
           connected: !!calendlyUrl,

@@ -362,4 +362,86 @@ router.get('/obsidian-export', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/dashboard/llm-usage
+// Returns today's LLM spend, budget, and breakdown by agent
+router.get('/llm-usage', async (req, res, next) => {
+  try {
+    const clientId = req.clientId;
+
+    const [spendRes, budgetRes, agentBreakdownRes, last7dRes] = await Promise.all([
+      // Today's total spend
+      pool.query(
+        `SELECT COALESCE(SUM(cost_usd), 0) AS today_spend,
+                COUNT(*) AS today_calls,
+                COALESCE(SUM(input_tokens), 0) AS total_input,
+                COALESCE(SUM(output_tokens), 0) AS total_output
+         FROM llm_usage
+         WHERE client_id = $1
+           AND created_at >= DATE_TRUNC('day', NOW() AT TIME ZONE 'UTC')`,
+        [clientId]
+      ),
+      // Client's daily budget
+      pool.query(
+        `SELECT daily_budget_usd FROM clients WHERE id = $1`,
+        [clientId]
+      ),
+      // Breakdown by agent (today)
+      pool.query(
+        `SELECT agent,
+                COUNT(*) AS calls,
+                COALESCE(SUM(cost_usd), 0) AS cost,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens
+         FROM llm_usage
+         WHERE client_id = $1
+           AND created_at >= DATE_TRUNC('day', NOW() AT TIME ZONE 'UTC')
+         GROUP BY agent
+         ORDER BY cost DESC`,
+        [clientId]
+      ),
+      // Last 7 days daily totals
+      pool.query(
+        `SELECT created_at::date AS date,
+                COALESCE(SUM(cost_usd), 0) AS cost,
+                COUNT(*) AS calls
+         FROM llm_usage
+         WHERE client_id = $1
+           AND created_at >= NOW() - INTERVAL '7 days'
+         GROUP BY date
+         ORDER BY date ASC`,
+        [clientId]
+      ),
+    ]);
+
+    const todaySpend = parseFloat(spendRes.rows[0].today_spend);
+    const budget = parseFloat(budgetRes.rows[0]?.daily_budget_usd || 10);
+    const percentage = budget > 0 ? Math.min(100, Math.round((todaySpend / budget) * 100)) : 0;
+
+    res.json({
+      data: {
+        today: {
+          spend_usd: todaySpend,
+          budget_usd: budget,
+          percentage,
+          calls: parseInt(spendRes.rows[0].today_calls, 10),
+          input_tokens: parseInt(spendRes.rows[0].total_input, 10),
+          output_tokens: parseInt(spendRes.rows[0].total_output, 10),
+        },
+        by_agent: agentBreakdownRes.rows.map(r => ({
+          agent: r.agent,
+          calls: parseInt(r.calls, 10),
+          cost_usd: parseFloat(r.cost),
+          input_tokens: parseInt(r.input_tokens, 10),
+          output_tokens: parseInt(r.output_tokens, 10),
+        })),
+        last_7_days: last7dRes.rows.map(r => ({
+          date: r.date,
+          cost_usd: parseFloat(r.cost),
+          calls: parseInt(r.calls, 10),
+        })),
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

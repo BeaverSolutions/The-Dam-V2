@@ -154,6 +154,48 @@ function AgentOfficeStrip({ agentLogs, liveLogs }) {
   );
 }
 
+function LlmSpendCard() {
+  const { request } = useApi();
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    request('/dashboard/llm-usage').then(r => setData(r?.data)).catch(() => {});
+  }, []);
+
+  if (!data) return null;
+
+  const { today } = data;
+  const pct = today.percentage;
+  const barColor = pct >= 80 ? 'var(--orange)' : 'var(--lime)';
+
+  return (
+    <div className="card" style={{ marginBottom: '1.25rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <Zap size={14} style={{ color: 'var(--purple)' }} />
+          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>AI Spend Today</span>
+        </div>
+        <span style={{ fontSize: '0.8rem', fontWeight: 600, color: barColor }}>
+          ${today.spend_usd.toFixed(2)} / ${today.budget_usd.toFixed(2)}
+        </span>
+      </div>
+      <div style={{ height: 6, background: 'var(--bg)', borderRadius: 3, overflow: 'hidden', marginBottom: '0.75rem' }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: barColor, borderRadius: 3, transition: 'width 0.3s ease' }} />
+      </div>
+      {data.by_agent.length > 0 && (
+        <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+          {data.by_agent.map(a => (
+            <div key={a.agent} style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+              <span style={{ color: 'var(--text)', fontWeight: 500 }}>{(a.agent || 'unknown').replace(/_/g, ' ')}</span>
+              {' '}${a.cost_usd.toFixed(3)} ({a.calls} calls)
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StatCard({ label, value, icon: Icon, color, loading, onClick, sub }) {
   return (
     <div
@@ -822,6 +864,9 @@ export default function Dashboard() {
           onClick={() => navigate('/calendar')}
         />
       </div>
+
+      {/* AI Spend */}
+      <LlmSpendCard />
 
       {/* Weekly Learnings */}
       <WeeklyLearningsCard />

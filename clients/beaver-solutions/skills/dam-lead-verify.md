@@ -110,4 +110,4 @@ Wait for MJ's confirmation before taking any action.
 - If BeavrDam stored a linkedin_url and Google confirms the same URL → extra confidence
 - If BeavrDam stored a linkedin_url but Google finds a different URL → flag the mismatch
 - This skill does NOT update the lead record. It only informs MJ's decision.
-- If lead source is `apollo` or `serper`, skip verification — these are already real. Just confirm to MJ: "#N — [Name]: Source is [apollo/serper] — verified automatically. Safe to approve."
+- If lead source is `apollo` or `brave`, skip verification — these are already real. Just confirm to MJ: "#N — [Name]: Source is [apollo/brave] — verified automatically. Safe to approve."

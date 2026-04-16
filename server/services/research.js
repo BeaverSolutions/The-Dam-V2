@@ -1,7 +1,7 @@
 'use strict';
 
 const pool = require('../db/pool');
-const serperService = require('./searchService');
+const searchService = require('./searchService');
 const hunterService = require('./hunter');
 
 /* ─── Rotation pools ─────────────────────────────────────── */
@@ -58,8 +58,8 @@ function normaliseLead(partial) {
     email:          partial.email          || '',
     email_verified: partial.email_verified || false,
     email_source:   partial.email_source   || '',
-    verified:       false,  // NEVER true from Serper — must pass Layer 2 verification
-    data_source:    partial.data_source    || 'serper',
+    verified:       false,  // NEVER true from search — must pass Layer 2 verification
+    data_source:    partial.data_source    || 'brave',
     snippet:        partial.snippet        || '',
   };
 }
@@ -173,7 +173,7 @@ function widenIcp(originalIcp, level) {
 /* ─── Query pool ─────────────────────────────────────────── */
 
 /**
- * QUERY POOL — generates all possible Serper queries from ICP config.
+ * QUERY POOL — generates all possible search queries from ICP config.
  * Returns array of { query, strategy, title, industry, location }
  */
 function buildQueryPool(icpMemory) {
@@ -210,7 +210,7 @@ function buildQueryPool(icpMemory) {
       // "Sdn Bhd" is a structural Malaysia signal (legal entity suffix) — safe to include.
       // NO location keywords (Malaysia, KL, etc.) — they cause query pollution where all
       // snippets contain the keyword, making Haiku's location verification circular.
-      // Geographic bias comes from gl:'my' in Serper only.
+      // Geographic bias comes from gl:'my' / country:'MY' in search providers.
       queryPool.push({
         query:    `${title} ${phrase} "Sdn Bhd"`,
         strategy: 'direct',
@@ -316,7 +316,7 @@ async function saveUsedQueries(clientId, usedSet) {
 
 /* ══════════════════════════════════════════════════════════════
  * LAYER 2: VERIFICATION — confirm candidates before saving
- * Each candidate from Serper is UNVERIFIED. This layer uses
+ * Each candidate from search is UNVERIFIED. This layer uses
  * Hunter (structured data) + Haiku (AI classification) to verify
  * location, industry, and role independently.
  * Cost: ~$0.001 per Haiku call, Hunter included in plan.
@@ -493,15 +493,15 @@ async function verifyBatch(candidates, icp, clientId = null) {
 
 /**
  * STRATEGY 1: Direct LinkedIn people search.
- * Serper: site:linkedin.com/in [title] [industry] [location]
+ * Brave: site:linkedin.com/in [title] [industry] [location]
  */
 async function strategyDirectPeople(query, limit) {
   try {
-    const results = await serperService.searchLinkedInProfiles(query, limit);
+    const results = await searchService.searchLinkedInProfiles(query, limit);
     return results.map(r => normaliseLead({
       ...r,
-      data_source:  'serper',
-      email_source: r.email ? 'serper' : '',
+      data_source:  'brave',
+      email_source: r.email ? 'brave' : '',
     }));
   } catch (err) {
     console.warn('[research] Strategy 1 (direct people) failed:', err.message);
@@ -513,7 +513,7 @@ async function strategyDirectPeople(query, limit) {
 
 /**
  * STRATEGY 2: Company-first search.
- * Step 1 — Serper: site:linkedin.com/company [industry] [location]
+ * Step 1 — Brave: site:linkedin.com/company [industry] [location]
  * Step 2 — For each company: Hunter domainSearch to find decision-makers.
  * Returns leads with real emails where Hunter finds them.
  */
@@ -529,12 +529,12 @@ async function strategyCompanyFirst(clientId, icpMemory, limit) {
 
     for (const item of companyQueries) {
       try {
-        // Step 1: find company LinkedIn pages via Serper.
+        // Step 1: find company LinkedIn pages via Brave search.
         // Pass item.industry (just the phrase) — searchLinkedInCompanies prepends
         // "site:linkedin.com/company" itself. Passing item.query would double it.
         const searchPhrase = `${item.industry} "Sdn Bhd"`;
-        const companyResults = await serperService.searchLinkedInCompanies
-          ? serperService.searchLinkedInCompanies(searchPhrase, 3)
+        const companyResults = await searchService.searchLinkedInCompanies
+          ? searchService.searchLinkedInCompanies(searchPhrase, 3)
           : Promise.resolve([]);
 
         const companies = await companyResults;
@@ -578,20 +578,20 @@ async function strategyCompanyFirst(clientId, icpMemory, limit) {
               }));
             }
           } else if (companyName) {
-            // Fallback: Serper people search scoped to this company
+            // Fallback: Brave people search scoped to this company
             try {
               const fallbackQuery = `site:linkedin.com/in "${companyName}" CEO OR Founder`;
-              const fallbackResults = await serperService.searchLinkedInProfiles(fallbackQuery, 3);
+              const fallbackResults = await searchService.searchLinkedInProfiles(fallbackQuery, 3);
               for (const r of fallbackResults) {
                 leads.push(normaliseLead({
                   ...r,
                   company:     companyName || r.company,
-                  data_source: 'serper_company',
-                  email_source: r.email ? 'serper' : '',
+                  data_source: 'brave_company',
+                  email_source: r.email ? 'brave' : '',
                 }));
               }
             } catch (fbErr) {
-              console.warn('[research] Strategy 2 fallback Serper failed:', fbErr.message);
+              console.warn('[research] Strategy 2 fallback search failed:', fbErr.message);
             }
           }
         }
@@ -610,15 +610,15 @@ async function strategyCompanyFirst(clientId, icpMemory, limit) {
 
 /**
  * STRATEGY 3: Signal-based search.
- * Serper: "[location]" "[title]" "[signal]" site:linkedin.com/in
+ * Brave: "[location]" "[title]" "[signal]" site:linkedin.com/in
  */
 async function strategySignalBased(query, limit) {
   try {
-    const results = await serperService.searchLinkedInProfiles(query, limit);
+    const results = await searchService.searchLinkedInProfiles(query, limit);
     return results.map(r => normaliseLead({
       ...r,
-      data_source:  'serper_signal',
-      email_source: r.email ? 'serper' : '',
+      data_source:  'brave_signal',
+      email_source: r.email ? 'brave' : '',
     }));
   } catch (err) {
     console.warn('[research] Strategy 3 (signal-based) failed:', err.message);
@@ -740,7 +740,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
           ...l,
           signal: l.signal || `Hiring signal: ${q.industry} company in ${q.location} is actively hiring`,
           why_now: l.why_now || `Hiring activity detected via job posting for "${q.industry}" in ${q.location} — likely scaling team now`,
-          data_source: 'serper_signal_jobs',
+          data_source: 'brave_signal_jobs',
         })))
         .catch(err => {
           console.warn('[research] Signal-jobs query failed:', err.message);
@@ -754,7 +754,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
           ...l,
           signal: l.signal || `Growth signal: ${q.industry} company in ${q.location} recently hired, raised, or launched`,
           why_now: l.why_now || `Recent growth event detected for "${q.industry}" company in ${q.location} — timing is right for outreach`,
-          data_source: 'serper_signal_news',
+          data_source: 'brave_signal_news',
         })))
         .catch(err => {
           console.warn('[research] Signal-news query failed:', err.message);
@@ -768,7 +768,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
           ...l,
           signal: l.signal || `Growth signal: ${q.industry} company in ${q.location} showing employee growth`,
           why_now: l.why_now || `Team expansion detected for "${q.industry}" company in ${q.location}`,
-          data_source: l.data_source || 'serper_signal_growth',
+          data_source: l.data_source || 'brave_signal_growth',
         })))
         .catch(err => {
           console.warn('[research] Signal-growth query failed:', err.message);
@@ -923,7 +923,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       metadata: {
         ...(lead.metadata || {}),
         verification: lead.verification,
-        data_source: 'serper',
+        data_source: 'brave',
       },
     }));
 

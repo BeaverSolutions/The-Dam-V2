@@ -18,7 +18,7 @@
  *   - check_lead_status       trace a specific lead's journey
  *   - read_memory             read agent_memory entries
  *   - write_memory            write learnings back to agent_memory
- *   - web_search_brave        external web search (Brave → Serper → CSE fallback)
+ *   - web_search_brave        external web search (Brave → CSE → DuckDuckGo fallback)
  *   - get_client_config       read the client's ICP + persona
  *
  * Added 2026-04-12. Replaces services/myClawChat.js as the web chat brain.
@@ -90,7 +90,7 @@ TOOLS (Anthropic tool_use — call directly, no HTTP):
 - check_lead_status        trace a specific lead's journey through the pipeline
 - read_memory              read agent_memory entries (ICP, learnings, rejection patterns)
 - write_memory             write a durable learning back to agent_memory
-- web_search_brave         open-web search (Brave → Serper → CSE fallback) — ONLY after search_internal_leads returns empty
+- web_search_brave         open-web search (Brave → CSE → DuckDuckGo fallback) — ONLY after search_internal_leads returns empty
 - get_client_config        read the client's ICP and persona
 
 Always use your tools. Do not claim facts about the pipeline without calling the relevant tool first.
@@ -220,7 +220,7 @@ const TOOLS = [
   },
   {
     name: 'web_search_brave',
-    description: 'Search the open web via Brave (with Serper + Google CSE fallback). Use this ONLY after search_internal_leads has returned no matches. For finding news, hiring signals, funding announcements, LinkedIn profiles.',
+    description: 'Search the open web via Brave (with Google CSE + DuckDuckGo fallback). Use this ONLY after search_internal_leads has returned no matches. For finding news, hiring signals, funding announcements, LinkedIn profiles.',
     input_schema: {
       type: 'object',
       properties: {

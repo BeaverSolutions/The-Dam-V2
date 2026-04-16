@@ -283,14 +283,14 @@ This skill runs per client. On scheduled runs, iterate through all active client
 3. Use each client's own ICP and memory — never mix data between clients
 
 ## Error Handling
-- If Serper/CSE returns empty: Try next query, log. After 3 empty queries in a row → switch to backup search engine.
+- If Brave/CSE returns empty: Try next query, log. After 3 empty queries in a row → switch to backup search engine.
 - If Hunter returns no email: Still create the lead with LinkedIn only. Mark `email` as null. Lead can be manually enriched later.
 - If API returns 401: Run dam-authenticate, retry once.
 - If signal-search endpoint returns 500: Log error, send Telegram "⚠️ Signal hunt failed: {error}. Check Railway logs.", skip to next client.
 - If run exceeds 15 minutes: Abort remaining queries, report partial results, log timeout.
 
 ## Cost Control
-- Max 10 Serper queries per run per client (60 queries/day across all clients)
+- Max 10 Brave queries per run per client (60 queries/day across all clients)
 - Max 5 Hunter lookups per run per client (30/day across all clients)
 - Max 20 Haiku calls per run per client (validation + person extraction)
 - Track costs in signal_hunt_log memory for monitoring

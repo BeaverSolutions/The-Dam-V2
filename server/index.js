@@ -127,7 +127,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     env: {
       encryption_key: encKeyOk ? 'valid' : 'INVALID',
-      serper: process.env.SERPER_API_KEY ? 'set' : 'missing',
+      brave: process.env.BRAVE_API_KEY ? 'set' : 'missing',
       anthropic: process.env.ANTHROPIC_API_KEY ? 'set' : 'missing',
       gmail_oauth: process.env.GMAIL_CLIENT_ID ? 'set' : 'missing',
     },

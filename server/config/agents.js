@@ -203,8 +203,8 @@ ANGLE SELECTION HIERARCHY:
 Always pick the highest available angle on this list.
 
 SEA FOCUS:
-Serper queries optimised for Malaysia/KL market. Use local company names and Malaysian LinkedIn patterns.
-Apollo data is unreliable for SEA — rely on Serper and Hunter.
+Search queries optimised for Malaysia/KL market. Use local company names and Malaysian LinkedIn patterns.
+Apollo data is unreliable for SEA — rely on Brave search and Hunter for enrichment.
 Default geography: Klang Valley (KL/Selangor) unless the ICP specifies otherwise.
 
 COMPETITOR SIGNAL DETECTION (required per lead):
@@ -287,7 +287,7 @@ Bad personalisation (will be rejected):
 - Making claims about their operations: "Your team seems to be scaling fast" (you have no data)
 
 THIN CONTEXT STRATEGY:
-When you only have name + title + company + industry (no signal, no angle, no friction), this is NORMAL for Serper-sourced leads. Write a strong role-based or industry-based message. Do NOT try to fabricate specifics. A clean, honest 50-word message about a real industry challenge beats a longer message with invented details. The Enforcer will accept role/industry personalisation as valid.
+When you only have name + title + company + industry (no signal, no angle, no friction), this is NORMAL for search-sourced leads. Write a strong role-based or industry-based message. Do NOT try to fabricate specifics. A clean, honest 50-word message about a real industry challenge beats a longer message with invented details. The Enforcer will accept role/industry personalisation as valid.
 
 When signal data IS provided (e.g. "hiring 3 roles", "posted about scaling"), reference it directly. When it's NOT provided, use role-based and industry-based hooks only.
 

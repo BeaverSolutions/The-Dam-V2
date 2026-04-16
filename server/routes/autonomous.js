@@ -11,12 +11,27 @@ const logger = require('../utils/logger');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
-function requireInternalKey(req, res, next) {
+async function requireInternalKey(req, res, next) {
   const { safeCompare } = require('../utils/crypto');
   const key = req.headers['x-internal-key'];
   if (!process.env.INTERNAL_API_KEY || !safeCompare(key, process.env.INTERNAL_API_KEY)) {
     return res.status(401).json({ error: 'Unauthorized', code: 'INVALID_KEY' });
   }
+
+  // Gate n8n by client whitelist (env: AUTONOMOUS_ENABLED_CLIENTS=beaver-solutions,trl)
+  const whitelist = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (whitelist.length > 0) {
+    const clientId = req.body?.client_id || req.query?.client_id;
+    if (clientId) {
+      const { rows } = await pool.query('SELECT slug FROM clients WHERE id = $1', [clientId]);
+      const slug = rows[0]?.slug;
+      if (!slug || !whitelist.includes(slug)) {
+        logger.warn(`[autonomous] Blocked client ${slug || clientId} — not in AUTONOMOUS_ENABLED_CLIENTS`);
+        return res.status(403).json({ error: 'Autonomous pipeline disabled for this client', code: 'CLIENT_NOT_ENABLED' });
+      }
+    }
+  }
+
   next();
 }
 
