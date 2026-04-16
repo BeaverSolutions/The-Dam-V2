@@ -18,29 +18,85 @@ We build AI-powered sales crews that find ideal clients, write personalised outr
 
 ## One-Line ICP
 
-Founder-led B2B service companies in Klang Valley who are doing all their own sales, have growth ambition, and no consistent pipeline system — from solo founders up to small teams.
+B2B founder-led businesses in Malaysia selling services, doing all their own sales, with growth ambition and no consistent pipeline system — from digital agencies to solo consultants and emerging verticals.
 
 ---
 
-## ICP 1: Founder-Led B2B Service Companies (PRIMARY)
+## ICP 1: Digital & Marketing Agencies (PRIMARY)
+
+**Who they are:**
+- Digital agencies, marketing agencies, content studios, PR firms, creative houses
+- 5–20 employees — owner-managed or founder-led
+- Selling B2B services to other businesses
+- Based in Malaysia
+
+**Must-Have Criteria:**
+- Actively pitching for new business (not purely inbound)
+- Owner or director personally involved in new business development
+- Has existing clients (social proof exists)
+- Service ticket size above RM 3,000/month or RM 15,000 per project
+
+**Strong Buying Signals:**
+- Posting client case studies or campaign results on LinkedIn
+- Hiring for client services, account management, or business development roles
+- Running thought leadership content about their industry or craft
+- Founder complaining about inconsistent pipeline or referral dependency
+- Active on LinkedIn with 500+ followers — visible, vocal, engaged
+
+**Core Problems:**
+- New business development is inconsistent or founder-dependent
+- Word-of-mouth is slowing down
+- No systematic outreach to ideal clients
+- Spending time pitching when they should be delivering
+
+**What They Care About:**
+- Winning more of the right clients without doing it themselves
+- Not coming across as spammy — brand reputation matters to them
+- A process that generates qualified conversations consistently
+- Proof it works before they commit
+
+**Positioning Angle:**
+- "Your outreach should be as good as your client work" — lead with the craft angle
+- Inconsistent new business pipeline is the #1 pain — open with it
+- Peer-to-peer: position as a fellow builder who solved the same problem
+- Long-term hook: they can eventually white-label this for their own clients
+
+**Why They Convert Fastest:**
+- Already understand outbound — they've run it for clients
+- Retainer revenue = predictable cash flow = purchase decision is simple
+- See proof of concept immediately when you show BeaverDam at 80+ per day
+- Best referral engine — agency owners talk to each other constantly
+
+**Disqualifiers:**
+- Fully inbound — only relies on referrals and explicitly doesn't want to change
+- No clear target client profile (can't define who they sell to)
+- Fewer than 5 employees with no growth ambition
+- B2C focused
+
+---
+
+## ICP 2: Founder-Led B2B Service Companies (SECONDARY)
 
 **Who they are:**
 - Founders or CEOs running a B2B service business
-- Industries: consulting, agency, SaaS, training, professional services
-- Any size from solo founder to small team — no headcount floor or ceiling
+- Industries: consulting, SaaS, training, professional services
+- Solo founder to small team
 - Pipeline is mostly referrals or founder-driven hustle
+- Based in Malaysia
 
 **Must-Have Criteria:**
 - Actively selling a B2B product or service (not B2C)
-- Founder or senior leader is personally responsible for bringing in new business
-- Has growth ambition — wants to scale, not stay where they are
-- Based in Klang Valley (KL / Selangor) — at least for Phase 1
+- Founder personally responsible for bringing in new business
+- Has growth ambition — wants to scale, not coast
+- At least ONE visible buying signal (see below)
+- Service ticket size above RM 3,000/month or RM 15,000 per project
 
-**Strong Buying Signals:**
-- Founder posting about business growth, client wins, or scaling challenges on LinkedIn
+**Strong Buying Signals (need at least one):**
+- Posting about business growth, scaling challenges, or client wins on LinkedIn
 - Hiring for sales, business development, or marketing roles
-- Running events, webinars, or content about their expertise (indicates they want pipeline)
-- Growing headcount but no sales infrastructure visible
+- Running events, webinars, or content about their expertise
+- Growing headcount but no visible sales infrastructure
+- 500+ LinkedIn followers with active posting behaviour
 
 **Core Problems:**
 - Founder doing all the sales — no time, no system, no predictability
@@ -56,62 +112,48 @@ Founder-led B2B service companies in Klang Valley who are doing all their own sa
 - A system that works while they sleep
 
 **Positioning Angle:**
-- Lead with the founder-doing-all-sales pain — it resonates immediately
-- "You shouldn't be the one prospecting" is the core hook
+- "You shouldn't be the one prospecting" — use it directly, it lands immediately
+- Founder-to-founder: built this because I had the same problem
+- Malaysian context works: reference KL, Klang Valley, local companies
 - Frame it as building a system, not hiring someone
 
 **Disqualifiers:**
 - E-commerce or B2C businesses
 - Already has a dedicated sales team or BDR
-- Outside Klang Valley for now
 - Freelancers with no intention to grow beyond themselves
-- Companies that only want inbound and are not open to outbound
+- Zero LinkedIn presence and no buying signals visible
 
 ---
 
-## ICP 2: B2B Agencies Wanting to Win New Clients (SECONDARY)
+## ICP 3: Emerging Verticals — Test & Validate (20% of outreach)
+Allocate 20% of outreach to these verticals. Do not scale until conversion data confirms fit.
 
-**Who they are:**
-- Digital agencies, marketing agencies, PR firms, creative studios
-- Selling services to other businesses
-- 10–50 employees, owner-managed or founder-led
+**Property — Commercial Focus**
+- Commercial real estate agents and small property firms pitching developers and corporate tenants
+- High-ticket B2B sales, long cycle, referral-dependent — exact pain match
+- Must be commercial/corporate focus. Residential agents are B2C. Skip them.
+- Signal: posting about projects, corporate tenant wins, developer relationships
 
-**Must-Have Criteria:**
-- Actively pitching for new business (not purely inbound)
-- Has existing clients to use as social proof
-- Owner or director involved in business development
+**Recruitment & HR Consulting**
+- Founder-led recruitment agencies selling to SMEs and mid-market
+- High ticket, inconsistent pipeline, founder-driven hustle — classic pain fit
+- Already understands targeted outreach — faster to convince
 
-**Strong Buying Signals:**
-- Posting client case studies or campaign results
-- Hiring for client services or account management (signals growth)
-- Running thought leadership content about their industry
-
-**Core Problems:**
-- New business development is inconsistent or founder-dependent
-- Word-of-mouth is slowing down
-- No systematic outreach to ideal clients
-
-**What They Care About:**
-- Winning more of the right clients
-- Not spending time on cold calls or spray-and-pray emails
-- Having a process that generates qualified conversations
-
-**Positioning Angle:**
-- "Your outreach should be as good as your client work"
-- Lead with the inconsistent pipeline pain
-
-**Disqualifiers:**
-- Fully inbound / only rely on referrals and don't want to change
-- No clear target client profile
-- Fewer than 10 employees
+**IT / Managed Services (MSP)**
+- Founder-led tech companies selling managed IT, cybersecurity, or cloud services to SMEs
+- Longer sales cycle but high contract value
+- Good signal: tech founders often post about their work and scaling challenges
 
 ---
 
 ## Global ICP Rules
 
-**Signal over job title:** A founder actively posting about scaling beats a CEO with no visible activity.
-**Priority split:** ICP 1: 75% of outreach / ICP 2: 25% of outreach
+**Signal over job title:** A founder actively posting about scaling beats a CEO with no visible LinkedIn activity.
+**Ticket size filter:** Minimum RM 3,000/month or RM 15,000 per project across all ICPs.
+**Malaysia first:** Phase 1 is Malaysia only
+**Priority split:** ICP 1: 50% / ICP 2: 30% / ICP 3: 20%
 **Angle selection order:** Pipeline inconsistency → Founder doing all sales → Failed alternatives (ads/hiring) → Scaling without a system
+**Solo founder rule:** ICP 2 requires at least one visible buying signal before outreach. No cold-targeting founders with zero LinkedIn presence.
 
 ---
 
