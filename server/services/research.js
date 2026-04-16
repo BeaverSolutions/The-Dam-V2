@@ -245,7 +245,6 @@ function buildQueryPool(icpMemory) {
   // No location in query — "Sdn Bhd" + gl:'my' + Haiku handles Malaysia verification
   for (const phrase of uniquePhrases.slice(0, 6)) {
     queryPool.push({
-      // searchLinkedInProfiles prepends site:linkedin.com/in — don't add it here
       query:    `${phrase} "Sdn Bhd" hiring`,
       strategy: 'signal_jobs',
       title:    '',
@@ -258,6 +257,29 @@ function buildQueryPool(icpMemory) {
       strategy: 'signal_news',
       title:    '',
       industry: phrase,
+      location: baseLocation,
+    });
+  }
+
+  // Strategy: growth signals — different angle, breaks dedup loop
+  const GROWTH_SIGNALS = [
+    'hiring first sales person "Sdn Bhd"',
+    'hiring BD manager "Sdn Bhd"',
+    '"Series A" Malaysia founder',
+    '"bootstrapped" founder Malaysia B2B',
+    'Malaysia startup founder 2024 OR 2025 B2B',
+    'founder CEO "small team" Malaysia B2B clients',
+    '"head of sales" hiring Malaysia "Sdn Bhd"',
+    'Malaysia B2B SaaS founder "growing team"',
+    'Malaysia founder "first enterprise client"',
+    'Malaysia CEO agency "scaling"',
+  ];
+  for (const sig of GROWTH_SIGNALS) {
+    queryPool.push({
+      query:    sig,
+      strategy: 'signal_growth',
+      title:    '',
+      industry: 'growth_signal',
       location: baseLocation,
     });
   }
@@ -688,14 +710,24 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     const unusedQueries = queryPool.filter(q => !usedSet.has(q.query));
     const usedQueries   = queryPool.filter(q =>  usedSet.has(q.query));
 
-    // Pool exhaustion detection — warn when most queries have been used
+    // Pool exhaustion detection — auto-reset + ICP widening when >80% used
     const exhaustionRate = queryPool.length > 0 ? usedQueries.length / queryPool.length : 0;
+    let finalUnused = unusedQueries;
+    let finalUsed = usedQueries;
+
     if (exhaustionRate > 0.8) {
-      console.warn(`[research] Query pool ${Math.round(exhaustionRate * 100)}% exhausted (${usedQueries.length}/${queryPool.length}). Consider different ICP keywords.`);
+      console.warn(`[research] Query pool ${Math.round(exhaustionRate * 100)}% exhausted. Auto-resetting used_queries and widening ICP.`);
+      // Reset used_queries so next run starts fresh with rotated angles
+      await saveUsedQueries(clientId, new Set());
+      // Rebuild pool with widened ICP (level 2 = sibling industries + synonym titles)
+      const widenedIcp = widenIcp(effectiveIcp, 2);
+      const widenedPool = buildQueryPool(widenedIcp);
+      finalUnused = widenedPool; // all queries fresh after reset
+      finalUsed = [];
     }
 
     // Prefer unused; fall back to used if pool is exhausted
-    const combined = [...unusedQueries, ...usedQueries];
+    const combined = [...finalUnused, ...finalUsed];
 
     // Apply batchIndex offset so repeated calls rotate through the pool
     // Cap pick count to available unique queries to prevent duplicates
