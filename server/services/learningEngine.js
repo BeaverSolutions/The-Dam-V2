@@ -20,7 +20,7 @@ const logger = require('../utils/logger');
 async function setMemory(clientId, agent, key, content) {
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
-     VALUES ($1, $2, $3, $4::jsonb, 'learning', NOW())
+     VALUES ($1, $2, $3, $4::jsonb, 'journal', NOW())
      ON CONFLICT (client_id, agent, key)
      DO UPDATE SET content = $4::jsonb, updated_at = NOW()`,
     [clientId, agent, key, JSON.stringify(content)]
