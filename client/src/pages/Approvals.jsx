@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle, XCircle, Edit2, Save, X, Shield, Send, AlertTriangle, Copy, ExternalLink } from 'lucide-react';
+import { CheckCircle, XCircle, Edit2, Save, X, Shield, Send, AlertTriangle, Copy, ExternalLink, Clock, UserCheck } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import BeaverAvatar from '../components/BeaverAvatar';
 import EmptyState from '../components/EmptyState';
 import FilterTabs from '../components/FilterTabs';
 
 const TABS = [
   { value: 'pending',  label: 'Pending' },
+  { value: 'awaiting', label: 'Awaiting Accept' },
   { value: 'approved', label: 'Approved' },
   { value: 'rejected', label: 'Rejected' },
 ];
@@ -19,13 +20,13 @@ function scoreColor(score) {
   return 'var(--orange)';
 }
 
-function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, tab, gmailConnected }) {
+function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnectionSent, onConnectionAccepted, tab, gmailConnected }) {
   const [editing, setEditing]     = useState(false);
   const [editBody, setEditBody]   = useState(approval.body || '');
   const [saving, setSaving]       = useState(false);
   const [acting, setActing]       = useState(false);
   const [copied, setCopied]       = useState(false);
-  const resolved = tab !== 'pending';
+  const resolved = tab !== 'pending' && tab !== 'awaiting';
 
   // A message is "auto-sendable" only if the channel is email AND we have an email.
   // LinkedIn / Instagram / any other channel is MANUAL SEND — user copies the message
@@ -86,6 +87,29 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, tab, gmail
     setEditing(false);
   };
 
+  const handleConnectionSent = async () => {
+    if (acting) return;
+    setActing(true);
+    try {
+      await onConnectionSent(approval.id);
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const handleConnectionAccepted = async () => {
+    if (acting) return;
+    setActing(true);
+    try {
+      await onConnectionAccepted(approval.id);
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const isLinkedin = approval.channel === 'linkedin';
+  const isAwaiting = tab === 'awaiting';
+
   const actionLabel = isManualSend
     ? (acting ? 'Approving…' : 'Approve (Manual Send)')
     : gmailConnected
@@ -129,8 +153,8 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, tab, gmail
               <Shield size={11} /> {approval.ranger_score}
             </span>
           )}
-          <span className={`badge badge-${tab === 'approved' ? 'lime' : tab === 'rejected' ? 'orange' : 'muted'}`} style={{ textTransform: 'capitalize' }}>
-            {tab}
+          <span className={`badge badge-${tab === 'approved' ? 'lime' : tab === 'rejected' ? 'orange' : tab === 'awaiting' ? 'blue' : 'muted'}`} style={{ textTransform: 'capitalize' }}>
+            {tab === 'awaiting' ? 'Awaiting Accept' : tab}
           </span>
         </div>
       </div>
@@ -212,8 +236,31 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, tab, gmail
         </div>
       )}
 
+      {/* Awaiting acceptance info banner */}
+      {isAwaiting && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '0.5rem',
+          padding: '0.5rem 0.75rem', marginBottom: '0.75rem',
+          background: 'rgba(168,85,247,0.08)', border: '1px solid rgba(168,85,247,0.25)',
+          borderRadius: 'var(--radius)', fontSize: '0.78rem', color: 'var(--text)',
+        }}>
+          <Clock size={14} style={{ color: 'var(--purple)', flexShrink: 0 }} />
+          <span>Connection request sent. Waiting for prospect to accept. Click <strong>Accepted + Sent</strong> after you've sent the DM.</span>
+        </div>
+      )}
+
       {/* Actions */}
-      {!resolved && (
+      {isAwaiting && (
+        <div className="approval-actions">
+          <button className="btn btn-success btn-sm" onClick={handleConnectionAccepted} disabled={acting}>
+            <UserCheck size={13} /> {acting ? 'Confirming…' : 'Accepted + Sent'}
+          </button>
+          <button className="btn btn-danger btn-sm" onClick={handleReject} disabled={acting}>
+            <XCircle size={13} /> No Response
+          </button>
+        </div>
+      )}
+      {!resolved && !isAwaiting && (
         <div className="approval-actions">
           {editing ? (
             <>
@@ -226,9 +273,15 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, tab, gmail
             </>
           ) : (
             <>
-              <button className="btn btn-success btn-sm" onClick={handleApproveAndSend} disabled={acting}>
-                <Send size={13} /> {actionLabel}
-              </button>
+              {isLinkedin ? (
+                <button className="btn btn-primary btn-sm" onClick={handleConnectionSent} disabled={acting}>
+                  <Send size={13} /> {acting ? 'Marking…' : 'Connection Sent'}
+                </button>
+              ) : (
+                <button className="btn btn-success btn-sm" onClick={handleApproveAndSend} disabled={acting}>
+                  <Send size={13} /> {actionLabel}
+                </button>
+              )}
               <button className="btn btn-danger btn-sm" onClick={handleReject} disabled={acting}>
                 <XCircle size={13} /> Reject
               </button>
@@ -246,9 +299,11 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, tab, gmail
 export default function Approvals() {
   const { request, loading } = useApi();
   const navigate = useNavigate();
-  const [tab, setTab]           = useState('pending');
+  const [searchParams] = useSearchParams();
+  const initialTab = searchParams.get('tab') || 'pending';
+  const [tab, setTab]           = useState(initialTab);
   const [approvals, setApprovals] = useState([]);
-  const [counts, setCounts]     = useState({ pending: 0, approved: 0, rejected: 0 });
+  const [counts, setCounts]     = useState({ pending: 0, awaiting: 0, approved: 0, rejected: 0 });
   const [gmailConnected, setGmailConnected] = useState(true); // optimistic
   const [actionError, setActionError] = useState(null);
 
@@ -261,20 +316,42 @@ export default function Approvals() {
       .catch(() => setGmailConnected(false));
   }, []);
 
-  const load = async (status) => {
+  const load = async (tabName) => {
     try {
-      const res = await request(`/approvals?status=${status}`);
-      setApprovals(res?.data || []);
-      setCounts(prev => ({ ...prev, [status]: res?.meta?.total || 0 }));
+      if (tabName === 'awaiting') {
+        // Awaiting tab: load linkedin_requested messages directly from messages endpoint
+        const res = await request('/approvals?status=pending');
+        const allPending = res?.data || [];
+        // Filter: show only approvals where the message is linkedin_requested
+        // The approval status is still 'pending' but notes='linkedin_requested'
+        const awaiting = allPending.filter(a => a.notes === 'linkedin_requested');
+        const realPending = allPending.filter(a => a.notes !== 'linkedin_requested');
+        setApprovals(awaiting);
+        setCounts(prev => ({ ...prev, awaiting: awaiting.length, pending: realPending.length }));
+      } else if (tabName === 'pending') {
+        const res = await request('/approvals?status=pending');
+        const allPending = res?.data || [];
+        const realPending = allPending.filter(a => a.notes !== 'linkedin_requested');
+        const awaiting = allPending.filter(a => a.notes === 'linkedin_requested');
+        setApprovals(realPending);
+        setCounts(prev => ({ ...prev, pending: realPending.length, awaiting: awaiting.length }));
+      } else {
+        const res = await request(`/approvals?status=${tabName}`);
+        setApprovals(res?.data || []);
+        setCounts(prev => ({ ...prev, [tabName]: res?.meta?.total || 0 }));
+      }
     } catch {}
   };
 
   useEffect(() => { load(tab); }, [tab]);
 
-  // Refresh pending count on mount
+  // Refresh pending + awaiting counts on mount
   useEffect(() => {
-    request('/approvals?status=pending&perPage=1').then(res => {
-      setCounts(prev => ({ ...prev, pending: res?.meta?.total || 0 }));
+    request('/approvals?status=pending').then(res => {
+      const all = res?.data || [];
+      const awaiting = all.filter(a => a.notes === 'linkedin_requested');
+      const pending = all.filter(a => a.notes !== 'linkedin_requested');
+      setCounts(prev => ({ ...prev, pending: pending.length, awaiting: awaiting.length }));
     }).catch(() => {});
   }, []);
 
@@ -312,8 +389,38 @@ export default function Approvals() {
     }
   };
 
-  const tabs = TABS.map(t => ({ ...t, count: counts[t.value] }));
-  const pending = counts.pending;
+  const handleConnectionSent = async (id) => {
+    setActionError(null);
+    try {
+      await request(`/approvals/${id}/connection-sent`, { method: 'POST' });
+      setApprovals(prev => prev.filter(a => a.id !== id));
+      setCounts(prev => ({
+        ...prev,
+        pending: Math.max(0, prev.pending - 1),
+        awaiting: (prev.awaiting || 0) + 1,
+      }));
+    } catch (err) {
+      setActionError(err?.message || 'Failed to mark connection sent');
+    }
+  };
+
+  const handleConnectionAccepted = async (id) => {
+    setActionError(null);
+    try {
+      await request(`/approvals/${id}/connection-accepted`, { method: 'POST' });
+      setApprovals(prev => prev.filter(a => a.id !== id));
+      setCounts(prev => ({
+        ...prev,
+        awaiting: Math.max(0, prev.awaiting - 1),
+        approved: (prev.approved || 0) + 1,
+      }));
+    } catch (err) {
+      setActionError(err?.message || 'Failed to mark connection accepted');
+    }
+  };
+
+  const tabs = TABS.map(t => ({ ...t, count: counts[t.value] || 0 }));
+  const pending = counts.pending + (counts.awaiting || 0);
 
   return (
     <div className="fade-in">
@@ -373,10 +480,12 @@ export default function Approvals() {
       ) : approvals.length === 0 ? (
         <EmptyState
           agent="ranger"
-          title={tab === 'pending' ? 'All caught up!' : `No ${tab} messages`}
+          title={tab === 'pending' ? 'All caught up!' : tab === 'awaiting' ? 'No pending connections' : `No ${tab} messages`}
           description={
             tab === 'pending'
               ? "The Ranger hasn't queued any messages yet. Run a campaign from Director Chat."
+              : tab === 'awaiting'
+              ? "No LinkedIn connection requests awaiting acceptance."
               : `No messages have been ${tab} yet.`
           }
         />
@@ -391,6 +500,8 @@ export default function Approvals() {
             onSend={handleSend}
             onEdit={handleEdit}
             onError={setActionError}
+            onConnectionSent={handleConnectionSent}
+            onConnectionAccepted={handleConnectionAccepted}
           />
         ))
       )}

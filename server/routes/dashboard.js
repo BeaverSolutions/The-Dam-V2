@@ -75,6 +75,10 @@ router.get('/stats', async (req, res, next) => {
             FROM messages
             WHERE client_id = $1 AND metadata->>'reply_sentiment' IS NOT NULL
               AND created_at >= NOW() - INTERVAL '30 days'
+          ),
+          linkedin_awaiting AS (
+            SELECT COUNT(*) AS total FROM messages
+            WHERE client_id = $1 AND status = 'linkedin_requested'
           )
         SELECT
           (SELECT total FROM msgs_sent_all)       AS sent_all_time,
@@ -90,7 +94,8 @@ router.get('/stats', async (req, res, next) => {
           (SELECT neutral   FROM sentiment_counts) AS sentiment_neutral,
           (SELECT objection FROM sentiment_counts) AS sentiment_objection,
           (SELECT no_fit    FROM sentiment_counts) AS sentiment_no_fit,
-          (SELECT json_object_agg(pipeline_stage, cnt) FROM leads_by_stage) AS leads_by_stage
+          (SELECT json_object_agg(pipeline_stage, cnt) FROM leads_by_stage) AS leads_by_stage,
+          (SELECT total FROM linkedin_awaiting)     AS awaiting_linkedin
       `, [clientId]),
 
       pool.query(
@@ -139,6 +144,7 @@ router.get('/stats', async (req, res, next) => {
         meetings_booked: parseInt(stats.meetings_booked, 10),
         pending_approvals: parseInt(stats.pending_approvals, 10),
         pool_health: parseInt(stats.pool_health, 10),
+        awaiting_linkedin: parseInt(stats.awaiting_linkedin, 10) || 0,
         enforcer_pass_rate: enforcerPassRate,
 
         // Sentiment split (last 30d)

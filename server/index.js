@@ -453,6 +453,75 @@ async function start() {
     }, 10 * 60 * 1000);
     logger.info({ msg: 'Captain Beaver cron jobs registered (10 min poll, 9am MYT brief, Sunday 8pm MYT review)' });
 
+    // ── LinkedIn stale connection sweep ─────────────────────────────────────
+    // Runs every 6 hours. Finds linkedin_requested messages older than 7 days
+    // and triggers email fallback for those leads (Hunter → email draft).
+    async function sweepStaleLinkedInRequests() {
+      try {
+        const { rows: staleMessages } = await pool.query(
+          `SELECT m.id AS message_id, m.lead_id, m.client_id, l.name AS lead_name, l.company AS lead_company
+           FROM messages m
+           JOIN leads l ON l.id = m.lead_id
+           WHERE m.status = 'linkedin_requested'
+             AND m.updated_at < NOW() - INTERVAL '7 days'
+           LIMIT 20`
+        );
+
+        if (staleMessages.length === 0) return;
+        logger.info({ msg: `LinkedIn sweep: found ${staleMessages.length} stale connections`, count: staleMessages.length });
+
+        // Group by client_id
+        const byClient = {};
+        for (const msg of staleMessages) {
+          if (!byClient[msg.client_id]) byClient[msg.client_id] = [];
+          byClient[msg.client_id].push(msg);
+        }
+
+        for (const [clientId, messages] of Object.entries(byClient)) {
+          const leadIds = messages.map(m => m.lead_id);
+          const messageIds = messages.map(m => m.message_id);
+
+          // Reject the stale LinkedIn messages
+          await pool.query(
+            `UPDATE messages SET status = 'rejected', ranger_notes = 'auto-sweep: LinkedIn connection not accepted after 7 days', updated_at = NOW()
+             WHERE id = ANY($1::uuid[]) AND client_id = $2`,
+            [messageIds, clientId]
+          );
+
+          // Cancel any pending approvals for these messages
+          await pool.query(
+            `UPDATE approvals SET status = 'rejected', notes = 'auto-sweep: LinkedIn stale', resolved_at = NOW()
+             WHERE message_id = ANY($1::uuid[]) AND client_id = $2 AND status = 'pending'`,
+            [messageIds, clientId]
+          ).catch(() => {});
+
+          // Try email fallback via Hunter + pipeline
+          try {
+            const { toolDraftEmailForLeads } = require('./services/captainBeaver');
+            if (typeof toolDraftEmailForLeads === 'function') {
+              await toolDraftEmailForLeads(clientId, {
+                lead_ids: leadIds,
+                note: 'auto-sweep: LinkedIn connection not accepted after 7 days, trying email fallback',
+              });
+            }
+          } catch (err) {
+            logger.warn({ msg: 'LinkedIn sweep email fallback failed', clientId, err: err.message });
+          }
+
+          logger.info({ msg: 'LinkedIn sweep processed', clientId, cleared: messageIds.length, lead_ids: leadIds });
+        }
+      } catch (err) {
+        logger.warn({ msg: 'LinkedIn sweep error', err: err.message });
+      }
+    }
+
+    // Run every 6 hours (delayed 5 min after startup)
+    setTimeout(() => {
+      sweepStaleLinkedInRequests().catch(() => {});
+      setInterval(() => sweepStaleLinkedInRequests().catch(() => {}), 6 * 60 * 60 * 1000);
+    }, 5 * 60 * 1000);
+    logger.info({ msg: 'LinkedIn stale connection sweep registered (every 6h, 7-day threshold)' });
+
   } catch (err) {
     logger.error({ msg: 'Failed to start server', err: err.message, stack: err.stack });
     process.exit(1);

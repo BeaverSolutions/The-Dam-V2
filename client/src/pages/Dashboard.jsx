@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
-  Users, MessageSquare, CheckCircle, Calendar,
+  Users, MessageSquare, CheckCircle, Calendar, Clock,
   Zap, Coffee, Sun, Moon, Sunrise, X, FileText,
   Mail, Search, Send, AtSign, ExternalLink, CornerDownRight, RefreshCw,
   ArrowRight, MessageCircle, Target, TrendingUp, BookOpen, BarChart2,
@@ -877,8 +877,8 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* ── Stat Row: 4 outcome cards ── */}
-      <div className="grid-4" style={{ marginBottom: '1.25rem' }}>
+      {/* ── Stat Row: outcome cards ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: (stats.awaiting_linkedin > 0) ? 'repeat(5, 1fr)' : 'repeat(4, 1fr)', gap: '0.75rem', marginBottom: '1.25rem' }}>
         <StatCard
           label="Pending Approvals"
           value={stats.pending_approvals ?? 0}
@@ -888,6 +888,17 @@ export default function Dashboard() {
           onClick={() => navigate('/approvals')}
           sub={stats.pending_approvals > 0 ? 'Needs your review' : 'Queue clear'}
         />
+        {(stats.awaiting_linkedin > 0) && (
+          <StatCard
+            label="Awaiting LinkedIn"
+            value={stats.awaiting_linkedin}
+            icon={Clock}
+            color="var(--purple)"
+            loading={statsLoading}
+            onClick={() => navigate('/approvals?tab=awaiting')}
+            sub="connection requests"
+          />
+        )}
         <StatCard
           label="Sent Today"
           value={sentToday ?? 0}

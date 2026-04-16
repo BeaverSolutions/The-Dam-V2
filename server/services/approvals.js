@@ -165,4 +165,124 @@ async function resolveApproval(clientId, approvalId, { status, notes, userId }) 
   return result.rows[0];
 }
 
-module.exports = { getApprovals, createApproval, resolveApproval };
+// ─── LinkedIn connection tracking ─────────────────────────────────────────
+
+/**
+ * Mark a LinkedIn approval as "connection sent" — the user has sent the
+ * connection request on LinkedIn and is now waiting for the prospect to accept.
+ * Moves the message from pending_approval → linkedin_requested.
+ * Clears it from the pending approval queue but keeps the approval row intact.
+ */
+async function markConnectionSent(clientId, approvalId, { userId }) {
+  const { rows } = await pool.query(
+    `SELECT a.*, m.channel, m.id AS message_id FROM approvals a
+     JOIN messages m ON m.id = a.message_id
+     WHERE a.id = $1 AND a.client_id = $2`,
+    [approvalId, clientId]
+  );
+  if (rows.length === 0) throw new AppError('Approval not found', 404, 'NOT_FOUND');
+  const approval = rows[0];
+  if (approval.status !== 'pending') throw new AppError('Approval already resolved', 400, 'ALREADY_RESOLVED');
+  if (approval.channel !== 'linkedin') throw new AppError('Connection tracking only applies to LinkedIn messages', 400, 'WRONG_CHANNEL');
+
+  // Update approval to a linkedin_requested sub-status (we reuse status='pending' but add a notes marker)
+  await pool.query(
+    `UPDATE approvals SET notes = 'linkedin_requested', updated_at = NOW()
+     WHERE id = $1 AND client_id = $2`,
+    [approvalId, clientId]
+  );
+
+  // Move message to linkedin_requested
+  await pool.query(
+    `UPDATE messages SET status = 'linkedin_requested', updated_at = NOW()
+     WHERE id = $1 AND client_id = $2`,
+    [approval.message_id, clientId]
+  );
+
+  await logsService.createLog(clientId, {
+    agent: 'system',
+    action: 'linkedin_connection_sent',
+    target_type: 'approval',
+    target_id: approvalId,
+    metadata: { message_id: approval.message_id, user_id: userId },
+  });
+
+  return { ok: true, message_id: approval.message_id };
+}
+
+/**
+ * Mark a LinkedIn connection as "accepted" — the prospect accepted the connection
+ * request, and the user has sent the Day 0 DM. Marks as sent + schedules follow-ups.
+ */
+async function markConnectionAccepted(clientId, approvalId, { userId }) {
+  const { rows } = await pool.query(
+    `SELECT a.*, m.channel, m.id AS message_id, m.lead_id FROM approvals a
+     JOIN messages m ON m.id = a.message_id
+     WHERE a.id = $1 AND a.client_id = $2`,
+    [approvalId, clientId]
+  );
+  if (rows.length === 0) throw new AppError('Approval not found', 404, 'NOT_FOUND');
+  const approval = rows[0];
+
+  // Allow from linkedin_requested messages (notes='linkedin_requested')
+  const { rows: msgRows } = await pool.query(
+    `SELECT status FROM messages WHERE id = $1 AND client_id = $2`,
+    [approval.message_id, clientId]
+  );
+  if (msgRows[0]?.status !== 'linkedin_requested') {
+    throw new AppError(`Message not in linkedin_requested status (currently: ${msgRows[0]?.status})`, 400, 'WRONG_STATUS');
+  }
+
+  // Resolve the approval
+  await pool.query(
+    `UPDATE approvals SET status = 'approved', notes = 'linkedin_accepted', approved_by = $1, resolved_at = NOW()
+     WHERE id = $2 AND client_id = $3`,
+    [userId, approvalId, clientId]
+  );
+
+  // Mark message as sent
+  await pool.query(
+    `UPDATE messages SET status = 'sent', sent_at = NOW(), updated_at = NOW()
+     WHERE id = $1 AND client_id = $2`,
+    [approval.message_id, clientId]
+  );
+
+  // Update lead to contacted
+  if (approval.lead_id) {
+    await pool.query(
+      `UPDATE leads SET pipeline_stage = 'contacted', first_contacted_at = COALESCE(first_contacted_at, NOW()), updated_at = NOW()
+       WHERE id = $1 AND client_id = $2`,
+      [approval.lead_id, clientId]
+    );
+  }
+
+  // Schedule follow-ups
+  try {
+    if (approval.lead_id) {
+      const { rows: prevSent } = await pool.query(
+        `SELECT COUNT(*) AS cnt FROM messages
+         WHERE lead_id = $1 AND client_id = $2 AND status = 'sent'`,
+        [approval.lead_id, clientId]
+      );
+      if (parseInt(prevSent[0].cnt) <= 1) {
+        const { scheduleFollowUps } = require('./followupSequence');
+        await scheduleFollowUps(clientId, approval.lead_id, new Date());
+        console.log(`[approvals] Scheduled follow-ups for linkedin-accepted lead ${approval.lead_id}`);
+      }
+    }
+  } catch (err) {
+    console.warn('[approvals] Follow-up scheduling failed for linkedin-accepted:', err.message);
+  }
+
+  await logsService.createLog(clientId, {
+    agent: 'system',
+    action: 'linkedin_connection_accepted',
+    target_type: 'approval',
+    target_id: approvalId,
+    metadata: { message_id: approval.message_id, lead_id: approval.lead_id, user_id: userId },
+  });
+
+  return { ok: true, message_id: approval.message_id };
+}
+
+module.exports = { getApprovals, createApproval, resolveApproval, markConnectionSent, markConnectionAccepted };

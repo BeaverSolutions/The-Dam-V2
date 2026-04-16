@@ -1231,7 +1231,41 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         console.warn(`[sales-personalise] Skipped for ${lead.name}:`, err.message);
       }
 
-      const channel = lead.email ? 'email' : 'linkedin';
+      // ── LinkedIn-already-tried check (signal pipeline) ───────────────────
+      let channel = lead.email ? 'email' : 'linkedin';
+      if (channel === 'linkedin') {
+        const prevLinkedinRes = await pool.query(
+          `SELECT id FROM messages WHERE client_id = $1 AND lead_id = $2 AND channel = 'linkedin' AND status NOT IN ('deleted') LIMIT 1`,
+          [clientId, lead.id]
+        );
+        if (prevLinkedinRes.rows.length > 0) {
+          // LinkedIn already tried — attempt Hunter for email
+          try {
+            const nameParts = (lead.name || '').split(' ');
+            const hunterResult = await hunterService.findEmail(clientId, {
+              firstName: nameParts[0] || '',
+              lastName: nameParts.slice(1).join(' ') || '',
+              company: lead.company,
+            });
+            if (hunterResult?.email) {
+              await pool.query(
+                `UPDATE leads SET email = $1, email_verified = $2, email_source = 'hunter', updated_at = NOW() WHERE id = $3 AND client_id = $4`,
+                [hunterResult.email, hunterResult.verified === true, lead.id, clientId]
+              );
+              lead.email = hunterResult.email;
+              channel = 'email';
+              console.log(`[signal-pipeline] Hunter email fallback for ${lead.name}: ${hunterResult.email}`);
+            } else {
+              console.log(`[signal-pipeline] ${lead.name} — LinkedIn tried, no email found — skipping`);
+              continue;
+            }
+          } catch {
+            console.log(`[signal-pipeline] ${lead.name} — Hunter failed, skipping`);
+            continue;
+          }
+        }
+      }
+
       const salesResult = await salesGenerate(clientId, {
         lead_id: lead.id,
         channel,
@@ -1380,11 +1414,45 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
 
         approvedCount++;
       } else {
+        // Enforcer rejected — try once more with Enforcer writing it himself
+        console.warn(`[signal-pipeline] Enforcer rejected ${lead.name}: ${rangerResult?.notes || 'unknown'} — Enforcer drafting fallback`);
         await pool.query(
           `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1 WHERE id = $2`,
           [rangerResult?.notes || 'Rejected by Enforcer', msg.id]
         );
-        rejectedCount++;
+
+        try {
+          const enforcerBody = await rangerDraft(clientId, {
+            lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
+            lead_angle: meta.angle, lead_friction: meta.friction,
+            rejected_body: finalBody, rejection_notes: rangerResult?.notes,
+          });
+          if (enforcerBody) {
+            // Insert as a NEW message (don't overwrite the rejected one)
+            const { rows: [enfMsg] } = await pool.query(
+              `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, metadata)
+               VALUES ($1, $2, $3, $4, $5, 'pending_approval', $6) RETURNING *`,
+              [clientId, lead.id, channel, draftSubject || lead.company, enforcerBody,
+               JSON.stringify({ source: 'enforcer_fallback', signal: meta.signal, original_rejection: rangerResult?.notes })]
+            );
+            await pool.query(
+              `INSERT INTO approvals (client_id, message_id, requested_by, status) VALUES ($1, $2, 'enforcer_fallback', 'pending')`,
+              [clientId, enfMsg.id]
+            );
+            await logsService.createLog(clientId, {
+              agent: 'enforcer_beaver', action: 'enforcer_drafted_fallback',
+              target_type: 'message', target_id: enfMsg.id,
+              metadata: { lead_name: lead.name, original_rejection: rangerResult?.notes },
+            }).catch(() => {});
+            approvedCount++;
+            console.log(`[signal-pipeline] Enforcer fallback draft for ${lead.name} → pending_approval`);
+          } else {
+            rejectedCount++;
+          }
+        } catch (fallbackErr) {
+          console.warn(`[signal-pipeline] Enforcer fallback failed for ${lead.name}:`, fallbackErr.message);
+          rejectedCount++;
+        }
       }
     } catch (err) {
       console.error(`[signal-pipeline] Error processing ${lead.name}:`, err.message);
@@ -1619,15 +1687,23 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           return null;
         });
 
-      // If DB leads fully satisfy target, await result and skip research
+      // If DB leads fully satisfy target, await result and check actual success count
       if (dbLeadsCount >= targetLimit) {
         const dbResult = await dbLeadsPromise;
-        console.log(`[director] DB-first: ${dbLeadsCount} leads processed — target met, skipping external research`);
-        return dbResult;
+        // Count actual successes — don't skip research if most leads failed
+        const actualDrafted = dbResult?.summary?.messages_drafted || 0;
+        if (actualDrafted >= targetLimit) {
+          console.log(`[director] DB-first: ${actualDrafted} drafts produced from ${dbLeadsCount} leads — target met, skipping external research`);
+          return dbResult;
+        }
+        // Some failed — continue to external research to fill the gap
+        const gap = targetLimit - actualDrafted;
+        console.log(`[director] DB-first: only ${actualDrafted} drafts from ${dbLeadsCount} leads — ${gap} more needed from external research`);
+        // Don't return — fall through to external research below
+      } else {
+        // Otherwise: DB pipeline runs in background while we continue to external research below
+        console.log(`[director] DB-first: ${dbLeadsCount} leads processing in parallel, ${targetLimit - dbLeadsCount} more needed from research`);
       }
-
-      // Otherwise: DB pipeline runs in background while we continue to external research below
-      console.log(`[director] DB-first: ${dbLeadsCount} leads processing in parallel, ${targetLimit - dbLeadsCount} more needed from research`);
     } else {
       console.log('[director] DB-first: no uncontacted leads in pipeline — proceeding to external research');
     }
@@ -2104,6 +2180,53 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       instagram: 'Write a casual Instagram DM. 1-2 sentences, under 30 words. No greeting, no sign-off. Reference something about their company. End with a casual question. Most informal channel.',
     };
 
+    // ── LinkedIn-already-tried check ─────────────────────────────────────────
+    // If this lead has a previous LinkedIn message (any status), LinkedIn was
+    // already attempted. Don't send again — try to find email via Hunter first.
+    // If Hunter finds nothing, skip this lead entirely (avoids recycling ghost leads).
+    let linkedinAlreadyTried = false;
+    if (lead.linkedin_url && !lead.email) {
+      const prevLinkedinRes = await pool.query(
+        `SELECT id FROM messages
+          WHERE client_id = $1 AND lead_id = $2 AND channel = 'linkedin'
+            AND status NOT IN ('deleted')
+          LIMIT 1`,
+        [clientId, lead.id]
+      );
+      if (prevLinkedinRes.rows.length > 0) {
+        linkedinAlreadyTried = true;
+        console.log(`[pipeline] ${lead.name} — LinkedIn already attempted. Trying Hunter for email...`);
+        try {
+          const nameParts = (lead.name || '').split(' ');
+          const hunterResult = await hunterService.findEmail(clientId, {
+            firstName: nameParts[0] || '',
+            lastName: nameParts.slice(1).join(' ') || '',
+            company: lead.company,
+          });
+          if (hunterResult?.email) {
+            // Save email to lead record
+            await pool.query(
+              `UPDATE leads SET email = $1, email_verified = $2, email_source = 'hunter', updated_at = NOW()
+                WHERE id = $3 AND client_id = $4`,
+              [hunterResult.email, hunterResult.verified === true, lead.id, clientId]
+            );
+            lead.email = hunterResult.email;
+            lead.email_source = 'hunter';
+            lead.email_verified = hunterResult.verified === true;
+            console.log(`[pipeline] Hunter found email for ${lead.name}: ${hunterResult.email} — switching to email channel`);
+          } else {
+            console.log(`[pipeline] Hunter found no email for ${lead.name} — skipping (LinkedIn already tried)`);
+            diagnostics.messages_failed++;
+            return; // Skip — no new channel available
+          }
+        } catch (hunterErr) {
+          console.warn(`[pipeline] Hunter lookup failed for ${lead.name}:`, hunterErr.message);
+          diagnostics.messages_failed++;
+          return; // Skip — can't find alternative channel
+        }
+      }
+    }
+
     // Smart channel selection based on data quality + availability
     // Priority: verified email > LinkedIn (if no email) > unverified email (risky) > Instagram
     let selectedChannel;
@@ -2113,8 +2236,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
     if (hasVerifiedEmail) {
       selectedChannel = 'email';
-      channelReason = `Verified email (${lead.email_source || 'known'})`;
-    } else if (lead.linkedin_url) {
+      channelReason = `Verified email (${lead.email_source || 'known'}${linkedinAlreadyTried ? ', Hunter fallback' : ''})`;
+    } else if (lead.linkedin_url && !linkedinAlreadyTried) {
       selectedChannel = 'linkedin';
       channelReason = hasUnverifiedEmail ? 'LinkedIn preferred over unverified email (bounce risk)' : 'No email, LinkedIn available';
     } else if (hasUnverifiedEmail) {
@@ -2142,6 +2265,22 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       } else {
         diagnostics.messages_drafted++;
         execStatus.beavers.sales.drafted++;
+
+        // ── Race-condition dedup guard ─────────────────────────────────────
+        // Prevent duplicate messages if this lead snuck into two parallel
+        // pipeline runs (e.g. pool + fresh research both picked it up).
+        const existingActiveMsg = await pool.query(
+          `SELECT id FROM messages WHERE client_id = $1 AND lead_id = $2
+             AND status IN ('pending_ranger', 'pending_approval', 'approved', 'pending_send', 'sent')
+           LIMIT 1`,
+          [clientId, lead.id]
+        );
+        if (existingActiveMsg.rows.length > 0) {
+          console.warn(`[pipeline] Dedup guard: ${lead.name} already has an active message — skipping insert`);
+          diagnostics.messages_drafted--; // uncredit the increment
+          diagnostics.messages_failed++;
+          return;
+        }
 
         const msgRes = await pool.query(
           `INSERT INTO messages (client_id, lead_id, channel, subject, body, status)

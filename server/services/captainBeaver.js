@@ -94,6 +94,8 @@ web_search_brave is ONLY for one-off lookups (a specific person, a company signa
 
 TOOLS (Anthropic tool_use — call directly, no HTTP):
 - run_campaign             ← USE THIS for any "find leads / run outreach / start campaign" request. Fires the full parallel pipeline.
+- clear_pending_messages   ← USE THIS to reject/clear old pending messages for specific leads (e.g. stale LinkedIn DMs). Pass lead_ids + note.
+- draft_email_for_leads    ← USE THIS to find emails (via Hunter) and queue email outreach for specific lead IDs. Run AFTER clear_pending_messages.
 - search_internal_leads    check the DB for existing leads (call this before run_campaign to show what's already there)
 - get_pipeline_status      live KPIs: sent today, pending approval, leads today, rejected today
 - get_approvals_pending    list messages awaiting approval with Enforcer notes
@@ -103,6 +105,12 @@ TOOLS (Anthropic tool_use — call directly, no HTTP):
 - write_memory             write a durable learning back to agent_memory
 - web_search_brave         open-web search (Brave → CSE → DuckDuckGo fallback) — ONLY after search_internal_leads returns empty
 - get_client_config        read the client's ICP and persona
+
+CHANNEL SWITCHING WORKFLOW (use this exact sequence):
+1. get_approvals_pending → identify which leads to switch
+2. clear_pending_messages(lead_ids=[...], note="no response (linkedin), trying email") → clears their pending queue
+3. draft_email_for_leads(lead_ids=[...]) → Hunter finds emails + queues email drafts
+NEVER call run_campaign to re-process existing leads — it pulls random new leads, not the specific ones you cleared.
 
 Always use your tools. Do not claim facts about the pipeline without calling the relevant tool first.
 
@@ -319,6 +327,31 @@ const TOOLS = [
         plan_id: { type: 'string', description: 'Optional pre-generated plan_id. Leave blank to auto-generate.' },
       },
       required: ['command'],
+    },
+  },
+  {
+    name: 'clear_pending_messages',
+    description: 'Reject/clear pending_approval or pending_ranger messages for specific leads. Use when MJ wants to discard old outreach attempts (e.g. LinkedIn messages that were never accepted) so those leads can be re-processed via a different channel. Pass either lead_ids or message_ids. Optionally provide a note explaining why (e.g. "no response (linkedin), trying email").',
+    input_schema: {
+      type: 'object',
+      properties: {
+        lead_ids:   { type: 'array', items: { type: 'string' }, description: 'List of lead UUIDs whose pending messages to reject' },
+        message_ids: { type: 'array', items: { type: 'string' }, description: 'Specific message UUIDs to reject (use instead of lead_ids if you have exact IDs)' },
+        note:       { type: 'string', description: 'Reason for clearing (stored as ranger_notes). E.g. "no response (linkedin), trying email"' },
+        channel:    { type: 'string', enum: ['email', 'linkedin', 'instagram'], description: 'Only clear messages on this channel (optional filter when using lead_ids)' },
+      },
+    },
+  },
+  {
+    name: 'draft_email_for_leads',
+    description: 'Find emails for specific leads (via Hunter) and draft email outreach through the Sales → Enforcer → approval pipeline. Use AFTER clear_pending_messages when MJ wants to switch specific leads from LinkedIn to email. Provide lead_ids from the existing DB (not new leads — use create_lead for those).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        lead_ids: { type: 'array', items: { type: 'string' }, description: 'List of lead UUIDs to process' },
+        note:     { type: 'string', description: 'Optional context note logged to memory (e.g. "email fallback after LinkedIn no-response")' },
+      },
+      required: ['lead_ids'],
     },
   },
 ];
@@ -799,7 +832,7 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
     ok: true,
     plan_id: planId,
     status: 'running',
-    message: `Campaign started (plan_id: ${planId}). I'll run Research → Sales → Enforcer in the background. Check approvals in a few minutes.`,
+    message: 'Campaign fired. Research → Sales → Enforcer pipeline running in background. Check approvals in a few minutes.',
   };
 }
 
@@ -817,6 +850,161 @@ async function toolQueryAgentMemoryRaw(clientId, { agent, key } = {}) {
     params
   );
   return { count: rows.length, entries: rows };
+}
+
+// ─── clear_pending_messages ───────────────────────────────────────────────
+
+async function toolClearPendingMessages(clientId, { lead_ids, message_ids, note, channel } = {}) {
+  const reason = note || 'cleared by captain';
+  const clearableStatuses = ['pending_approval', 'pending_ranger'];
+  let cleared = 0;
+  const clearedLeadIds = [];
+
+  if (message_ids?.length > 0) {
+    // Reject by explicit message IDs
+    for (const msgId of message_ids) {
+      const res = await pool.query(
+        `UPDATE messages
+            SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW()
+          WHERE id = $2 AND client_id = $3 AND status = ANY($4::text[])
+          RETURNING lead_id`,
+        [reason, msgId, clientId, clearableStatuses]
+      );
+      if (res.rows.length > 0) {
+        cleared++;
+        clearedLeadIds.push(res.rows[0].lead_id);
+      }
+    }
+  } else if (lead_ids?.length > 0) {
+    // Reject by lead IDs (optionally filtered by channel)
+    for (const leadId of lead_ids) {
+      const conditions = ['lead_id = $1', 'client_id = $2', 'status = ANY($3::text[])'];
+      const params = [leadId, clientId, clearableStatuses];
+      if (channel) conditions.push(`channel = $${params.push(channel)}`);
+
+      const res = await pool.query(
+        `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $${params.push(reason)}, updated_at = NOW()
+          WHERE ${conditions.join(' AND ')}
+          RETURNING id`,
+        params
+      );
+      if (res.rowCount > 0) {
+        cleared += res.rowCount;
+        clearedLeadIds.push(leadId);
+      }
+    }
+  } else {
+    return { ok: false, error: 'Provide lead_ids or message_ids' };
+  }
+
+  // Also cancel approvals rows for cleared messages
+  if (clearedLeadIds.length > 0) {
+    await pool.query(
+      `UPDATE approvals a SET status = 'rejected', resolved_at = NOW()
+        FROM messages m
+       WHERE a.message_id = m.id AND m.lead_id = ANY($1::uuid[]) AND m.client_id = $2
+         AND a.status = 'pending'`,
+      [clearedLeadIds, clientId]
+    ).catch(() => {}); // non-fatal
+  }
+
+  return { ok: true, cleared, note: reason, lead_ids_affected: clearedLeadIds };
+}
+
+// ─── draft_email_for_leads ────────────────────────────────────────────────
+
+async function toolDraftEmailForLeads(clientId, { lead_ids, note } = {}) {
+  if (!lead_ids?.length) return { ok: false, error: 'lead_ids required' };
+
+  const hunterService = require('./hunter');
+  const { processExistingLeadsPipeline: runPipeline } = require('./agents');
+  const { v4: uuidV4 } = require('uuid');
+
+  const results = [];
+
+  for (const leadId of lead_ids) {
+    const { rows } = await pool.query(
+      `SELECT * FROM leads WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL LIMIT 1`,
+      [leadId, clientId]
+    );
+    if (rows.length === 0) {
+      results.push({ lead_id: leadId, ok: false, reason: 'not found' });
+      continue;
+    }
+
+    const lead = rows[0];
+
+    // Check if already has an active email message
+    const activeMsgRes = await pool.query(
+      `SELECT id FROM messages WHERE client_id = $1 AND lead_id = $2
+         AND channel = 'email'
+         AND status IN ('pending_ranger','pending_approval','approved','pending_send','sent')
+       LIMIT 1`,
+      [clientId, leadId]
+    );
+    if (activeMsgRes.rows.length > 0) {
+      results.push({ lead_id: leadId, lead_name: lead.name, ok: false, reason: 'active email message already exists' });
+      continue;
+    }
+
+    // Try Hunter if no email yet
+    if (!lead.email) {
+      try {
+        const nameParts = (lead.name || '').split(' ');
+        const hunterResult = await hunterService.findEmail(clientId, {
+          firstName: nameParts[0] || '',
+          lastName: nameParts.slice(1).join(' ') || '',
+          company: lead.company,
+        });
+
+        if (hunterResult?.email) {
+          await pool.query(
+            `UPDATE leads SET email = $1, email_verified = $2, email_source = 'hunter', updated_at = NOW()
+              WHERE id = $3 AND client_id = $4`,
+            [hunterResult.email, hunterResult.verified === true, leadId, clientId]
+          );
+          lead.email = hunterResult.email;
+          lead.email_source = 'hunter';
+          lead.email_verified = hunterResult.verified === true;
+          results.push({ lead_id: leadId, lead_name: lead.name, email: hunterResult.email, hunter_confidence: hunterResult.confidence, status: 'email_found_queuing' });
+        } else {
+          results.push({ lead_id: leadId, lead_name: lead.name, ok: false, reason: 'Hunter found no email' });
+          continue;
+        }
+      } catch (err) {
+        results.push({ lead_id: leadId, lead_name: lead.name, ok: false, reason: `Hunter error: ${err.message}` });
+        continue;
+      }
+    } else {
+      results.push({ lead_id: leadId, lead_name: lead.name, email: lead.email, status: 'existing_email_queuing' });
+    }
+
+    // Run pipeline on this lead (fire-and-forget per lead)
+    const planId = uuidV4();
+    runPipeline(clientId, planId, [lead]).catch(err => {
+      console.error(`[captainBeaver:draft_email_for_leads] pipeline failed for ${lead.name}: ${err.message}`);
+    });
+  }
+
+  const found = results.filter(r => r.ok !== false).length;
+  const skipped = results.filter(r => r.ok === false).length;
+
+  if (note) {
+    await pool.query(
+      `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
+       VALUES ($1, 'captain', $2, $3::jsonb, 'journal', NOW())
+       ON CONFLICT (client_id, agent, key) DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
+      [clientId, `email_fallback_${new Date().toISOString().slice(0,10)}`, JSON.stringify({ note, lead_ids, ts: new Date().toISOString() })]
+    ).catch(() => {});
+  }
+
+  return {
+    ok: true,
+    queued: found,
+    skipped,
+    results,
+    message: `${found} lead(s) queued for email outreach. Check approvals in a few minutes.`,
+  };
 }
 
 // ─── Tool dispatcher ──────────────────────────────────────────────────────
@@ -840,6 +1028,8 @@ function buildToolHandler(clientId) {
         case 'query_logs':              return await toolQueryLogs(clientId, input || {});
         case 'query_agent_memory_raw':  return await toolQueryAgentMemoryRaw(clientId, input || {});
         case 'run_campaign':            return await toolRunCampaign(clientId, input || {});
+        case 'clear_pending_messages':  return await toolClearPendingMessages(clientId, input || {});
+        case 'draft_email_for_leads':   return await toolDraftEmailForLeads(clientId, input || {});
         default:                        return { error: `Unknown tool: ${toolName}` };
       }
     } catch (err) {
@@ -1009,4 +1199,6 @@ module.exports = {
   buildToolHandler,
   loadPersona,
   getClientSlug,
+  // Used by LinkedIn auto-sweep in index.js
+  toolDraftEmailForLeads,
 };
