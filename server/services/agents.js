@@ -1989,6 +1989,10 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       }
     }
 
+    // Validate LinkedIn URL — strip fakes before saving
+    const { sanitiseLinkedInUrl } = require('../utils/validateLinkedIn');
+    lead.linkedin_url = sanitiseLinkedInUrl(lead.linkedin_url, `research_beaver ${lead.name}`);
+
     // Contact channel gate: lead MUST have at least 1 channel (email or LinkedIn)
     const hasAnyChannel = !!(lead.email || lead.linkedin_url);
     if (!hasAnyChannel) {

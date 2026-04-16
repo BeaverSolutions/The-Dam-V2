@@ -464,10 +464,12 @@ async function toolGetApprovalsPending(clientId, { limit = 20 } = {}) {
 
 async function toolCreateLead(clientId, input) {
   const {
-    name, company, title, email, linkedin_url,
+    name, company, title, email,
     signal, why_now, angle, friction,
     signal_tier = 'P1', confidence,
   } = input;
+  const { sanitiseLinkedInUrl } = require('../utils/validateLinkedIn');
+  const linkedin_url = sanitiseLinkedInUrl(input.linkedin_url, `captain_beaver create_lead ${name}`);
 
   if (!name || !company || !signal) {
     return { ok: false, error: 'name, company, and signal are required' };

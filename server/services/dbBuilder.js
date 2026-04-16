@@ -108,6 +108,10 @@ async function saveLead(clientId, lead, searchQuery) {
     }
   }
 
+  // Validate LinkedIn URL — strip fakes before saving
+  const { sanitiseLinkedInUrl } = require('../utils/validateLinkedIn');
+  lead.linkedin_url = sanitiseLinkedInUrl(lead.linkedin_url, `db_builder ${lead.name}`);
+
   // Must have at least one contact channel
   if (!lead.email && !lead.linkedin_url) return null;
 
