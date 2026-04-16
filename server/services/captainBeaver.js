@@ -106,6 +106,11 @@ TOOLS (Anthropic tool_use — call directly, no HTTP):
 - web_search_brave         open-web search (Brave → CSE → DuckDuckGo fallback) — ONLY after search_internal_leads returns empty
 - get_client_config        read the client's ICP and persona
 
+RESPONSE RULES:
+- NEVER show plan_id, UUIDs, or internal IDs to the user. They are for internal tracking only.
+- Instead of "Plan '0d48134c' running", say "Running." or "Campaign fired." — keep it clean.
+- NEVER start a message with "Plan" or "Running. Plan".
+
 CHANNEL SWITCHING WORKFLOW (use this exact sequence):
 1. get_approvals_pending → identify which leads to switch
 2. clear_pending_messages(lead_ids=[...], note="no response (linkedin), trying email") → clears their pending queue
@@ -830,7 +835,6 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
   }
   return {
     ok: true,
-    plan_id: planId,
     status: 'running',
     message: 'Campaign fired. Research → Sales → Enforcer pipeline running in background. Check approvals in a few minutes.',
   };
