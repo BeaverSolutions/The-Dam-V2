@@ -28,7 +28,7 @@ function getAuthUrl(clientId) {
   const sig = crypto.createHmac('sha256', process.env.JWT_SECRET).update(clientId).digest('hex');
   return client.generateAuthUrl({
     access_type: 'offline',
-    prompt: 'consent',
+    prompt: 'select_account consent',
     state: Buffer.from(JSON.stringify({ clientId, sig })).toString('base64'),
     scope: [
       'https://www.googleapis.com/auth/calendar.readonly',
