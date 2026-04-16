@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Mail, CheckCircle, XCircle, Search, Save, Eye, EyeOff, Send, AtSign, Calendar } from 'lucide-react';
+import { Mail, CheckCircle, XCircle, Search, Save, Eye, EyeOff, Send, AtSign, Calendar, MessageSquare } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { getUser } from '../utils/auth';
 
@@ -67,6 +67,12 @@ export default function Settings() {
   const [calendlySaving, setCalendlySaving] = useState(false);
   const [calendlySaved, setCalendlySaved] = useState(false);
 
+  // WhatsApp
+  const [whatsappNumber, setWhatsappNumber] = useState('');
+  const [whatsappInfo, setWhatsappInfo] = useState({ connected: false, number: null });
+  const [whatsappSaving, setWhatsappSaving] = useState(false);
+  const [whatsappSaved, setWhatsappSaved] = useState(false);
+
   // Profile / display name
   const [displayName, setDisplayName] = useState(user?.name || '');
   const [nameSaving, setNameSaving] = useState(false);
@@ -132,6 +138,7 @@ export default function Settings() {
           setIntegrations(res.data);
           if (res.data.calendly) setCalendlyInfo(res.data.calendly);
           if (res.data.google_calendar) setCalendarInfo(res.data.google_calendar);
+          if (res.data.whatsapp) setWhatsappInfo(res.data.whatsapp);
         }
       })
       .catch(() => {})
@@ -181,6 +188,28 @@ export default function Settings() {
     try {
       await request('/integrations/calendly', { method: 'DELETE' });
       setCalendlyInfo({ connected: false, url: null });
+    } catch {}
+  };
+
+  const handleSaveWhatsapp = async () => {
+    if (!whatsappNumber.trim()) return;
+    setWhatsappSaving(true);
+    try {
+      const res = await request('/integrations/whatsapp', { method: 'POST', body: JSON.stringify({ number: whatsappNumber.trim() }) });
+      if (res?.data) {
+        setWhatsappInfo(res.data);
+        setWhatsappNumber('');
+        setWhatsappSaved(true);
+        setTimeout(() => setWhatsappSaved(false), 2500);
+      }
+    } catch {}
+    setWhatsappSaving(false);
+  };
+
+  const handleDisconnectWhatsapp = async () => {
+    try {
+      await request('/integrations/whatsapp', { method: 'DELETE' });
+      setWhatsappInfo({ connected: false, number: null });
     } catch {}
   };
 
@@ -770,6 +799,65 @@ export default function Settings() {
                   </div>
                   <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
                     Paste your full Calendly URL or just your username. Agents will use this to suggest booking times.
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* WhatsApp */}
+            <div style={{ padding: '0.875rem 0', borderTop: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: whatsappInfo?.connected ? 0 : '0.875rem' }}>
+                <div style={{ width: 36, height: 36, borderRadius: 'var(--radius)', background: 'var(--bg)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <MessageSquare size={18} style={{ color: whatsappInfo?.connected ? 'var(--lime)' : 'var(--text-muted)' }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 500, fontSize: '0.875rem' }}>WhatsApp</div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
+                    {whatsappInfo?.connected
+                      ? `Positive replies include wa.me/${(whatsappInfo.number || '').replace(/^\+/, '')} for easy handoff`
+                      : 'Add your WhatsApp number — Sales Beaver includes a wa.me link in positive reply responses'}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem' }}>
+                    {whatsappInfo?.connected
+                      ? <><CheckCircle size={13} style={{ color: 'var(--lime)' }} /> <span style={{ color: 'var(--lime)' }}>Connected</span></>
+                      : <><XCircle size={13} style={{ color: 'var(--text-muted)' }} /> <span style={{ color: 'var(--text-muted)' }}>Not connected</span></>
+                    }
+                  </div>
+                  {whatsappInfo?.connected && (
+                    <button
+                      className="btn btn-secondary"
+                      style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem', color: 'var(--orange)', borderColor: 'var(--orange)' }}
+                      onClick={handleDisconnectWhatsapp}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {!whatsappInfo?.connected && (
+                <div style={{ paddingLeft: 52 }}>
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <input
+                      className="form-input"
+                      placeholder="+601115081530"
+                      value={whatsappNumber}
+                      onChange={e => setWhatsappNumber(e.target.value)}
+                      style={{ fontSize: '0.875rem', flex: 1 }}
+                    />
+                    <button
+                      className="btn btn-primary"
+                      style={{ fontSize: '0.75rem', padding: '0.45rem 0.875rem', whiteSpace: 'nowrap' }}
+                      onClick={handleSaveWhatsapp}
+                      disabled={whatsappSaving || !whatsappNumber.trim()}
+                    >
+                      {whatsappSaving ? 'Saving…' : whatsappSaved ? '✓ Saved' : 'Connect'}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
+                    Include country code (e.g. +601115081530). Sales Beaver adds a wa.me link when prospects reply positively.
                   </div>
                 </div>
               )}

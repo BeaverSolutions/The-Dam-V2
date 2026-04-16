@@ -27,13 +27,17 @@ router.get('/status', async (req, res, next) => {
       encKeyOk = false;
     }
 
-    const [gmailConnected, calendarConnected, apolloKey, hunterKey, calendlyRow] = await Promise.all([
+    const [gmailConnected, calendarConnected, apolloKey, hunterKey, calendlyRow, whatsappRow] = await Promise.all([
       gmailService.isConnected(req.clientId),
       googleCalendarService.isConnected(req.clientId),
       encKeyOk ? apolloService.getApiKey(req.clientId) : Promise.resolve(null),
       encKeyOk ? hunterService.getApiKey(req.clientId) : Promise.resolve(null),
       pool.query(
         `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'system' AND key = 'calendly_url' LIMIT 1`,
+        [req.clientId]
+      ),
+      pool.query(
+        `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'captain' AND key = 'whatsapp_number' LIMIT 1`,
         [req.clientId]
       ),
     ]);
@@ -92,6 +96,15 @@ router.get('/status', async (req, res, next) => {
           url: calendlyUrl || null,
           label: calendlyUrl ? calendlyUrl.replace('https://calendly.com/', '@') : 'Not connected',
         },
+        whatsapp: (() => {
+          const waContent = whatsappRow.rows[0]?.content;
+          const waNumber = waContent ? (typeof waContent === 'string' ? JSON.parse(waContent) : waContent)?.number : null;
+          return {
+            connected: !!waNumber,
+            number: waNumber || null,
+            label: waNumber ? `wa.me/${waNumber.replace(/^\+/, '')}` : 'Not connected',
+          };
+        })(),
       },
     });
   } catch (err) { next(err); }
@@ -440,6 +453,54 @@ router.delete('/hunter/key', async (req, res, next) => {
   try {
     await secrets.deleteClientSecret(req.clientId, 'system', 'hunter_api_key');
     res.json({ data: { status: 'removed' } });
+  } catch (err) { next(err); }
+});
+
+/* ─── WhatsApp ──────────────────────────────────────────── */
+
+router.get('/whatsapp', async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT content FROM agent_memory
+       WHERE client_id = $1 AND agent = 'captain' AND key = 'whatsapp_number' LIMIT 1`,
+      [req.clientId]
+    );
+    const row = result.rows[0];
+    const number = row ? (typeof row.content === 'string' ? JSON.parse(row.content) : row.content)?.number : null;
+    res.json({ data: { connected: !!number, number: number || null } });
+  } catch (err) { next(err); }
+});
+
+router.post('/whatsapp',
+  [body('number').notEmpty().trim(), validate],
+  async (req, res, next) => {
+    try {
+      // Strip non-digits except leading +
+      const number = req.body.number.replace(/[^0-9+]/g, '');
+      const content = JSON.stringify({ number });
+      await pool.query(
+        `INSERT INTO agent_memory (client_id, agent, memory_type, key, content)
+         VALUES ($1, 'captain', 'config', 'whatsapp_number', $2)
+         ON CONFLICT (client_id, agent, key)
+         DO UPDATE SET content = $2, updated_at = NOW()`,
+        [req.clientId, content]
+      );
+      await logsService.createLog(req.clientId, {
+        agent: 'system', action: 'whatsapp_connected', target_type: 'integration',
+        metadata: { number },
+      });
+      res.json({ data: { connected: true, number } });
+    } catch (err) { next(err); }
+  }
+);
+
+router.delete('/whatsapp', async (req, res, next) => {
+  try {
+    await pool.query(
+      `DELETE FROM agent_memory WHERE client_id = $1 AND agent = 'captain' AND key = 'whatsapp_number'`,
+      [req.clientId]
+    );
+    res.json({ data: { connected: false, number: null } });
   } catch (err) { next(err); }
 });
 

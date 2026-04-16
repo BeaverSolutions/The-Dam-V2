@@ -141,6 +141,22 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       }
     }
 
+    // For positive replies, also inject WhatsApp handoff link
+    let whatsappContext = '';
+    if (sentiment === 'positive') {
+      try {
+        const { getMemory } = require('./agents');
+        const waConfig = await getMemory(clientId, 'captain', 'whatsapp_number');
+        const waNumber = waConfig?.number || process.env.WHATSAPP_NUMBER || null;
+        if (waNumber) {
+          const cleanNumber = waNumber.replace(/[^0-9]/g, '');
+          whatsappContext = `\nWHATSAPP HANDOFF: After suggesting a time or confirming interest, casually offer WhatsApp as an easier channel. Example: "Happy to continue this over WhatsApp if that's easier — wa.me/${cleanNumber}". Keep it natural, don't force it. Only mention once.`;
+        }
+      } catch (err) {
+        console.warn('[replyHandler] WhatsApp config fetch failed:', err.message);
+      }
+    }
+
     const draftContext = [
       `Name: ${lead.name}`,
       `Company: ${lead.company}`,
@@ -151,6 +167,7 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       `Previous messages sent: ${history.length}`,
       `IMPORTANT: This is a REPLY message, not a cold outreach. Write a conversational response to their reply. Do not start from scratch — continue the conversation naturally.`,
       calendarContext,
+      whatsappContext,
     ].filter(Boolean).join('\n');
 
     const draft = await salesGenerate(clientId, {
