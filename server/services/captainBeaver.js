@@ -306,10 +306,15 @@ async function toolSearchInternalLeads(clientId, { industry, location, signal_ti
   const conditions = ['client_id = $1', 'deleted_at IS NULL'];
   const params = [clientId];
 
-  // By default, exclude recently contacted leads (within 14 days)
+  // By default, exclude recently contacted leads and leads with pending outreach
   if (!include_contacted) {
     conditions.push(`(first_contacted_at IS NULL OR first_contacted_at < NOW() - INTERVAL '14 days')`);
     conditions.push(`status NOT IN ('contacted', 'replied', 'meeting_booked', 'closed_won', 'closed_lost')`);
+    // Exclude leads with any message already in the pipeline (draft, approved, pending_send)
+    conditions.push(`NOT EXISTS (
+      SELECT 1 FROM messages m WHERE m.lead_id = leads.id AND m.client_id = leads.client_id
+        AND m.status IN ('pending_ranger', 'pending_approval', 'approved', 'pending_send', 'sending', 'sent')
+    )`);
   }
 
   if (industry) {

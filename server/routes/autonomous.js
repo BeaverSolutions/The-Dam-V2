@@ -157,6 +157,10 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
              AND status = 'new'
              AND (first_contacted_at IS NULL OR first_contacted_at < NOW() - INTERVAL '14 days')
              AND deleted_at IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM messages m WHERE m.lead_id = leads.id AND m.client_id = leads.client_id
+                 AND m.status IN ('pending_ranger', 'pending_approval', 'approved', 'pending_send', 'sending', 'sent')
+             )
            ORDER BY
              CASE WHEN signal_tier = 'P1' THEN 1 WHEN signal_tier = 'P2' THEN 2 ELSE 3 END,
              CASE WHEN email IS NOT NULL THEN 0 ELSE 1 END,
