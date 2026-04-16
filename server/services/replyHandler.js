@@ -141,20 +141,10 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       }
     }
 
-    // For positive replies, also inject WhatsApp handoff link
+    // For positive replies, ask for their WhatsApp number so we can reach out to them
     let whatsappContext = '';
     if (sentiment === 'positive') {
-      try {
-        const { getMemory } = require('./agents');
-        const waConfig = await getMemory(clientId, 'captain', 'whatsapp_number');
-        const waNumber = waConfig?.number || process.env.WHATSAPP_NUMBER || null;
-        if (waNumber) {
-          const cleanNumber = waNumber.replace(/[^0-9]/g, '');
-          whatsappContext = `\nWHATSAPP HANDOFF: After suggesting a time or confirming interest, casually offer WhatsApp as an easier channel. Example: "Happy to continue this over WhatsApp if that's easier — wa.me/${cleanNumber}". Keep it natural, don't force it. Only mention once.`;
-        }
-      } catch (err) {
-        console.warn('[replyHandler] WhatsApp config fetch failed:', err.message);
-      }
+      whatsappContext = `\nWHATSAPP HANDOFF: After confirming interest or suggesting a time, naturally ask for their WhatsApp number. Example: "Happy to sort out the details over WhatsApp if that's easier for you — what's your number?" or "Shall I WhatsApp you to lock in a time?". Keep it casual, one sentence max. The goal is to get THEIR number so we message them, not the other way round.`;
     }
 
     const draftContext = [
