@@ -17,7 +17,7 @@ function getOAuthClient() {
   return new google.auth.OAuth2(
     process.env.GMAIL_CLIENT_ID,
     process.env.GMAIL_CLIENT_SECRET,
-    process.env.GOOGLE_CALENDAR_REDIRECT_URI || 'http://localhost:3001/api/integrations/calendar/callback'
+    (process.env.GMAIL_REDIRECT_URI || '').replace('/gmail/', '/calendar/') || process.env.GOOGLE_CALENDAR_REDIRECT_URI || 'http://localhost:3001/api/integrations/calendar/callback'
   );
 }
 
