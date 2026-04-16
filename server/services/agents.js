@@ -1238,9 +1238,23 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         context: contextParts.join('\n'),
       });
 
-      if (!salesResult?.body) {
-        console.warn(`[signal-pipeline] Sales draft failed for ${lead.name}`);
-        continue;
+      // If Sales Beaver failed, fall back to Enforcer drafting directly
+      let draftBody = salesResult?.body;
+      let draftSubject = salesResult?.subject || null;
+      let draftSource = 'signal_hunt';
+      if (!draftBody) {
+        console.warn(`[signal-pipeline] Sales draft failed for ${lead.name} — Enforcer drafting fallback`);
+        const enforcerBody = await rangerDraft(clientId, {
+          lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
+          lead_angle: meta.angle, lead_friction: meta.friction, rejected_body: '',
+        });
+        if (!enforcerBody) {
+          console.warn(`[signal-pipeline] Enforcer fallback also failed for ${lead.name} — skipping`);
+          continue;
+        }
+        draftBody = enforcerBody;
+        draftSubject = `${lead.company}`;
+        draftSource = 'enforcer_fallback';
       }
 
       // Insert message
@@ -1248,8 +1262,8 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, metadata)
          VALUES ($1, $2, $3, $4, $5, 'pending_ranger', $6)
          RETURNING *`,
-        [clientId, lead.id, channel, salesResult.subject || null, salesResult.body,
-         JSON.stringify({ source: 'signal_hunt', signal: meta.signal })]
+        [clientId, lead.id, channel, draftSubject, draftBody,
+         JSON.stringify({ source: draftSource, signal: meta.signal })]
       );
       messagesDrafted++;
 
