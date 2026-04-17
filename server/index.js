@@ -72,10 +72,8 @@ app.get('/api/integrations/gmail/callback', async (req, res) => {
       const sig = decoded?.sig;
       if (!clientId || typeof clientId !== 'string' || !/^[0-9a-f-]{36}$/i.test(clientId)) throw new Error('invalid');
       // Verify HMAC signature to prevent state tampering
-      const crypto = require('crypto');
-      const { safeCompare } = require('./utils/crypto');
-      const expectedSig = crypto.createHmac('sha256', config.jwt.secret).update(clientId).digest('hex');
-      if (!safeCompare(sig, expectedSig)) throw new Error('invalid signature');
+      const { verifyOAuthState } = require('./utils/crypto');
+      if (!verifyOAuthState(clientId, sig)) throw new Error('invalid signature');
     } catch {
       return res.redirect(`${frontendUrl}/settings?gmail=error`);
     }
@@ -99,10 +97,8 @@ app.get('/api/integrations/calendar/callback', async (req, res) => {
       clientId = decoded?.clientId;
       const sig = decoded?.sig;
       if (!clientId || typeof clientId !== 'string' || !/^[0-9a-f-]{36}$/i.test(clientId)) throw new Error('invalid');
-      const crypto = require('crypto');
-      const { safeCompare } = require('./utils/crypto');
-      const expectedSig = crypto.createHmac('sha256', config.jwt.secret).update(clientId).digest('hex');
-      if (!safeCompare(sig, expectedSig)) throw new Error('invalid signature');
+      const { verifyOAuthState } = require('./utils/crypto');
+      if (!verifyOAuthState(clientId, sig)) throw new Error('invalid signature');
     } catch {
       return res.redirect(`${frontendUrl}/settings?calendar=error`);
     }
@@ -134,25 +130,31 @@ app.use('/api/import',       authMiddleware, tenantScope, clientContext, require
 // runWithClientContext(clientId, ...) so Claude calls get attributed.
 app.use('/api/autonomous', require('./routes/autonomous'));
 
-// Captain Beaver external API — token auth (MYCLAW_HOOK_TOKEN), no JWT required.
-// Used by OpenClaw integration for approvals, memory, leads, etc.
-const captainRoutes = require('./routes/myclaw');
-app.use('/api/captain', captainRoutes);
-app.use('/api/myclaw', captainRoutes);  // backward compat
-
 // Routes - super admin only (Beaver Solutions)
 app.use('/api/admin', authMiddleware, tenantScope, clientContext, superAdminOnly, require('./routes/admin'));
 
-// Health check — includes env diagnostics so Railway logs show what's misconfigured
-app.get('/health', (req, res) => {
+// Health check — probes DB connectivity and returns env diagnostics.
+// Returns 503 if DB is unreachable so Railway stops routing traffic to a broken instance.
+app.get('/health', async (req, res) => {
   let encKeyOk = false;
   try { require('./services/secrets').testEncKey(); encKeyOk = true; } catch {}
-  res.json({
-    status: 'ok',
+
+  let dbOk = false;
+  try {
+    await pool.query('SELECT 1');
+    dbOk = true;
+  } catch (err) {
+    logger.warn({ msg: 'Health check DB probe failed', err: err.message });
+  }
+
+  const status = dbOk ? 200 : 503;
+  res.status(status).json({
+    status: dbOk ? 'ok' : 'degraded',
     version: '2.0.0',
     tag: 'Autonomous',
     timestamp: new Date().toISOString(),
     env: {
+      database: dbOk ? 'ok' : 'unreachable',
       encryption_key: encKeyOk ? 'valid' : 'INVALID',
       brave: process.env.BRAVE_API_KEY ? 'set' : 'missing',
       anthropic: process.env.ANTHROPIC_API_KEY ? 'set' : 'missing',
@@ -178,6 +180,20 @@ if (process.env.NODE_ENV === 'production') {
 // Global error handler (must be last)
 app.use(errorHandler);
 
+// Process-level safety net — log and exit cleanly so Railway restarts us
+// rather than leaving a zombie process with half-initialized background jobs.
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  logger.error({ msg: 'UNHANDLED_REJECTION', err: err.message, stack: err.stack });
+  // Give logger 500ms to flush, then exit so orchestrator restarts the process
+  setTimeout(() => process.exit(1), 500);
+});
+
+process.on('uncaughtException', (err) => {
+  logger.error({ msg: 'UNCAUGHT_EXCEPTION', err: err.message, stack: err.stack });
+  setTimeout(() => process.exit(1), 500);
+});
+
 async function start() {
   try {
     logger.info({ msg: 'Running database migrations...' });
@@ -199,7 +215,9 @@ async function start() {
     });
 
     // Pre-warm client config cache (reads clients/<slug>/config.md for each client)
-    require('./services/clientConfig').warmCache().catch(() => {});
+    require('./services/clientConfig').warmCache().catch(err => {
+      logger.warn({ msg: 'Client config cache warm failed', err: err.message });
+    });
 
     // Discord bot
     const { startDiscordBot, notifyDiscordPendingApprovals, postDiscordAlert } = require('./services/discordBot');
@@ -212,11 +230,21 @@ async function start() {
     // Reply detection + Discord approvals notify + calendar sync — poll every 5 minutes
     const { checkAllClients } = require('./services/replyDetector');
     const calendarService = require('./services/googleCalendar');
+    let _replyDetectorRunning = false;
     setInterval(() => {
-      checkAllClients().catch(err => {
-        logger.warn({ msg: 'Reply detector error', err: err.message });
-        postDiscordAlert('reply polling', err.message).catch(() => {});
-      });
+      // Skip if previous run hasn't finished — prevents overlap under slow Gmail API
+      if (_replyDetectorRunning) {
+        logger.warn({ msg: 'Reply detector previous run still in flight, skipping tick' });
+        return;
+      }
+      _replyDetectorRunning = true;
+      checkAllClients()
+        .catch(err => {
+          logger.warn({ msg: 'Reply detector error', err: err.message });
+          postDiscordAlert('reply polling', err.message).catch(() => {});
+        })
+        .finally(() => { _replyDetectorRunning = false; });
+
       notifyDiscordPendingApprovals().catch(err => {
         logger.warn({ msg: 'Discord approvals notify error', err: err.message });
         postDiscordAlert('approvals polling', err.message).catch(() => {});
@@ -354,8 +382,21 @@ async function start() {
 
     // DB Builder — Research Beaver maintains lead pool health
     const { runDbBuilder } = require('./services/dbBuilder');
+    let _dbBuilderRunning = false;
     setTimeout(() => {
-      setInterval(() => runDbBuilder().catch(err => logger.warn({ msg: 'DB Builder error', err: err.message })), 15 * 60 * 1000);
+      setInterval(() => {
+        // Skip if previous run hasn't finished — prevents overlap under slow search APIs
+        // or large client loops. dbBuilder.js also has its own internal _running guard;
+        // this is defence in depth at the scheduler level.
+        if (_dbBuilderRunning) {
+          logger.warn({ msg: 'DB Builder previous run still in flight, skipping tick' });
+          return;
+        }
+        _dbBuilderRunning = true;
+        runDbBuilder()
+          .catch(err => logger.warn({ msg: 'DB Builder error', err: err.message }))
+          .finally(() => { _dbBuilderRunning = false; });
+      }, 15 * 60 * 1000);
       logger.info({ msg: 'DB Builder started (15 min interval)' });
     }, 3 * 60 * 1000); // 3min delay after startup
 

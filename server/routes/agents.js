@@ -6,46 +6,6 @@ const validate = require('../middleware/validate');
 const agentsService = require('../services/agents');
 const pool = require('../db/pool');
 
-// ── MyClaw diagnostic: test connection with detailed error info ──
-router.get('/myclaw/status', async (req, res) => {
-  const myclaw = require('../services/myclaw');
-  const axios = require('axios');
-  const configured = myclaw.isConfigured();
-  const baseUrl = process.env.MYCLAW_BASE_URL || '';
-  const hasToken = !!process.env.MYCLAW_HOOK_TOKEN;
-
-  if (!configured) {
-    return res.json({ data: { configured: false, base_url: baseUrl || 'missing', token: hasToken ? 'set' : 'missing' } });
-  }
-
-  // Try multiple endpoint paths to find the right one
-  const paths = ['/hooks/agent', '/hooks/wake', '/api/hooks/agent', '/api/v1/hooks/agent'];
-  const results = {};
-
-  for (const path of paths) {
-    try {
-      const url = `${baseUrl}${path}`;
-      const resp = await axios.post(url,
-        { message: 'ping', name: 'BeavrDam' },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${process.env.MYCLAW_HOOK_TOKEN}`,
-            'x-openclaw-token': process.env.MYCLAW_HOOK_TOKEN,
-          },
-          timeout: 10000,
-          validateStatus: () => true, // don't throw on 4xx/5xx
-        }
-      );
-      results[path] = { status: resp.status, statusText: resp.statusText, data: typeof resp.data === 'string' ? resp.data.substring(0, 200) : resp.data };
-    } catch (err) {
-      results[path] = { error: err.code || err.message };
-    }
-  }
-
-  return res.json({ data: { configured: true, base_url: baseUrl, token: 'set', endpoints_tested: results } });
-});
-
 router.post('/research/search',
   [body('query').notEmpty().trim(), validate],
   async (req, res, next) => {

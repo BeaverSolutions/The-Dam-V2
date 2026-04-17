@@ -40,12 +40,24 @@ async function runMigrations() {
       }
       logger.info({ msg: `Applying migration ${file}` });
       const sql = fs.readFileSync(path.join(migrationDir, file), 'utf8');
-      await client.query(sql);
-      // ON CONFLICT DO NOTHING guards against any remaining race conditions
-      await client.query(
-        'INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING',
-        [version]
-      );
+      // Wrap each migration in a transaction so partial failures roll back cleanly.
+      // Without this, a mid-file SQL error leaves the DB in a half-migrated state
+      // and the schema_migrations row is never written — next startup retries from
+      // an already-partially-applied schema and fails with confusing errors.
+      await client.query('BEGIN');
+      try {
+        await client.query(sql);
+        // ON CONFLICT DO NOTHING guards against any remaining race conditions
+        await client.query(
+          'INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING',
+          [version]
+        );
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        logger.error({ msg: `Migration ${file} FAILED — rolled back`, err: err.message });
+        throw err;
+      }
       logger.info({ msg: `Migration ${file} applied successfully` });
     }
 

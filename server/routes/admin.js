@@ -365,6 +365,12 @@ router.post('/access-codes/generate',
   [body('client_id').isUUID(), validate],
   async (req, res, next) => {
     try {
+      // Verify client exists before generating a code (gives clear 404 instead of
+      // a cryptic FK violation error from the INSERT).
+      const clientCheck = await pool.query('SELECT id FROM clients WHERE id = $1', [req.body.client_id]);
+      if (clientCheck.rows.length === 0) {
+        return res.status(404).json({ error: 'Client not found', code: 'CLIENT_NOT_FOUND' });
+      }
       const code = generateAccessCode();
       const result = await pool.query(
         `INSERT INTO access_codes (client_id, code) VALUES ($1, $2) RETURNING *`,

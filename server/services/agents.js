@@ -1291,6 +1291,21 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         draftSource = 'enforcer_fallback';
       }
 
+      // ── Race-condition dedup guard ─────────────────────────────────────
+      // Prevent duplicate messages if this lead was picked up by a parallel
+      // pipeline run (e.g. two concurrent directorExecute calls, or DB-first
+      // + external research collision on the same lead).
+      const existingActiveMsg = await pool.query(
+        `SELECT id FROM messages WHERE client_id = $1 AND lead_id = $2
+           AND status IN ('pending_ranger', 'pending_approval', 'approved', 'pending_send', 'sent')
+         LIMIT 1`,
+        [clientId, lead.id]
+      );
+      if (existingActiveMsg.rows.length > 0) {
+        console.warn(`[signal-pipeline] Dedup guard: ${lead.name} already has an active message — skipping insert`);
+        continue;
+      }
+
       // Insert message
       const { rows: [msg] } = await pool.query(
         `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, metadata)
@@ -2771,16 +2786,7 @@ async function directorBrief(clientId) {
 
   let summary = `You have ${stats.total_leads} leads in the pipeline, ${stats.messages_sent} messages generated, and ${stats.pending_approvals} approval${stats.pending_approvals !== 1 ? 's' : ''} waiting for your review.`;
 
-  // MyClaw brief (strategic context) → Claude fallback
-  const myClawSvc = require('./myclaw');
-  if (myClawSvc.isConfigured()) {
-    try {
-      const result = await myClawSvc.myClawBrief({ clientId, stats, recent_activity: logsRes.rows });
-      if (result?.summary) { summary = result.summary; }
-    } catch { /* fall through to Claude */ }
-  }
-
-  if (summary === `You have ${stats.total_leads} leads in the pipeline, ${stats.messages_sent} messages generated, and ${stats.pending_approvals} approval${stats.pending_approvals !== 1 ? 's' : ''} waiting for your review.` && callAgent) {
+  if (callAgent) {
     try {
       const result = await callAgent(
         'brief_writer',

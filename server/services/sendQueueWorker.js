@@ -65,9 +65,19 @@ async function processJob(job) {
 
   try {
     const sendFn = getSendFn();
-    await sendFn(client_id, message_id, 'auto');
+    const result = await sendFn(client_id, message_id, 'auto');
 
-    // Success
+    // sendMessageById returns { status: 'sent'|'failed'|'simulated' } instead of throwing
+    // on expected failures (Gmail 401/429/5xx, bad email, etc.). Without checking the
+    // return value, a failed send would incorrectly mark the queue entry as 'sent'.
+    if (result && result.status === 'failed') {
+      const err = new Error(result.reason || 'Send failed');
+      err.failureClass = result.failure_class || 'unknown';
+      err.reauthRequired = !!result.reauth_required;
+      throw err;
+    }
+
+    // Success (or simulated — both are terminal states for the queue entry)
     await pool.query(
       `UPDATE send_queue SET status = 'sent', updated_at = NOW() WHERE id = $1`,
       [id]
@@ -76,9 +86,13 @@ async function processJob(job) {
 
   } catch (err) {
     const newAttemptCount = attempt_count + 1;
-    console.warn(`[send_queue] Send failed for message ${message_id} (attempt ${newAttemptCount}):`, err.message);
+    console.warn(`[send_queue] Send failed for message ${message_id} (attempt ${newAttemptCount}, class=${err.failureClass || 'thrown'}):`, err.message);
 
-    if (newAttemptCount >= MAX_ATTEMPTS) {
+    // Reauth-required failures are permanent until the user reconnects their provider.
+    // No point burning retries — fail fast and surface the alert so operator reconnects.
+    const forcePermanent = err.reauthRequired === true || err.failureClass === 'permanent';
+
+    if (forcePermanent || newAttemptCount >= MAX_ATTEMPTS) {
       // Final failure — mark dead, alert
       await pool.query(
         `UPDATE send_queue SET status = 'failed', attempt_count = $1,
@@ -96,14 +110,21 @@ async function processJob(job) {
         metadata: {
           attempts: newAttemptCount,
           error: err.message,
-          alert: 'Message could not be sent after 3 attempts — manual intervention required',
+          failure_class: err.failureClass || 'thrown',
+          reauth_required: err.reauthRequired === true,
+          alert: err.reauthRequired
+            ? 'Email provider token expired/revoked — reconnect Gmail in Settings to resume sending'
+            : 'Message could not be sent after 3 attempts — manual intervention required',
         },
       }).catch(() => {});
 
-      console.error(`[send_queue] PERMANENT FAILURE — message ${message_id} after ${newAttemptCount} attempts. Admin action required.`);
+      console.error(`[send_queue] PERMANENT FAILURE — message ${message_id} after ${newAttemptCount} attempts (${err.failureClass || 'thrown'}). Admin action required.`);
     } else {
-      // Schedule retry with exponential backoff
-      const interval = RETRY_INTERVALS[newAttemptCount - 1] || '2 hours';
+      // Schedule retry with exponential backoff — rate-limited uses the longer interval up front
+      const retryIndex = err.failureClass === 'rate_limited'
+        ? Math.min(newAttemptCount, RETRY_INTERVALS.length - 1)
+        : newAttemptCount - 1;
+      const interval = RETRY_INTERVALS[retryIndex] || '2 hours';
       await pool.query(
         `UPDATE send_queue SET status = 'pending', attempt_count = $1,
          next_retry_at = NOW() + INTERVAL '${interval}',

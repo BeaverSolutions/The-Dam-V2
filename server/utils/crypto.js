@@ -45,4 +45,31 @@ function safeCompare(a, b) {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
-module.exports = { encrypt, decrypt, safeCompare };
+/**
+ * Return the secret used to sign OAuth state parameters.
+ * Prefers OAUTH_STATE_SECRET (dedicated) and falls back to JWT_SECRET for
+ * backward compatibility so existing deployments keep working until the new
+ * env var is set. Using a separate secret means a JWT-secret leak does not
+ * let an attacker forge OAuth callback state (and vice versa).
+ */
+function getOAuthStateSecret() {
+  return process.env.OAUTH_STATE_SECRET || process.env.JWT_SECRET;
+}
+
+/**
+ * Sign a client_id for inclusion in an OAuth state parameter. Returns hex HMAC.
+ */
+function signOAuthState(clientId) {
+  return crypto.createHmac('sha256', getOAuthStateSecret()).update(String(clientId)).digest('hex');
+}
+
+/**
+ * Verify an OAuth state signature against a clientId. Timing-safe.
+ */
+function verifyOAuthState(clientId, sig) {
+  if (!clientId || !sig) return false;
+  const expected = signOAuthState(clientId);
+  return safeCompare(sig, expected);
+}
+
+module.exports = { encrypt, decrypt, safeCompare, signOAuthState, verifyOAuthState };

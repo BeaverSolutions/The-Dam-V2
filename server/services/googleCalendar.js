@@ -24,8 +24,8 @@ function getOAuthClient() {
 function getAuthUrl(clientId) {
   const client = getOAuthClient();
   if (!client) return null;
-  const crypto = require('crypto');
-  const sig = crypto.createHmac('sha256', process.env.JWT_SECRET).update(clientId).digest('hex');
+  const { signOAuthState } = require('../utils/crypto');
+  const sig = signOAuthState(clientId);
   return client.generateAuthUrl({
     access_type: 'offline',
     prompt: 'select_account consent',

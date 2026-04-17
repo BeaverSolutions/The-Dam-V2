@@ -11,6 +11,9 @@ const logger = require('../utils/logger');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
+// Strict UUID v1-v5 validator — rejects malformed input before it reaches SQL.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 async function requireInternalKey(req, res, next) {
   const { safeCompare } = require('../utils/crypto');
   const key = req.headers['x-internal-key'];
@@ -18,10 +21,16 @@ async function requireInternalKey(req, res, next) {
     return res.status(401).json({ error: 'Unauthorized', code: 'INVALID_KEY' });
   }
 
+  // Validate client_id format if supplied — reject bad UUIDs before any DB query
+  // so we don't log or trace untrusted input through the system.
+  const clientId = req.body?.client_id || req.query?.client_id;
+  if (clientId && !UUID_RE.test(String(clientId))) {
+    return res.status(400).json({ error: 'Invalid client_id format', code: 'INVALID_CLIENT_ID' });
+  }
+
   // Gate n8n by client whitelist (env: AUTONOMOUS_ENABLED_CLIENTS=beaver-solutions,trl)
   const whitelist = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
   if (whitelist.length > 0) {
-    const clientId = req.body?.client_id || req.query?.client_id;
     if (clientId) {
       const { rows } = await pool.query('SELECT slug FROM clients WHERE id = $1', [clientId]);
       const slug = rows[0]?.slug;

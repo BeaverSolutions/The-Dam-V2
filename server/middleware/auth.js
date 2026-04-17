@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const config = require('../config');
 
 function authMiddleware(req, res, next) {
-  // Accept httpOnly cookie first, fall back to Bearer header (MyClaw compatibility)
+  // Accept httpOnly cookie first, fall back to Bearer header
   const cookieToken = req.cookies?.dam_token;
   const authHeader = req.headers.authorization;
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;

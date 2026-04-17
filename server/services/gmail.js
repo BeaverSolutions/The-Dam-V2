@@ -24,8 +24,8 @@ function getOAuthClient() {
 function getAuthUrl(clientId) {
   const client = getOAuthClient();
   if (!client) return null;
-  const crypto = require('crypto');
-  const sig = crypto.createHmac('sha256', process.env.JWT_SECRET).update(clientId).digest('hex');
+  const { signOAuthState } = require('../utils/crypto');
+  const sig = signOAuthState(clientId);
   return client.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
@@ -239,18 +239,62 @@ async function sendEmail(clientId, { to, subject, body, messageDbId }) {
 
     return { status: 'sent', messageId, threadId };
   } catch (err) {
-    console.warn('[gmail] Send failed:', err.message);
-    // Log the failure
+    // Classify the failure so the send queue worker can react appropriately:
+    //   - reauth_required   → token invalid/revoked, retries are pointless until user reconnects
+    //   - rate_limited      → Gmail 429, retry with backoff
+    //   - server_error      → Gmail 5xx, retry with backoff
+    //   - transient         → network/timeout, retry soon
+    //   - permanent         → bad address, malformed request — do not retry
+    const status = err.code || err.status || err.response?.status || 0;
+    const msg = String(err.message || '').toLowerCase();
+
+    let failureClass = 'permanent';
+    let reauthRequired = false;
+
+    if (status === 401 || status === 403 ||
+        /invalid_grant|invalid_token|token has been expired or revoked|unauthorized/.test(msg)) {
+      failureClass = 'reauth_required';
+      reauthRequired = true;
+    } else if (status === 429 || /rate.?limit|quota/.test(msg)) {
+      failureClass = 'rate_limited';
+    } else if (status >= 500 && status < 600) {
+      failureClass = 'server_error';
+    } else if (/etimedout|econnreset|econnrefused|enotfound|socket hang up|network/.test(msg)) {
+      failureClass = 'transient';
+    }
+
+    console.warn(`[gmail] Send failed (${failureClass}, status=${status}):`, err.message);
+
+    // If the refresh token is dead, purge stored tokens so the dashboard clearly
+    // shows "not connected" and the operator gets prompted to reconnect. The send
+    // queue will mark the message as permanently failed on the next retry.
+    if (reauthRequired) {
+      try {
+        await disconnect(clientId);
+        console.warn(`[gmail] Purged Gmail tokens for client ${clientId} — reauth required`);
+      } catch (purgeErr) {
+        console.warn(`[gmail] Failed to purge dead tokens: ${purgeErr.message}`);
+      }
+    }
+
     try {
       await logsService.createLog(clientId, {
         agent: 'system',
         action: 'email_failed',
         target_type: 'message',
         target_id: null,
-        metadata: { to, subject, reason: err.message },
+        metadata: { to, subject, reason: err.message, failure_class: failureClass, status },
       });
     } catch {}
-    return { status: 'failed', reason: err.message, messageId: null, threadId: null };
+
+    return {
+      status: 'failed',
+      reason: err.message,
+      failure_class: failureClass,
+      reauth_required: reauthRequired,
+      messageId: null,
+      threadId: null,
+    };
   }
 }
 
