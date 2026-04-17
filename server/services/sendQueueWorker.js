@@ -86,7 +86,45 @@ async function processJob(job) {
 
   } catch (err) {
     const newAttemptCount = attempt_count + 1;
-    console.warn(`[send_queue] Send failed for message ${message_id} (attempt ${newAttemptCount}, class=${err.failureClass || 'thrown'}):`, err.message);
+    const errMsg = String(err.message || '');
+    const errStatus = err.status || 0;
+    console.warn(`[send_queue] Send failed for message ${message_id} (attempt ${newAttemptCount}, class=${err.failureClass || 'thrown'}):`, errMsg);
+
+    // Terminal success: message was already sent (HTTP 409 from sendMessageById's
+    // FOR UPDATE status check). Happens when attempt 1 actually shipped the email
+    // but the queue 'sent' update didn't land (process restart, DB hiccup, etc).
+    // Retrying just thrashes — the email is already out the door.
+    if (errStatus === 409 || /already sent/i.test(errMsg)) {
+      await pool.query(
+        `UPDATE send_queue SET status = 'sent', error_reason = 'already_sent_reconciled', updated_at = NOW()
+         WHERE id = $1`,
+        [id]
+      );
+      console.log(`[send_queue] Message ${message_id} was already sent — queue reconciled, no retry`);
+      return;
+    }
+
+    // Other terminal non-retryable states — skip the retry ladder:
+    // 404 message not found, 400 wrong status, bad email format. Retrying these
+    // just burns attempts; let it fail fast so the operator sees the real reason.
+    if (errStatus === 404 || errStatus === 400 ||
+        /not found|must be approved|no lead email|invalid.*email/i.test(errMsg)) {
+      await pool.query(
+        `UPDATE send_queue SET status = 'failed', attempt_count = $1,
+         error_reason = $2, updated_at = NOW()
+         WHERE id = $3`,
+        [newAttemptCount, errMsg, id]
+      );
+      await logsService.createLog(client_id, {
+        agent: 'system',
+        action: 'send_failed_permanent',
+        target_type: 'message',
+        target_id: message_id,
+        metadata: { error: errMsg, status: errStatus, reason: 'terminal_state' },
+      }).catch(() => {});
+      console.warn(`[send_queue] Terminal state — ${message_id} will not be retried: ${errMsg}`);
+      return;
+    }
 
     // Reauth-required failures are permanent until the user reconnects their provider.
     // No point burning retries — fail fast and surface the alert so operator reconnects.
