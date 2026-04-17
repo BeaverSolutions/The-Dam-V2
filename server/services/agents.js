@@ -376,11 +376,35 @@ ${personaContext}${fileContext}${rangerContext}`,
 
       // Primary: structured JSON response with body field
       if (result?.body) {
+        let finalSubject = result.subject || null;
+        let finalBody = result.body;
+
+        // Defensive unwrap: Haiku intermittently returns nested JSON inside the
+        // body field, i.e. result = {subject: "X", body: '{"subject":"X","body":"Hi AJ..."}'}.
+        // Without this check, the raw JSON string gets stored as the message body and
+        // ends up in the approval queue as literal {"subject":"...","body":"..."}.
+        if (typeof finalBody === 'string' && /^\s*\{[\s\S]*?"body"\s*:/.test(finalBody)) {
+          try {
+            const inner = JSON.parse(finalBody);
+            if (typeof inner?.body === 'string' && inner.body.trim().length > 0) {
+              console.warn(`[agents] Sales Beaver returned nested JSON body for lead ${lead_id} — unwrapping inner body`);
+              finalBody = inner.body;
+              // Inner subject only overrides when outer didn't provide one
+              if (!finalSubject && typeof inner?.subject === 'string') {
+                finalSubject = inner.subject;
+              }
+            }
+          } catch (err) {
+            console.warn(`[agents] Failed to parse nested JSON body for lead ${lead_id}: ${err.message}`);
+            // Keep original — better a broken message that Enforcer will catch than a silent drop
+          }
+        }
+
         return {
           lead_id,
           channel,
-          subject: stripEmDashes(result.subject) || null,
-          body:    stripEmDashes(result.body),
+          subject: stripEmDashes(finalSubject) || null,
+          body:    stripEmDashes(finalBody),
           status:  'pending_ranger',
         };
       }
