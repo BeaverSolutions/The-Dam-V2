@@ -20,14 +20,30 @@ async function getApiKey(clientId) {
 
 /* ─── Domain guesser (fallback) ─────────────────────────── */
 
-function domainFromCompany(company) {
-  if (!company) return null;
-  return company
+// Returns [primaryDomain, ...fallbacks] to try in order.
+// Covers MY (Sdn Bhd), SG (Pte Ltd), AU (Pty Ltd) + standard US/UK suffixes.
+function domainsFromCompany(company) {
+  if (!company) return [];
+  const cleaned = company
     .toLowerCase()
-    .replace(/\b(inc|ltd|llc|corp|co|group|holdings|technologies|technology|solutions|services|global)\b/gi, '')
+    // Multi-word suffixes first (order matters)
+    .replace(/\bsdn\.?\s*bhd\.?\b/gi, '')
+    .replace(/\bpte\.?\s*ltd\.?\b/gi, '')
+    .replace(/\bpty\.?\s*ltd\.?\b/gi, '')
+    // Single-word suffixes
+    .replace(/\b(inc|ltd|llc|corp|co|group|holdings|technologies|technology|solutions|services|global|berhad|bhd|sdn|pte|pty|plc|gmbh|ag|bv|nv|sa)\b/gi, '')
     .replace(/[^a-z0-9\s]/g, '')
     .trim()
-    .replace(/\s+/g, '') + '.com';
+    .replace(/\s+/g, '');
+
+  if (!cleaned) return [];
+  // Try .com first, then .com.my (Malaysian companies often use both)
+  return [`${cleaned}.com`, `${cleaned}.com.my`];
+}
+
+// Keep legacy single-return for domainSearch callers
+function domainFromCompany(company) {
+  return domainsFromCompany(company)[0] || null;
 }
 
 /* ─── Find email by name + domain ────────────────────────── */
@@ -37,43 +53,46 @@ async function findEmail(clientId, { firstName, lastName, domain, company }) {
   const apiKey = await getApiKey(clientId);
   if (!apiKey) return null;
 
-  const targetDomain = domain || domainFromCompany(company);
-  if (!targetDomain) return null;
+  const domainsToTry = domain ? [domain] : domainsFromCompany(company);
+  if (!domainsToTry.length) return null;
 
-  try {
-    const resp = await axios.get(`${BASE}/email-finder`, {
-      params: {
-        domain: targetDomain,
-        first_name: firstName,
-        last_name: lastName,
-      },
-      headers: { 'X-Api-Key': apiKey },
-      timeout: 10000,
-    });
+  for (const targetDomain of domainsToTry) {
+    try {
+      const resp = await axios.get(`${BASE}/email-finder`, {
+        params: {
+          domain: targetDomain,
+          first_name: firstName,
+          last_name: lastName,
+        },
+        headers: { 'X-Api-Key': apiKey },
+        timeout: 10000,
+      });
 
-    const data = resp.data?.data;
-    if (!data?.email) return null;
-
-    return {
-      email: data.email,
-      confidence: data.score || 0,
-      verified: data.verification?.status === 'valid',
-    };
-  } catch (err) {
-    const status = err.response?.status;
-    if (status === 401 || status === 403) {
-      console.warn('[hunter] Invalid API key');
+      const data = resp.data?.data;
+      if (data?.email) {
+        return {
+          email: data.email,
+          confidence: data.score || 0,
+          verified: data.verification?.status === 'valid',
+        };
+      }
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 401 || status === 403) {
+        console.warn('[hunter] Invalid API key');
+        return null;
+      }
+      if (status === 429) {
+        console.warn('[hunter] Rate limit hit');
+        return null;
+      }
+      // 404 = no email found for this domain — try next
+      if (status === 404) continue;
+      console.warn('[hunter] findEmail error:', err.message);
       return null;
     }
-    if (status === 429) {
-      console.warn('[hunter] Rate limit hit');
-      return null;
-    }
-    // 404 = no email found — not a real error
-    if (status === 404) return null;
-    console.warn('[hunter] findEmail error:', err.message);
-    return null;
   }
+  return null;
 }
 
 /* ─── Domain search (fallback: find anyone at company) ────── */
