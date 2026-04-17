@@ -503,12 +503,59 @@ async function start() {
       }
     }
 
+    // Daily agent self-reflection — 11:00 UTC = 7pm MYT, once per day.
+    // Runs 1 hour before Sunday's weekly review so Sunday's daily gets captured first.
+    // Each agent reflects on its own logs activity. Activity-gated (see learningEngine).
+    const DAILY_REFLECTION_AGENTS = ['research_beaver', 'sales_beaver', 'ranger', 'captain_beaver'];
+
+    async function runDailyAgentReflections() {
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+      const utcMin  = now.getUTCMinutes();
+      if (utcHour !== 11 || utcMin > 10) return; // 11:00–11:10 UTC window
+
+      const dedupeKey = `daily_reflections_${now.toISOString().slice(0, 10)}`;
+      const { rows } = await pool.query(
+        `SELECT 1 FROM agent_memory WHERE agent = 'captain' AND key = $1 LIMIT 1`,
+        [dedupeKey]
+      );
+      if (rows.length > 0) return; // already ran today
+
+      // Mark as ran before the loop so a crash mid-run can't cause a double-fire on restart
+      const slug = process.env.TELEGRAM_CLIENT_SLUG || 'beaver-solutions';
+      await pool.query(
+        `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+         SELECT id, 'captain', $1, '"sent"'::jsonb, 'config' FROM clients WHERE slug = $2`,
+        [dedupeKey, slug]
+      ).catch(() => {});
+
+      const { rows: [clientRow] } = await pool.query(
+        `SELECT id FROM clients WHERE slug = $1 LIMIT 1`,
+        [slug]
+      );
+      if (!clientRow) return;
+
+      const { generateAgentDailySummary } = require('./services/learningEngine');
+      for (const agent of DAILY_REFLECTION_AGENTS) {
+        const result = await generateAgentDailySummary(clientRow.id, agent).catch(err => {
+          logger.warn({ msg: 'Daily reflection failed', agent, err: err.message });
+          return { error: err.message };
+        });
+        if (result?.reflection) {
+          logger.info({ msg: 'Daily reflection captured', agent, activity_count: result.activity_count });
+        } else if (result?.skipped) {
+          logger.info({ msg: 'Daily reflection skipped', agent, reason: result.skipped });
+        }
+      }
+    }
+
     // Poll every 10 minutes — each function self-guards against running outside its window
     setInterval(() => {
       runMorningBrief().catch(err => logger.warn({ msg: 'Morning brief poll error', err: err.message }));
       runWeeklyReview().catch(err => logger.warn({ msg: 'Weekly review poll error', err: err.message }));
+      runDailyAgentReflections().catch(err => logger.warn({ msg: 'Daily reflection poll error', err: err.message }));
     }, 10 * 60 * 1000);
-    logger.info({ msg: 'Captain Beaver cron jobs registered (10 min poll, 9am MYT brief, Sunday 8pm MYT review)' });
+    logger.info({ msg: 'Captain Beaver cron jobs registered (10 min poll: 9am brief, 7pm daily reflections, Sunday 8pm review, all MYT)' });
 
     // ── LinkedIn stale connection sweep ─────────────────────────────────────
     // Runs every 6 hours. Finds linkedin_requested messages older than 7 days

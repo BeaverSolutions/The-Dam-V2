@@ -75,6 +75,80 @@ async function postRangerRejection(clientId, { messageBody, notes, score, channe
   });
 }
 
+// ─── Phase 1.5: Daily agent self-reflection ────────────────────────────────
+// Each agent reviews today's activity from the logs table and writes a short
+// reflection (did_well / went_wrong / focus_tomorrow) to shared memory.
+// Activity-gated: skips silently if the agent took fewer than MIN_ACTIVITY
+// actions today, so slow days don't pollute memory with vague summaries.
+
+const DAILY_REFLECTION_MIN_ACTIVITY = 3;
+
+async function generateAgentDailySummary(clientId, agent) {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Idempotent: skip if today's reflection for this agent is already written
+    const existing = await getMemory(clientId, 'shared', `daily_${agent}_${today}`);
+    if (existing) return { skipped: 'already_ran' };
+
+    // Pull today's activity for this agent from the logs table
+    const { rows: activity } = await pool.query(
+      `SELECT action, metadata, created_at
+         FROM logs
+        WHERE client_id = $1
+          AND agent = $2
+          AND created_at >= CURRENT_DATE
+        ORDER BY created_at ASC
+        LIMIT 100`,
+      [clientId, agent]
+    );
+
+    if (activity.length < DAILY_REFLECTION_MIN_ACTIVITY) {
+      return { skipped: 'below_threshold', count: activity.length };
+    }
+
+    // Compact activity summary for the reflection prompt
+    const activitySummary = activity
+      .map(a => {
+        const note = a.metadata?.notes || a.metadata?.reason || a.metadata?.feedback;
+        return note ? `${a.action} (${String(note).slice(0, 60)})` : a.action;
+      })
+      .join(', ');
+
+    const prompt = `You are the ${agent} for The Dam outbound sales system. Here is what you did today (${activity.length} actions):
+
+${activitySummary}
+
+Reflect in 2-3 sentences covering specifically: one concrete thing that went well, one concrete friction or mistake (if any — skip if none), and one specific focus for tomorrow. Be specific to what you actually did. No vague self-congratulation. No hedging. Return {"summary": "your reflection"}.`;
+
+    const result = await callAgent('brief_writer', prompt, { clientId });
+    const reflection = (result?.summary || '').trim();
+
+    // Empty or unparseable reflection → don't pollute memory
+    if (!reflection || reflection.length < 20) {
+      return { skipped: 'empty_reflection' };
+    }
+
+    const entry = {
+      ts: new Date().toISOString(),
+      agent,
+      date: today,
+      activity_count: activity.length,
+      reflection,
+    };
+
+    // Date-keyed per-agent record for point-in-time lookup
+    await setMemory(clientId, 'shared', `daily_${agent}_${today}`, entry);
+    // Rolling log capped at 30 days so Phase 2 strategist has a week-of-history window
+    await appendSharedMemory(clientId, `daily_${agent}_log`, entry, 30);
+
+    return entry;
+  } catch (err) {
+    logger.warn({ msg: 'generateAgentDailySummary failed', agent, err: err.message });
+    return { error: err.message };
+  }
+}
+
 // ─── Telegram history (DB-backed, cap 6 turns × 4000 chars) ───────────────
 
 async function getTelegramHistory(clientId, chatId) {
@@ -422,6 +496,7 @@ module.exports = {
   postCampaignDebrief,
   postReplyLearning,
   postRangerRejection,
+  generateAgentDailySummary,
   generateWeeklyReview,
   injectMemoryContext,
 };
