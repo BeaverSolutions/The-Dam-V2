@@ -39,6 +39,42 @@ async function getMemory(clientId, agent, key) {
   }
 }
 
+// ─── Shared memory (Phase 1: capture — populates data for Phase 2 strategy) ─
+// All agents read/write under agent='shared'. Used so Captain's weekly review
+// (Phase 2) has cross-agent signal to synthesize strategy from. No agent
+// READS from shared/ yet — this is pure capture.
+//
+// Keys in use:
+//   shared/wins           — positive replies with hook + industry + signal
+//   shared/mistakes       — Enforcer rejections with reason + score + excerpt
+//   shared/campaign_trend — per-campaign metrics + pass/reply rates
+
+async function appendSharedMemory(clientId, key, entry, maxEntries = 50) {
+  try {
+    const existing = await getMemory(clientId, 'shared', key);
+    const list = Array.isArray(existing) ? existing : [];
+    list.unshift({ ts: new Date().toISOString(), ...entry });
+    await setMemory(clientId, 'shared', key, list.slice(0, maxEntries));
+  } catch (err) {
+    logger.warn({ msg: 'appendSharedMemory failed', key, err: err.message });
+  }
+}
+
+/**
+ * Capture an Enforcer rejection so Phase 2 strategy can see rejection patterns.
+ * Called from rangerReview when it returns approved=false.
+ */
+async function postRangerRejection(clientId, { messageBody, notes, score, channel, leadIndustry }) {
+  await appendSharedMemory(clientId, 'mistakes', {
+    type: 'enforcer_rejection',
+    excerpt: typeof messageBody === 'string' ? messageBody.slice(0, 240) : null,
+    notes: typeof notes === 'string' ? notes.slice(0, 400) : null,
+    score: typeof score === 'number' ? score : null,
+    channel: channel || null,
+    industry: leadIndustry || null,
+  });
+}
+
 // ─── Telegram history (DB-backed, cap 6 turns × 4000 chars) ───────────────
 
 async function getTelegramHistory(clientId, chatId) {
@@ -122,6 +158,17 @@ async function postCampaignDebrief(clientId, {
     const log = Array.isArray(existing) ? existing : [];
     log.push({ planId, passRate, leadsFound, messagesDrafted, ts: entry.ts });
     await setMemory(clientId, 'director', 'campaign_log', log.slice(-30)); // last 30 campaigns
+
+    // Shared capture — Phase 2 weekly strategy will read campaign_trend
+    await appendSharedMemory(clientId, 'campaign_trend', {
+      type: 'campaign_complete',
+      plan_id: planId,
+      leads_found: leadsFound,
+      messages_drafted: messagesDrafted,
+      enforcer_passed: enforcerPassed,
+      enforcer_failed: enforcerFailed,
+      pass_rate: passRate,
+    }, 30);
   } catch (err) {
     logger.warn({ msg: 'postCampaignDebrief failed', err: err.message });
   }
@@ -162,6 +209,19 @@ async function postReplyLearning(clientId, {
     patterns.updated_at = new Date().toISOString();
 
     await setMemory(clientId, 'sales_beaver', 'reply_patterns', patterns);
+
+    // Shared capture — winning hooks go into shared/wins for Phase 2 strategy.
+    // Only positive replies count as wins (neutral/objection/no_fit don't
+    // validate the hook). Non-positive outcomes still go into the sales_beaver
+    // reply_patterns above for full classification visibility.
+    if (sentiment === 'positive') {
+      await appendSharedMemory(clientId, 'wins', {
+        type: 'positive_reply',
+        industry: leadIndustry,
+        angle: angleUsed,
+        signal: companySignal,
+      });
+    }
   } catch (err) {
     logger.warn({ msg: 'postReplyLearning failed', err: err.message });
   }
@@ -361,6 +421,7 @@ module.exports = {
   postSessionLearning,
   postCampaignDebrief,
   postReplyLearning,
+  postRangerRejection,
   generateWeeklyReview,
   injectMemoryContext,
 };

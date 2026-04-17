@@ -725,6 +725,14 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
   const safety = brandSafetyCheck(message_body, lead_context);
   if (!safety.safe) {
     console.warn(`[enforcer] HARD REJECT (brand-safety): ${safety.reason}`);
+    // Shared-memory capture for Phase 2 weekly strategy (fire-and-forget)
+    require('./learningEngine').postRangerRejection(clientId, {
+      messageBody: message_body,
+      notes: `Brand safety violation: ${safety.reason}`,
+      score: 0,
+      channel: lead_context?.channel,
+      leadIndustry: lead_context?.industry,
+    }).catch(() => {});
     return {
       message_id,
       approved: false,
@@ -785,6 +793,17 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
           approved = true;
           result.decision = 'approve_with_edits';
           result.feedback = `${result.feedback || ''} [Auto-rescued: fixes=${fixesApplied.join(',')}, score=${score}]`.trim();
+        }
+
+        // Shared-memory capture on final rejection (fire-and-forget)
+        if (!approved) {
+          require('./learningEngine').postRangerRejection(clientId, {
+            messageBody: fixedBody,
+            notes: result.reject_reason || result.feedback,
+            score,
+            channel: lead_context?.channel,
+            leadIndustry: lead_context?.industry,
+          }).catch(() => {});
         }
 
         return {
