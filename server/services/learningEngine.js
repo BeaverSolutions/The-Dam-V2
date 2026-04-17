@@ -431,6 +431,155 @@ Return JSON only:
   }
 }
 
+// ─── Phase 2: Weekly Strategic Synthesis (Sonnet) ─────────────────────────
+// Reads the shared memory pool + daily reflections + 7-day DB stats and
+// produces a structured strategic directive the on-ground agents will
+// follow next week. Data-gated: skips silently if the shared pool is too
+// sparse to synthesize meaningfully (protects against noise strategy).
+//
+// Writes to shared/weekly_strategy_<weekLabel>. Cross-agent readable so
+// Phase 3 (apply-to-prompts) can pick it up without coordination.
+
+const STRATEGY_MIN_EVENTS = 5;
+
+async function generateWeeklyStrategy(clientId) {
+  try {
+    // 1. Pull 7-day shared pool
+    const wins     = await getMemory(clientId, 'shared', 'wins')           || [];
+    const mistakes = await getMemory(clientId, 'shared', 'mistakes')       || [];
+    const trend    = await getMemory(clientId, 'shared', 'campaign_trend') || [];
+
+    const weekAgoMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const withinWeek = entry => {
+      const ts = entry?.ts ? new Date(entry.ts).getTime() : 0;
+      return ts >= weekAgoMs;
+    };
+    const recentWins     = wins.filter(withinWeek);
+    const recentMistakes = mistakes.filter(withinWeek);
+    const recentTrend    = trend.filter(withinWeek);
+
+    // 2. Pull last 7 days of daily agent reflections (from Phase 1.5)
+    const AGENTS = ['research_beaver', 'sales_beaver', 'ranger', 'captain_beaver'];
+    const reflections = {};
+    for (const agent of AGENTS) {
+      const log = await getMemory(clientId, 'shared', `daily_${agent}_log`) || [];
+      reflections[agent] = log.filter(withinWeek).slice(0, 7);
+    }
+
+    // 3. Data-sufficiency gate — protect against noise synthesis on empty pool
+    const totalEvents = recentWins.length + recentMistakes.length + recentTrend.length;
+    if (totalEvents < STRATEGY_MIN_EVENTS) {
+      logger.info({
+        msg: 'Phase 2 weekly strategy skipped — shared pool too sparse',
+        total_events: totalEvents,
+        threshold: STRATEGY_MIN_EVENTS,
+        wins: recentWins.length,
+        mistakes: recentMistakes.length,
+        campaigns: recentTrend.length,
+      });
+      return { skipped: 'insufficient_data', total_events: totalEvents, threshold: STRATEGY_MIN_EVENTS };
+    }
+
+    // 4. Pull 7-day DB stats to ground the strategy in real outcome numbers
+    const { rows: [stats] } = await pool.query(
+      `SELECT
+         COUNT(DISTINCT m.id) FILTER (WHERE m.sent_at >= NOW() - INTERVAL '7 days') AS sent_7d,
+         COUNT(DISTINCT m.id) FILTER (WHERE m.sent_at >= NOW() - INTERVAL '7 days' AND m.replied_at IS NOT NULL) AS replies_7d,
+         COUNT(DISTINCT l.id) FILTER (WHERE l.pipeline_stage = 'meeting_booked' AND l.updated_at >= NOW() - INTERVAL '7 days') AS meetings_7d
+       FROM messages m
+       JOIN leads l ON l.id = m.lead_id
+       WHERE m.client_id = $1`,
+      [clientId]
+    );
+    const sent    = parseInt(stats?.sent_7d    || 0, 10);
+    const replies = parseInt(stats?.replies_7d || 0, 10);
+    const meetings = parseInt(stats?.meetings_7d || 0, 10);
+    const replyRatePct = sent > 0 ? +((replies / sent) * 100).toFixed(1) : 0;
+
+    // 5. Build compact context for Sonnet — trim fields to what the strategist needs
+    const reflectionsSummary = Object.entries(reflections)
+      .map(([agent, log]) => log.length === 0
+        ? null
+        : `${agent}:\n${log.map(d => `  ${d.date || d.ts?.slice(0, 10)}: ${d.reflection}`).join('\n')}`)
+      .filter(Boolean)
+      .join('\n\n') || 'No agent reflections logged this week.';
+
+    const prompt = `Analyse the past 7 days of outbound performance for The Dam. Produce your strategic directive for next week.
+
+== OVERALL STATS (7 days) ==
+Sent: ${sent}
+Replies: ${replies}
+Reply rate: ${replyRatePct}%
+Meetings booked: ${meetings}
+Total shared-memory events: ${totalEvents}
+
+== WINS (${recentWins.length} positive replies) ==
+${recentWins.length === 0 ? 'None.' : JSON.stringify(recentWins.slice(0, 10))}
+
+== MISTAKES (${recentMistakes.length} Enforcer rejections) ==
+${recentMistakes.length === 0 ? 'None.' : JSON.stringify(recentMistakes.slice(0, 10).map(m => ({ notes: m.notes, score: m.score, industry: m.industry, excerpt: m.excerpt?.slice(0, 120) })))}
+
+== CAMPAIGN TREND (${recentTrend.length} runs) ==
+${recentTrend.length === 0 ? 'None.' : JSON.stringify(recentTrend.slice(0, 7))}
+
+== DAILY AGENT REFLECTIONS ==
+${reflectionsSummary}
+
+Return your directive in the exact JSON schema from your system prompt. No prose wrapper.`;
+
+    // 6. Sonnet call — JSON output
+    const raw = await callAgent('weekly_strategist', prompt, { clientId });
+
+    // callAgent may return a parsed object or a raw string — handle both
+    let parsed = null;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      parsed = raw;
+    } else if (typeof raw === 'string') {
+      try {
+        const match = raw.match(/\{[\s\S]*\}/);
+        parsed = JSON.parse(match ? match[0] : raw);
+      } catch (err) {
+        logger.warn({ msg: 'Phase 2 strategy JSON parse failed', err: err.message, raw_preview: raw.slice(0, 200) });
+      }
+    }
+
+    if (!parsed || !parsed.director_notes) {
+      logger.warn({ msg: 'Phase 2 strategy returned no usable output' });
+      return { error: 'empty_or_invalid_output' };
+    }
+
+    // 7. Write to shared memory — cross-agent readable for Phase 3
+    const weekLabel = getWeekStart().toISOString().slice(0, 10);
+    const strategyRecord = {
+      ts: new Date().toISOString(),
+      week_label: weekLabel,
+      stats: { sent_7d: sent, replies_7d: replies, reply_rate_pct: replyRatePct, meetings_7d: meetings },
+      total_events: totalEvents,
+      top_industries: parsed.top_industries || [],
+      top_hooks: parsed.top_hooks || [],
+      dead_patterns: parsed.dead_patterns || [],
+      continue: parsed.continue || [],
+      pivot: parsed.pivot || [],
+      test: parsed.test || [],
+      director_notes: parsed.director_notes || '',
+      telegram_brief: parsed.telegram_brief || parsed.director_notes || '',
+    };
+    await setMemory(clientId, 'shared', `weekly_strategy_${weekLabel}`, strategyRecord);
+
+    logger.info({
+      msg: 'Phase 2 weekly strategy generated',
+      week_label: weekLabel,
+      total_events: totalEvents,
+      reply_rate_pct: replyRatePct,
+    });
+
+    return strategyRecord;
+  } catch (err) {
+    logger.error({ msg: 'generateWeeklyStrategy failed', err: err.message, stack: err.stack });
+    return { error: err.message };
+  }
+}
+
 // ─── Memory context injection ──────────────────────────────────────────────
 
 /**
@@ -500,5 +649,6 @@ module.exports = {
   postRangerRejection,
   generateAgentDailySummary,
   generateWeeklyReview,
+  generateWeeklyStrategy,
   injectMemoryContext,
 };

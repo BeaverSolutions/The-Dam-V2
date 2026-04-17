@@ -420,7 +420,7 @@ async function start() {
     // Morning brief: daily at 9:00 AM MYT (01:00 UTC). Sent via Telegram.
     // Weekly review: every Sunday at 8:00 PM MYT (12:00 UTC). Full self-review.
     // Dedup: each run checks agent_memory before running to avoid double-send on restart.
-    const { generateWeeklyReview } = require('./services/learningEngine');
+    const { generateWeeklyReview, generateWeeklyStrategy } = require('./services/learningEngine');
     const telegramService = require('./services/telegram');
     const { directorBrief } = require('./services/agents');
 
@@ -497,6 +497,17 @@ async function start() {
         if (brief) {
           await telegramService.sendMessage(chatId, `<b>Weekly review</b>\n\n${brief}`);
           logger.info({ msg: 'Weekly review sent via Telegram' });
+        }
+
+        // Phase 2 strategic synthesis — runs after the Haiku narrative. Data-gated:
+        // skips silently if shared memory pool has fewer than STRATEGY_MIN_EVENTS.
+        // Uses Sonnet for reasoning, writes to shared/weekly_strategy_<weekLabel>.
+        const strategy = await generateWeeklyStrategy(clientRow.id);
+        if (strategy?.telegram_brief) {
+          await telegramService.sendMessage(chatId, `<b>Weekly strategy</b>\n\n${strategy.telegram_brief}`);
+          logger.info({ msg: 'Weekly strategy sent via Telegram', events: strategy.total_events });
+        } else if (strategy?.skipped) {
+          logger.info({ msg: 'Weekly strategy skipped', reason: strategy.skipped, total_events: strategy.total_events });
         }
       } catch (err) {
         logger.warn({ msg: 'Weekly review failed', err: err.message });
