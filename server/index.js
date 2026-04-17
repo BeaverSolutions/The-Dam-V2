@@ -85,9 +85,13 @@ app.get('/api/integrations/gmail/callback', async (req, res) => {
   }
 });
 
-// Google Calendar OAuth callback — public (no auth, clientId from HMAC-signed state param)
+// Google Calendar OAuth callback — public (no auth, clientId from HMAC-signed state param).
+// Also handles Gmail OAuth flows (routed here because only the calendar callback URI
+// is whitelisted in Google Cloud Console for this OAuth client). state.type selects.
 app.get('/api/integrations/calendar/callback', async (req, res) => {
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+  // state.type may change the frontend redirect target — default to calendar
+  let flowType = 'calendar';
   try {
     const { code, state } = req.query;
     if (!code || !state) return res.redirect(`${frontendUrl}/settings?calendar=error`);
@@ -96,17 +100,29 @@ app.get('/api/integrations/calendar/callback', async (req, res) => {
       const decoded = JSON.parse(Buffer.from(state, 'base64').toString('utf8'));
       clientId = decoded?.clientId;
       const sig = decoded?.sig;
+      flowType = decoded?.type === 'gmail' ? 'gmail' : 'calendar';
       if (!clientId || typeof clientId !== 'string' || !/^[0-9a-f-]{36}$/i.test(clientId)) throw new Error('invalid');
       const { verifyOAuthState } = require('./utils/crypto');
-      if (!verifyOAuthState(clientId, sig)) throw new Error('invalid signature');
+      // Signature must match the type that was used when signing. Gmail flows
+      // sign with type='gmail'; legacy/calendar flows sign without type.
+      const verified = flowType === 'gmail'
+        ? verifyOAuthState(clientId, sig, 'gmail')
+        : verifyOAuthState(clientId, sig);
+      if (!verified) throw new Error('invalid signature');
     } catch {
-      return res.redirect(`${frontendUrl}/settings?calendar=error`);
+      return res.redirect(`${frontendUrl}/settings?${flowType}=error`);
     }
-    const calendarService = require('./services/googleCalendar');
-    await calendarService.exchangeCode(clientId, code);
-    res.redirect(`${frontendUrl}/settings?calendar=connected`);
+    if (flowType === 'gmail') {
+      const gmailService = require('./services/gmail');
+      await gmailService.exchangeCode(clientId, code);
+      res.redirect(`${frontendUrl}/settings?gmail=connected`);
+    } else {
+      const calendarService = require('./services/googleCalendar');
+      await calendarService.exchangeCode(clientId, code);
+      res.redirect(`${frontendUrl}/settings?calendar=connected`);
+    }
   } catch {
-    res.redirect(`${frontendUrl}/settings?calendar=error`);
+    res.redirect(`${frontendUrl}/settings?${flowType}=error`);
   }
 });
 

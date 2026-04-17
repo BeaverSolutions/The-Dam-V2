@@ -12,12 +12,27 @@ try {
 
 /* ─── OAuth client ───────────────────────────────────────── */
 
+// NOTE: Gmail OAuth routes through the CALENDAR callback URI because that's
+// the one registered in Google Cloud Console for this OAuth client. The
+// gmail/callback URI was never whitelisted. The callback at
+// /api/integrations/calendar/callback inspects state.type to route either
+// to gmailService.exchangeCode or calendarService.exchangeCode.
+// If the Gmail callback URI is ever properly whitelisted in Console, this
+// can be reverted to use GMAIL_REDIRECT_URI directly.
+function getGmailOAuthRedirectUri() {
+  // Prefer the calendar callback path (verified whitelisted). Fall back to
+  // swapping /gmail/ -> /calendar/ in GMAIL_REDIRECT_URI so local dev still works.
+  return (process.env.GMAIL_REDIRECT_URI || '').replace('/gmail/', '/calendar/')
+    || process.env.GOOGLE_CALENDAR_REDIRECT_URI
+    || 'http://localhost:3001/api/integrations/calendar/callback';
+}
+
 function getOAuthClient() {
   if (!google) return null;
   return new google.auth.OAuth2(
     process.env.GMAIL_CLIENT_ID,
     process.env.GMAIL_CLIENT_SECRET,
-    process.env.GMAIL_REDIRECT_URI || 'http://localhost:3001/api/integrations/gmail/callback'
+    getGmailOAuthRedirectUri()
   );
 }
 
@@ -25,11 +40,13 @@ function getAuthUrl(clientId) {
   const client = getOAuthClient();
   if (!client) return null;
   const { signOAuthState } = require('../utils/crypto');
-  const sig = signOAuthState(clientId);
+  // state.type='gmail' tells the shared calendar callback to route this
+  // exchange to gmailService instead of calendarService.
+  const sig = signOAuthState(clientId, 'gmail');
   return client.generateAuthUrl({
     access_type: 'offline',
-    prompt: 'consent',
-    state: Buffer.from(JSON.stringify({ clientId, sig })).toString('base64'),
+    prompt: 'select_account consent',
+    state: Buffer.from(JSON.stringify({ clientId, sig, type: 'gmail' })).toString('base64'),
     scope: [
       'https://www.googleapis.com/auth/gmail.send',
       'https://www.googleapis.com/auth/gmail.readonly',

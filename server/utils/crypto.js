@@ -57,18 +57,24 @@ function getOAuthStateSecret() {
 }
 
 /**
- * Sign a client_id for inclusion in an OAuth state parameter. Returns hex HMAC.
+ * Sign a client_id (and optional type) for inclusion in an OAuth state parameter.
+ * Returns hex HMAC. The optional `type` binds the signature to a specific flow
+ * (e.g. 'gmail' or 'calendar'), preventing an attacker from reusing a signed
+ * state across flows. Callers that don't pass type keep the pre-existing
+ * signing behavior for backward compatibility.
  */
-function signOAuthState(clientId) {
-  return crypto.createHmac('sha256', getOAuthStateSecret()).update(String(clientId)).digest('hex');
+function signOAuthState(clientId, type) {
+  const payload = type ? `${clientId}|${type}` : String(clientId);
+  return crypto.createHmac('sha256', getOAuthStateSecret()).update(payload).digest('hex');
 }
 
 /**
- * Verify an OAuth state signature against a clientId. Timing-safe.
+ * Verify an OAuth state signature against a clientId (and optional type).
+ * Timing-safe. Must be called with the same `type` that was used when signing.
  */
-function verifyOAuthState(clientId, sig) {
+function verifyOAuthState(clientId, sig, type) {
   if (!clientId || !sig) return false;
-  const expected = signOAuthState(clientId);
+  const expected = signOAuthState(clientId, type);
   return safeCompare(sig, expected);
 }
 
