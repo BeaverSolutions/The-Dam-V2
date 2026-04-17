@@ -52,7 +52,10 @@ const {
 // Cached in-memory per client slug; invalidates on process restart.
 
 const personaCache = new Map();
-const PERSONA_FILES = ['IDENTITY.md', 'SOUL.md', 'USER.md', 'AGENTS.md', 'MEMORY.md', 'TOOLS.md'];
+// TOOLS.md excluded — its HTTP endpoints + Telegram bot config are all irrelevant
+// for Captain running in-process inside the Dam. The real tool list is provided
+// via Anthropic's tool_use schema below. Notification rules preserved in preamble.
+const PERSONA_FILES = ['IDENTITY.md', 'SOUL.md', 'USER.md', 'AGENTS.md', 'MEMORY.md'];
 
 function loadPersona(clientSlug = 'beaver-solutions') {
   if (personaCache.has(clientSlug)) return personaCache.get(clientSlug);
@@ -123,6 +126,11 @@ CHANNEL SWITCHING WORKFLOW (use this exact sequence):
 NEVER call run_campaign to re-process existing leads — it pulls random new leads, not the specific ones you cleared.
 
 Always use your tools. Do not claim facts about the pipeline without calling the relevant tool first.
+
+NOTIFICATION RULES (carried over from TOOLS.md):
+- This chat is a private DM with MJ — same confidentiality tier. No financial figures or internal metrics in any content that could be forwarded or shared.
+- For routine status, batch updates where possible rather than flooding.
+- Never repeat the same notification twice for the same event.
 
 Below is your full persona as loaded from clients/beaver-solutions/myclaw/. It is IDENTICAL to what Jarvis loads on Telegram. Where the files reference Telegram, cron, heartbeats, or HTTP API calls, apply the SPIRIT not the literal text — your tool_use calls replace HTTP, and the Dam web chat is equivalent to a private Telegram DM with MJ.
 
@@ -1068,11 +1076,17 @@ function formatResponse(content, meta = {}) {
 // Keywords that signal complex tasks requiring full Sonnet reasoning
 const COMPLEX_KEYWORDS = /\b(create|find|search|run|send|start|kickoff|outreach|message|draft|plan|write|generate|source|research|campaign|approve|reject|reprocess|fix|update|edit|schedule|book|analyse|analyze|review|check all|go through|strategy|suggest|recommend)\b/i;
 
+// Words that refer back to prior conversation — if any appear, the query needs
+// history context which the fast-path Haiku handler doesn't receive, so we must
+// route through the full Sonnet+history path instead.
+const REFERENTIAL_WORDS = /\b(that|those|it|them|same|again|previous|last one|back to|earlier|above|before)\b/i;
+
 // Returns true if the command is a simple status read that doesn't need Sonnet
 function isSimpleReadQuery(cmd) {
   if (cmd.length > 200) return false;              // Long messages = complex
   if (COMPLEX_KEYWORDS.test(cmd)) return false;    // Action verb = needs reasoning
-  return /\b(pending|approvals?|pipeline|status|how many|leads?|today|kpi|numbers?|stats?|summary|what.s|show me|tell me|give me)\b/i.test(cmd);
+  if (REFERENTIAL_WORDS.test(cmd)) return false;   // Needs history context
+  return /\b(pending|approvals?|pipeline|status|how many|leads?|today|kpi|numbers?|stats?|summary|what.s|show me|tell me|give me|count|replies|responses)\b/i.test(cmd);
 }
 
 // Lightweight Haiku-powered handler for simple reads
@@ -1141,7 +1155,9 @@ async function handleChat(clientId, command, options = {}) {
   // "what's pending?", "pipeline status", "how many leads" etc. are pure DB
   // reads — no reasoning, no orchestration needed. We call the tool directly
   // and return a formatted answer via Haiku (~10x cheaper than Sonnet).
-  if (isSimpleReadQuery(command) && history.length === 0) {
+  // Works regardless of history length because isSimpleReadQuery already
+  // excludes referential queries ("that", "again", etc.) that would need it.
+  if (isSimpleReadQuery(command)) {
     const fastResult = await handleSimpleReadQuery(clientId, command);
     if (fastResult) return fastResult;
     // If fast-path produced nothing, fall through to full Sonnet path
