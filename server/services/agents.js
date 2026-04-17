@@ -1298,7 +1298,37 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         console.warn(`[sales-personalise] Skipped for ${lead.name}:`, err.message);
       }
 
-      // ── LinkedIn-already-tried check (signal pipeline) ───────────────────
+      // ── Email-priority rule ─────────────────────────────────────────────
+      // If the lead has no email, ALWAYS try Hunter first before falling back
+      // to LinkedIn. MJ's rule: email is the primary channel; LinkedIn is only
+      // used when no email is available, and for follow-up escalation after FU2.
+      if (!lead.email) {
+        try {
+          const nameParts = (lead.name || '').split(' ');
+          const hunterResult = await hunterService.findEmail(clientId, {
+            firstName: nameParts[0] || '',
+            lastName: nameParts.slice(1).join(' ') || '',
+            company: lead.company,
+          });
+          if (hunterResult?.email) {
+            await pool.query(
+              `UPDATE leads SET email = $1, email_verified = $2, email_source = 'hunter', updated_at = NOW()
+                WHERE id = $3 AND client_id = $4`,
+              [hunterResult.email, hunterResult.verified === true, lead.id, clientId]
+            );
+            lead.email = hunterResult.email;
+            lead.email_source = 'hunter';
+            lead.email_verified = hunterResult.verified === true;
+            console.log(`[signal-pipeline] Hunter sourced email for ${lead.name}: ${hunterResult.email} (email-priority)`);
+          } else {
+            console.log(`[signal-pipeline] Hunter found no email for ${lead.name} — will use LinkedIn`);
+          }
+        } catch (err) {
+          console.warn(`[signal-pipeline] Hunter lookup failed for ${lead.name}: ${err.message}`);
+        }
+      }
+
+      // ── LinkedIn-already-tried check (retry scenario) ────────────────────
       let channel = lead.email ? 'email' : 'linkedin';
       if (channel === 'linkedin') {
         const prevLinkedinRes = await pool.query(
@@ -1306,30 +1336,10 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           [clientId, lead.id]
         );
         if (prevLinkedinRes.rows.length > 0) {
-          // LinkedIn already tried — attempt Hunter for email
-          try {
-            const nameParts = (lead.name || '').split(' ');
-            const hunterResult = await hunterService.findEmail(clientId, {
-              firstName: nameParts[0] || '',
-              lastName: nameParts.slice(1).join(' ') || '',
-              company: lead.company,
-            });
-            if (hunterResult?.email) {
-              await pool.query(
-                `UPDATE leads SET email = $1, email_verified = $2, email_source = 'hunter', updated_at = NOW() WHERE id = $3 AND client_id = $4`,
-                [hunterResult.email, hunterResult.verified === true, lead.id, clientId]
-              );
-              lead.email = hunterResult.email;
-              channel = 'email';
-              console.log(`[signal-pipeline] Hunter email fallback for ${lead.name}: ${hunterResult.email}`);
-            } else {
-              console.log(`[signal-pipeline] ${lead.name} — LinkedIn tried, no email found — skipping`);
-              continue;
-            }
-          } catch {
-            console.log(`[signal-pipeline] ${lead.name} — Hunter failed, skipping`);
-            continue;
-          }
+          // LinkedIn already attempted + Hunter above didn't find email → skip
+          // (avoids recycling ghost leads with no new channel to try)
+          console.log(`[signal-pipeline] ${lead.name} — LinkedIn already tried, Hunter found nothing — skipping`);
+          continue;
         }
       }
 
@@ -2276,12 +2286,42 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       instagram: 'Write a casual Instagram DM. 1-2 sentences, under 30 words. No greeting, no sign-off. Reference something about their company. End with a casual question. Most informal channel.',
     };
 
-    // ── LinkedIn-already-tried check ─────────────────────────────────────────
-    // If this lead has a previous LinkedIn message (any status), LinkedIn was
-    // already attempted. Don't send again — try to find email via Hunter first.
-    // If Hunter finds nothing, skip this lead entirely (avoids recycling ghost leads).
+    // ── Email-priority rule ───────────────────────────────────────────────
+    // MJ's policy: email is the primary channel. Always try Hunter BEFORE
+    // falling back to LinkedIn, regardless of whether LinkedIn was attempted
+    // before. LinkedIn is used only when no email can be sourced.
+    // Follow-up escalation (email → LinkedIn after FU2 with no reply) is
+    // handled separately in followupSequence.escalateChannel().
     let linkedinAlreadyTried = false;
-    if (lead.linkedin_url && !lead.email) {
+    if (!lead.email) {
+      try {
+        const nameParts = (lead.name || '').split(' ');
+        const hunterResult = await hunterService.findEmail(clientId, {
+          firstName: nameParts[0] || '',
+          lastName: nameParts.slice(1).join(' ') || '',
+          company: lead.company,
+        });
+        if (hunterResult?.email) {
+          await pool.query(
+            `UPDATE leads SET email = $1, email_verified = $2, email_source = 'hunter', updated_at = NOW()
+              WHERE id = $3 AND client_id = $4`,
+            [hunterResult.email, hunterResult.verified === true, lead.id, clientId]
+          );
+          lead.email = hunterResult.email;
+          lead.email_source = 'hunter';
+          lead.email_verified = hunterResult.verified === true;
+          console.log(`[pipeline] Email-priority: Hunter sourced ${hunterResult.email} for ${lead.name}`);
+        } else {
+          console.log(`[pipeline] Email-priority: no email for ${lead.name} — will fall back to LinkedIn`);
+        }
+      } catch (err) {
+        console.warn(`[pipeline] Hunter lookup failed for ${lead.name}: ${err.message}`);
+      }
+    }
+
+    // If Hunter didn't find an email AND LinkedIn was previously attempted,
+    // skip the lead entirely — no new channel available, recycling is waste.
+    if (!lead.email && lead.linkedin_url) {
       const prevLinkedinRes = await pool.query(
         `SELECT id FROM messages
           WHERE client_id = $1 AND lead_id = $2 AND channel = 'linkedin'
@@ -2291,35 +2331,9 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       );
       if (prevLinkedinRes.rows.length > 0) {
         linkedinAlreadyTried = true;
-        console.log(`[pipeline] ${lead.name} — LinkedIn already attempted. Trying Hunter for email...`);
-        try {
-          const nameParts = (lead.name || '').split(' ');
-          const hunterResult = await hunterService.findEmail(clientId, {
-            firstName: nameParts[0] || '',
-            lastName: nameParts.slice(1).join(' ') || '',
-            company: lead.company,
-          });
-          if (hunterResult?.email) {
-            // Save email to lead record
-            await pool.query(
-              `UPDATE leads SET email = $1, email_verified = $2, email_source = 'hunter', updated_at = NOW()
-                WHERE id = $3 AND client_id = $4`,
-              [hunterResult.email, hunterResult.verified === true, lead.id, clientId]
-            );
-            lead.email = hunterResult.email;
-            lead.email_source = 'hunter';
-            lead.email_verified = hunterResult.verified === true;
-            console.log(`[pipeline] Hunter found email for ${lead.name}: ${hunterResult.email} — switching to email channel`);
-          } else {
-            console.log(`[pipeline] Hunter found no email for ${lead.name} — skipping (LinkedIn already tried)`);
-            diagnostics.messages_failed++;
-            return; // Skip — no new channel available
-          }
-        } catch (hunterErr) {
-          console.warn(`[pipeline] Hunter lookup failed for ${lead.name}:`, hunterErr.message);
-          diagnostics.messages_failed++;
-          return; // Skip — can't find alternative channel
-        }
+        console.log(`[pipeline] ${lead.name} — LinkedIn already tried, Hunter found nothing — skipping`);
+        diagnostics.messages_failed++;
+        return;
       }
     }
 
