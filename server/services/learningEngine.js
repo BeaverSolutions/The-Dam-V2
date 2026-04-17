@@ -45,9 +45,11 @@ async function getMemory(clientId, agent, key) {
 // READS from shared/ yet — this is pure capture.
 //
 // Keys in use:
-//   shared/wins           — positive replies with hook + industry + signal
-//   shared/mistakes       — Enforcer rejections with reason + score + excerpt
-//   shared/campaign_trend — per-campaign metrics + pass/reply rates
+//   shared/wins                   — positive replies with hook + industry + signal
+//   shared/mistakes               — Enforcer rejections with reason + score + excerpt
+//   shared/campaign_trend         — per-campaign metrics + pass/reply rates
+//   shared/daily_<agent>_<date>   — per-agent daily reflection (Phase 1.5)
+//   shared/daily_<agent>_log      — rolling 30-day list of reflections per agent
 
 async function appendSharedMemory(clientId, key, entry, maxEntries = 50) {
   try {
