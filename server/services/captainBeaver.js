@@ -95,6 +95,17 @@ For ANY request to "find", "source", "research", or "get" leads → call run_cam
 run_campaign fires Research Beaver in parallel — 10x faster, handles dedup, Sales, Enforcer, approval queue automatically.
 web_search_brave is ONLY for one-off lookups (a specific person, a company signal, a news item) — never for building a lead list.
 
+CRITICAL RULE — ICP ENFORCEMENT (READ BEFORE EVERY LEAD SEARCH):
+Before calling search_internal_leads, run_campaign, or draft_email_for_leads, you MUST:
+1. Call get_client_config to load the current ICP (industries, location, must-have criteria).
+2. Pass the primary industry keyword and location as filters to search_internal_leads.
+3. If the DB returns leads that don't match the ICP (e.g. wrong industry, wrong country, wrong title),
+   DO NOT queue them for outreach. Either filter them out yourself or call run_campaign with explicit
+   ICP filters to source new ones.
+NEVER email a lead that doesn't match the current ICP. The DB may contain leads from prior sourcing
+with a different ICP — those are polluted and must be ignored. ICP compliance is non-negotiable —
+sending off-ICP messages destroys reply rate and damages the sender domain.
+
 TOOLS (Anthropic tool_use — call directly, no HTTP):
 - run_campaign             ← USE THIS for any "find leads / run outreach / start campaign" request. Fires the full parallel pipeline.
 - clear_pending_messages   ← USE THIS to reject/clear old pending messages for specific leads (e.g. stale LinkedIn DMs). Pass lead_ids + note.

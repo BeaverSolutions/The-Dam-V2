@@ -928,9 +928,33 @@ Return JSON only: {"subject":"Subject line (max 6 words, no em dashes)","body":"
     );
 
     if (result?.body) {
+      let finalSubject = result.subject || null;
+      let finalBody = result.body;
+
+      // Defense-in-depth: Haiku occasionally returns nested JSON in the body
+      // field (same failure mode seen in salesGenerate). Unwrap it here so
+      // downstream callers always get a clean string body, never a nested
+      // JSON blob. Without this, callers that store the returned body
+      // directly into messages.body end up with literal {"subject":"...","body":"..."}
+      // text in the approval queue.
+      if (typeof finalBody === 'string' && /^\s*\{[\s\S]*?"body"\s*:/.test(finalBody)) {
+        try {
+          const inner = JSON.parse(finalBody);
+          if (typeof inner?.body === 'string' && inner.body.trim().length > 0) {
+            console.warn(`[agents] rangerDraft returned nested JSON body for ${lead_name} — unwrapping`);
+            finalBody = inner.body;
+            if (!finalSubject && typeof inner?.subject === 'string') {
+              finalSubject = inner.subject;
+            }
+          }
+        } catch (err) {
+          console.warn(`[agents] rangerDraft nested-JSON parse failed for ${lead_name}: ${err.message}`);
+        }
+      }
+
       return {
-        subject: result.subject || null,
-        body: stripEmDashes(result.body), // safety net even on Ranger's own draft
+        subject: finalSubject,
+        body: stripEmDashes(finalBody), // safety net even on Ranger's own draft
       };
     }
     return null;
@@ -1321,16 +1345,17 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       let draftSource = 'signal_hunt';
       if (!draftBody) {
         console.warn(`[signal-pipeline] Sales draft failed for ${lead.name} — Enforcer drafting fallback`);
-        const enforcerBody = await rangerDraft(clientId, {
+        const enforcerDraft = await rangerDraft(clientId, {
           lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
           lead_angle: meta.angle, lead_friction: meta.friction, rejected_body: '',
         });
-        if (!enforcerBody) {
+        // rangerDraft returns {subject, body} — extract the STRING body, not the whole object
+        if (!enforcerDraft?.body || typeof enforcerDraft.body !== 'string') {
           console.warn(`[signal-pipeline] Enforcer fallback also failed for ${lead.name} — skipping`);
           continue;
         }
-        draftBody = enforcerBody;
-        draftSubject = `${lead.company}`;
+        draftBody = enforcerDraft.body;
+        draftSubject = enforcerDraft.subject || `${lead.company}`;
         draftSource = 'enforcer_fallback';
       }
 
@@ -1480,17 +1505,19 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         );
 
         try {
-          const enforcerBody = await rangerDraft(clientId, {
+          const enforcerDraft = await rangerDraft(clientId, {
             lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
             lead_angle: meta.angle, lead_friction: meta.friction,
             rejected_body: finalBody, rejection_notes: rangerResult?.notes,
           });
-          if (enforcerBody) {
+          // rangerDraft returns {subject, body} — pass the STRING body to SQL, never the whole object
+          if (enforcerDraft?.body && typeof enforcerDraft.body === 'string') {
+            const enfSubject = enforcerDraft.subject || draftSubject || lead.company;
             // Insert as a NEW message (don't overwrite the rejected one)
             const { rows: [enfMsg] } = await pool.query(
               `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, metadata)
                VALUES ($1, $2, $3, $4, $5, 'pending_approval', $6) RETURNING *`,
-              [clientId, lead.id, channel, draftSubject || lead.company, enforcerBody,
+              [clientId, lead.id, channel, enfSubject, enforcerDraft.body,
                JSON.stringify({ source: 'enforcer_fallback', signal: meta.signal, original_rejection: rangerResult?.notes })]
             );
             await pool.query(
@@ -2557,14 +2584,15 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
             // If still rejected after redraft → Enforcer drafts it himself
             if (!rangerResult?.approved) {
-              const enforcerBody = await rangerDraft(clientId, {
+              const enforcerDraft = await rangerDraft(clientId, {
                 lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
                 lead_angle: lead.metadata?.angle, lead_friction: lead.metadata?.friction,
                 rejected_body: currentBody,
               });
-              if (enforcerBody) {
-                currentBody = enforcerBody;
-                currentSubject = currentSubject || `${lead.company}`;
+              // rangerDraft returns {subject, body} — extract the STRING body
+              if (enforcerDraft?.body && typeof enforcerDraft.body === 'string') {
+                currentBody = enforcerDraft.body;
+                currentSubject = enforcerDraft.subject || currentSubject || `${lead.company}`;
                 await pool.query(
                   `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval',
                    ranger_score = 70, ranger_notes = $3, updated_at = NOW()
@@ -2607,14 +2635,15 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
       // Final rejection — Sales exhausted all retries, Enforcer drafts his own version
       if (!rangerResult?.approved) {
-        const enforcerBody = await rangerDraft(clientId, {
+        const enforcerDraft = await rangerDraft(clientId, {
           lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
           lead_angle: lead.metadata?.angle, lead_friction: lead.metadata?.friction,
           rejected_body: currentBody,
         });
-        if (enforcerBody) {
-          currentBody = enforcerBody;
-          currentSubject = currentSubject || `${lead.company}`;
+        // rangerDraft returns {subject, body} — extract the STRING body
+        if (enforcerDraft?.body && typeof enforcerDraft.body === 'string') {
+          currentBody = enforcerDraft.body;
+          currentSubject = enforcerDraft.subject || currentSubject || `${lead.company}`;
           await pool.query(
             `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval',
              ranger_score = 70, ranger_notes = $3, updated_at = NOW()
