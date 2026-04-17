@@ -1633,14 +1633,21 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   const icpMemory = await getMemory(clientId, 'director', 'icp') || {};
 
   // ── ICP Pre-flight check ─────────────────────────────────
-  // Captain Beaver rule: before ANY kickoff, confirm ICP is defined.
-  // If critical fields are missing AND command doesn't cover them → ask user first.
-  // ICP field detection: check if the command itself provides enough context
-  // Be generous — if the command mentions ANY industry-like term, geography, or role, skip the poll
-  const cmd = command || '';
-  const hasIndustry = icpMemory.industries || /industry|sector|niche|agency|agencies|saas|fintech|proptech|tech|gaming|esports|web3|crypto|marketing|digital|consulting|legal|insurance|real estate|property|food|logistics|healthcare|education|retail|ecommerce|e-commerce|startup|software|ai\b|crypto/i.test(cmd);
-  const hasGeo = icpMemory.geographies || icpMemory.location || /location|city|country|region|kuala lumpur|\bkl\b|malaysia|singapore|\bsg\b|indonesia|bangkok|jakarta|penang|johor|selangor|cyberjaya|global|asia|sea\b|southeast asia/i.test(cmd);
-  const hasTitle = icpMemory.job_titles || icpMemory.who || /ceo|founder|co-founder|director|title|role|head of|manager|lead|owner|partner|vp|president|chief|cto|cmo|coo|cfo/i.test(cmd);
+  // Captain Beaver rule: before ANY kickoff, confirm ICP is defined in memory.
+  //
+  // IMPORTANT: The previous implementation allowed keyword-in-command to satisfy
+  // this gate ("malaysia agency founder" in the text would bypass the check even
+  // when icpMemory was empty). This was exactly how off-ICP leads slipped through:
+  // command-level keyword matches don't feed Research Beaver's query builder —
+  // Research reads icpMemory directly and falls back to DEFAULT_INDUSTRIES (SaaS,
+  // training, fintech, global) when memory is empty. Result: US/UK leads in a
+  // Malaysia-only ICP.
+  //
+  // Now we require actual icpMemory to have the three fields populated. If the
+  // user hasn't configured ICP (via migration seed, UI, or API PUT), we block.
+  const hasIndustry = !!(icpMemory.industries);
+  const hasGeo = !!(icpMemory.geographies || icpMemory.location);
+  const hasTitle = !!(icpMemory.job_titles || icpMemory.who);
 
   const missingIcpFields = [];
   if (!hasIndustry) missingIcpFields.push('industries');
