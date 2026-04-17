@@ -36,11 +36,15 @@ pool.on('error', (err) => {
   logger.error({ msg: 'Unexpected DB pool error', err: err.message });
 });
 
-// Helper: set tenant context and run callback within transaction
+// Helper: set tenant context and run callback within transaction.
+// SET LOCAL ROLE beavrdam_app activates the RLS policies on all tenant-scoped
+// tables (migrations 002/017/023/027). Role reverts to postgres at COMMIT/ROLLBACK.
+// Migrations use pool.connect() directly (no withTenant), so DDL still runs as superuser.
 async function withTenant(clientId, callback) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query('SET LOCAL ROLE beavrdam_app');
     await client.query('SELECT set_config($1, $2, true)', ['app.current_client_id', clientId]);
     const result = await callback(client);
     await client.query('COMMIT');
