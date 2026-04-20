@@ -13,6 +13,7 @@
 
 const pool = require('../db/pool');
 const logsService = require('./logs');
+const { trackEvent, upsertDealSummary } = require('./conversionTracker');
 
 let callAgent;
 try {
@@ -85,6 +86,18 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       metadata: { lead_id: leadId, lead_name: lead.name, sentiment, confidence: classification.confidence, reason: classification.reason },
     });
 
+    // Track reply event for conversion data
+    const sentimentEventMap = { positive: 'reply_positive', neutral: 'message_replied', objection: 'reply_objection', no_fit: 'reply_negative' };
+    trackEvent(clientId, {
+      lead_id: leadId,
+      message_id: messageId,
+      event_type: sentimentEventMap[sentiment] || 'message_replied',
+      channel: 'email',
+      reply_sentiment: sentiment,
+      agent: 'director',
+    });
+    upsertDealSummary(clientId, leadId, { first_reply_at: new Date().toISOString() });
+
     // ── Step 2: Stop follow-up sequence on ANY reply ────────
     // A reply (any sentiment) means the lead is engaged — stop automated follow-ups immediately.
     await pool.query(
@@ -111,6 +124,15 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
         target_type: 'lead',
         target_id: leadId,
         metadata: { reason: classification.reason, auto_disqualified: true },
+      });
+      trackEvent(clientId, {
+        lead_id: leadId, event_type: 'deal_lost', channel: 'email',
+        reply_sentiment: 'no_fit', agent: 'director',
+        metadata: { reason: classification.reason },
+      });
+      upsertDealSummary(clientId, leadId, {
+        closed_at: new Date().toISOString(), outcome: 'lost',
+        loss_reason: 'Reply indicated no fit',
       });
       console.log(`[replyHandler] Lead ${lead.name} disqualified (no_fit)`);
       return;
@@ -246,6 +268,15 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
           clientId,
         ]
       );
+    }
+
+    // Track stage transition
+    if (newStage === 'booked') {
+      trackEvent(clientId, {
+        lead_id: leadId, event_type: 'meeting_booked', channel: 'email',
+        reply_sentiment: sentiment, agent: 'director',
+      });
+      upsertDealSummary(clientId, leadId, { meeting_booked_at: new Date().toISOString() });
     }
 
     // Auto-generate call prep + competitive brief when prospect shows interest

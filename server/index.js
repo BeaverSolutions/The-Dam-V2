@@ -163,12 +163,18 @@ app.get('/health', async (req, res) => {
     logger.warn({ msg: 'Health check DB probe failed', err: err.message });
   }
 
+  const jobHealth = require('./services/jobHealth');
+  const jobs = jobHealth.getStatus();
+  const staleJobs = Object.entries(jobs).filter(([, v]) => v.status === 'stale').map(([k]) => k);
+
   const status = dbOk ? 200 : 503;
   res.status(status).json({
-    status: dbOk ? 'ok' : 'degraded',
+    status: dbOk ? (staleJobs.length > 0 ? 'degraded' : 'ok') : 'degraded',
     version: '2.0.0',
     tag: 'Autonomous',
     timestamp: new Date().toISOString(),
+    uptime_seconds: Math.floor(process.uptime()),
+    memory_mb: Math.round(process.memoryUsage().rss / 1024 / 1024),
     env: {
       database: dbOk ? 'ok' : 'unreachable',
       encryption_key: encKeyOk ? 'valid' : 'INVALID',
@@ -176,6 +182,8 @@ app.get('/health', async (req, res) => {
       anthropic: process.env.ANTHROPIC_API_KEY ? 'set' : 'missing',
       gmail_oauth: process.env.GMAIL_CLIENT_ID ? 'set' : 'missing',
     },
+    jobs,
+    stale_jobs: staleJobs,
   });
 });
 
@@ -246,6 +254,7 @@ async function start() {
     // Reply detection + Discord approvals notify + calendar sync — poll every 5 minutes
     const { checkAllClients } = require('./services/replyDetector');
     const calendarService = require('./services/googleCalendar');
+    const jobHealth = require('./services/jobHealth');
     let _replyDetectorRunning = false;
     setInterval(() => {
       // Skip if previous run hasn't finished — prevents overlap under slow Gmail API
@@ -255,8 +264,10 @@ async function start() {
       }
       _replyDetectorRunning = true;
       checkAllClients()
+        .then(() => { jobHealth.markRun('reply_detector'); })
         .catch(err => {
           logger.warn({ msg: 'Reply detector error', err: err.message });
+          jobHealth.markError('reply_detector', err.message);
           postDiscordAlert('reply polling', err.message).catch(() => {});
         })
         .finally(() => { _replyDetectorRunning = false; });
@@ -277,14 +288,17 @@ async function start() {
     // Send queue worker — auto-sends approved messages, retries on failure
     const { processSendQueue } = require('./services/sendQueueWorker');
     setInterval(() => {
-      processSendQueue().catch(err => {
-        logger.warn({ msg: 'Send queue worker error', err: err.message });
-      });
+      processSendQueue()
+        .then(() => { jobHealth.markRun('send_queue'); })
+        .catch(err => {
+          logger.warn({ msg: 'Send queue worker error', err: err.message });
+          jobHealth.markError('send_queue', err.message);
+        });
     }, 60 * 1000); // Every 60 seconds
     logger.info({ msg: 'Send queue worker started (60s interval)' });
 
     // Follow-up scheduler — checks for due follow-ups every 30 minutes
-    // Independent of n8n so follow-ups never get missed even if external scheduler is down.
+    // Internal scheduler — follow-ups never get missed.
     const { runWithClientContext } = require('./middleware/clientContext');
     const { getDueFollowUps, draftFollowUp } = require('./services/followupSequence');
     const { rangerReview } = require('./services/agents');
@@ -384,8 +398,10 @@ async function start() {
             }
           });
         }
+        jobHealth.markRun('follow_up_scheduler');
       } catch (err) {
         console.error('[followup-scheduler] Failed:', err.message);
+        jobHealth.markError('follow_up_scheduler', err.message);
       } finally {
         _followUpRunning = false;
       }
@@ -410,7 +426,11 @@ async function start() {
         }
         _dbBuilderRunning = true;
         runDbBuilder()
-          .catch(err => logger.warn({ msg: 'DB Builder error', err: err.message }))
+          .then(() => { jobHealth.markRun('db_builder'); })
+          .catch(err => {
+            logger.warn({ msg: 'DB Builder error', err: err.message });
+            jobHealth.markError('db_builder', err.message);
+          })
           .finally(() => { _dbBuilderRunning = false; });
       }, 15 * 60 * 1000);
       logger.info({ msg: 'DB Builder started (15 min interval)' });
@@ -560,10 +580,10 @@ async function start() {
       }
     }
 
-    // ── Daily kickoff (replaces n8n trigger) ────────────────────────────────
+    // ── Daily kickoff (internal scheduler) ───────────────────────────────────
     // Fires at 9:30 AM MYT (01:30 UTC) for all clients in AUTONOMOUS_ENABLED_CLIENTS.
     const { runAutonomousKickoff } = require('./routes/autonomous');
-    const { runWithClientContext } = require('./middleware/clientContext');
+    // runWithClientContext already imported above for follow-up scheduler
 
     async function runDailyKickoff() {
       const now = new Date();
@@ -610,10 +630,18 @@ async function start() {
 
     // Poll every 10 minutes — each function self-guards against running outside its window
     setInterval(() => {
-      runMorningBrief().catch(err => logger.warn({ msg: 'Morning brief poll error', err: err.message }));
-      runWeeklyReview().catch(err => logger.warn({ msg: 'Weekly review poll error', err: err.message }));
-      runDailyAgentReflections().catch(err => logger.warn({ msg: 'Daily reflection poll error', err: err.message }));
-      runDailyKickoff().catch(err => logger.warn({ msg: 'Daily kickoff poll error', err: err.message }));
+      runMorningBrief()
+        .then(() => { jobHealth.markRun('morning_brief'); })
+        .catch(err => { logger.warn({ msg: 'Morning brief poll error', err: err.message }); jobHealth.markError('morning_brief', err.message); });
+      runWeeklyReview()
+        .then(() => { jobHealth.markRun('weekly_review'); })
+        .catch(err => { logger.warn({ msg: 'Weekly review poll error', err: err.message }); jobHealth.markError('weekly_review', err.message); });
+      runDailyAgentReflections()
+        .then(() => { jobHealth.markRun('daily_reflections'); })
+        .catch(err => { logger.warn({ msg: 'Daily reflection poll error', err: err.message }); jobHealth.markError('daily_reflections', err.message); });
+      runDailyKickoff()
+        .then(() => { jobHealth.markRun('daily_kickoff'); })
+        .catch(err => { logger.warn({ msg: 'Daily kickoff poll error', err: err.message }); jobHealth.markError('daily_kickoff', err.message); });
     }, 10 * 60 * 1000);
     logger.info({ msg: 'Captain Beaver cron jobs registered (10 min poll: 9am brief, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, all MYT)' });
 
@@ -681,8 +709,8 @@ async function start() {
 
     // Run every 6 hours (delayed 5 min after startup)
     setTimeout(() => {
-      sweepStaleLinkedInRequests().catch(() => {});
-      setInterval(() => sweepStaleLinkedInRequests().catch(() => {}), 6 * 60 * 60 * 1000);
+      sweepStaleLinkedInRequests().then(() => jobHealth.markRun('linkedin_sweep')).catch(err => jobHealth.markError('linkedin_sweep', err.message));
+      setInterval(() => sweepStaleLinkedInRequests().then(() => jobHealth.markRun('linkedin_sweep')).catch(err => jobHealth.markError('linkedin_sweep', err.message)), 6 * 60 * 60 * 1000);
     }, 5 * 60 * 1000);
     logger.info({ msg: 'LinkedIn stale connection sweep registered (every 6h, 7-day threshold)' });
 

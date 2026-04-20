@@ -293,7 +293,7 @@ Return JSON only:
 
 /**
  * Find stale leads: active sequence, no reply, first contacted > 5 days ago.
- * Returns leads with their last message info for n8n daily surfacing.
+ * Returns leads with their last message info for daily surfacing.
  */
 async function getStaleLeads(clientId) {
   const { rows } = await pool.query(

@@ -28,7 +28,7 @@ async function requireInternalKey(req, res, next) {
     return res.status(400).json({ error: 'Invalid client_id format', code: 'INVALID_CLIENT_ID' });
   }
 
-  // Gate n8n by client whitelist (env: AUTONOMOUS_ENABLED_CLIENTS=beaver-solutions,trl)
+  // Gate by client whitelist (env: AUTONOMOUS_ENABLED_CLIENTS=beaver-solutions,trl)
   const whitelist = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
   if (whitelist.length > 0) {
     if (clientId) {
@@ -587,7 +587,7 @@ router.get('/agent-status', requireInternalKey, async (req, res) => {
 
 /* ─── GET /api/autonomous/stale-leads ───────────────────── */
 // Returns leads with active sequences, no reply, contacted > 5 days ago.
-// Called by n8n daily to surface stale leads for re-engagement or nurture.
+// Called daily by internal scheduler to surface stale leads for re-engagement or nurture.
 
 router.get('/stale-leads', requireInternalKey, async (req, res) => {
   try {
@@ -603,7 +603,7 @@ router.get('/stale-leads', requireInternalKey, async (req, res) => {
 });
 
 /* ─── POST /api/autonomous/send-approved ─────────────────── */
-// n8n calls this every 5 minutes to send all approved messages.
+// Internal send queue worker calls this every 60s to send all approved messages.
 // Bridge between approval queue and actual email/LinkedIn send.
 
 router.post('/send-approved', requireInternalKey, async (req, res) => {

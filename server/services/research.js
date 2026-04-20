@@ -8,14 +8,13 @@ const hunterService = require('./hunter');
 
 const DEFAULT_TITLES = [
   'CEO', 'Founder', 'Co-Founder', 'Managing Director', 'Owner',
-  'Director', 'MD', 'CTO', 'COO', 'Partner',
+  'Director', 'MD',
 ];
 
 const DEFAULT_INDUSTRIES = [
   'consulting', 'agency', 'SaaS', 'training',
   'professional services', 'recruitment', 'marketing',
-  'digital marketing', 'technology', 'software', 'fintech',
-  'e-commerce', 'logistics', 'media', 'advertising',
+  'digital marketing', 'media', 'advertising',
 ];
 
 const KL_LOCATIONS = [
@@ -29,8 +28,24 @@ const SIGNALS = [
 ];
 
 const ICP_TITLE_KEYWORDS = [
-  'ceo', 'founder', 'co-founder', 'director', 'md',
-  'managing director', 'owner',
+  'ceo', 'founder', 'co-founder', 'managing director', 'owner',
+];
+
+/* Titles that MUST match the full title (not substring) to pass Hunter filtering */
+const ICP_TITLE_EXACT = new Set([
+  'ceo', 'founder', 'co-founder', 'managing director', 'owner',
+  'chief executive officer', 'director', 'md',
+]);
+
+/* Hard-reject titles — if the lead's title contains any of these, reject immediately.
+   These are junior/mid-level roles that should never reach outreach. */
+const BANNED_TITLE_KEYWORDS = [
+  'intern', 'trainee', 'junior', 'associate', 'assistant',
+  'coordinator', 'executive', 'specialist', 'analyst', 'officer',
+  'manager', 'supervisor', 'admin', 'receptionist', 'clerk',
+  'engineer', 'developer', 'designer', 'writer', 'editor',
+  'consultant', 'advisor', 'agent', 'representative', 'lead',
+  'team lead', 'senior', 'staff', 'head of',
 ];
 
 /* ─── Helpers ────────────────────────────────────────────── */
@@ -122,14 +137,12 @@ function widenIcp(originalIcp, level) {
     for (const t of origTitles) {
       const lower = t.toLowerCase();
       if (/founder/i.test(lower)) {
-        ['Owner', 'Principal', 'Proprietor', 'Co-Founder', 'Partner'].forEach(x => expandedTitles.add(x));
+        ['Owner', 'Principal', 'Proprietor', 'Co-Founder'].forEach(x => expandedTitles.add(x));
       }
       if (/ceo/i.test(lower)) {
-        ['Managing Director', 'MD', 'President', 'Chief Executive'].forEach(x => expandedTitles.add(x));
+        ['Managing Director', 'MD', 'Chief Executive'].forEach(x => expandedTitles.add(x));
       }
-      if (/director/i.test(lower)) {
-        ['Head of', 'VP', 'Vice President'].forEach(x => expandedTitles.add(x));
-      }
+      // Do NOT expand "Director" to VP/Head of — those are not decision-maker/owner roles
     }
     widened.job_titles = Array.from(expandedTitles).join(', ');
   }
@@ -162,9 +175,9 @@ function widenIcp(originalIcp, level) {
   }
 
   if (level >= 4) {
-    // Last resort: generic B2B founders
-    widened.industries = 'consulting, agency, saas, professional services, technology, b2b';
-    widened.job_titles = 'Founder, CEO, Managing Director, Owner, Director';
+    // Last resort: generic B2B founders — still restricted to owner/C-level
+    widened.industries = 'consulting, agency, saas, professional services, b2b';
+    widened.job_titles = 'Founder, CEO, Managing Director, Owner, Co-Founder';
   }
 
   return widened;
@@ -392,7 +405,19 @@ async function verifyCandidate(candidate, icp, hunterCache = {}, clientId = null
     verification.hunterMatch = true;
   }
 
+  // ── Pre-Haiku title gate: hard reject banned titles before spending API calls ──
+  const candidateTitle = (candidate.title || '').toLowerCase().trim();
+  if (candidateTitle) {
+    if (BANNED_TITLE_KEYWORDS.some(bk => candidateTitle.includes(bk))) {
+      verification.rejectReason = `Title "${candidate.title}" is not a decision-maker role (banned keyword match)`;
+      verification.pass = false;
+      console.log(`[verify] ⛔ Pre-filter reject: "${candidate.name}" — title "${candidate.title}" contains banned keyword`);
+      return { ...candidate, verification };
+    }
+  }
+
   // ── Haiku AI classification (the core verification) ──
+  let haikuCompleted = false;
   if (callAgent) {
     try {
       const icpContext = `Industries: ${icp.industries || 'any'}\nTitles: ${icp.job_titles || 'CEO, Founder, Director'}\nGeography: ${icp.geographies || icp.geography || 'Malaysia'}\nCompany Size: ${icp.company_size || '1-50'}`;
@@ -416,10 +441,12 @@ ${icpContext}
 
 CRITICAL: Do NOT count search query terms as evidence of location. Only count as Malaysia evidence: .my domain, "Sdn Bhd" or "Berhad" in company name, Malaysian city names in the company description or person's headline, Malay language markers. Generic mentions of "Malaysia" in snippets are unreliable.
 
+CRITICAL ROLE CHECK: The ONLY acceptable roles are: ${icp.job_titles || 'CEO, Founder, Co-Founder, Managing Director, Owner, Director'}. If the title is anything else — Manager, Head of, VP, Coordinator, Lead, Specialist, Engineer — mark role as "unlikely". We only want founders and top-level decision-makers who own the business or run it.
+
 Verify:
 1. LOCATION: Is this person actually based in ${icp.geographies || 'Malaysia'}? Cite specific evidence.
 2. INDUSTRY: Is this company actually in ${icp.industries || 'the target industry'}? Not just tangentially related.
-3. ROLE: Is "${candidate.title}" actually a decision-maker role (${icp.job_titles || 'CEO/Founder/Director'})?
+3. ROLE: Is "${candidate.title}" actually a founder/owner/CEO/MD role (${icp.job_titles || 'CEO/Founder/Director'})? "Likely" is NOT good enough — if the title does not clearly indicate ownership or C-level, mark as "unlikely".
 
 Return JSON:
 {"location":"confirmed|likely|unlikely|unknown","location_evidence":"...","industry":"confirmed|likely|unlikely|unknown","industry_evidence":"...","role":"confirmed|likely|unlikely|unknown","confidence":0-100,"pass":true|false,"reason":"one line summary"}`;
@@ -428,6 +455,8 @@ Return JSON:
       verification.haikuResult = result;
 
       if (result) {
+        haikuCompleted = true;
+
         // Hard rejects
         if (result.location === 'unlikely') {
           verification.rejectReason = `Location: ${result.location_evidence || 'not in target geography'}`;
@@ -439,8 +468,8 @@ Return JSON:
           verification.pass = false;
           return { ...candidate, verification };
         }
-        if (result.role === 'unlikely') {
-          verification.rejectReason = `Role: not a decision-maker`;
+        if (result.role === 'unlikely' || result.role === 'unknown') {
+          verification.rejectReason = `Role: "${candidate.title}" is not a decision-maker`;
           verification.pass = false;
           return { ...candidate, verification };
         }
@@ -455,8 +484,16 @@ Return JSON:
       }
     } catch (err) {
       console.warn(`[verify] Haiku classification failed for "${candidate.name}":`, err.message);
-      // If Haiku fails, rely on Hunter + regex signals only
+      // Haiku failed — do NOT pass this lead on Hunter/regex signals alone
     }
+  }
+
+  // ── If Haiku didn't complete, reject the lead — no silent pass-through ──
+  if (!haikuCompleted) {
+    verification.rejectReason = 'Haiku verification unavailable — cannot confirm ICP fit';
+    verification.pass = false;
+    console.log(`[verify] ⛔ Rejecting "${candidate.name}" — Haiku verification did not complete`);
+    return { ...candidate, verification };
   }
 
   // ── Regex-based bonus signals (free, no API calls) ──
@@ -464,14 +501,13 @@ Return JSON:
   if (/sdn\s*bhd|berhad/i.test(allText)) verification.score += 5;
 
   // ── Final decision ──
+  // Minimum 50 to pass. No more 30-point backdoor — every lead must have
+  // Haiku-confirmed location + industry + role to reach 50.
   if (verification.score >= 50) {
     verification.pass = true;
-  } else if (verification.score >= 30) {
-    verification.pass = true; // lower confidence, but save with P3 tier
-    candidate.signal_tier = 'P3';
   } else {
     verification.pass = false;
-    verification.rejectReason = verification.rejectReason || `Score too low (${verification.score})`;
+    verification.rejectReason = verification.rejectReason || `Score too low (${verification.score}/50)`;
   }
 
   return { ...candidate, verification };
@@ -579,11 +615,14 @@ async function strategyCompanyFirst(clientId, icpMemory, limit) {
             console.warn('[research] Hunter domainSearch error:', hErr.message);
           }
 
-          // Filter Hunter results by ICP-relevant titles
+          // Filter Hunter results by ICP-relevant titles (exact match, not substring)
           const filtered = hunterLeads.filter(h => {
             if (!h.title) return false;
-            const t = h.title.toLowerCase();
-            return ICP_TITLE_KEYWORDS.some(kw => t.includes(kw));
+            const t = h.title.toLowerCase().trim();
+            // Check banned titles first — hard reject
+            if (BANNED_TITLE_KEYWORDS.some(bk => t.includes(bk))) return false;
+            // Exact match against ICP titles
+            return ICP_TITLE_EXACT.has(t);
           });
 
           if (filtered.length > 0) {
@@ -659,6 +698,13 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
   const emptyResult = { leads: [], queriesUsed: [], source: 'multi' };
 
   try {
+    // 0. Log ICP consumption for debugging
+    console.log(`[research] ═══ Starting research for client ${clientId} ═══`);
+    console.log(`[research] ICP job_titles: ${icpMemory?.job_titles || 'NONE (using defaults)'}`);
+    console.log(`[research] ICP industries: ${icpMemory?.industries || 'NONE (using defaults)'}`);
+    console.log(`[research] ICP geographies: ${icpMemory?.geographies || icpMemory?.geography || 'NONE (using defaults)'}`);
+    console.log(`[research] Target count: ${targetCount}, Batch index: ${batchIndex}`);
+
     // 1. Load used queries
     const usedSet = await loadUsedQueries(clientId);
 

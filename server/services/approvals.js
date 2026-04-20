@@ -4,6 +4,7 @@ const pool = require('../db/pool');
 const { AppError } = require('../utils/errors');
 const logsService = require('./logs');
 const { enqueueMessage } = require('./sendQueueWorker');
+const { trackEvent, upsertDealSummary } = require('./conversionTracker');
 
 // Push approval notification to MyClaw so it doesn't have to poll
 async function notifyMyClaw(approvalId, messageId, clientId) {
@@ -272,6 +273,15 @@ async function markConnectionAccepted(clientId, approvalId, { userId }) {
     }
   } catch (err) {
     console.warn('[approvals] Follow-up scheduling failed for linkedin-accepted:', err.message);
+  }
+
+  // Track message_sent for LinkedIn accepted
+  if (approval.lead_id) {
+    trackEvent(clientId, {
+      lead_id: approval.lead_id, message_id: approval.message_id,
+      event_type: 'message_sent', channel: 'linkedin', agent: 'system',
+    });
+    upsertDealSummary(clientId, approval.lead_id, { first_touch_at: new Date().toISOString() });
   }
 
   await logsService.createLog(clientId, {

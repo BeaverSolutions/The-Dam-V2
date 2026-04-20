@@ -9,7 +9,7 @@
 ## Business
 - **What we do:** AI automation startup helping businesses automate their sales process to increase revenue, without changing their existing tools.
 - **Current status:** Testing phase. 5 companies confirmed for case studies (The Gaming Company, MGMX, Emplifive, TRL, Beaver Solutions).
-- **Daily tools:** Claude Code, ChatGPT, Railway, GitHub, Supabase, Google Workspace, n8n
+- **Daily tools:** Claude Code, ChatGPT, Railway, GitHub, Supabase, Google Workspace
 - **Work hours:** 9:30AM to 6:30PM, Monday to Friday (GMT+8)
 
 ## Communication Style

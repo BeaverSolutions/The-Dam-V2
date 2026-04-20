@@ -7,6 +7,7 @@
 
 const pool = require('../db/pool');
 const logsService = require('./logs');
+const { trackEvent } = require('./conversionTracker');
 
 // Retry intervals (exponential backoff)
 const RETRY_INTERVALS = ['5 minutes', '30 minutes', '2 hours'];
@@ -83,6 +84,30 @@ async function processJob(job) {
       [id]
     );
     console.log(`[send_queue] Sent message ${message_id} (attempt ${attempt_count + 1})`);
+
+    // Track message_sent for conversion data
+    try {
+      const { rows: [msg] } = await pool.query(
+        `SELECT lead_id, channel, metadata FROM messages WHERE id = $1 AND client_id = $2`,
+        [message_id, client_id]
+      );
+      if (msg?.lead_id) {
+        const touchRes = await pool.query(
+          `SELECT COUNT(*) AS cnt FROM messages WHERE lead_id = $1 AND client_id = $2 AND status = 'sent'`,
+          [msg.lead_id, client_id]
+        );
+        trackEvent(client_id, {
+          lead_id: msg.lead_id,
+          message_id,
+          event_type: 'message_sent',
+          channel: msg.channel || 'email',
+          touch_number: parseInt(touchRes.rows[0].cnt, 10),
+          agent: 'system',
+        });
+      }
+    } catch (trackErr) {
+      console.warn('[send_queue] Conversion tracking failed:', trackErr.message);
+    }
 
   } catch (err) {
     const newAttemptCount = attempt_count + 1;

@@ -19,7 +19,7 @@ Individual agent behaviour is tuned in each client's config.md — not here.
 ## Mandatory Pipeline (cannot be skipped)
 
 ```
-8:30am MYT — n8n triggers daily kickoff (gated: AUTONOMOUS_ENABLED_CLIENTS env var)
+9:30am MYT — internal scheduler triggers daily kickoff (gated: AUTONOMOUS_ENABLED_CLIENTS env var)
   → Captain Beaver: pre-flight check (ICP defined? Signal identified?)
   → Captain Beaver: daily priority order
       1. Open conversations (reply handling)
@@ -56,7 +56,7 @@ Individual agent behaviour is tuned in each client's config.md — not here.
 
 ---
 
-## Background Jobs (always running, independent of n8n)
+## Background Jobs (all internal, node-native scheduling)
 
 | Job | Interval | Purpose |
 |-----|----------|---------|
@@ -65,7 +65,7 @@ Individual agent behaviour is tuned in each client's config.md — not here.
 | Send queue worker | Every 60s | Sends approved messages via Gmail |
 | Follow-up scheduler | Every 30min | Drafts and submits due follow-ups through Enforcer |
 
-## Weekly Cadence (n8n scheduled)
+## Weekly Cadence (internal scheduler)
 
 | Day | Task |
 |-----|------|

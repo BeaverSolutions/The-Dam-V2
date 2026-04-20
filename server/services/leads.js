@@ -3,6 +3,7 @@
 const pool = require('../db/pool');
 const { AppError } = require('../utils/errors');
 const logsService = require('./logs');
+const { trackEvent, upsertDealSummary } = require('./conversionTracker');
 
 async function getLeads(clientId, filters = {}, pagination = {}) {
   const { status, signal_tier, source, pipeline_stage, search } = filters;
@@ -82,6 +83,11 @@ async function createLead(clientId, data) {
     metadata: { name: lead.name, company: lead.company, signal_tier: lead.signal_tier },
   });
 
+  trackEvent(clientId, { lead_id: lead.id, event_type: 'lead_created', agent: 'system' });
+  upsertDealSummary(clientId, lead.id, {
+    company: lead.company, signal_tier: lead.signal_tier,
+  });
+
   return lead;
 }
 
@@ -151,7 +157,40 @@ async function updateLead(clientId, leadId, data) {
     metadata: { updated_fields: Object.keys(data) },
   });
 
-  return result.rows[0];
+  const updated = result.rows[0];
+
+  // Track pipeline stage transitions
+  const newStage = data.pipeline_stage || (data.status && STATUS_TO_PIPELINE[data.status]);
+  if (newStage && newStage !== existing.pipeline_stage) {
+    const eventMap = {
+      booked: 'meeting_booked',
+      closed: data.status === 'closed_won' ? 'deal_won' : 'deal_lost',
+      nurture: 'lead_nurtured',
+    };
+    const eventType = eventMap[newStage] || 'stage_changed';
+    trackEvent(clientId, {
+      lead_id: leadId,
+      event_type: eventType,
+      agent: 'system',
+      deal_value: data.deal_value,
+      metadata: { from_stage: existing.pipeline_stage, to_stage: newStage },
+    });
+
+    // Update deal summary on key milestones
+    const summaryUpdates = {};
+    if (newStage === 'booked') summaryUpdates.meeting_booked_at = new Date().toISOString();
+    if (newStage === 'closed') {
+      summaryUpdates.closed_at = new Date().toISOString();
+      summaryUpdates.outcome = data.status === 'closed_won' ? 'won' : 'lost';
+      if (data.deal_value) summaryUpdates.deal_value = data.deal_value;
+      if (data.metadata?.lost_reason) summaryUpdates.loss_reason = data.metadata.lost_reason;
+    }
+    if (Object.keys(summaryUpdates).length > 0) {
+      upsertDealSummary(clientId, leadId, summaryUpdates);
+    }
+  }
+
+  return updated;
 }
 
 async function deleteLead(clientId, leadId) {

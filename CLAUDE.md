@@ -42,7 +42,7 @@ Set `DATABASE_URL` in the root `.env` file (not server/.env).
 - DB-first pipeline: impromptu chat/kickoff requests draw from pool before triggering cold research
 - Don't-approach-twice: 14-day cooldown + NOT EXISTS check on in-pipeline messages
 - Search stack: Brave → Google CSE → DuckDuckGo (Serper removed)
-- n8n gated: only clients in `AUTONOMOUS_ENABLED_CLIENTS` env var receive n8n-triggered daily kickoffs
+- Internal scheduler: only clients in `AUTONOMOUS_ENABLED_CLIENTS` env var receive daily kickoffs (node-native setInterval, no external orchestrator)
 - LLM spend visible: `llm_usage` table, `/api/dashboard/llm-usage` endpoint, dashboard widget
 
 ## Key Files
