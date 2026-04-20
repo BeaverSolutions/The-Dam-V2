@@ -560,13 +560,62 @@ async function start() {
       }
     }
 
+    // ── Daily kickoff (replaces n8n trigger) ────────────────────────────────
+    // Fires at 9:30 AM MYT (01:30 UTC) for all clients in AUTONOMOUS_ENABLED_CLIENTS.
+    const { runAutonomousKickoff } = require('./routes/autonomous');
+    const { runWithClientContext } = require('./middleware/clientContext');
+
+    async function runDailyKickoff() {
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+      const utcMin  = now.getUTCMinutes();
+      if (utcHour !== 1 || utcMin < 30 || utcMin > 40) return;
+
+      const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
+      if (enabledSlugs.length === 0) return;
+
+      const dedupeKey = `daily_kickoff_${now.toISOString().slice(0, 10)}`;
+      const { rows: already } = await pool.query(
+        `SELECT 1 FROM agent_memory WHERE agent = 'captain' AND key = $1 LIMIT 1`,
+        [dedupeKey]
+      );
+      if (already.length > 0) return;
+
+      await pool.query(
+        `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+         SELECT id, 'captain', $1, '"sent"'::jsonb, 'config' FROM clients WHERE slug = ANY($2)`,
+        [dedupeKey, enabledSlugs]
+      ).catch(() => {});
+
+      const { rows: clients } = await pool.query(
+        `SELECT id, slug FROM clients WHERE slug = ANY($1)`,
+        [enabledSlugs]
+      );
+
+      for (const client of clients) {
+        logger.info({ msg: `[daily-kickoff] Starting for ${client.slug}` });
+        runWithClientContext(client.id, () =>
+          runAutonomousKickoff(client.id).catch(err => {
+            logger.error({ msg: `[daily-kickoff] Failed for ${client.slug}`, err: err.message });
+            const chatId = process.env.TELEGRAM_CHAT_ID;
+            if (chatId) {
+              telegramService.sendMessage(chatId,
+                `<b>Daily Kickoff Failed</b>\n\nClient: ${client.slug}\nError: ${err.message}`
+              ).catch(() => {});
+            }
+          })
+        );
+      }
+    }
+
     // Poll every 10 minutes — each function self-guards against running outside its window
     setInterval(() => {
       runMorningBrief().catch(err => logger.warn({ msg: 'Morning brief poll error', err: err.message }));
       runWeeklyReview().catch(err => logger.warn({ msg: 'Weekly review poll error', err: err.message }));
       runDailyAgentReflections().catch(err => logger.warn({ msg: 'Daily reflection poll error', err: err.message }));
+      runDailyKickoff().catch(err => logger.warn({ msg: 'Daily kickoff poll error', err: err.message }));
     }, 10 * 60 * 1000);
-    logger.info({ msg: 'Captain Beaver cron jobs registered (10 min poll: 9am brief, 7pm daily reflections, Sunday 8pm review, all MYT)' });
+    logger.info({ msg: 'Captain Beaver cron jobs registered (10 min poll: 9am brief, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, all MYT)' });
 
     // ── LinkedIn stale connection sweep ─────────────────────────────────────
     // Runs every 6 hours. Finds linkedin_requested messages older than 7 days

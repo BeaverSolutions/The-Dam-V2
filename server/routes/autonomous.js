@@ -1614,3 +1614,4 @@ async function logAction(clientId, agent, action, targetType, targetId, metadata
 }
 
 module.exports = router;
+module.exports.runAutonomousKickoff = runAutonomousKickoff;
