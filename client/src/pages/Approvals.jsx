@@ -318,23 +318,15 @@ export default function Approvals() {
 
   const load = async (tabName) => {
     try {
-      if (tabName === 'awaiting') {
-        // Awaiting tab: load linkedin_requested messages directly from messages endpoint
-        const res = await request('/approvals?status=pending');
+      if (tabName === 'awaiting' || tabName === 'pending') {
+        // Fetch all pending in one shot (perPage=200 covers any realistic queue size).
+        // Client-side split: notes='linkedin_requested' → awaiting, everything else → pending.
+        const res = await request('/approvals?status=pending&perPage=200');
         const allPending = res?.data || [];
-        // Filter: show only approvals where the message is linkedin_requested
-        // The approval status is still 'pending' but notes='linkedin_requested'
         const awaiting = allPending.filter(a => a.notes === 'linkedin_requested');
         const realPending = allPending.filter(a => a.notes !== 'linkedin_requested');
-        setApprovals(awaiting);
+        setApprovals(tabName === 'awaiting' ? awaiting : realPending);
         setCounts(prev => ({ ...prev, awaiting: awaiting.length, pending: realPending.length }));
-      } else if (tabName === 'pending') {
-        const res = await request('/approvals?status=pending');
-        const allPending = res?.data || [];
-        const realPending = allPending.filter(a => a.notes !== 'linkedin_requested');
-        const awaiting = allPending.filter(a => a.notes === 'linkedin_requested');
-        setApprovals(realPending);
-        setCounts(prev => ({ ...prev, pending: realPending.length, awaiting: awaiting.length }));
       } else {
         const res = await request(`/approvals?status=${tabName}`);
         setApprovals(res?.data || []);
@@ -347,7 +339,7 @@ export default function Approvals() {
 
   // Refresh pending + awaiting counts on mount
   useEffect(() => {
-    request('/approvals?status=pending').then(res => {
+    request('/approvals?status=pending&perPage=200').then(res => {
       const all = res?.data || [];
       const awaiting = all.filter(a => a.notes === 'linkedin_requested');
       const pending = all.filter(a => a.notes !== 'linkedin_requested');
