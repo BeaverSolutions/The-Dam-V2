@@ -31,12 +31,14 @@ async function notifyMyClaw(approvalId, messageId, clientId) {
 }
 
 async function getApprovals(clientId, filters = {}, pagination = {}) {
-  const { status = 'pending' } = filters;
+  const { status = 'pending', excludeLinkedin = false } = filters;
   const { page = 1, perPage = 20 } = pagination;
   const offset = (page - 1) * perPage;
 
+  const linkedinClause = excludeLinkedin ? `AND (a.notes IS NULL OR a.notes != 'linkedin_requested')` : '';
+
   const countResult = await pool.query(
-    `SELECT COUNT(*) FROM approvals WHERE client_id = $1 AND ($2::text IS NULL OR status = $2)`,
+    `SELECT COUNT(*) FROM approvals a WHERE a.client_id = $1 AND ($2::text IS NULL OR a.status = $2) ${linkedinClause}`,
     [clientId, status || null]
   );
 
@@ -48,7 +50,7 @@ async function getApprovals(clientId, filters = {}, pagination = {}) {
      FROM approvals a
      JOIN messages m ON m.id = a.message_id
      LEFT JOIN leads l ON l.id = m.lead_id
-     WHERE a.client_id = $1 AND ($2::text IS NULL OR a.status = $2)
+     WHERE a.client_id = $1 AND ($2::text IS NULL OR a.status = $2) ${linkedinClause}
      ORDER BY a.created_at DESC
      LIMIT $3 OFFSET $4`,
     [clientId, status || null, perPage, offset]

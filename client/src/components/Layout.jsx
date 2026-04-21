@@ -35,7 +35,7 @@ export default function Layout() {
 
   useEffect(() => {
     const fetchCounts = () => {
-      request('/approvals?status=pending&perPage=1')
+      request('/approvals?status=pending&excludeLinkedin=1&perPage=1')
         .then(res => setPendingCount(res?.meta?.total || 0))
         .catch(() => {});
       request('/messages?status=ranger_rejected&perPage=1')

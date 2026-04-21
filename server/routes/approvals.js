@@ -9,7 +9,7 @@ router.get('/', async (req, res, next) => {
   try {
     const result = await approvalsService.getApprovals(
       req.clientId,
-      { status: req.query.status || 'pending' },
+      { status: req.query.status || 'pending', excludeLinkedin: req.query.excludeLinkedin === '1' },
       { page: parseInt(req.query.page, 10) || 1, perPage: parseInt(req.query.perPage, 10) || 20 }
     );
     res.json(result);
