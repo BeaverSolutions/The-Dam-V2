@@ -1,0 +1,24 @@
+name: Hourly Status Report
+
+on:
+  schedule:
+    - cron: '7 1-11 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install pg
+        run: npm install --no-save pg@^8
+      - name: Run hourly report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BEAVRDAM_DATABASE_URL: ${{ secrets.BEAVRDAM_DATABASE_URL }}
+        run: node scripts/hourly-report.mjs
