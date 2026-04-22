@@ -436,6 +436,33 @@ async function start() {
       logger.info({ msg: 'DB Builder started (15 min interval)' });
     }, 3 * 60 * 1000); // 3min delay after startup
 
+    // Auto-approval — autonomous approve/reject for Sales Beaver drafts using Ranger score.
+    // See services/autoApproval.js. Kill switch: AUTO_APPROVAL_ENABLED=false.
+    const { runAutoApprovals } = require('./services/autoApproval');
+    let _autoApprovalRunning = false;
+    setTimeout(() => {
+      setInterval(() => {
+        if (_autoApprovalRunning) {
+          logger.warn({ msg: 'Auto-approval previous run still in flight, skipping tick' });
+          return;
+        }
+        _autoApprovalRunning = true;
+        runAutoApprovals()
+          .then(result => {
+            jobHealth.markRun('auto_approval');
+            if (result && !result.skipped && (result.approved || result.rejected)) {
+              logger.info({ msg: 'Auto-approval tick', ...result });
+            }
+          })
+          .catch(err => {
+            logger.warn({ msg: 'Auto-approval error', err: err.message });
+            jobHealth.markError('auto_approval', err.message);
+          })
+          .finally(() => { _autoApprovalRunning = false; });
+      }, 15 * 60 * 1000);
+      logger.info({ msg: 'Auto-approval started (15 min interval)' });
+    }, 4 * 60 * 1000); // 4min delay after startup (after DB Builder)
+
     // ── Captain Beaver cron jobs ─────────────────────────────────────────────
     // Morning brief: daily at 9:00 AM MYT (01:00 UTC). Sent via Telegram.
     // Weekly review: every Sunday at 8:00 PM MYT (12:00 UTC). Full self-review.
