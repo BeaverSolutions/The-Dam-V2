@@ -11,6 +11,7 @@ const apolloService = require('./apollo');
 const hunterService = require('./hunter');
 const researchModule = require('./research');
 const { getClientConfig, buildClientContext } = require('./clientConfig');
+const { evaluateLeadQuality } = require('../utils/leadQuality');
 
 let callAgent;
 
@@ -2053,6 +2054,26 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // ── Step 2: Save leads to DB ─────────────────────────────
   const savedLeads = [];
   for (const lead of cleanedLeads) {
+    // Quality gate — reject placeholder/freelance/generic-company leads.
+    // Mirrors dbBuilder.js so both sourcing paths apply the same filter.
+    const quality = evaluateLeadQuality(lead);
+    if (!quality.ok) {
+      console.log(`[quality] Rejecting ${lead.name} at ${lead.company || 'NO_COMPANY'} — ${quality.reason}`);
+      diagnostics.reason = (diagnostics.reason || '') + ` Rejected ${lead.name}: ${quality.reason}.`;
+      await logsService.createLog(clientId, {
+        agent: 'research_beaver',
+        action: 'lead_quality_reject',
+        target_type: 'system',
+        metadata: {
+          reason: quality.reason,
+          name: lead.name,
+          company: lead.company,
+          source: 'agents_pipeline',
+        },
+      }).catch(() => {}); // non-blocking
+      continue;
+    }
+
     // ── Sprint 7B: Deduplication ──────────────────────────
     if (lead.email) {
       const dup = await pool.query(
