@@ -16,6 +16,7 @@ const { runWithClientContext } = require('../middleware/clientContext');
 const { checkBudget } = require('./budget');
 const logsService = require('./logs');
 const logger = require('../utils/logger');
+const { evaluateLeadQuality } = require('../utils/leadQuality');
 
 let _running = false;
 
@@ -77,6 +78,30 @@ async function checkDbHealth(clientId) {
 // ── Lead Saver (mirrors agents.js:1849-1937 dedup + INSERT pattern) ──────────
 
 async function saveLead(clientId, lead, searchQuery) {
+  // Quality gate — reject placeholder/freelance/generic-company leads at source.
+  // Saves enrichment budget downstream and keeps the prospecting pool clean.
+  const quality = evaluateLeadQuality(lead);
+  if (!quality.ok) {
+    logger.info({
+      msg: '[db-builder] Lead rejected by quality gate',
+      reason: quality.reason,
+      name: lead.name,
+      company: lead.company,
+    });
+    await logsService.createLog(clientId, {
+      agent: 'research_beaver',
+      action: 'lead_quality_reject',
+      target_type: 'system',
+      metadata: {
+        reason: quality.reason,
+        name: lead.name,
+        company: lead.company,
+        source: 'db_builder',
+      },
+    });
+    return null;
+  }
+
   // Email dedup
   if (lead.email) {
     const { rows } = await pool.query(
