@@ -772,7 +772,8 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
 
   // ── Phase A Step 2: Auto-fix quality issues ──
   const touchNumber = lead_context?.touch_number || 0;
-  const fixed = autoFixMessage(message_body, { touchNumber, maxWords: 80 });
+  const maxWords = touchNumber > 0 ? 120 : 80;
+  const fixed = autoFixMessage(message_body, { touchNumber, maxWords });
   const fixedBody = fixed.body;
   const fixesApplied = fixed.fixes;
 
@@ -836,7 +837,7 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
           approved,
           body: fixedBody, // ← return the fixed body so caller saves the cleaned version
           fixes_applied: fixesApplied,
-          notes: result.feedback || result.reject_reason || null,
+          notes: result.feedback || result.reject_reason || (approved ? null : `rejected:score=${score},decision=${result.decision}`),
           issues: result.reject_reason ? [result.reject_reason] : [],
           suggestions: result.suggested_edit ? [result.suggested_edit] : [],
         };
@@ -2838,11 +2839,19 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     metadata: { plan_id, leads_found: totalLeadsFound, db_leads: dbLeadsCount, research_leads: savedLeads.length, messages_drafted: savedMessages.length, approved: approvedCount },
   });
 
+  const { rows: [fuRow] } = await pool.query(
+    `SELECT COUNT(*) FROM messages WHERE client_id = $1 AND status IN ('pending_approval', 'pending_send') AND metadata->>'is_followup' = 'true'`,
+    [clientId]
+  );
+  const followupsPending = parseInt(fuRow.count, 10);
+
   const summary = {
     leads_found: totalLeadsFound,
     messages_drafted: savedMessages.length,
     approved: approvedCount,
-    pending_your_approval: approvedCount,
+    new_outreach_pending: approvedCount,
+    followups_pending: followupsPending,
+    pending_your_approval: approvedCount + followupsPending,
     db_leads_processed: dbLeadsCount,
   };
 
@@ -2872,7 +2881,10 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       { step: 1, agent: 'research_beaver', status: 'completed', result: `${savedLeads.length} new lead${savedLeads.length !== 1 ? 's' : ''} found via research` },
       { step: 2, agent: 'sales_beaver', status: 'completed', result: `${savedMessages.length} message${savedMessages.length !== 1 ? 's' : ''} drafted (1 message per lead, best channel)` },
       { step: 3, agent: 'ranger', status: 'completed', result: `${approvedCount} approved${rejectedCount > 0 ? `, ${rejectedCount} rejected by server gates` : ''}` },
-      { step: 4, agent: 'director', status: approvedCount > 0 ? 'completed' : 'pending', result: approvedCount > 0 ? `${approvedCount} message${approvedCount !== 1 ? 's' : ''} in approval queue` : 'All messages failed Ranger QA — check Memory for rejection patterns' },
+      { step: 4, agent: 'director', status: (approvedCount + followupsPending) > 0 ? 'completed' : 'pending', result: [
+        approvedCount > 0 ? `${approvedCount} new outreach in approval queue` : 'All new outreach failed Ranger QA',
+        followupsPending > 0 ? `${followupsPending} follow-up${followupsPending !== 1 ? 's' : ''} awaiting review` : null,
+      ].filter(Boolean).join(' + ') || 'Nothing in queue' },
     ],
   };
 }

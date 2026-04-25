@@ -337,11 +337,14 @@ async function start() {
 
                 const cleanBody = draft.body.replace(/\s*\u2014\s*/g, ', ').replace(/\u2014/g, ' ');
 
-                // Server-side hard gates
+                // Server-side hard gates — relaxed for follow-ups (touch >= 2)
                 const bodyText = cleanBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
                 const wordCount = bodyText.trim().split(/\s+/).length;
                 const questionCount = (cleanBody.match(/\?/g) || []).length;
-                if ((originalChannel === 'email' && wordCount > 80) || questionCount > 1 || /\u2014/.test(cleanBody)) {
+                const wordCap = fu.touch_number >= 2 ? 120 : 80;
+                const questionCap = fu.touch_number >= 2 ? 2 : 1;
+                if ((originalChannel === 'email' && wordCount > wordCap) || questionCount > questionCap) {
+                  console.warn(`[followup-scheduler] pre-gate skip: touch=${fu.touch_number} lead=${fu.lead_id} words=${wordCount}/${wordCap} questions=${questionCount}/${questionCap}`);
                   await pool.query(`UPDATE followup_queue SET status = 'skipped' WHERE id = $1`, [fu.id]);
                   continue;
                 }
@@ -358,11 +361,15 @@ async function start() {
 
                 let approved = false;
                 try {
-                  const result = await rangerReview(client_id, { message_id: savedMsg.id, message_body: cleanBody });
+                  const result = await rangerReview(client_id, {
+                    message_id: savedMsg.id,
+                    message_body: cleanBody,
+                    lead_context: { touch_number: fu.touch_number, is_followup: true, name: fu.name, channel: originalChannel },
+                  });
                   approved = !!result?.approved;
                   await pool.query(
                     `UPDATE messages SET status = $1, ranger_score = $2, ranger_notes = $3, updated_at = NOW() WHERE id = $4`,
-                    [approved ? 'pending_approval' : 'ranger_rejected', result?.score || 0, result?.notes || 'Enforcer review', savedMsg.id]
+                    [approved ? 'pending_approval' : 'ranger_rejected', result?.score || 0, result?.notes || (approved ? 'Enforcer approved' : `ranger_rejected:score=${result?.score||0}`), savedMsg.id]
                   );
                 } catch (err) {
                   await pool.query(`UPDATE messages SET status = 'ranger_rejected', ranger_notes = 'Enforcer unavailable', updated_at = NOW() WHERE id = $1`, [savedMsg.id]);
