@@ -297,7 +297,34 @@ function buildQueryPool(icpMemory) {
     });
   }
 
-  // Deduplicate by query string
+  // Strategy: email-derivable companies — surfaces firms with public staff directories.
+  // These return company/team/contact pages that expose email patterns, shifting the
+  // search distribution toward prospects that can be reached via email (not just LinkedIn).
+  for (const phrase of uniquePhrases.slice(0, 6)) {
+    queryPool.push({
+      query:    `site:rocketreach.co "${phrase}" "Sdn Bhd"`,
+      strategy: 'email_derivable',
+      title:    '',
+      industry: phrase,
+      location: baseLocation,
+    });
+    queryPool.push({
+      query:    `"team" "${phrase}" "@" Malaysia`,
+      strategy: 'email_derivable',
+      title:    '',
+      industry: phrase,
+      location: baseLocation,
+    });
+    queryPool.push({
+      query:    `"contact" "${phrase}" "Sdn Bhd"`,
+      strategy: 'email_derivable',
+      title:    '',
+      industry: phrase,
+      location: baseLocation,
+    });
+  }
+
+    // Deduplicate by query string
   const seen = new Set();
   return queryPool.filter(item => {
     if (seen.has(item.query)) return false;
