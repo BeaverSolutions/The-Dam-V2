@@ -21,4 +21,4 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           BEAVRDAM_INTERNAL_API_KEY: ${{ secrets.BEAVRDAM_INTERNAL_API_KEY }}
           BEAVRDAM_API_URL: https://app.beaver.solutions
-        run: node scripts/hourly-report.mjs
+        run: node scripts/hourly-report.mjs ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}
