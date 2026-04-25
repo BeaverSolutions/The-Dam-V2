@@ -1613,5 +1613,80 @@ async function logAction(clientId, agent, action, targetType, targetId, metadata
   }
 }
 
+
+/* ─── GET /api/autonomous/hourly-stats ──────────────────── */
+// Returns aggregated pipeline stats for the hourly Telegram report.
+// No client_id required — aggregates across all tenants (internal tool).
+
+router.get('/hourly-stats', requireInternalKey, async (req, res) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+
+    const [pending, channelStats, aa, ar, failed, leadStats, patternRows] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*)::int AS c FROM approvals WHERE status='pending' AND (notes IS NULL OR notes != 'linkedin_requested')`
+      ),
+      pool.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE channel = 'email' AND status IN ('sent','approved','pending_send') AND created_at::date = CURRENT_DATE)::int AS email_sent,
+           COUNT(*) FILTER (WHERE channel = 'email' AND status IN ('pending_approval') AND created_at::date = CURRENT_DATE)::int AS email_pending,
+           COUNT(*) FILTER (WHERE channel = 'email' AND status = 'replied')::int AS email_replied,
+           COUNT(*) FILTER (WHERE channel = 'linkedin' AND status IN ('sent','approved','pending_send') AND created_at::date = CURRENT_DATE)::int AS li_sent,
+           COUNT(*) FILTER (WHERE channel = 'linkedin' AND status IN ('pending_approval','linkedin_requested') AND created_at::date = CURRENT_DATE)::int AS li_pending,
+           COUNT(*) FILTER (WHERE channel = 'linkedin' AND status = 'replied')::int AS li_replied
+         FROM messages`
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS c FROM approval_audit WHERE decision='approved' AND created_at::date = CURRENT_DATE`
+      ).catch(() => ({ rows: [{ c: 0 }] })),
+      pool.query(
+        `SELECT COUNT(*)::int AS c FROM approval_audit WHERE decision='rejected' AND created_at::date = CURRENT_DATE`
+      ).catch(() => ({ rows: [{ c: 0 }] })),
+      pool.query(
+        `SELECT COUNT(*)::int AS c FROM messages WHERE status='failed' AND updated_at > NOW() - INTERVAL '1 hour'`
+      ),
+      pool.query(
+        `SELECT
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE metadata->>'outreach_route' = 'email')::int AS email_route,
+           COUNT(*) FILTER (WHERE metadata->>'outreach_route' = 'linkedin')::int AS linkedin_route
+         FROM leads WHERE created_at::date = CURRENT_DATE AND deleted_at IS NULL`
+      ),
+      pool.query(
+        `SELECT content FROM agent_memory WHERE agent = 'research_beaver' AND key = 'email_patterns_verified' LIMIT 1`
+      ).catch(() => ({ rows: [] })),
+    ]);
+
+    const cs = channelStats.rows[0];
+    const ls = leadStats.rows[0];
+    const rawPatterns = patternRows.rows[0]?.content;
+    const patternN = rawPatterns
+      ? Object.keys(typeof rawPatterns === 'string' ? JSON.parse(rawPatterns) : rawPatterns).length
+      : 0;
+
+    res.json({
+      data: {
+        pending_approval: pending.rows[0].c,
+        email_sent:       cs.email_sent,
+        email_pending:    cs.email_pending,
+        email_replied:    cs.email_replied,
+        li_sent:          cs.li_sent,
+        li_pending:       cs.li_pending,
+        li_replied:       cs.li_replied,
+        auto_approved:    aa.rows[0].c,
+        auto_rejected:    ar.rows[0].c,
+        failed_1h:        failed.rows[0].c,
+        leads_today:      ls.total,
+        leads_email_route:   ls.email_route,
+        leads_linkedin_route: ls.linkedin_route,
+        pattern_count:    patternN,
+        date:             today,
+      },
+    });
+  } catch (err) {
+    logger.error({ msg: 'hourly-stats query failed', err: err.message });
+    res.status(500).json({ error: 'Failed to fetch hourly stats', code: 'DB_ERROR' });
+  }
+});
 module.exports = router;
 module.exports.runAutonomousKickoff = runAutonomousKickoff;
