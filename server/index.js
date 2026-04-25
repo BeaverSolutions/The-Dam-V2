@@ -337,11 +337,14 @@ async function start() {
 
                 const cleanBody = draft.body.replace(/\s*\u2014\s*/g, ', ').replace(/\u2014/g, ' ');
 
-                // Server-side hard gates
+                // Server-side hard gates — relaxed for follow-ups (touch >= 2)
                 const bodyText = cleanBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
                 const wordCount = bodyText.trim().split(/\s+/).length;
                 const questionCount = (cleanBody.match(/\?/g) || []).length;
-                if ((originalChannel === 'email' && wordCount > 80) || questionCount > 1 || /\u2014/.test(cleanBody)) {
+                const wordCap = fu.touch_number >= 2 ? 120 : 80;
+                const questionCap = fu.touch_number >= 2 ? 2 : 1;
+                if ((originalChannel === 'email' && wordCount > wordCap) || questionCount > questionCap) {
+                  console.warn(`[followup-scheduler] pre-gate skip: touch=${fu.touch_number} lead=${fu.lead_id} words=${wordCount}/${wordCap} questions=${questionCount}/${questionCap}`);
                   await pool.query(`UPDATE followup_queue SET status = 'skipped' WHERE id = $1`, [fu.id]);
                   continue;
                 }
@@ -358,11 +361,15 @@ async function start() {
 
                 let approved = false;
                 try {
-                  const result = await rangerReview(client_id, { message_id: savedMsg.id, message_body: cleanBody });
+                  const result = await rangerReview(client_id, {
+                    message_id: savedMsg.id,
+                    message_body: cleanBody,
+                    lead_context: { touch_number: fu.touch_number, is_followup: true, name: fu.name, channel: originalChannel },
+                  });
                   approved = !!result?.approved;
                   await pool.query(
                     `UPDATE messages SET status = $1, ranger_score = $2, ranger_notes = $3, updated_at = NOW() WHERE id = $4`,
-                    [approved ? 'pending_approval' : 'ranger_rejected', result?.score || 0, result?.notes || 'Enforcer review', savedMsg.id]
+                    [approved ? 'pending_approval' : 'ranger_rejected', result?.score || 0, result?.notes || (approved ? 'Enforcer approved' : `ranger_rejected:score=${result?.score||0}`), savedMsg.id]
                   );
                 } catch (err) {
                   await pool.query(`UPDATE messages SET status = 'ranger_rejected', ranger_notes = 'Enforcer unavailable', updated_at = NOW() WHERE id = $1`, [savedMsg.id]);
@@ -646,8 +653,14 @@ async function start() {
     logger.info({ msg: 'Captain Beaver cron jobs registered (10 min poll: 9am brief, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, all MYT)' });
 
     // ── LinkedIn stale connection sweep ─────────────────────────────────────
-    // Runs every 6 hours. Finds linkedin_requested messages older than 7 days
-    // and triggers email fallback for those leads (Hunter → email draft).
+    // Runs every 6 hours. After 3 days in `linkedin_requested`, assume the
+    // prospect accepted (users naturally don't come back to click "Connection
+    // Accepted" — they reply from LinkedIn). Auto-graduate to `sent` + Day 0,
+    // and schedule the Day 2/5/10/18/30 follow-up sequence.
+    //
+    // Prior behaviour auto-REJECTED after 7 days and routed to email fallback,
+    // which silently killed active LinkedIn conversations. This inversion is
+    // the Option D fix from memory `project_beavrdam_linkedin_blindspot.md`.
     async function sweepStaleLinkedInRequests() {
       try {
         const { rows: staleMessages } = await pool.query(
@@ -655,53 +668,57 @@ async function start() {
            FROM messages m
            JOIN leads l ON l.id = m.lead_id
            WHERE m.status = 'linkedin_requested'
-             AND m.updated_at < NOW() - INTERVAL '7 days'
-           LIMIT 20`
+             AND m.updated_at < NOW() - INTERVAL '3 days'
+           LIMIT 50`
         );
 
         if (staleMessages.length === 0) return;
-        logger.info({ msg: `LinkedIn sweep: found ${staleMessages.length} stale connections`, count: staleMessages.length });
+        logger.info({ msg: `LinkedIn sweep: auto-graduating ${staleMessages.length} connections past 3-day window`, count: staleMessages.length });
 
-        // Group by client_id
-        const byClient = {};
+        const { scheduleFollowUps } = require('./services/followupSequence');
+
         for (const msg of staleMessages) {
-          if (!byClient[msg.client_id]) byClient[msg.client_id] = [];
-          byClient[msg.client_id].push(msg);
-        }
-
-        for (const [clientId, messages] of Object.entries(byClient)) {
-          const leadIds = messages.map(m => m.lead_id);
-          const messageIds = messages.map(m => m.message_id);
-
-          // Reject the stale LinkedIn messages
-          await pool.query(
-            `UPDATE messages SET status = 'rejected', ranger_notes = 'auto-sweep: LinkedIn connection not accepted after 7 days', updated_at = NOW()
-             WHERE id = ANY($1::uuid[]) AND client_id = $2`,
-            [messageIds, clientId]
-          );
-
-          // Cancel any pending approvals for these messages
-          await pool.query(
-            `UPDATE approvals SET status = 'rejected', notes = 'auto-sweep: LinkedIn stale', resolved_at = NOW()
-             WHERE message_id = ANY($1::uuid[]) AND client_id = $2 AND status = 'pending'`,
-            [messageIds, clientId]
-          ).catch(() => {});
-
-          // Try email fallback via Hunter + pipeline
           try {
-            const { toolDraftEmailForLeads } = require('./services/captainBeaver');
-            if (typeof toolDraftEmailForLeads === 'function') {
-              await toolDraftEmailForLeads(clientId, {
-                lead_ids: leadIds,
-                note: 'auto-sweep: LinkedIn connection not accepted after 7 days, trying email fallback',
-              });
+            // Mark message as sent (Day 0) — presume acceptance
+            await pool.query(
+              `UPDATE messages SET status = 'sent', sent_at = NOW(), ranger_notes = 'auto-sweep: LinkedIn auto-graduated to sent after 3 days (acceptance presumed)', updated_at = NOW()
+               WHERE id = $1 AND client_id = $2`,
+              [msg.message_id, msg.client_id]
+            );
+
+            // Resolve any pending approvals for this message
+            await pool.query(
+              `UPDATE approvals SET status = 'approved', notes = 'auto-sweep: LinkedIn auto-graduated', resolved_at = NOW()
+               WHERE message_id = $1 AND client_id = $2 AND status = 'pending'`,
+              [msg.message_id, msg.client_id]
+            ).catch(() => {});
+
+            // Move lead to contacted
+            if (msg.lead_id) {
+              await pool.query(
+                `UPDATE leads SET pipeline_stage = 'contacted', first_contacted_at = COALESCE(first_contacted_at, NOW()), updated_at = NOW()
+                 WHERE id = $1 AND client_id = $2`,
+                [msg.lead_id, msg.client_id]
+              );
+            }
+
+            // Schedule the Day 2/5/10/18/30 follow-up sequence
+            // Guard: only if no prior sent messages exist (same guard as markConnectionAccepted)
+            const { rows: prevSent } = await pool.query(
+              `SELECT COUNT(*) AS cnt FROM messages
+               WHERE lead_id = $1 AND client_id = $2 AND status = 'sent'`,
+              [msg.lead_id, msg.client_id]
+            );
+            if (parseInt(prevSent[0].cnt) <= 1) {
+              await scheduleFollowUps(msg.client_id, msg.lead_id, new Date());
+              logger.info({ msg: `[linkedin-sweep] Scheduled follow-ups for auto-graduated lead ${msg.lead_id}` });
             }
           } catch (err) {
-            logger.warn({ msg: 'LinkedIn sweep email fallback failed', clientId, err: err.message });
+            logger.warn({ msg: '[linkedin-sweep] Per-message error', message_id: msg.message_id, err: err.message });
           }
-
-          logger.info({ msg: 'LinkedIn sweep processed', clientId, cleared: messageIds.length, lead_ids: leadIds });
         }
+
+        logger.info({ msg: 'LinkedIn sweep processed', processed: staleMessages.length });
       } catch (err) {
         logger.warn({ msg: 'LinkedIn sweep error', err: err.message });
       }

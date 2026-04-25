@@ -16,6 +16,108 @@ const { runWithClientContext } = require('../middleware/clientContext');
 const { checkBudget } = require('./budget');
 const logsService = require('./logs');
 const logger = require('../utils/logger');
+const { evaluateLeadQuality } = require('../utils/leadQuality');
+const { searchEmailDomain } = require('./searchService');
+
+// ── Email pattern helpers ─────────────────────────────────────────────────────
+
+async function loadEmailPatterns(clientId) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT content FROM agent_memory
+       WHERE client_id = $1 AND agent = 'research_beaver' AND key = 'email_patterns_verified'
+       LIMIT 1`,
+      [clientId]
+    );
+    if (!rows.length) return {};
+    const raw = typeof rows[0].content === 'string' ? JSON.parse(rows[0].content) : rows[0].content;
+    if (Array.isArray(raw)) {
+      return raw.reduce((acc, e) => { if (e.domain && e.pattern) acc[e.domain] = e.pattern; return acc; }, {});
+    }
+    return raw || {};
+  } catch { return {}; }
+}
+
+async function saveEmailPattern(clientId, domain, pattern, currentPatterns) {
+  try {
+    const updated = { ...currentPatterns, [domain]: pattern };
+    await pool.query(
+      `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
+       VALUES ($1, 'research_beaver', 'email_patterns_verified', $2::jsonb, 'config', NOW())
+       ON CONFLICT (client_id, agent, key)
+       DO UPDATE SET content = $2::jsonb, updated_at = NOW()`,
+      [clientId, JSON.stringify(updated)]
+    );
+  } catch { /* non-critical */ }
+}
+
+function normalizeToDomains(company) {
+  const clean = (company || '')
+    .replace(/\bSdn\.?\s*Bhd\.?\b/gi, '')
+    .replace(/\bBerhad\b/gi, '')
+    .replace(/\bMalaysia\b/gi, '')
+    .replace(/\(M\)/gi, '')
+    .replace(/[^a-zA-Z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '');
+  if (!clean) return [];
+  return [`${clean}.com.my`, `${clean}.com`];
+}
+
+function applyPattern(pattern, firstName, lastName) {
+  return pattern
+    .replace('{first}', firstName.toLowerCase())
+    .replace('{last}', lastName.toLowerCase())
+    .replace('{fi}', (firstName[0] || '').toLowerCase());
+}
+
+function inferPattern(email, domain) {
+  const local = email.split('@')[0].toLowerCase();
+  if (/^[a-z]+$/.test(local)) return `{first}@${domain}`;
+  if (/^[a-z]+\.[a-z]+$/.test(local)) return `{first}.{last}@${domain}`;
+  if (/^[a-z]\.[a-z]+$/.test(local)) return `{fi}.{last}@${domain}`;
+  return `{first}@${domain}`;
+}
+
+async function tryEnrichEmail(lead, patterns) {
+  const parts = (lead.name || '').trim().split(/\s+/);
+  const firstName = parts[0] || '';
+  const lastName  = parts.slice(1).join('') || '';
+  if (!firstName || firstName.length < 2) return null;
+
+  const candidateDomains = normalizeToDomains(lead.company);
+  if (!candidateDomains.length) return null;
+
+  // Step 1: check known patterns
+  for (const domain of candidateDomains) {
+    if (patterns[domain]) {
+      const email = applyPattern(patterns[domain], firstName, lastName);
+      if (email && email.includes('@')) {
+        return { email, source: 'pattern_derived', domain, newPattern: null };
+      }
+    }
+  }
+
+  // Step 2: one Brave search per domain until we find an email
+  for (const domain of candidateDomains) {
+    try {
+      const found = await searchEmailDomain(domain);
+      if (found.length > 0) {
+        const pattern = inferPattern(found[0], domain);
+        const email   = applyPattern(pattern, firstName, lastName);
+        if (email && email.includes('@')) {
+          return { email, source: 'brave_derived', domain, newPattern: pattern };
+        }
+      }
+    } catch { /* continue to next domain */ }
+  }
+
+  return null;
+}
+
+
 
 let _running = false;
 
@@ -76,7 +178,31 @@ async function checkDbHealth(clientId) {
 
 // ── Lead Saver (mirrors agents.js:1849-1937 dedup + INSERT pattern) ──────────
 
-async function saveLead(clientId, lead, searchQuery) {
+async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
+  // Quality gate — reject placeholder/freelance/generic-company leads at source.
+  // Saves enrichment budget downstream and keeps the prospecting pool clean.
+  const quality = evaluateLeadQuality(lead);
+  if (!quality.ok) {
+    logger.info({
+      msg: '[db-builder] Lead rejected by quality gate',
+      reason: quality.reason,
+      name: lead.name,
+      company: lead.company,
+    });
+    await logsService.createLog(clientId, {
+      agent: 'research_beaver',
+      action: 'lead_quality_reject',
+      target_type: 'system',
+      metadata: {
+        reason: quality.reason,
+        name: lead.name,
+        company: lead.company,
+        source: 'db_builder',
+      },
+    });
+    return null;
+  }
+
   // Email dedup
   if (lead.email) {
     const { rows } = await pool.query(
@@ -126,6 +252,20 @@ async function saveLead(clientId, lead, searchQuery) {
   if (searchQuery)    meta.search_query = searchQuery;
   meta.source = 'db_builder';
   if (lead.data_source) meta.data_source = lead.data_source;
+
+  // Email enrichment at source time
+  if (!lead.email && enrichContext?.patterns) {
+    const enriched = await tryEnrichEmail(lead, enrichContext.patterns).catch(() => null);
+    if (enriched) {
+      lead.email = enriched.email;
+      lead.email_source = enriched.source;
+      if (enriched.newPattern) {
+        saveEmailPattern(clientId, enriched.domain, enriched.newPattern, enrichContext.patterns).catch(() => {});
+        enrichContext.patterns[enriched.domain] = enriched.newPattern;
+      }
+    }
+    meta.outreach_route = lead.email ? 'email' : 'linkedin';
+  }
 
   try {
     const res = await pool.query(
@@ -214,7 +354,7 @@ async function sourceLeads(clientId, deficit, config) {
 
       let batchSaved = 0;
       for (const lead of leads) {
-        const savedId = await saveLead(clientId, lead, searchQuery);
+        const savedId = await saveLead(clientId, lead, searchQuery, enrichContext);
         if (savedId) batchSaved++;
       }
 

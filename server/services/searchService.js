@@ -461,4 +461,27 @@ async function searchOpenWeb(query, limit = 5) {
   return [];
 }
 
-module.exports = { searchLinkedInProfiles, searchLinkedInCompanies, searchBySignal, parallelSearch, searchOpenWeb };
+
+/**
+ * Searches a company domain for email addresses.
+ * Used by DB Builder to verify a domain is email-able and infer patterns.
+ * Returns array of email strings found on the domain (deduplicated, max 5).
+ */
+async function searchEmailDomain(domain) {
+  try {
+    const items = await callBrave(`@${domain} site:${domain}`, 5);
+    const emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+    const found = new Set();
+    for (const item of items) {
+      const text = `${item.title || ''} ${item.description || ''} ${item.url || ''}`;
+      for (const e of (text.match(emailRe) || [])) {
+        if (e.toLowerCase().endsWith(`@${domain.toLowerCase()}`)) found.add(e.toLowerCase());
+      }
+    }
+    return [...found].slice(0, 5);
+  } catch {
+    return [];
+  }
+}
+
+module.exports = { searchLinkedInProfiles, searchLinkedInCompanies, searchBySignal, parallelSearch, searchOpenWeb, searchEmailDomain };
