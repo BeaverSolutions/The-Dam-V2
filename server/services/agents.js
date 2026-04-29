@@ -13,6 +13,160 @@ const researchModule = require('./research');
 const { getClientConfig, buildClientContext } = require('./clientConfig');
 const { evaluateLeadQuality } = require('../utils/leadQuality');
 
+// ICP+channel patches per MJ direction 2026-04-29
+// ─── ICP v2: SEA-only country, persona, vertical hard gates ─────────────────
+const ICP_ALLOWED_COUNTRIES = new Set([
+  'malaysia','singapore','indonesia','philippines','thailand','vietnam',
+  'my','sg','id','ph','th','vn',
+]);
+
+// Senior decision-maker titles. If any matches, lead passes title gate.
+// Founder/Co-founder/CEO/MD/COO/CMO/CFO/CTO/President/Owner/Principal/Managing Partner
+// stand alone. Director/Head/VP/GM/Chief must combine with a sales/growth/marketing function
+// (handled in applyIcpV2Filter — these regexes are component-level).
+const ICP_SENIOR_STANDALONE = /\b(founder|co-?founder|ceo|chief executive|cmo|coo|cfo|cto|managing director|managing partner|president|owner|principal|proprietor|\bmd\b|chairman|chairwoman)\b/i;
+const ICP_SENIOR_LEADER = /\b(director|head\s+of|vp|vice\s+president|general\s+manager|\bgm\b|chief)\b/i;
+const ICP_SENIOR_FUNCTION = /\b(sales|business\s+development|\bbd\b|growth|marketing|revenue|commercial|operations|brand|partnerships|comms|communications|client\s+services)\b/i;
+
+// Junior IC / sub-decision-maker titles. If any matches AND no senior-standalone, reject.
+const ICP_JUNIOR_TITLE = /\b(intern|trainee|junior|associate|assistant|coordinator|specialist|analyst|officer|admin|receptionist|clerk|engineer|developer|designer|writer|editor|representative|agent\b|strategist)\b/i;
+
+// "Executive" / "Manager" / "Lead" / "Consultant" — junior unless preceded by Senior/Head/Chief.
+// Standalone "BD Executive", "Senior Digital Marketing Executive" → junior IC.
+const ICP_JUNIOR_QUALIFIED = /\b(executive|manager|lead|consultant)\b/i;
+const ICP_SENIOR_QUALIFIER = /\b(senior|head|chief|principal|lead\s+(of|the)|managing|global|regional)\b/i;
+
+// Companies that must be hard-rejected even if title looks senior — too big to sell to,
+// or not buyers (industry bodies, universities, government).
+const ICP_LARGE_GLOBAL_AGENCIES = /\b(wpp|publicis|omnicom|interpublic|\bipg\b|\bbbdo\b|ogilvy|mccann|\bvml\b|dentsu|havas|grey\s+group|leo\s+burnett|saatchi|\bddb\b|tbwa|\bjwt\b|wunderman|edelman|\bweber\b|burson|fleishman|hill\+knowlton)\b/i;
+const ICP_ENTERPRISE_BRANDS = /\b(deloitte|mckinsey|\bpwc\b|\bkpmg\b|\bey\b|accenture|boston\s+consulting|\bbain\b|shell|petronas|tenaga|maybank|\bcimb\b|\brhb\b|public\s+bank|hong\s+leong|sime\s+darby|axiata|celcomdigi|celcom|\bdigi\b|\bmaxis\b|\bastro\b|unilever|nestle|nestlé|procter|p&g|samsung|\blg\b|sony|panasonic|google|\bmeta\b|amazon|microsoft|apple|\bibm\b|huawei|xiaomi|canon|honda|toyota|mastercard|visa\b)\b/i;
+const ICP_INDUSTRY_BODIES = /\b(women\s+in\s+pr|female\s+founders|chamber\s+of|chambers\s+of|association|trade\s+union|alliance|federation|society\s+of|members?'?\s*(network|club|association)|institute\s+of|board\s+of|council\s+of)\b/i;
+const ICP_GOV_NGO_EDU = /\b(ministry|jabatan|kementerian|government|\bpolis\b|police|army|military|ngo|non[\s-]?profit|charity|foundation|university|universiti|college|polytechnic|sekolah|school|\buitm\b|\bukm\b|training\s+(institute|provider|academy))\b/i;
+const ICP_FREELANCE = /\b(freelance|freelancer|self[\s-]?employed|independent(\s+consultant)?|solo(\s+consultant)?|individual)\b/i;
+
+// Per-tenant sender identity. If client_id is missing, fallback to 'The Team'.
+// Beaver Solutions tenant — MJ direction 2026-04-29: hardcode "Michael Jerry".
+const ICP_SENDER_IDENTITY = {
+  'ce2fc8e5-617e-42d5-91fe-4275ceaa0030': 'Michael Jerry',
+};
+
+// Strip any LLM-generated sign-off block from a body. Catches patterns like
+// "Regards,\nName", "Best,\nName", "Cheers,\nName", and anything trailing after them.
+const SIGNOFF_STRIP_REGEX = /\n*\s*(regards|best( regards)?|cheers|kind regards|sincerely|warm regards|thanks|thank you)[,!.]?\s*[\r\n]+[\s\S]*$/i;
+
+/**
+ * Resolve sender identity for a given client. Hardcoded map first, then persona,
+ * then fallback. Pulled OUT of the LLM path so the LLM cannot hallucinate a name.
+ */
+function resolveSenderName(clientId, persona) {
+  if (clientId && ICP_SENDER_IDENTITY[clientId]) return ICP_SENDER_IDENTITY[clientId];
+  return persona?.sender_name || persona?.contact_name || persona?.name || 'The Team';
+}
+
+/**
+ * ICP v2 hard filter. Runs AFTER existing geo/industry/corp gate.
+ * Returns { pass: true } or { pass: false, status: 'rejected_*', reason: '...' }.
+ *
+ * Acceptance order: data integrity → country → vertical → persona/title → score.
+ * Each gate emits a distinct status for validation queries.
+ */
+function applyIcpV2Filter(lead) {
+  const allText = [lead.name || '', lead.company || '', lead.title || '', lead.snippet || '', lead.location || ''].join(' ');
+  const company = (lead.company || '').trim();
+  const name = (lead.name || '').trim();
+  const title = (lead.title || '').trim();
+
+  // Gate 0: Data integrity — lead name must not equal company name.
+  if (name && company && name.toLowerCase() === company.toLowerCase()) {
+    return { pass: false, status: 'rejected_data_integrity', reason: 'lead name equals company name' };
+  }
+  if (!name || name.toLowerCase().includes('unknown')) {
+    return { pass: false, status: 'rejected_data_integrity', reason: 'missing or unknown lead name' };
+  }
+
+  // Gate 1: Country. Must be SEA-6. NULL is treated as unresolved (rejected_unresolved_country).
+  // Country may live on lead.country (preferred) or be derived from Haiku verification metadata.
+  const rawCountry = (lead.country
+    || lead.metadata?.country
+    || lead.verification?.haikuResult?.country
+    || lead.verification?.country
+    || ''
+  ).trim().toLowerCase();
+
+  if (!rawCountry) {
+    return { pass: false, status: 'rejected_unresolved_country', reason: 'country could not be resolved from LinkedIn / company website' };
+  }
+  if (!ICP_ALLOWED_COUNTRIES.has(rawCountry)) {
+    return { pass: false, status: 'rejected_country', reason: `country "${rawCountry}" is outside SEA-6` };
+  }
+
+  // Gate 2: Vertical / company shape exclusions.
+  if (ICP_INDUSTRY_BODIES.test(allText)) {
+    return { pass: false, status: 'rejected_vertical', reason: 'industry body / association / chamber' };
+  }
+  if (ICP_GOV_NGO_EDU.test(allText)) {
+    return { pass: false, status: 'rejected_vertical', reason: 'government / NGO / academic / training provider' };
+  }
+  if (ICP_FREELANCE.test(allText)) {
+    return { pass: false, status: 'rejected_vertical', reason: 'freelance / solo / independent operator' };
+  }
+  if (ICP_LARGE_GLOBAL_AGENCIES.test(allText) || ICP_ENTERPRISE_BRANDS.test(allText)) {
+    return { pass: false, status: 'rejected_size', reason: 'global agency / enterprise brand — outside 5-50 sweet spot' };
+  }
+
+  // Gate 3: Persona / title. Senior standalone passes immediately. Senior leader (Director/Head/VP/GM/Chief)
+  // passes only when combined with a sales-adjacent function. Junior IC titles reject.
+  const titleLower = title.toLowerCase();
+  const hasSeniorStandalone = ICP_SENIOR_STANDALONE.test(titleLower);
+  const hasSeniorLeader = ICP_SENIOR_LEADER.test(titleLower);
+  const hasSeniorFunction = ICP_SENIOR_FUNCTION.test(titleLower);
+  const hasJuniorWord = ICP_JUNIOR_TITLE.test(titleLower);
+  const hasQualifiedJunior = ICP_JUNIOR_QUALIFIED.test(titleLower);
+  const hasSeniorQualifier = ICP_SENIOR_QUALIFIER.test(titleLower);
+
+  // Senior standalone always passes.
+  if (hasSeniorStandalone) {
+    // fall through to score gate
+  } else if (hasSeniorLeader && hasSeniorFunction) {
+    // fall through — Director of Sales, Head of Marketing, VP of BD all pass
+  } else if (hasJuniorWord) {
+    return { pass: false, status: 'rejected_persona', reason: `junior IC title: "${title}"` };
+  } else if (hasQualifiedJunior && !hasSeniorQualifier) {
+    return { pass: false, status: 'rejected_persona', reason: `unqualified mid-IC title: "${title}"` };
+  } else if (!title) {
+    return { pass: false, status: 'rejected_persona', reason: 'no title present' };
+  } else {
+    // Title doesn't clearly match either bucket — reject conservatively.
+    return { pass: false, status: 'rejected_persona', reason: `title "${title}" does not match decision-maker criteria` };
+  }
+
+  // Gate 4: Score threshold. <65 rejects entirely. P-tier resolved on insert side.
+  const score = Number(lead.score || 0);
+  if (score > 0 && score < 65) {
+    return { pass: false, status: 'rejected_low_score', reason: `score ${score} below 65 threshold` };
+  }
+
+  return { pass: true };
+}
+
+/**
+ * Resolve signal_tier from score + verification state per MJ 2026-04-29:
+ *   P1 = score >=85 AND email_verified
+ *   P2 = 75-84
+ *   P3 = 65-74
+ *   <65 already rejected by applyIcpV2Filter.
+ */
+function resolveSignalTier(lead) {
+  const score = Number(lead.score || 0);
+  const verified = lead.email_verified === true
+    || lead.email_source === 'hunter'
+    || lead.email_source === 'apollo';
+  if (score >= 85 && verified) return 'P1';
+  if (score >= 75) return 'P2';
+  if (score >= 65) return 'P3';
+  return null;
+}
+
 let callAgent;
 
 try {
@@ -359,12 +513,12 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         rangerContext = `\n\nRANGER REJECTION HISTORY — these patterns were rejected recently, do NOT repeat them:\n${rangerPatterns.slice(0, 5).join('\n')}`;
       }
 
-      // Extract sender name for the sign-off — from persona or fall back to client name
-      const senderName = persona?.sender_name || persona?.contact_name || persona?.name || 'The Team';
+      // Sender identity — resolved at template layer, NOT in prompt (ICP+channel patches per MJ direction 2026-04-29).
+      // The LLM must not produce its own signature; we strip and re-append below.
+      const senderName = resolveSenderName(clientId, persona);
 
-      // Channel-specific sign-off instructions
       const signOffInstruction = channel === 'email'
-        ? `\nSENDER NAME (use "Regards," then this name on the next line): ${senderName}`
+        ? `\nDO NOT include any sign-off, signature, sender name, "Regards,", "Best,", "Cheers,", or your own name. The system appends the signature deterministically. End the body at the final question.`
         : `\nDO NOT include any sign-off like "Regards," or "Best," — this is a ${channel} DM, not an email. No sign-off at all. Just end with the question.`;
 
       const result = await callAgent(
@@ -401,11 +555,22 @@ ${personaContext}${fileContext}${rangerContext}`,
           }
         }
 
+        // ICP+channel patches per MJ direction 2026-04-29
+        // Strip any LLM-generated signature/sign-off, then deterministically append the
+        // hardcoded sender identity for emails. LinkedIn DMs get no sign-off.
+        finalBody = stripEmDashes(finalBody);
+        if (typeof finalBody === 'string') {
+          const stripped = finalBody.replace(SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '');
+          finalBody = (channel === 'email')
+            ? `${stripped}\n\nRegards,\n${senderName}`
+            : stripped;
+        }
+
         return {
           lead_id,
           channel,
           subject: stripEmDashes(finalSubject) || null,
-          body:    stripEmDashes(finalBody),
+          body:    finalBody,
           status:  'pending_ranger',
         };
       }
@@ -426,7 +591,11 @@ ${personaContext}${fileContext}${rangerContext}`,
             lead_id,
             channel,
             subject: extractedSubject ? stripEmDashes(extractedSubject) : null,
-            body:    stripEmDashes(extractedBody),
+            body:    (() => {
+              // ICP+channel patches per MJ direction 2026-04-29 — strip+append in fallback path too
+              const stripped = stripEmDashes(extractedBody).replace(SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '');
+              return channel === 'email' ? `${stripped}\n\nRegards,\n${senderName}` : stripped;
+            })(),
             status:  'pending_ranger',
           };
         }
@@ -438,7 +607,11 @@ ${personaContext}${fileContext}${rangerContext}`,
             lead_id,
             channel,
             subject: null,
-            body:    stripEmDashes(raw.trim()),
+            body:    (() => {
+              // ICP+channel patches per MJ direction 2026-04-29 — strip+append in last-resort fallback too
+              const stripped = stripEmDashes(raw.trim()).replace(SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '');
+              return channel === 'email' ? `${stripped}\n\nRegards,\n${senderName}` : stripped;
+            })(),
             status:  'pending_ranger',
           };
         }
@@ -1330,8 +1503,28 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         }
       }
 
-      // ── LinkedIn-already-tried check (retry scenario) ────────────────────
-      let channel = lead.email ? 'email' : 'linkedin';
+      // ── Channel selection (ICP+channel patches per MJ direction 2026-04-29) ──
+      // Email-first default. LinkedIn ONLY at touch 3, or when explicit override metadata flag set.
+      // Touch 1 with unverified email → blocked_no_email (do NOT fall through to LinkedIn).
+      const meta_channel = lead.metadata || {};
+      const linkedinFirstOverride = meta_channel.linkedin_first_override === true || meta_channel.linkedin_first_override === 'true';
+      const hasVerifiedEmailSP = lead.email && (lead.email_verified === true || lead.email_source === 'hunter' || lead.email_source === 'apollo');
+
+      let channel;
+      let kickoffMessageStatus = 'pending_ranger';
+
+      if (linkedinFirstOverride && lead.linkedin_url) {
+        channel = 'linkedin';
+      } else if (hasVerifiedEmailSP) {
+        channel = 'email';
+      } else {
+        // Hold for enrichment. Persist message as blocked_no_email so the queue surfaces it
+        // for Hunter/Apollo backfill rather than auto-defaulting to LinkedIn at touch 1.
+        channel = 'email';
+        kickoffMessageStatus = 'blocked_no_email';
+        console.log(`[signal-pipeline] ${lead.name} — no verified email, marking blocked_no_email`);
+      }
+
       if (channel === 'linkedin') {
         const prevLinkedinRes = await pool.query(
           `SELECT id FROM messages WHERE client_id = $1 AND lead_id = $2 AND channel = 'linkedin' AND status NOT IN ('deleted') LIMIT 1`,
@@ -1386,14 +1579,21 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         continue;
       }
 
-      // Insert message
+      // Insert message (ICP+channel patches per MJ direction 2026-04-29)
+      // kickoffMessageStatus is 'blocked_no_email' when no verified email available.
       const { rows: [msg] } = await pool.query(
         `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, metadata)
-         VALUES ($1, $2, $3, $4, $5, 'pending_ranger', $6)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING *`,
-        [clientId, lead.id, channel, draftSubject, draftBody,
-         JSON.stringify({ source: draftSource, signal: meta.signal })]
+        [clientId, lead.id, channel, draftSubject, draftBody, kickoffMessageStatus,
+         JSON.stringify({ source: draftSource, signal: meta.signal, blocked_reason: kickoffMessageStatus === 'blocked_no_email' ? 'awaiting_email_enrichment' : undefined })]
       );
+
+      // If blocked, skip Ranger and downstream processing — message is on hold for enrichment.
+      if (kickoffMessageStatus === 'blocked_no_email') {
+        messagesDrafted++;
+        continue;
+      }
       messagesDrafted++;
 
       // Run auto-fix + Enforcer
@@ -1914,79 +2114,67 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     return true;
   });
 
-  // ── Gate 4: Geography + Industry + Company Size ──
-  const icpLocation = (icpMemory?.geographies || icpMemory?.geography || icpMemory?.location || '').toLowerCase();
-  const isKLFocused = !icpLocation || /klang|kuala lumpur|kl|selangor|malaysia/i.test(icpLocation);
+  // ── Gate 4: ICP v2 — country, vertical, persona, score (per MJ direction 2026-04-29) ──
+  // Replaces the prior "reject only if explicit foreign signal" geo logic which let through
+  // 51 non-MY leads on the Beaver Solutions tenant. New gate REQUIRES SEA-6 country evidence
+  // (lead.country, metadata, or Haiku verification) and emits granular rejection statuses.
 
-  // Non-target geographies — expanded list
-  const NON_TARGET_GEO = /\bsingapore\b|\bsg\b|jakarta|indonesia|bangkok|thailand|\blondon\b|sydney|australia|manila|philippines|vietnam|myanmar|cambodia|india\b|hong kong|\bhk\b|\bdubai\b|\buae\b|abu dhabi|saudi|qatar|bahrain|pakistan|bangladesh|\busa\b|united states|new york|california|san francisco|chicago|toronto|canada|united kingdom|\buk\b/i;
+  // Sector exclusions still apply on top of ICP v2 (these are sector-narrowing for the
+  // Beaver Solutions ICP, not country/persona checks).
+  const EXCLUDED_INDUSTRIES = /hospital|clinic|medical centre|healthcare|pharmacy|polyclinic|hotel|resort|restaurant|hospitality|retail|e-commerce|ecommerce|supermarket|hypermarket/i;
 
-  // Malaysia confirmation — if we can confirm they're in MY, they pass geo check
-  const MALAYSIA_CONFIRM = /malaysia|kuala lumpur|\bkl\b|selangor|klang|penang|johor|melaka|sabah|sarawak|perak|kedah|kelantan|pahang|putrajaya|cyberjaya|petaling jaya|\bpj\b|subang|shah alam|bangsar|mont kiara|damansara|\bsdn bhd\b|\bbhd\b/i;
-
-  // Excluded industries
-  const EXCLUDED_INDUSTRIES = /hospital|clinic|medical centre|healthcare|pharmacy|polyclinic|hotel|resort|restaurant|hospitality|retail|e-commerce|ecommerce|supermarket|hypermarket|ministry|government|jabatan|polis|army|military/i;
-
-  // Large multinationals — check ALL text fields including name
-  const LARGE_CORPS = /\bwpp\b|publicis|omnicom|interpublic|\bbbdo\b|ogilvy|mccann|\bvml\b|dentsu|havas|grey group|leo burnett|saatchi|ddb\b|tbwa|jwt\b|\bdeloitte\b|\bmckinsey\b|\bpwc\b|\bkpmg\b|\bey\b|\baccenture\b|boston consulting|\bbain\b|\bshell\b|\bpetronas\b|tenaga|maybank|\bcimb\b|\brhb\b|public bank|hong leong|sime darby|axiata|celcom|\bmaxis\b|\bdigi\b|unilever|nestle|procter|p&g\b|samsung|\blg\b|sony\b|panasonic|\bgoogle\b|\bmeta\b|\bamazon\b|\bmicrosoft\b|\bapple\b|\bibm\b/i;
-
-  // ── Command intent industry filter — DISABLED ──
-  // Previously rejected leads whose profile text didn't contain the exact industry name
-  // (e.g. "marketing agency"). This killed valid leads because LinkedIn/Brave snippets
-  // rarely include the industry name verbatim. The search query itself already targets
-  // the right industry — requiring double-confirmation was too aggressive.
-  // Kept as comment for reference; re-enable only with broader matching (e.g. NLP).
-  const commandIndustryFilter = null;
-
-  const icpGatedLeads = namedLeads.filter(lead => {
-    // Combine ALL text for comprehensive checks
+  const icpGatedLeads = [];
+  const rejectedAuditQueue = [];
+  for (const lead of namedLeads) {
     const allText = [lead.name || '', lead.company || '', lead.title || '', lead.snippet || '', lead.location || ''].join(' ');
 
-    // Command intent gate: if user asked for specific industry, reject leads that don't match
-    if (commandIndustryFilter && !commandIndustryFilter.test(allText)) {
-      console.warn(`[captain] REJECT command intent: ${lead.name} at ${lead.company} — doesn't match command industry filter`);
-      logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_command_intent', metadata: { name: lead.name, company: lead.company, reason: 'command_industry_mismatch' } }).catch(() => {});
-      return false;
-    }
-    const locationText = [lead.location || '', lead.snippet || ''].join(' ');
-
-    // Geography check (Phase B2: loosened — hard-reject foreign, trust search for rest)
-    // Brave country:'MY' already biases toward Malaysian results. Second-guessing that
-    // via regex on snippets is circular validation and kills valid leads.
-    if (isKLFocused) {
-      // Only hard-reject if the lead explicitly shows they're based in a foreign country.
-      // Passive Malaysia-confirmation is NOT required — trust the search bias.
-      if (NON_TARGET_GEO.test(allText)) {
-        // Exception: if Malaysia is ALSO present (e.g. dual-city exec), allow
-        if (!MALAYSIA_CONFIRM.test(allText)) {
-          console.warn(`[captain] REJECT geo: ${lead.name} at ${lead.company} — foreign location`);
-          logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_geo', metadata: { name: lead.name, company: lead.company, reason: 'foreign_location' } }).catch(() => {});
-          return false;
-        }
-      }
-      // No foreign signal + no Malaysia signal = ACCEPT. Trust the search.
+    // ICP v2 hard gate.
+    const v2 = applyIcpV2Filter(lead);
+    if (!v2.pass) {
+      console.warn(`[captain] REJECT ${v2.status}: ${lead.name} at ${lead.company} — ${v2.reason}`);
+      rejectedAuditQueue.push({ lead, status: v2.status, reason: v2.reason });
+      continue;
     }
 
-    // Industry exclusion
+    // Sector exclusion (kept as a separate narrow gate — no status enum, just drop).
     if (EXCLUDED_INDUSTRIES.test(allText)) {
       console.warn(`[captain] REJECT industry: ${lead.name} at ${lead.company}`);
       logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_industry', metadata: { name: lead.name, company: lead.company } }).catch(() => {});
-      return false;
+      continue;
     }
 
-    // Large multinational check — now checks ALL fields including name
-    if (LARGE_CORPS.test(allText)) {
-      console.warn(`[captain] REJECT corp: ${lead.name} at ${lead.company} — large multinational`);
-      logsService.createLog(clientId, { agent: 'director', action: 'lead_skipped_corp', metadata: { name: lead.name, company: lead.company } }).catch(() => {});
-      return false;
-    }
+    icpGatedLeads.push(lead);
+  }
 
-    return true;
-  });
+  // Persist rejected leads with status='rejected_*' and deleted_at=NOW() so they show up
+  // in the validation SQL but don't pollute the active leads view. Fire-and-forget so the
+  // pipeline isn't blocked on audit writes.
+  if (rejectedAuditQueue.length > 0) {
+    Promise.allSettled(rejectedAuditQueue.map(r => pool.query(
+      `INSERT INTO leads (client_id, name, email, company, title, source,
+                          pipeline_stage, status, country, linkedin_url, metadata, deleted_at)
+       VALUES ($1,$2,$3,$4,$5,'research_beaver','rejected',$6,$7,$8,$9,NOW())`,
+      [
+        clientId,
+        r.lead.name || 'Unknown',
+        r.lead.email || null,
+        r.lead.company || 'Unknown',
+        r.lead.title || null,
+        r.status,
+        (r.lead.country || r.lead.metadata?.country || null),
+        r.lead.linkedin_url || null,
+        JSON.stringify({ ...(r.lead.metadata || {}), rejection_reason: r.reason, rejected_at: new Date().toISOString(), source: 'icp_v2_filter' }),
+      ]
+    ))).then(results => {
+      const persisted = results.filter(x => x.status === 'fulfilled').length;
+      console.log(`[captain] ICP v2 persisted ${persisted}/${rejectedAuditQueue.length} rejected lead audit rows`);
+    }).catch(err => console.warn('[captain] ICP v2 audit batch insert failed:', err.message));
+  }
 
   diagnostics.after_icp_gate = icpGatedLeads.length;
+  diagnostics.icp_v2_rejected = rejectedAuditQueue.length;
   if (namedLeads.length !== icpGatedLeads.length) {
-    console.log(`[captain] ICP gate removed ${namedLeads.length - icpGatedLeads.length} leads (geo/industry/corp)`);
+    console.log(`[captain] ICP v2 gate: ${namedLeads.length} → ${icpGatedLeads.length} (rejected ${namedLeads.length - icpGatedLeads.length})`);
   }
 
   // Update status: research phase counts
@@ -2148,10 +2336,12 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       if (lead.metadata?.verified !== undefined) meta.verified = lead.metadata.verified;
 
       const res = await pool.query(
+        // ICP+channel patches per MJ direction 2026-04-29
+        // signal_tier resolved from score+verified per spec; country lifted from Haiku verification.
         `INSERT INTO leads (client_id, name, email, company, title, signal_tier, score, source,
                             pipeline_stage, status, email_verified, email_source,
-                            apollo_enriched, apollo_person_id, apollo_org_id, linkedin_url, metadata)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11,$12,$13,$14)
+                            apollo_enriched, apollo_person_id, apollo_org_id, linkedin_url, country, metadata)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11,$12,$13,$14,$15)
          ON CONFLICT (client_id, linkedin_url) WHERE linkedin_url IS NOT NULL AND deleted_at IS NULL
          DO NOTHING
          RETURNING *`,
@@ -2161,7 +2351,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           lead.email || null,
           lead.company || 'Unknown Company',
           lead.title || null,
-          lead.signal_tier || null,
+          resolveSignalTier(lead) || lead.signal_tier || null,
           lead.score || 0,
           lead.email_verified || false,
           lead.email_source || null,
@@ -2169,6 +2359,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           lead.metadata?.apollo_person_id || null,
           lead.metadata?.apollo_org_id || null,
           lead.linkedin_url || null,
+          lead.country || lead.metadata?.country || lead.verification?.country || lead.verification?.haikuResult?.country || null,
           JSON.stringify({ short_description: lead.short_description || '', ...meta }),
         ]
       );
@@ -2359,28 +2550,31 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       }
     }
 
-    // Smart channel selection based on data quality + availability
-    // Priority: verified email > LinkedIn (if no email) > unverified email (risky) > Instagram
+    // Channel selection (ICP+channel patches per MJ direction 2026-04-29)
+    // Email-first default. LinkedIn ONLY when override metadata flag set, or as a Touch 3
+    // escalation handled separately by followupSequence.js. Touch 1 with no verified email
+    // → blocked_no_email (do NOT fall through to LinkedIn at touch 1).
     let selectedChannel;
     let channelReason;
+    let kickoffMessageStatus = 'pending_ranger';
+    const meta_pl = lead.metadata || {};
+    const linkedinFirstOverride = meta_pl.linkedin_first_override === true || meta_pl.linkedin_first_override === 'true';
     const hasVerifiedEmail = lead.email && (lead.email_verified === true || lead.email_source === 'hunter' || lead.email_source === 'apollo');
-    const hasUnverifiedEmail = lead.email && !hasVerifiedEmail;
 
-    if (hasVerifiedEmail) {
-      selectedChannel = 'email';
-      channelReason = `Verified email (${lead.email_source || 'known'}${linkedinAlreadyTried ? ', Hunter fallback' : ''})`;
-    } else if (lead.linkedin_url && !linkedinAlreadyTried) {
+    if (linkedinFirstOverride && lead.linkedin_url && !linkedinAlreadyTried) {
       selectedChannel = 'linkedin';
-      channelReason = hasUnverifiedEmail ? 'LinkedIn preferred over unverified email (bounce risk)' : 'No email, LinkedIn available';
-    } else if (hasUnverifiedEmail) {
+      channelReason = 'linkedin_first_override metadata flag set';
+    } else if (hasVerifiedEmail) {
       selectedChannel = 'email';
-      channelReason = 'Unverified email (only option)';
+      channelReason = `Verified email (${lead.email_source || 'known'})`;
     } else {
-      selectedChannel = 'instagram';
-      channelReason = 'No email or LinkedIn available';
+      // No verified email at touch 1 — hold for enrichment instead of falling through to LinkedIn.
+      selectedChannel = 'email';
+      channelReason = 'No verified email — holding as blocked_no_email for enrichment';
+      kickoffMessageStatus = 'blocked_no_email';
     }
 
-    console.log(`[pipeline] Channel for ${lead.name}: ${selectedChannel} — ${channelReason}`);
+    console.log(`[pipeline] Channel for ${lead.name}: ${selectedChannel} status=${kickoffMessageStatus} — ${channelReason}`);
 
     const hint = CHANNEL_HINTS[selectedChannel];
 
@@ -2415,10 +2609,12 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         }
 
         const msgRes = await pool.query(
-          `INSERT INTO messages (client_id, lead_id, channel, subject, body, status)
-           VALUES ($1, $2, $3, $4, $5, 'pending_ranger')
+          `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            RETURNING *`,
-          [clientId, lead.id, selectedChannel, salesResult.subject || null, salesResult.body]
+          [clientId, lead.id, selectedChannel, salesResult.subject || null, salesResult.body,
+           kickoffMessageStatus,
+           JSON.stringify({ blocked_reason: kickoffMessageStatus === 'blocked_no_email' ? 'awaiting_email_enrichment' : undefined })]
         );
 
         const message = msgRes.rows[0];
@@ -2430,8 +2626,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           action: 'message_created',
           target_type: 'message',
           target_id: message.id,
-          metadata: { lead_id: lead.id, lead_name: lead.name, channel: selectedChannel, reason: `Best channel: ${selectedChannel}` },
+          metadata: { lead_id: lead.id, lead_name: lead.name, channel: selectedChannel, status: kickoffMessageStatus, reason: channelReason },
         });
+
+        // If blocked, skip Captain validation + Enforcer — message is on hold for enrichment.
+        if (kickoffMessageStatus === 'blocked_no_email') {
+          return;
+        }
 
         // ── Captain validation gate — check for placeholders, missing data ──
         const validation = await captainValidate(clientId, lead, message);

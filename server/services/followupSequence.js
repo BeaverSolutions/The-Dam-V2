@@ -212,8 +212,16 @@ async function getLeadSequence(clientId, leadId) {
  * Draft a follow-up message for a specific touch.
  */
 async function draftFollowUp(lead, touchNumber, previousMessages) {
-  // Determine channel from first message in the sequence
-  const channel = previousMessages?.[0]?.channel || 'email';
+  // ICP+channel patches per MJ direction 2026-04-29
+  // Email-first sequence. Touch 1 + 2 always inherit (or default to 'email' for new sequences).
+  // Touch 3 (D+7) is the FIRST point where LinkedIn becomes valid as an escalation, and only
+  // if (a) the previous channel was email, (b) the lead has a linkedin_url, and (c) no reply yet.
+  const previousChannel = previousMessages?.[0]?.channel || 'email';
+  let channel = previousChannel;
+  if (touchNumber === 3 && previousChannel === 'email' && lead.linkedin_url) {
+    channel = 'linkedin';
+    console.log(`[followup] Touch 3 escalation for lead ${lead.id}: email → linkedin`);
+  }
 
   const touchConfig = {
     2: {

@@ -472,17 +472,26 @@ CRITICAL ROLE CHECK: The ONLY acceptable roles are: ${icp.job_titles || 'CEO, Fo
 
 Verify:
 1. LOCATION: Is this person actually based in ${icp.geographies || 'Malaysia'}? Cite specific evidence.
-2. INDUSTRY: Is this company actually in ${icp.industries || 'the target industry'}? Not just tangentially related.
-3. ROLE: Is "${candidate.title}" actually a founder/owner/CEO/MD role (${icp.job_titles || 'CEO/Founder/Director'})? "Likely" is NOT good enough — if the title does not clearly indicate ownership or C-level, mark as "unlikely".
+2. COUNTRY: Resolve to a single country full name from this fixed list: Malaysia, Singapore, Indonesia, Philippines, Thailand, Vietnam, US, UK, India, China, Japan, Australia, UAE, Other, Unknown. Use evidence from the LinkedIn URL country tag, company TLD, headline city, or "Sdn Bhd"/"Pte Ltd" suffix. If unsure → "Unknown" (do not guess).
+3. INDUSTRY: Is this company actually in ${icp.industries || 'the target industry'}? Not just tangentially related.
+4. ROLE: Is "${candidate.title}" actually a founder/owner/CEO/MD role (${icp.job_titles || 'CEO/Founder/Director'})? "Likely" is NOT good enough — if the title does not clearly indicate ownership or C-level, mark as "unlikely".
 
 Return JSON:
-{"location":"confirmed|likely|unlikely|unknown","location_evidence":"...","industry":"confirmed|likely|unlikely|unknown","industry_evidence":"...","role":"confirmed|likely|unlikely|unknown","confidence":0-100,"pass":true|false,"reason":"one line summary"}`;
+{"location":"confirmed|likely|unlikely|unknown","location_evidence":"...","country":"Malaysia|Singapore|Indonesia|Philippines|Thailand|Vietnam|US|UK|India|China|Japan|Australia|UAE|Other|Unknown","industry":"confirmed|likely|unlikely|unknown","industry_evidence":"...","role":"confirmed|likely|unlikely|unknown","confidence":0-100,"pass":true|false,"reason":"one line summary"}`;
 
       const result = await callAgent('research_beaver', prompt, { clientId });
       verification.haikuResult = result;
 
       if (result) {
         haikuCompleted = true;
+
+        // ICP+channel patches per MJ direction 2026-04-29
+        // Lift country onto verification + candidate so the captain-level ICP v2 gate
+        // can hard-reject by country without re-asking Haiku.
+        if (typeof result.country === 'string' && result.country.trim()) {
+          verification.country = result.country.trim();
+          candidate.country = result.country.trim();
+        }
 
         // Hard rejects
         if (result.location === 'unlikely') {
