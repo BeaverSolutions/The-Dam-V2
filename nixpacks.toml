@@ -2,8 +2,11 @@
 nixPkgs = ["nodejs_20"]
 
 [phases.install]
+# --include=dev forces devDependencies (vite, @vitejs/plugin-react) to install.
+# Railway defaults to NODE_ENV=production which makes npm skip devDeps; without
+# vite the [phases.build] step crashes with "vite: not found".
 cmds = [
-  "cd client && npm install",
+  "cd client && npm install --include=dev",
   "cd server && npm install"
 ]
 
