@@ -105,7 +105,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
         `SELECT target FROM daily_kpi WHERE client_id = $1 AND date = $2`,
         [client_id, today]
       );
-      const target = kpiRow?.target || 80;
+      const target = kpiRow?.target || 50;
 
       response.data = {
         date: today,
@@ -836,18 +836,16 @@ async function _runAutonomousKickoffInner(clientId) {
   );
   const sent = parseInt(counts[0].total_sent) || 0;
 
-  // Update daily_kpi with live count
-  await pool.query(
-    `UPDATE daily_kpi SET outreach_sent = $1, outreach_email = $1, updated_at = NOW()
-     WHERE client_id = $2 AND date = $3`,
-    [sent, clientId, today]
-  );
+  // Recompute all daily_kpi counters from source-of-truth tables
+  // (replaces the previous outreach_sent-only inline UPDATE that lost the
+  // outreach_linkedin / leads_found / replies_received counters).
+  await require('../services/kpi').recountKpi(clientId, today).catch(() => {});
 
   const { rows: [kpiRow] } = await pool.query(
     `SELECT target FROM daily_kpi WHERE client_id = $1 AND date = $2`,
     [clientId, today]
   );
-  const target = kpiRow?.target || 80;
+  const target = kpiRow?.target || 50;
   const gap = target - sent;
 
   if (gap <= 0) {
@@ -1720,7 +1718,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
 
     const tenants = [];
     for (const c of clientRows) {
-      const [kickoffLog, kpi, msgs, queue, approvedUnsent, leadPool, researchLog] = await Promise.all([
+      const [kickoffLog, kpi, msgs, queue, approvedUnsent, leadPool, researchLog, integrations] = await Promise.all([
         pool.query(
           `SELECT created_at FROM logs
            WHERE client_id = $1 AND agent = 'director' AND action = 'autonomous_kickoff'
@@ -1771,11 +1769,21 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
            FROM logs WHERE client_id = $1 AND agent = 'research_beaver'`,
           [c.id]
         ),
+        pool.query(
+          `SELECT
+             COUNT(*) FILTER (WHERE key = 'gmail_tokens')::int AS gmail_connected,
+             COUNT(*) FILTER (WHERE key = 'agentmail_inbox')::int AS agentmail_provisioned,
+             COUNT(*) FILTER (WHERE key = 'calendar_tokens')::int AS calendar_connected,
+             COUNT(*) FILTER (WHERE key = 'hunter_api_key')::int AS hunter_configured
+           FROM agent_memory WHERE client_id = $1 AND memory_type = 'secret'`,
+          [c.id]
+        ),
       ]);
 
       const approvedUnsentByChannel = {};
       for (const r of approvedUnsent.rows) approvedUnsentByChannel[r.channel] = r.n;
 
+      const i = integrations.rows[0];
       tenants.push({
         slug: c.slug,
         name: c.name,
@@ -1789,6 +1797,12 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
         approved_unsent: approvedUnsentByChannel,
         lead_pool_remaining: leadPool.rows[0].n,
         research_beaver: researchLog.rows[0],
+        integrations: {
+          gmail_connected: !!i.gmail_connected,
+          agentmail_provisioned: !!i.agentmail_provisioned,
+          calendar_connected: !!i.calendar_connected,
+          hunter_configured: !!i.hunter_configured,
+        },
       });
     }
 

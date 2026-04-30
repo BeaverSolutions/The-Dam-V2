@@ -76,6 +76,8 @@ async function main() {
     const rb = t.research_beaver || {};
     lines.push(`Research Beaver: ${rb.leads_saved_24h ?? 0} saved · ${rb.no_results_24h ?? 0} no-results · last run ${rb.last_run ? new Date(rb.last_run).toISOString().slice(0, 10) : 'NEVER'}`);
     lines.push(`Lead pool remaining: ${t.lead_pool_remaining}`);
+    const ig = t.integrations || {};
+    lines.push(`Integrations: ${emoji(ig.gmail_connected)} Gmail · ${emoji(ig.calendar_connected)} Calendar · ${emoji(ig.hunter_configured)} Hunter · ${emoji(ig.agentmail_provisioned)} AgentMail`);
     lines.push('');
   }
 

@@ -85,6 +85,12 @@ async function processJob(job) {
     );
     console.log(`[send_queue] Sent message ${message_id} (attempt ${attempt_count + 1})`);
 
+    // Recompute daily KPI counters so outreach_sent / outreach_email / kpi_met
+    // reflect the new send. Non-blocking — never fail the send on a counter sync error.
+    require('./kpi').recountKpi(client_id).catch(err =>
+      console.warn('[send_queue] KPI recount failed:', err.message)
+    );
+
     // Track message_sent for conversion data
     try {
       const { rows: [msg] } = await pool.query(
