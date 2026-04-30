@@ -1973,5 +1973,51 @@ router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── POST /api/autonomous/vibe-prospecting/test ──────────────
+ * Sentinel probe for the Vibe Prospecting (Explorium) integration.
+ * Runs the full chain on a known business+prospect (Microsoft / Satya Nadella):
+ *   match-business (FREE) → match-prospects (FREE) → enrich-prospects ['contacts'] (~5 credits)
+ * Returns the verified email, status, and credits spent.
+ * Hits 5 credits per call. Use sparingly. Removable once 6.3 onboarding ships.
+ *
+ * Body: { client_id }
+ */
+router.post('/vibe-prospecting/test', requireInternalKey, async (req, res) => {
+  const { client_id } = req.body || {};
+  if (!client_id || !UUID_RE.test(String(client_id))) {
+    return res.status(400).json({ error: 'client_id required (UUID)' });
+  }
+  try {
+    const vp = require('../services/vibeProspecting');
+    const apiKey = await vp.getApiKey(client_id);
+    if (!apiKey) {
+      return res.status(400).json({
+        ok: false,
+        error: 'no_api_key',
+        hint: 'Set VIBE_PROSPECTING_API_KEY env var (bootstrap) or seed via secrets.setClientSecret(clientId, "system", "vibe_prospecting_api_key", { key })',
+      });
+    }
+    const result = await vp.findVerifiedEmail(client_id, {
+      fullName: 'Satya Nadella',
+      company: 'Microsoft',
+      domain: 'microsoft.com',
+    });
+    return res.json({
+      ok: result?.ok === true,
+      // Mask the email value so the response itself is not a leak vector when shared
+      email_masked: result?.email ? result.email.replace(/^(.).*(@.*)$/, '$1***$2') : null,
+      email_verified: result?.email_verified || false,
+      email_status: result?.email_status || null,
+      business_id: result?.business_id || null,
+      prospect_id: result?.prospect_id || null,
+      credits_used: result?.credits ?? 0,
+      error: result?.error || null,
+    });
+  } catch (err) {
+    logger.error({ msg: 'vp-test failed', err: err.message, stack: err.stack?.split('\n').slice(0, 3) });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 module.exports = router;
 module.exports.runAutonomousKickoff = runAutonomousKickoff;

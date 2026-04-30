@@ -181,6 +181,7 @@ app.get('/health', async (req, res) => {
       brave: process.env.BRAVE_API_KEY ? 'set' : 'missing',
       anthropic: process.env.ANTHROPIC_API_KEY ? 'set' : 'missing',
       gmail_oauth: process.env.GMAIL_CLIENT_ID ? 'set' : 'missing',
+      vibe_prospecting: process.env.VIBE_PROSPECTING_API_KEY ? 'set' : 'missing',
     },
     jobs,
     stale_jobs: staleJobs,
