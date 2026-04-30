@@ -390,9 +390,251 @@ async function runMorningBrief(clientId) {
   return brief;
 }
 
+/* ─── EOD Brief ───────────────────────────────────────────────────── */
+
+/**
+ * Generate the end-of-day brief. Mirrors morning structure but reports
+ * on TODAY (what shipped, what's stuck, tomorrow's plan).
+ */
+async function generateEodBrief(clientId) {
+  const beaverState = require('./beaverState');
+
+  const kpis = await collectTeamKPIs(clientId);
+  const beaverReports = await beaverState.readAllBeaversKPIsForToday(clientId).catch(() => ({}));
+  const todaysActions = await beaverState.readRecentCaptainActions(clientId, 12).catch(() => []);
+
+  const userMessage = `Compose today's END-OF-DAY brief for ${kpis.tenant.name}. Same conversational-tight tone as morning. Three sections: SYSTEM HEALTH, TODAY'S RESULTS, TOMORROW'S SETUP.
+
+═══ SYSTEM HEALTH (close of day) ═══
+DB ${kpis.dam_health.db_ok ? 'ok' : 'UNREACHABLE'} · stale crons: ${kpis.dam_health.stale_jobs.join(', ') || 'none'}
+spend today $${kpis.cost.llm_spend_today_usd.toFixed(4)} · mtd $${kpis.cost.llm_spend_mtd_usd.toFixed(2)}
+vp credits today ${kpis.cost.vp_credits_used_today} of ${kpis.cost.vp_credits_budget_today}
+
+═══ TODAY'S RESULTS ═══
+research beaver self-report: ${JSON.stringify(beaverReports.research_beaver || 'no report submitted').slice(0, 200)}
+sales beaver self-report: ${JSON.stringify(beaverReports.sales_beaver || 'no report submitted').slice(0, 200)}
+enforcer self-report: ${JSON.stringify(beaverReports.ranger || 'no report submitted').slice(0, 200)}
+
+aggregated 24h: sourced ${kpis.research_beaver.sourced_24h}, drafts ${kpis.sales_beaver.drafts_24h}, sent ${kpis.sales_beaver.sent_24h}, replies ${kpis.sales_beaver.replies_24h}
+meetings: ${kpis.meetings.this_week} this week, ${kpis.meetings.mtd} mtd, projecting ${kpis.meetings.mtd_pace_projected} (gap ${kpis.meetings.gap_to_target} to target ${kpis.meetings.monthly_target})
+
+actions you took today: ${todaysActions.length === 0 ? 'none' : todaysActions.map(a => a.action).join(', ')}
+
+═══ TOMORROW'S SETUP ═══
+Surface what each beaver is working on tomorrow + any decisions queued for MJ overnight.
+
+Write the brief now. Conversational-tight, lowercase opener, no fluff.`;
+
+  let summary;
+  try {
+    const result = await callAgent('captain_orchestrator', userMessage, { clientId });
+    summary = result?.brief || result?.summary || result?.raw || null;
+  } catch (err) {
+    console.warn('[captain] EOD brief generation failed:', err.message);
+  }
+
+  if (!summary || typeof summary !== 'string') {
+    summary = renderPlainEodBrief(kpis, beaverReports, todaysActions);
+  }
+
+  return { summary, raw_kpis: kpis, beaver_reports: beaverReports, actions_taken: todaysActions };
+}
+
+function renderPlainEodBrief(k, reports, actions) {
+  const lines = [
+    `eod brief — ${k.tenant.name}.`,
+    ``,
+    `═══ system health ═══`,
+    `db ${k.dam_health.db_ok ? 'ok' : 'UNREACHABLE'} · stale crons: ${k.dam_health.stale_jobs.join(', ') || 'none'}`,
+    `spend today $${k.cost.llm_spend_today_usd.toFixed(4)} · mtd $${k.cost.llm_spend_mtd_usd.toFixed(2)}`,
+    ``,
+    `═══ today's results ═══`,
+    `sourced ${k.research_beaver.sourced_24h}/${k.research_beaver.sourced_floor}, drafts ${k.sales_beaver.drafts_24h}, sent ${k.sales_beaver.sent_24h}, replies ${k.sales_beaver.replies_24h}`,
+    `meetings: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd, projecting ${k.meetings.mtd_pace_projected}/${k.meetings.monthly_target}`,
+    `captain actions today: ${actions?.length || 0}`,
+    ``,
+    `═══ tomorrow's setup ═══`,
+    `(captain's llm offline — tomorrow plan in raw kpis)`,
+  ];
+  return lines.join('\n');
+}
+
+async function runEodBrief(clientId) {
+  const brief = await generateEodBrief(clientId);
+  const today = new Date().toISOString().slice(0, 10);
+  await pool.query(
+    `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+     VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
+     ON CONFLICT (client_id, agent, key) DO UPDATE
+       SET content = EXCLUDED.content, updated_at = NOW()`,
+    [clientId, `eod_brief_${today}`, JSON.stringify(brief)]
+  ).catch(err => console.warn('[captain] persist EOD failed:', err.message));
+  return brief;
+}
+
+/* ─── Stuck-state monitor ─────────────────────────────────────────── */
+
+/**
+ * Detect stuck states across the team. Runs every hour during 09-19 MYT.
+ * Triggers Captain's autonomous tactical decisions when KPIs slip.
+ *
+ * Returns an array of detected issues. Each issue includes a recommended
+ * action — the executor (Phase 2) calls the appropriate function.
+ */
+async function detectStuckStates(clientId) {
+  const kpis = await collectTeamKPIs(clientId);
+  const issues = [];
+
+  // Issue 1: Research Beaver is below floor by mid-day
+  const utcHour = new Date().getUTCHours();
+  const isMidDay = utcHour >= 4 && utcHour <= 8; // 12-16 MYT
+  if (isMidDay && kpis.research_beaver.sourced_24h < kpis.research_beaver.sourced_floor * 0.5) {
+    issues.push({
+      severity: 'high',
+      type: 'research_below_floor_midday',
+      detail: `${kpis.research_beaver.sourced_24h}/${kpis.research_beaver.sourced_floor} by midday — likely strategy is dry`,
+      recommended_action: 'switchResearchStrategy',
+    });
+  }
+
+  // Issue 2: Sales Beaver pass-rate collapsed
+  if (kpis.sales_beaver.first_attempt_pass_rate_pct !== null && kpis.sales_beaver.first_attempt_pass_rate_pct < 50) {
+    issues.push({
+      severity: 'high',
+      type: 'sales_pass_rate_collapsed',
+      detail: `first-pass at ${kpis.sales_beaver.first_attempt_pass_rate_pct}% — Enforcer rejecting heavily`,
+      recommended_action: 'fireCoachingLoop',
+    });
+  }
+
+  // Issue 3: Bounce rate elevated
+  if (kpis.pipeline.bounces_7d >= 5) {
+    issues.push({
+      severity: 'high',
+      type: 'bounce_rate_elevated',
+      detail: `${kpis.pipeline.bounces_7d} bounces in last 7d — sender reputation at risk`,
+      recommended_action: 'throttleSend',
+    });
+  }
+
+  // Issue 4: VP credits exhausting
+  if (kpis.vp.credits_remaining_today < 5 && kpis.vp.credits_used_today > 0) {
+    issues.push({
+      severity: 'medium',
+      type: 'vp_credits_exhausting',
+      detail: `${kpis.vp.credits_remaining_today} of ${kpis.vp.credits_budget} VP credits remain today`,
+      recommended_action: 'tuneVpThreshold',
+    });
+  }
+
+  // Issue 5: Stale crons
+  if (kpis.dam_health.stale_jobs.length > 0) {
+    issues.push({
+      severity: 'critical',
+      type: 'stale_crons',
+      detail: `crons stale: ${kpis.dam_health.stale_jobs.join(', ')}`,
+      recommended_action: 'escalateToMJ',
+    });
+  }
+
+  return { issues, kpis_snapshot: kpis };
+}
+
+/* ─── Tactical execution stubs ────────────────────────────────────── */
+//
+// These are the calls Captain makes autonomously when stuck-state
+// monitor surfaces an issue. STUB-LEVEL tonight — they log the
+// decision + write to agent_memory so Sales/Research/etc see the
+// directive in their next loop. Full execution (e.g. actually
+// switching the Research Beaver query queue) lands in Phase 2.
+
+const beaverState = require('./beaverState');
+
+/**
+ * Tells Sales Beaver: stop and re-read the recent rejection patterns
+ * before next draft. Captain writes a coaching note Sales reads.
+ */
+async function fireCoachingLoop(clientId, reason) {
+  await beaverState.logCaptainAction(clientId, 'fire_coaching_loop', { reason });
+  await pool.query(
+    `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+     VALUES ($1, 'sales_beaver', $2, $3::jsonb, 'coaching')
+     ON CONFLICT (client_id, agent, key) DO UPDATE
+       SET content = EXCLUDED.content, updated_at = NOW()`,
+    [clientId, 'coaching_directive_active', JSON.stringify({ reason, fired_at: new Date().toISOString() })]
+  );
+  return { ok: true, action: 'fire_coaching_loop' };
+}
+
+/**
+ * Tells Research Beaver: switch to a different strategy bucket.
+ * Captain writes the directive; Research reads it on next loop.
+ */
+async function switchResearchStrategy(clientId, reason, suggested_strategy = null) {
+  await beaverState.logCaptainAction(clientId, 'switch_research_strategy', { reason, suggested_strategy });
+  await pool.query(
+    `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+     VALUES ($1, 'research_beaver', $2, $3::jsonb, 'directive')
+     ON CONFLICT (client_id, agent, key) DO UPDATE
+       SET content = EXCLUDED.content, updated_at = NOW()`,
+    [clientId, 'strategy_directive_active', JSON.stringify({ reason, suggested_strategy, fired_at: new Date().toISOString() })]
+  );
+  return { ok: true, action: 'switch_research_strategy' };
+}
+
+/**
+ * Tightens VP threshold by N points to preserve credits.
+ */
+async function tuneVpThreshold(clientId, deltaPoints = 5) {
+  const cfg = await tenantConfig.getTenantConfig(clientId);
+  const newThreshold = Math.min(95, Math.max(50, cfg.vp_threshold_score + deltaPoints));
+  await tenantConfig.setVpThreshold(clientId, newThreshold);
+  await beaverState.logCaptainAction(clientId, 'tune_vp_threshold', {
+    from: cfg.vp_threshold_score, to: newThreshold, delta: deltaPoints,
+  });
+  return { ok: true, action: 'tune_vp_threshold', from: cfg.vp_threshold_score, to: newThreshold };
+}
+
+/**
+ * Throttles send pacing on bounce signal. STUB — full implementation
+ * would update tenant config or send_queue worker rate limit.
+ */
+async function throttleSend(clientId, throttle_pct = 30) {
+  await beaverState.logCaptainAction(clientId, 'throttle_send', { throttle_pct });
+  await pool.query(
+    `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+     VALUES ($1, 'sales_beaver', $2, $3::jsonb, 'directive')
+     ON CONFLICT (client_id, agent, key) DO UPDATE
+       SET content = EXCLUDED.content, updated_at = NOW()`,
+    [clientId, 'send_throttle_directive', JSON.stringify({ throttle_pct, applied_at: new Date().toISOString() })]
+  );
+  return { ok: true, action: 'throttle_send', throttle_pct };
+}
+
+/**
+ * Routes a decision to MJ via Telegram. STUB — full version composes
+ * the Telegram message using Captain's voice + forced-choice format.
+ */
+async function escalateToMJ(clientId, decision) {
+  await beaverState.logCaptainAction(clientId, 'escalate_to_mj', decision);
+  // Future: fire Telegram message immediately, not wait for next brief.
+  return { ok: true, action: 'escalate_to_mj' };
+}
+
 module.exports = {
   collectTeamKPIs,
   generateMorningBrief,
   persistMorningBrief,
   runMorningBrief,
+  // EOD
+  generateEodBrief,
+  runEodBrief,
+  // Stuck-state monitor
+  detectStuckStates,
+  // Tactical execution stubs
+  fireCoachingLoop,
+  switchResearchStrategy,
+  tuneVpThreshold,
+  throttleSend,
+  escalateToMJ,
 };

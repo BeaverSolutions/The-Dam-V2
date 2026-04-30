@@ -2856,6 +2856,21 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
               },
             });
 
+            // ─── Sales Beaver improvement-after-feedback tracker ──
+            // Did the retry actually fix the flagged issue? This metric
+            // closes Enforcer's coaching loop — if Sales repeatedly fixes
+            // his mistakes after feedback, Enforcer's coaching is landing.
+            try {
+              const beaverState = require('./beaverState');
+              await beaverState.recordImprovementAfterFeedback(clientId, {
+                lead_id: lead.id,
+                original_message_id: msg.id,
+                retry_message_id: msg.id,
+                original_reject_reason: rejectionFeedback,
+                retry_passed: rangerResult?.approved === true,
+              }).catch(() => {});
+            } catch (_) { /* non-fatal */ }
+
             // If still rejected after redraft → Enforcer drafts it himself
             if (!rangerResult?.approved) {
               const enforcerDraft = await rangerDraft(clientId, {

@@ -658,6 +658,106 @@ async function start() {
       }
     }
 
+    // ── Captain EOD brief (19:00 MYT = 11:00 UTC) ────────────────────────────
+    async function runCaptainEodBrief() {
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+      const utcMin  = now.getUTCMinutes();
+      if (utcHour !== 11 || utcMin > 10) return; // 11:00-11:10 UTC = 19:00-19:10 MYT
+
+      const dedupeKey = `eod_brief_${now.toISOString().slice(0, 10)}`;
+      const { rows } = await pool.query(
+        `SELECT 1 FROM agent_memory WHERE agent = 'captain_orchestrator' AND key = $1 LIMIT 1`,
+        [dedupeKey]
+      );
+      if (rows.length > 0) return;
+
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (!chatId) return;
+      const { rows: [clientRow] } = await pool.query(
+        `SELECT id FROM clients WHERE slug = $1 LIMIT 1`,
+        [process.env.TELEGRAM_CLIENT_SLUG || 'beaver-solutions']
+      );
+      if (!clientRow) return;
+
+      try {
+        const captain = require('./services/captainOrchestrator');
+        const brief = await captain.runEodBrief(clientRow.id);
+        if (brief?.summary) {
+          await telegramService.sendMessage(chatId, `<b>EOD brief</b>\n\n${brief.summary}`);
+          logger.info({ msg: 'Captain EOD brief sent via Telegram' });
+        }
+      } catch (err) {
+        logger.warn({ msg: 'Captain EOD brief failed', err: err.message });
+      }
+    }
+
+    // ── Captain stuck-state monitor (hourly during 09-19 MYT) ────────────────
+    // Runs every poll during working hours. Detects KPI slippage, fires Captain's
+    // tactical decisions (coaching loop, strategy switch, threshold tune, throttle).
+    // Telegram alert on critical issues.
+    async function runStuckStateMonitor() {
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+      // 01:00-11:59 UTC = 09:00-19:59 MYT working hours
+      if (utcHour < 1 || utcHour > 11) return;
+      // Only fire once per hour (10-min poll, self-dedupe via timestamp)
+      const dedupeKey = `stuck_check_${now.toISOString().slice(0, 13)}`;
+      const { rows } = await pool.query(
+        `SELECT 1 FROM agent_memory WHERE agent = 'captain_orchestrator' AND key = $1 LIMIT 1`,
+        [dedupeKey]
+      );
+      if (rows.length > 0) return;
+
+      const { rows: clients } = await pool.query(
+        `SELECT id, slug FROM clients WHERE is_active = true AND onboarding_completed = true`
+      );
+      if (clients.length === 0) return;
+
+      const captain = require('./services/captainOrchestrator');
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+
+      for (const client of clients) {
+        try {
+          const { issues } = await captain.detectStuckStates(client.id);
+          if (issues.length === 0) continue;
+
+          // Mark this hour as checked for this tenant
+          await pool.query(
+            `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+             VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
+             ON CONFLICT (client_id, agent, key) DO NOTHING`,
+            [client.id, dedupeKey, JSON.stringify({ issues_count: issues.length })]
+          ).catch(() => {});
+
+          // Fire tactical responses for each issue
+          for (const issue of issues) {
+            try {
+              if (issue.recommended_action === 'fireCoachingLoop') {
+                await captain.fireCoachingLoop(client.id, issue.detail);
+              } else if (issue.recommended_action === 'switchResearchStrategy') {
+                await captain.switchResearchStrategy(client.id, issue.detail);
+              } else if (issue.recommended_action === 'tuneVpThreshold') {
+                await captain.tuneVpThreshold(client.id, 5);
+              } else if (issue.recommended_action === 'throttleSend') {
+                await captain.throttleSend(client.id, 30);
+              } else if (issue.recommended_action === 'escalateToMJ' && chatId) {
+                // Critical issues hit Telegram immediately
+                await telegramService.sendMessage(chatId,
+                  `<b>Captain alert — ${client.slug}</b>\n\n[${issue.severity}] ${issue.type}\n${issue.detail}`
+                ).catch(() => {});
+                await captain.escalateToMJ(client.id, { type: issue.type, detail: issue.detail });
+              }
+            } catch (actionErr) {
+              logger.warn({ msg: `[stuck-monitor] action failed: ${issue.recommended_action}`, err: actionErr.message });
+            }
+          }
+        } catch (err) {
+          logger.warn({ msg: `[stuck-monitor] failed for ${client.slug}`, err: err.message });
+        }
+      }
+    }
+
     // Poll every 10 minutes — each function self-guards against running outside its window
     setInterval(() => {
       runMorningBrief()
@@ -672,8 +772,14 @@ async function start() {
       runDailyKickoff()
         .then(() => { jobHealth.markRun('daily_kickoff'); })
         .catch(err => { logger.warn({ msg: 'Daily kickoff poll error', err: err.message }); jobHealth.markError('daily_kickoff', err.message); });
+      runCaptainEodBrief()
+        .then(() => { jobHealth.markRun('captain_eod_brief'); })
+        .catch(err => { logger.warn({ msg: 'Captain EOD brief poll error', err: err.message }); jobHealth.markError('captain_eod_brief', err.message); });
+      runStuckStateMonitor()
+        .then(() => { jobHealth.markRun('stuck_state_monitor'); })
+        .catch(err => { logger.warn({ msg: 'Stuck-state monitor poll error', err: err.message }); jobHealth.markError('stuck_state_monitor', err.message); });
     }, 10 * 60 * 1000);
-    logger.info({ msg: 'Captain Beaver cron jobs registered (10 min poll: 9am brief, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, all MYT)' });
+    logger.info({ msg: 'Captain Beaver cron jobs registered (10min poll: 9am brief, 7pm EOD brief, hourly stuck-state monitor 9am-7pm, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, all MYT)' });
 
     // ── LinkedIn stale connection sweep ─────────────────────────────────────
     // Runs every 6 hours. After 3 days in `linkedin_requested`, assume the

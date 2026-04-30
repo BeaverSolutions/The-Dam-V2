@@ -1041,6 +1041,59 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       },
     }));
 
+    // ─── Quality scoring (Phase B integration) ───────────────────────
+    // Score every verified lead so Sales Beaver can pull top-N by score.
+    // Failure here is non-fatal — leads still flow without scores.
+    let scoringStats = { scored: 0, top_score: null, avg_score: null };
+    try {
+      const tenantConfig = require('./tenantConfig');
+      const qualityScorer = require('./qualityScorer');
+      const cfg = await tenantConfig.getTenantConfig(clientId);
+
+      let scoreSum = 0, topScore = 0;
+      for (const lead of verifiedLeads) {
+        try {
+          const result = qualityScorer.scoreLead(lead, cfg);
+          lead.quality_score = result.score;
+          lead.quality_score_breakdown = result.breakdown;
+          scoreSum += result.score;
+          if (result.score > topScore) topScore = result.score;
+          scoringStats.scored++;
+        } catch (scoreErr) {
+          console.warn('[research] quality score failed for', lead.name, ':', scoreErr.message);
+        }
+      }
+      scoringStats.top_score = topScore || null;
+      scoringStats.avg_score = scoringStats.scored > 0 ? Math.round(scoreSum / scoringStats.scored) : null;
+      console.log(`[research] Quality-scored ${scoringStats.scored}/${verifiedLeads.length} leads. avg=${scoringStats.avg_score} top=${scoringStats.top_score}`);
+
+      // Sort by quality_score DESC so top scorers surface first downstream
+      verifiedLeads.sort((a, b) => (b.quality_score || 0) - (a.quality_score || 0));
+    } catch (err) {
+      console.warn('[research] tenant config / scoring layer failed:', err.message);
+    }
+
+    // ─── Daily KPI report to Captain ────────────────────────────────
+    // Beavers report their own daily output to Captain via beaverState.
+    // Captain reads these in his EOD brief + tomorrow's morning brief.
+    // Failure non-fatal — research output still flows.
+    try {
+      const beaverState = require('./beaverState');
+      await beaverState.reportDailyKPIs(clientId, 'research_beaver', {
+        sourced: verifiedLeads.length,
+        avg_quality: scoringStats.avg_score,
+        top_score: scoringStats.top_score,
+        strategies_used: [...new Set(verifiedLeads.map(l => l.data_source))].length,
+        queries_used: queriesUsed.length,
+        rejection_rate_pct: deduped.length > 0
+          ? Math.round((rejected.length / deduped.length) * 100)
+          : null,
+        verification_retries: retryCount,
+      }).catch(() => {});
+    } catch (err) {
+      console.warn('[research] daily KPI report failed:', err.message);
+    }
+
     return {
       leads:       verifiedLeads,
       queriesUsed,
@@ -1058,6 +1111,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         rejection_reasons: rejected.map(r => `${r.name}: ${r.verification?.rejectReason || 'unknown'}`),
         retries: retryCount,
       },
+      scoring_stats: scoringStats,
     };
   } catch (err) {
     console.warn('[research] researchLeads total failure:', err.message);
