@@ -839,7 +839,9 @@ async function _runAutonomousKickoffInner(clientId) {
   // Recompute all daily_kpi counters from source-of-truth tables
   // (replaces the previous outreach_sent-only inline UPDATE that lost the
   // outreach_linkedin / leads_found / replies_received counters).
-  await require('../services/kpi').recountKpi(clientId, today).catch(() => {});
+  await require('../services/kpi').recountKpi(clientId, today).catch(err =>
+    logger.warn({ msg: '[kickoff] kpi recount failed', clientId, err: err?.message, stack: err?.stack?.split('\n')[0] })
+  );
 
   const { rows: [kpiRow] } = await pool.query(
     `SELECT target FROM daily_kpi WHERE client_id = $1 AND date = $2`,
@@ -1930,7 +1932,9 @@ router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
       }
 
       // Recompute daily KPI counters
-      require('../services/kpi').recountKpi(client_id).catch(() => {});
+      require('../services/kpi').recountKpi(client_id).catch(err =>
+        logger.warn({ msg: '[linkedin-mark-sent] kpi recount failed', client_id, err: err?.message })
+      );
 
       return res.json({ data: { message_id, status: 'sent', sent_at: updated.sent_at } });
     }
