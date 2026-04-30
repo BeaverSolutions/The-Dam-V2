@@ -1823,5 +1823,150 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── GET /api/autonomous/linkedin-queue ─────────────────── */
+// Returns LinkedIn messages MJ has approved but that haven't shipped yet,
+// in the order Cowork should send them (oldest first). Cowork drives the
+// actual send via Chrome MCP; this endpoint is the data source.
+//
+// Query: ?client_id=...&limit=50 (max 100)
+// Auth: x-internal-key
+
+router.get('/linkedin-queue', requireInternalKey, async (req, res) => {
+  try {
+    const clientId = req.query.client_id;
+    if (!clientId) return res.status(400).json({ error: 'client_id query param required', code: 'MISSING_CLIENT_ID' });
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+
+    const { rows } = await pool.query(
+      `SELECT
+         m.id           AS message_id,
+         m.subject,
+         m.body,
+         m.metadata     AS message_meta,
+         m.channel,
+         m.created_at,
+         EXTRACT(EPOCH FROM (NOW() - m.created_at))::int AS age_seconds,
+         l.id           AS lead_id,
+         l.name         AS lead_name,
+         l.company      AS lead_company,
+         l.title        AS lead_title,
+         l.linkedin_url AS lead_linkedin_url,
+         l.country      AS lead_country,
+         l.signal_tier  AS lead_signal_tier,
+         l.metadata     AS lead_metadata
+       FROM messages m
+       JOIN leads l ON l.id = m.lead_id
+       WHERE m.client_id = $1
+         AND m.channel = 'linkedin'
+         AND m.status = 'approved'
+         AND m.sent_at IS NULL
+       ORDER BY m.created_at ASC
+       LIMIT $2`,
+      [clientId, limit]
+    );
+
+    res.json({
+      data: {
+        client_id: clientId,
+        count: rows.length,
+        queue: rows,
+      },
+    });
+  } catch (err) {
+    logger.error({ msg: 'linkedin-queue query failed', err: err.message });
+    res.status(500).json({ error: 'Failed to fetch LinkedIn queue', code: 'DB_ERROR' });
+  }
+});
+
+/* ─── POST /api/autonomous/linkedin-mark-sent ───────────── */
+// Cowork calls this after Chrome MCP confirms a LinkedIn action.
+//
+// Body: { client_id, message_id, action: 'sent' | 'connection_requested' | 'failed', notes? }
+//
+// 'sent' → message.status='sent' + sent_at=NOW + schedule follow-up + recount KPI
+// 'connection_requested' → message.status='linkedin_requested' (waiting for accept; touch 1 not yet sendable)
+// 'failed' → status reverts to 'approved' so the queue surfaces it again; log the reason
+
+router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
+  const { client_id, message_id, action, notes } = req.body || {};
+  if (!client_id || !message_id || !action) {
+    return res.status(400).json({ error: 'client_id, message_id, action required', code: 'MISSING_PARAMS' });
+  }
+  if (!['sent', 'connection_requested', 'failed'].includes(action)) {
+    return res.status(400).json({ error: 'action must be one of: sent, connection_requested, failed', code: 'INVALID_ACTION' });
+  }
+
+  try {
+    if (action === 'sent') {
+      const { rows: [updated] } = await pool.query(
+        `UPDATE messages SET status = 'sent', sent_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND client_id = $2 AND channel = 'linkedin' AND status = 'approved'
+         RETURNING id, lead_id, sent_at`,
+        [message_id, client_id]
+      );
+      if (!updated) {
+        return res.status(404).json({ error: 'Message not found or not in approved state', code: 'NOT_FOUND' });
+      }
+
+      // Move lead pipeline_stage forward
+      await pool.query(
+        `UPDATE leads SET pipeline_stage = 'outreach', updated_at = NOW()
+         WHERE id = $1 AND client_id = $2 AND pipeline_stage IN ('prospecting', 'researched')`,
+        [updated.lead_id, client_id]
+      );
+
+      await pool.query(
+        `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)
+         VALUES ($1, 'system', 'linkedin_sent_via_cowork', 'message', $2, $3)`,
+        [client_id, message_id, JSON.stringify({ notes: notes || null, lead_id: updated.lead_id })]
+      );
+
+      // Schedule follow-up sequence (Day 2/5/10/18/30)
+      try {
+        const { scheduleFollowUps } = require('../services/followupSequence');
+        await scheduleFollowUps(client_id, updated.lead_id, new Date());
+      } catch (err) {
+        logger.warn({ msg: 'scheduleFollowUps failed after linkedin send', err: err.message, message_id });
+      }
+
+      // Recompute daily KPI counters
+      require('../services/kpi').recountKpi(client_id).catch(() => {});
+
+      return res.json({ data: { message_id, status: 'sent', sent_at: updated.sent_at } });
+    }
+
+    if (action === 'connection_requested') {
+      const { rows: [updated] } = await pool.query(
+        `UPDATE messages SET status = 'linkedin_requested', updated_at = NOW()
+         WHERE id = $1 AND client_id = $2 AND channel = 'linkedin' AND status = 'approved'
+         RETURNING id, lead_id`,
+        [message_id, client_id]
+      );
+      if (!updated) {
+        return res.status(404).json({ error: 'Message not found or not in approved state', code: 'NOT_FOUND' });
+      }
+
+      await pool.query(
+        `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)
+         VALUES ($1, 'system', 'linkedin_connection_requested_via_cowork', 'message', $2, $3)`,
+        [client_id, message_id, JSON.stringify({ notes: notes || null, lead_id: updated.lead_id })]
+      );
+
+      return res.json({ data: { message_id, status: 'linkedin_requested' } });
+    }
+
+    // action === 'failed' → just log; status stays 'approved' so it surfaces again
+    await pool.query(
+      `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)
+       VALUES ($1, 'system', 'linkedin_send_failed_via_cowork', 'message', $2, $3)`,
+      [client_id, message_id, JSON.stringify({ notes: notes || null })]
+    );
+    return res.json({ data: { message_id, status: 'failed_will_retry' } });
+  } catch (err) {
+    logger.error({ msg: 'linkedin-mark-sent failed', err: err.message });
+    res.status(500).json({ error: 'Failed to mark sent', code: 'DB_ERROR' });
+  }
+});
+
 module.exports = router;
 module.exports.runAutonomousKickoff = runAutonomousKickoff;
