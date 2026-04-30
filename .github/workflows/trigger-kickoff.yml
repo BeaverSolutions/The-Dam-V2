@@ -1,0 +1,31 @@
+name: Trigger Kickoff (manual)
+
+# Manual kickoff trigger for testing or out-of-window runs.
+# The in-process daily-kickoff cron only fires at 09:30-09:40 MYT;
+# this lets us validate code changes immediately after deploy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      client_slug:
+        description: "Client slug (e.g. beaver-solutions). Empty = all enabled clients."
+        required: false
+        default: "beaver-solutions"
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Trigger kickoff
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BEAVRDAM_INTERNAL_API_KEY: ${{ secrets.BEAVRDAM_INTERNAL_API_KEY }}
+          BEAVRDAM_API_URL: https://app.beaver.solutions
+          CLIENT_SLUG: ${{ github.event.inputs.client_slug }}
+        run: node scripts/trigger-kickoff.mjs
