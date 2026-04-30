@@ -614,8 +614,10 @@ async function start() {
         [dedupeKey, enabledSlugs]
       ).catch(() => {});
 
+      // Defensive: only kickoff active+onboarded tenants. Inactive ones (no ICP
+      // / no API keys configured) get explicitly disabled via clients.is_active.
       const { rows: clients } = await pool.query(
-        `SELECT id, slug FROM clients WHERE slug = ANY($1)`,
+        `SELECT id, slug FROM clients WHERE slug = ANY($1) AND is_active = true AND onboarding_completed = true`,
         [enabledSlugs]
       );
 

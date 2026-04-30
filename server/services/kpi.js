@@ -40,9 +40,8 @@ async function recountKpi(clientId, date = null) {
       [clientId, today]
     );
     step = 'update';
-    // kpi_met now references the `target` column directly (no self-referencing
-    // subquery on daily_kpi inside the same UPDATE — that pattern was suspected
-    // of throwing in the original. Simpler is safer.)
+    // kpi_met is a GENERATED column (outreach_sent >= target) — DO NOT update it.
+    // Postgres rejects with "column kpi_met can only be updated to DEFAULT" otherwise.
     const updateRes = await client.query(
       `UPDATE daily_kpi SET
          outreach_sent = (
@@ -71,11 +70,6 @@ async function recountKpi(clientId, date = null) {
            WHERE client_id = $1 AND reply_detected_at IS NOT NULL
              AND DATE(reply_detected_at) = $2
          ),
-         kpi_met = (
-           SELECT COUNT(*) FROM messages
-           WHERE client_id = $1 AND status = 'sent'
-             AND DATE(COALESCE(sent_at, updated_at)) = $2
-         ) >= target,
          updated_at = NOW()
        WHERE client_id = $1 AND date = $2`,
       [clientId, today]

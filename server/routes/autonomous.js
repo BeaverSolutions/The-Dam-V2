@@ -1714,7 +1714,8 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
     const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
 
     const { rows: clientRows } = await pool.query(
-      `SELECT id, slug, name FROM clients WHERE slug = ANY($1)`,
+      `SELECT id, slug, name FROM clients
+       WHERE slug = ANY($1) AND is_active = true AND onboarding_completed = true`,
       [enabledSlugs.length ? enabledSlugs : ['__none__']]
     );
 
