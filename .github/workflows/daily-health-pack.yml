@@ -1,0 +1,25 @@
+name: Daily Health Pack
+
+on:
+  schedule:
+    # 01:05 UTC = 09:05 MYT — fires after the 09:30 MYT kickoff window check.
+    # Note: kickoff fires at 09:30 MYT, so this runs BEFORE — it's a state snapshot at start of MJ's day.
+    - cron: '5 1 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run Daily Health Pack
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BEAVRDAM_INTERNAL_API_KEY: ${{ secrets.BEAVRDAM_INTERNAL_API_KEY }}
+          BEAVRDAM_API_URL: https://app.beaver.solutions
+        run: node scripts/daily-health-pack.mjs

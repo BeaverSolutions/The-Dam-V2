@@ -1,0 +1,26 @@
+name: Kickoff Watchdog
+
+on:
+  schedule:
+    # 02:00, 02:15, 02:30, 02:45 UTC = 10:00, 10:15, 10:30, 10:45 MYT
+    # Daily kickoff fires at 09:30 MYT (01:30 UTC). 30 min window for it to log,
+    # then watchdog alerts every 15 min until 11:00 MYT if still missing.
+    - cron: '0,15,30,45 2 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run Kickoff Watchdog
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BEAVRDAM_INTERNAL_API_KEY: ${{ secrets.BEAVRDAM_INTERNAL_API_KEY }}
+          BEAVRDAM_API_URL: https://app.beaver.solutions
+        run: node scripts/kickoff-watchdog.mjs

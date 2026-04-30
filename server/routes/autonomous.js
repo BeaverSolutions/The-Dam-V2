@@ -1435,6 +1435,21 @@ async function verifyKickoffOutput(clientId, target) {
       );
     } else {
       console.log(`[Autonomous] Kickoff verified for ${clientId}: ${totalOutput} messages produced (${sent} sent, ${pending} pending, ${drafting} drafting)`);
+
+      // Success Telegram — closes the loop on every kickoff run
+      const { rows: clientRows } = await pool.query(`SELECT name FROM clients WHERE id = $1`, [clientId]);
+      const clientName = clientRows[0]?.name || clientId;
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (chatId) {
+        const { sendMessage } = require('../services/telegram');
+        await sendMessage(chatId,
+          `<b>Daily Kickoff Completed</b>\n\n` +
+          `Client: <code>${clientName}</code>\n` +
+          `Target: ${target}\n` +
+          `Sent: ${sent} | Pending: ${pending} | Drafting: ${drafting} | Rejected: ${rejected}\n\n` +
+          `<a href="https://app.beaver.solutions/approvals">Review pending →</a>`
+        ).catch(err => console.warn('[telegram] Success alert failed:', err.message));
+      }
     }
   } catch (err) {
     console.warn('[Autonomous] Kickoff verification failed:', err.message);
@@ -1688,5 +1703,111 @@ router.get('/hourly-stats', requireInternalKey, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch hourly stats', code: 'DB_ERROR' });
   }
 });
+/* ─── GET /api/autonomous/system-health ─────────────────── */
+// Returns end-to-end pipeline health for cloud-cron watchdogs (Health Pack +
+// kickoff watchdog). Internal API, no client_id — aggregates the active tenant.
+// Safe to call frequently; all queries are indexed.
+
+router.get('/system-health', requireInternalKey, async (req, res) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
+
+    const { rows: clientRows } = await pool.query(
+      `SELECT id, slug, name FROM clients WHERE slug = ANY($1)`,
+      [enabledSlugs.length ? enabledSlugs : ['__none__']]
+    );
+
+    const tenants = [];
+    for (const c of clientRows) {
+      const [kickoffLog, kpi, msgs, queue, approvedUnsent, leadPool, researchLog] = await Promise.all([
+        pool.query(
+          `SELECT created_at FROM logs
+           WHERE client_id = $1 AND agent = 'director' AND action = 'autonomous_kickoff'
+             AND created_at::date = CURRENT_DATE
+           ORDER BY created_at DESC LIMIT 1`,
+          [c.id]
+        ),
+        pool.query(
+          `SELECT target, outreach_sent, outreach_email, outreach_linkedin, leads_found, replies_received
+           FROM daily_kpi WHERE client_id = $1 AND date = $2`,
+          [c.id, today]
+        ),
+        pool.query(
+          `SELECT
+             COUNT(*) FILTER (WHERE status = 'sent' AND DATE(COALESCE(sent_at, created_at)) = CURRENT_DATE)::int AS sent_today,
+             COUNT(*) FILTER (WHERE status = 'pending_approval' AND created_at::date = CURRENT_DATE)::int AS pending_today,
+             COUNT(*) FILTER (WHERE status = 'ranger_rejected' AND created_at::date = CURRENT_DATE)::int AS rejected_today,
+             COUNT(*) FILTER (WHERE status = 'approved' AND sent_at IS NULL)::int AS approved_unsent_total
+           FROM messages WHERE client_id = $1`,
+          [c.id]
+        ),
+        pool.query(
+          `SELECT
+             COUNT(*) FILTER (WHERE status = 'pending')::int AS sq_pending,
+             COUNT(*) FILTER (WHERE status = 'pending' AND last_attempted_at < NOW() - INTERVAL '1 hour')::int AS sq_stuck,
+             COUNT(*) FILTER (WHERE status = 'failed')::int AS sq_failed
+           FROM send_queue WHERE client_id = $1`,
+          [c.id]
+        ),
+        pool.query(
+          `SELECT channel, COUNT(*)::int AS n
+           FROM messages WHERE client_id = $1 AND status = 'approved' AND sent_at IS NULL
+           GROUP BY channel`,
+          [c.id]
+        ),
+        pool.query(
+          `SELECT COUNT(*)::int AS n FROM leads
+           WHERE client_id = $1 AND deleted_at IS NULL
+             AND (pipeline_stage IS NULL OR pipeline_stage NOT IN ('rejected','contacted','outreach','qualifying'))
+             AND (status IS NULL OR status NOT LIKE 'rejected_%')`,
+          [c.id]
+        ),
+        pool.query(
+          `SELECT
+             MAX(created_at) AS last_run,
+             COUNT(*) FILTER (WHERE action = 'leads_saved' AND created_at >= NOW() - INTERVAL '24 hours')::int AS leads_saved_24h,
+             COUNT(*) FILTER (WHERE action = 'research_no_results' AND created_at >= NOW() - INTERVAL '24 hours')::int AS no_results_24h
+           FROM logs WHERE client_id = $1 AND agent = 'research_beaver'`,
+          [c.id]
+        ),
+      ]);
+
+      const approvedUnsentByChannel = {};
+      for (const r of approvedUnsent.rows) approvedUnsentByChannel[r.channel] = r.n;
+
+      tenants.push({
+        slug: c.slug,
+        name: c.name,
+        kickoff_today: {
+          fired: kickoffLog.rows.length > 0,
+          at: kickoffLog.rows[0]?.created_at || null,
+        },
+        kpi: kpi.rows[0] || null,
+        messages: msgs.rows[0],
+        send_queue: queue.rows[0],
+        approved_unsent: approvedUnsentByChannel,
+        lead_pool_remaining: leadPool.rows[0].n,
+        research_beaver: researchLog.rows[0],
+      });
+    }
+
+    res.json({
+      data: {
+        date: today,
+        enabled_slugs: enabledSlugs,
+        telegram_chat_id_present: !!process.env.TELEGRAM_CHAT_ID,
+        telegram_bot_token_present: !!process.env.TELEGRAM_BOT_TOKEN,
+        agentmail_configured: !!process.env.AGENTMAIL_API_KEY,
+        gmail_oauth_configured: !!process.env.GOOGLE_CLIENT_ID,
+        tenants,
+      },
+    });
+  } catch (err) {
+    logger.error({ msg: 'system-health query failed', err: err.message });
+    res.status(500).json({ error: 'Failed to fetch system health', code: 'DB_ERROR' });
+  }
+});
+
 module.exports = router;
 module.exports.runAutonomousKickoff = runAutonomousKickoff;

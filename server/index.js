@@ -621,10 +621,15 @@ async function start() {
 
       for (const client of clients) {
         logger.info({ msg: `[daily-kickoff] Starting for ${client.slug}` });
+        const chatId = process.env.TELEGRAM_CHAT_ID;
+        if (chatId) {
+          telegramService.sendMessage(chatId,
+            `<b>Daily Kickoff Started</b>\n\nClient: <code>${client.slug}</code>\nTime: ${new Date().toLocaleTimeString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit' })} MYT\n\nFiring Research → Sales → Ranger → Approval. Watch for completion alert.`
+          ).catch(() => {});
+        }
         runWithClientContext(client.id, () =>
           runAutonomousKickoff(client.id).catch(err => {
             logger.error({ msg: `[daily-kickoff] Failed for ${client.slug}`, err: err.message });
-            const chatId = process.env.TELEGRAM_CHAT_ID;
             if (chatId) {
               telegramService.sendMessage(chatId,
                 `<b>Daily Kickoff Failed</b>\n\nClient: ${client.slug}\nError: ${err.message}`
