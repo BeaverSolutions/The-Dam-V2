@@ -29,63 +29,78 @@ async function recountKpi(clientId, date = null) {
     [clientId, JSON.stringify({ today, source: 'kpi.js' })]
   ).catch(() => {});
 
-  const client = await pool.connect();
+  let client;
+  let step = 'connect';
   try {
+    client = await pool.connect();
+    step = 'insert';
     await client.query(
       `INSERT INTO daily_kpi (client_id, date) VALUES ($1, $2)
        ON CONFLICT (client_id, date) DO NOTHING`,
       [clientId, today]
     );
-
+    step = 'update';
+    // kpi_met now references the `target` column directly (no self-referencing
+    // subquery on daily_kpi inside the same UPDATE — that pattern was suspected
+    // of throwing in the original. Simpler is safer.)
     const updateRes = await client.query(
       `UPDATE daily_kpi SET
-         outreach_sent = COALESCE((
+         outreach_sent = (
            SELECT COUNT(*) FROM messages
            WHERE client_id = $1 AND status = 'sent'
              AND DATE(COALESCE(sent_at, updated_at)) = $2
-         ), 0),
-         outreach_email = COALESCE((
+         ),
+         outreach_email = (
            SELECT COUNT(*) FROM messages
            WHERE client_id = $1 AND status = 'sent' AND channel = 'email'
              AND DATE(COALESCE(sent_at, updated_at)) = $2
-         ), 0),
-         outreach_linkedin = COALESCE((
+         ),
+         outreach_linkedin = (
            SELECT COUNT(*) FROM messages
            WHERE client_id = $1 AND status = 'sent' AND channel = 'linkedin'
              AND DATE(COALESCE(sent_at, updated_at)) = $2
-         ), 0),
-         leads_found = COALESCE((
+         ),
+         leads_found = (
            SELECT COUNT(*) FROM leads
            WHERE client_id = $1
              AND deleted_at IS NULL
              AND DATE(created_at) = $2
-         ), 0),
-         replies_received = COALESCE((
+         ),
+         replies_received = (
            SELECT COUNT(*) FROM messages
            WHERE client_id = $1 AND reply_detected_at IS NOT NULL
              AND DATE(reply_detected_at) = $2
-         ), 0),
-         kpi_met = (
-           COALESCE((
-             SELECT COUNT(*) FROM messages
-             WHERE client_id = $1 AND status = 'sent'
-               AND DATE(COALESCE(sent_at, updated_at)) = $2
-           ), 0) >= COALESCE((SELECT target FROM daily_kpi WHERE client_id = $1 AND date = $2), 50)
          ),
+         kpi_met = (
+           SELECT COUNT(*) FROM messages
+           WHERE client_id = $1 AND status = 'sent'
+             AND DATE(COALESCE(sent_at, updated_at)) = $2
+         ) >= target,
          updated_at = NOW()
        WHERE client_id = $1 AND date = $2`,
       [clientId, today]
     );
 
-    // Instrumentation: log completion + rowCount so we can see if the UPDATE
-    // matched the expected row.
     pool.query(
       `INSERT INTO logs (client_id, agent, action, target_type, metadata, created_at)
        VALUES ($1, 'system', 'kpi_recount_completed', 'system', $2, NOW())`,
       [clientId, JSON.stringify({ today, rows_updated: updateRes.rowCount })]
     ).catch(() => {});
+  } catch (err) {
+    // Capture the actual error to logs so we can debug remotely.
+    pool.query(
+      `INSERT INTO logs (client_id, agent, action, target_type, metadata, created_at)
+       VALUES ($1, 'system', 'kpi_recount_failed', 'system', $2, NOW())`,
+      [clientId, JSON.stringify({
+        today,
+        step,
+        err_message: String(err?.message || err).slice(0, 500),
+        err_code: err?.code || null,
+      })]
+    ).catch(() => {});
+    throw err;
   } finally {
-    client.release();
+    if (client) client.release();
   }
 }
 
