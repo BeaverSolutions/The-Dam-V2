@@ -357,11 +357,13 @@ INSTAGRAM DM — DAY 0
 Most casual. Reference something public about them. Under 40 words. Feels like a DM from someone who follows them. One question.
 
 ═══════════════════════════════════════════════════
-FOLLOW-UPS
+FOLLOW-UPS (cadence matches followupSequence.js touches)
 ═══════════════════════════════════════════════════
-Day 2 (FU1): Different angle on same pain. Not a reminder.
-Day 4 (FU2): One-line social proof. Under 20 words.
-Day 7 (FU3): Easy out. "Happy to leave this here if timing's off." Under 40 words.
+Day 2 (touch 2): Different angle on same pain. Not a reminder. Under 50 words.
+Day 5 (touch 3): One-line social proof or peer case. Under 30 words. Touch 3 may escalate email -> linkedin if email had no reply and the lead has a linkedin_url.
+Day 10 (touch 4): New value reframe. Under 50 words. No pitch.
+Day 18 (touch 5): Specific peer outcome. Under 50 words.
+Day 30 (touch 6): Break-up. "Happy to leave this here if timing is off." Under 40 words.
 Sequence stops on any reply.
 
 ═══════════════════════════════════════════════════
