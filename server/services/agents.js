@@ -961,6 +961,36 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
     }).catch(() => {});
   }
 
+  // ── Phase A Step 2.5: Deterministic gate sweep (post-autofix) ──
+  // Catches anything autoFixMessage couldn't repair (e.g. word count not
+  // trimmable because too few sentences). Replaces the duplicate auto-reject
+  // gates we used to ask the LLM to enforce — the LLM was miscounting on both
+  // Haiku and Sonnet. Code-level checks are deterministic by definition.
+  const gateCheck = codeEnforcerGates(fixedBody, touchNumber);
+  if (!gateCheck.passed) {
+    console.warn(`[enforcer] Code-gate reject: ${gateCheck.reason}`);
+    require('./learningEngine').postRangerRejection(clientId, {
+      messageBody: fixedBody,
+      notes: `Code-gate violation: ${gateCheck.reason}`,
+      score: 0,
+      channel: lead_context?.channel,
+      leadIndustry: lead_context?.industry,
+    }).catch(() => {});
+    return {
+      message_id,
+      approved: false,
+      decision: 'reject',
+      score: 0,
+      body: fixedBody,
+      fixes_applied: fixesApplied,
+      notes: `Code-gate violation: ${gateCheck.reason}`,
+      issues: [gateCheck.reason],
+      suggestions: [],
+      reject_reason: gateCheck.reason,
+      code_gate_failure: true,
+    };
+  }
+
   // ── Phase A Step 3: Claude scores the FIXED version ──
   if (callAgent) {
     try {
