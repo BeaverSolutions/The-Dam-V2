@@ -25,6 +25,11 @@
 const pool = require('../db/pool');
 const { callAgent } = require('./claude');
 const tenantConfig = require('./tenantConfig');
+const jobHealth = require('./jobHealth');
+
+// MJ's monthly meeting target per tenant (set 2026-04-30 with MJ).
+// Drives the "on pace for X meetings" projection in the brief.
+const MONTHLY_MEETING_TARGET = 10;
 
 /* ─── KPI snapshot collector ──────────────────────────────────────── */
 
@@ -117,9 +122,52 @@ async function collectTeamKPIs(clientId) {
     [clientId]
   );
 
-  const [research, sales, enforcer, rejectReasons, pipeline] = await Promise.all([
+  // ─── DB + cron health ──
+  const dbCheckPromise = pool.query(`SELECT 1 AS ok`).then(() => true).catch(() => false);
+  const cronHealthPromise = Promise.resolve(jobHealth.getStatus());
+
+  // ─── $$ spend (today + MTD, all agents this tenant) ──
+  const spendTodayPromise = pool.query(
+    `SELECT COALESCE(SUM(cost_usd), 0)::numeric(10,4) AS spend
+     FROM llm_usage
+     WHERE client_id = $1 AND created_at > date_trunc('day', NOW() AT TIME ZONE 'UTC')`,
+    [clientId]
+  );
+  const spendMtdPromise = pool.query(
+    `SELECT COALESCE(SUM(cost_usd), 0)::numeric(10,4) AS spend
+     FROM llm_usage
+     WHERE client_id = $1 AND created_at > date_trunc('month', NOW() AT TIME ZONE 'UTC')`,
+    [clientId]
+  );
+
+  // ─── Meetings — the metric MJ cares about ──
+  const meetingsThisWeekPromise = pool.query(
+    `SELECT COUNT(*) AS n FROM leads
+     WHERE client_id = $1 AND deleted_at IS NULL
+       AND meeting_date IS NOT NULL
+       AND meeting_date > NOW() - INTERVAL '7 days'`,
+    [clientId]
+  );
+  const meetingsMtdPromise = pool.query(
+    `SELECT COUNT(*) AS n FROM leads
+     WHERE client_id = $1 AND deleted_at IS NULL
+       AND meeting_date IS NOT NULL
+       AND meeting_date > date_trunc('month', NOW() AT TIME ZONE 'UTC')`,
+    [clientId]
+  );
+
+  const [research, sales, enforcer, rejectReasons, pipeline,
+         dbOk, cronHealth,
+         spendToday, spendMtd, meetingsWeek, meetingsMtd] = await Promise.all([
     researchPromise, salesPromise, enforcerPromise, rejectReasonsPromise, pipelinePromise,
+    dbCheckPromise, cronHealthPromise,
+    spendTodayPromise, spendMtdPromise, meetingsThisWeekPromise, meetingsMtdPromise,
   ]);
+
+  // Stale jobs derived from cronHealth — jobs in 'stale' state
+  const staleJobs = Object.entries(cronHealth || {})
+    .filter(([_, v]) => v?.status === 'stale')
+    .map(([name]) => name);
 
   const r = research.rows[0];
   const s = sales.rows[0];
@@ -173,8 +221,48 @@ async function collectTeamKPIs(clientId) {
       credits_used_today: cfg.vp_credits_used_today,
       credits_budget: cfg.vp_daily_budget_credits,
       credits_remaining_today: Math.max(0, cfg.vp_daily_budget_credits - cfg.vp_credits_used_today),
+      credits_used_total: cfg.vp_credits_used_total,
+    },
+    // ─── DAM HEALTH (the system itself) ──
+    dam_health: {
+      db_ok: dbOk,
+      encryption_key_ok: !!process.env.ENCRYPTION_KEY,
+      anthropic_set: !!process.env.ANTHROPIC_API_KEY,
+      brave_set: !!process.env.BRAVE_API_KEY,
+      vp_set: !!process.env.VIBE_PROSPECTING_API_KEY,
+      gmail_oauth_set: !!process.env.GMAIL_CLIENT_ID,
+      stale_jobs: staleJobs,
+      cron_health: cronHealth,
+    },
+    // ─── COST (the spend that actually matters) ──
+    cost: {
+      llm_spend_today_usd: Number(spendToday.rows[0].spend) || 0,
+      llm_spend_mtd_usd: Number(spendMtd.rows[0].spend) || 0,
+      vp_credits_used_today: cfg.vp_credits_used_today,
+      vp_credits_budget_today: cfg.vp_daily_budget_credits,
+      daily_budget_usd: cfg.daily_budget_usd,
+    },
+    // ─── MEETINGS (the metric that defines success) ──
+    meetings: {
+      this_week: Number(meetingsWeek.rows[0].n) || 0,
+      mtd: Number(meetingsMtd.rows[0].n) || 0,
+      monthly_target: MONTHLY_MEETING_TARGET,
+      mtd_pace_projected: projectMonthEndMeetings(Number(meetingsMtd.rows[0].n) || 0),
+      gap_to_target: Math.max(0, MONTHLY_MEETING_TARGET - projectMonthEndMeetings(Number(meetingsMtd.rows[0].n) || 0)),
     },
   };
+}
+
+/**
+ * Linear-pace projection for end-of-month meetings.
+ * (mtd / day-of-month) × days-in-month.
+ */
+function projectMonthEndMeetings(mtd) {
+  const now = new Date();
+  const dayOfMonth = now.getUTCDate();
+  if (dayOfMonth < 2) return mtd; // too early to project
+  const daysInMonth = new Date(now.getUTCFullYear(), now.getUTCMonth() + 1, 0).getDate();
+  return Math.round((mtd / dayOfMonth) * daysInMonth);
 }
 
 /* ─── Morning brief generator ─────────────────────────────────────── */
@@ -187,39 +275,39 @@ async function collectTeamKPIs(clientId) {
 async function generateMorningBrief(clientId) {
   const kpis = await collectTeamKPIs(clientId);
 
-  const userMessage = `Compose this morning's brief for ${kpis.tenant.name}.
+  const userMessage = `Compose this morning's brief for ${kpis.tenant.name} in three sections: SYSTEM HEALTH, SITUATION REPORT, ORDERS OF THE DAY. Keep the conversational-tight tone. No royal greetings, no preamble.
 
-KPIs (last 24h):
+═══ SYSTEM HEALTH ═══
+- DB: ${kpis.dam_health.db_ok ? 'connected' : 'UNREACHABLE'}
+- Encryption key: ${kpis.dam_health.encryption_key_ok ? 'valid' : 'MISSING'}
+- API keys: anthropic ${kpis.dam_health.anthropic_set ? 'set' : 'MISSING'}, brave ${kpis.dam_health.brave_set ? 'set' : 'MISSING'}, vp ${kpis.dam_health.vp_set ? 'set' : 'MISSING'}, gmail-oauth ${kpis.dam_health.gmail_oauth_set ? 'set' : 'MISSING'}
+- Stale crons: ${kpis.dam_health.stale_jobs.length === 0 ? 'none — all firing on schedule' : kpis.dam_health.stale_jobs.join(', ')}
+- LLM spend today: $${kpis.cost.llm_spend_today_usd.toFixed(4)}
+- LLM spend MTD: $${kpis.cost.llm_spend_mtd_usd.toFixed(2)}
+- Daily LLM budget: $${kpis.cost.daily_budget_usd.toFixed(2)}
+- VP credits today: ${kpis.cost.vp_credits_used_today} / ${kpis.cost.vp_credits_budget_today}
 
-RESEARCH BEAVER
-- Sourced: ${kpis.research_beaver.sourced_24h} of ${kpis.research_beaver.sourced_floor} target ${kpis.research_beaver.meeting_floor ? '✓' : '✗'}
-- Avg quality score: ${kpis.research_beaver.scored_avg ?? 'no scores yet'}
-- Top scorer today: ${kpis.research_beaver.top_quality_score ?? 'n/a'}
-- Pool size now: ${kpis.research_beaver.pool_size}
-- Strategies tried: ${kpis.research_beaver.strategies_used}
+═══ SITUATION REPORT (last 24h) ═══
 
-SALES BEAVER
-- Drafts: ${kpis.sales_beaver.drafts_24h}
-- First-attempt Enforcer pass rate: ${kpis.sales_beaver.first_attempt_pass_rate_pct ?? 'no data'}%
-- Sent: ${kpis.sales_beaver.sent_24h}
-- Replies: ${kpis.sales_beaver.replies_24h}
+Research Beaver — sourced ${kpis.research_beaver.sourced_24h} of ${kpis.research_beaver.sourced_floor} floor ${kpis.research_beaver.meeting_floor ? '(on target)' : '(BELOW FLOOR)'}, avg quality ${kpis.research_beaver.scored_avg ?? '—'}, top score ${kpis.research_beaver.top_quality_score ?? '—'}, pool ${kpis.research_beaver.pool_size}, ${kpis.research_beaver.strategies_used} strategies in use.
 
-ENFORCER
-- Reviews: ${kpis.enforcer.reviews_24h}
-- Approve rate: ${kpis.enforcer.approve_rate_pct ?? 'no data'}%
-- Top reject reasons: ${kpis.enforcer.top_reject_reasons.map(r => `${r.reason} (${r.n})`).join(', ') || 'none'}
+Sales Beaver — ${kpis.sales_beaver.drafts_24h} drafts, ${kpis.sales_beaver.first_attempt_pass_rate_pct ?? '—'}% first-pass on Enforcer, ${kpis.sales_beaver.sent_24h} sent, ${kpis.sales_beaver.replies_24h} replies.
 
-PIPELINE STATE
-- Pending approvals on MJ: ${kpis.pipeline.pending_approvals}
-- LinkedIn approved-not-sent: ${kpis.pipeline.approved_unsent_linkedin}
-- Email approved-not-sent: ${kpis.pipeline.approved_unsent_email}
-- Bounces (7d): ${kpis.pipeline.bounces_7d}
+Enforcer Beaver — ${kpis.enforcer.reviews_24h} reviews, ${kpis.enforcer.approve_rate_pct ?? '—'}% approve rate. Top reject reasons: ${kpis.enforcer.top_reject_reasons.map(r => `${r.reason} (${r.n})`).join(', ') || 'none'}.
 
-VP CREDITS
-- Used today: ${kpis.vp.credits_used_today} / ${kpis.vp.credits_budget}
-- Remaining today: ${kpis.vp.credits_remaining_today}
+Pipeline state — ${kpis.pipeline.pending_approvals} pending MJ approval, ${kpis.pipeline.approved_unsent_linkedin} LinkedIn approved-not-sent, ${kpis.pipeline.approved_unsent_email} email approved-not-sent, ${kpis.pipeline.bounces_7d} bounces in last 7 days.
 
-Write the brief.`;
+THE NUMBER THAT MATTERS — meetings:
+- This week: ${kpis.meetings.this_week}
+- MTD: ${kpis.meetings.mtd}
+- Monthly target: ${kpis.meetings.monthly_target}
+- Linear-pace projection: ${kpis.meetings.mtd_pace_projected} by month-end (gap of ${kpis.meetings.gap_to_target} to target)
+
+═══ ORDERS OF THE DAY ═══
+
+Today's plan — surface what each beaver is working on, what strategy you're betting on this week, and what specifically NEEDS MJ'S DECISION today. Decisions you make autonomously (threshold tunes, strategy switches, coaching loop firing) get listed under "actions taken" — don't ask MJ about those.
+
+Write the brief now. Three sections. Hard-line breaks between sections. Be the GM.`;
 
   let summary;
   try {
@@ -242,16 +330,30 @@ Write the brief.`;
 /**
  * Plain-text fallback brief when the LLM call fails. Same data, no
  * Captain personality. Used so MJ's morning view is never blank.
+ * Mirrors the 3-section structure so MJ's mental model stays consistent.
  */
 function renderPlainBrief(k) {
+  const health = k.dam_health.db_ok && k.dam_health.encryption_key_ok && k.dam_health.stale_jobs.length === 0
+    ? 'green'
+    : 'degraded';
+
   const lines = [
-    `Morning. ${k.tenant.name} pipeline brief — last 24h.`,
+    `morning. dam health: ${health}.`,
     ``,
-    `Research: ${k.research_beaver.sourced_24h}/${k.research_beaver.sourced_floor} sourced (${k.research_beaver.meeting_floor ? 'on target' : 'BELOW FLOOR'}). Pool ${k.research_beaver.pool_size}. Avg quality ${k.research_beaver.scored_avg ?? '—'}.`,
-    `Sales: ${k.sales_beaver.drafts_24h} drafts, ${k.sales_beaver.first_attempt_pass_rate_pct ?? '—'}% first-pass, ${k.sales_beaver.sent_24h} sent, ${k.sales_beaver.replies_24h} replies.`,
-    `Enforcer: ${k.enforcer.approve_rate_pct ?? '—'}% approve rate. Top reject: ${k.enforcer.top_reject_reasons[0]?.reason || 'none'}.`,
-    `Queue: ${k.pipeline.pending_approvals} pending you, ${k.pipeline.approved_unsent_linkedin} LinkedIn unsent, ${k.pipeline.approved_unsent_email} email unsent.`,
-    `VP: ${k.vp.credits_used_today}/${k.vp.credits_budget} credits used today.`,
+    `═══ system health ═══`,
+    `db ${k.dam_health.db_ok ? 'ok' : 'UNREACHABLE'} · enc-key ${k.dam_health.encryption_key_ok ? 'valid' : 'MISSING'} · crons ${k.dam_health.stale_jobs.length === 0 ? 'all firing' : 'STALE: ' + k.dam_health.stale_jobs.join(', ')}`,
+    `spend today $${k.cost.llm_spend_today_usd.toFixed(4)} · mtd $${k.cost.llm_spend_mtd_usd.toFixed(2)} · vp credits ${k.cost.vp_credits_used_today}/${k.cost.vp_credits_budget_today} today`,
+    ``,
+    `═══ situation report ═══`,
+    `research beaver: ${k.research_beaver.sourced_24h}/${k.research_beaver.sourced_floor} sourced ${k.research_beaver.meeting_floor ? '(on target)' : '(BELOW FLOOR)'}, avg quality ${k.research_beaver.scored_avg ?? '—'}, pool ${k.research_beaver.pool_size}`,
+    `sales beaver: ${k.sales_beaver.drafts_24h} drafts, ${k.sales_beaver.first_attempt_pass_rate_pct ?? '—'}% first-pass, ${k.sales_beaver.sent_24h} sent, ${k.sales_beaver.replies_24h} replies`,
+    `enforcer: ${k.enforcer.approve_rate_pct ?? '—'}% approve, top reject: ${k.enforcer.top_reject_reasons[0]?.reason || 'none'}`,
+    `pipeline: ${k.pipeline.pending_approvals} pending you, ${k.pipeline.approved_unsent_linkedin} linkedin unsent, ${k.pipeline.approved_unsent_email} email unsent, ${k.pipeline.bounces_7d} bounces 7d`,
+    ``,
+    `meetings: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd, projecting ${k.meetings.mtd_pace_projected}/${k.meetings.monthly_target} (gap ${k.meetings.gap_to_target})`,
+    ``,
+    `═══ orders of the day ═══`,
+    `(captain's llm offline — orders not generated. tomorrow's plan: clear ${k.pipeline.pending_approvals} pending approvals, hit ${k.research_beaver.sourced_floor} quality leads, watch bounces.)`,
   ];
   return lines.join('\n');
 }
