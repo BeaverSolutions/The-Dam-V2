@@ -275,44 +275,33 @@ function projectMonthEndMeetings(mtd) {
 async function generateMorningBrief(clientId) {
   const kpis = await collectTeamKPIs(clientId);
 
-  const userMessage = `Compose this morning's brief for ${kpis.tenant.name} in three sections: SYSTEM HEALTH, SITUATION REPORT, ORDERS OF THE DAY. Keep the conversational-tight tone. No royal greetings, no preamble.
+  const userMessage = `Compose this morning's brief for ${kpis.tenant.name}. Three sections, plain text + HTML, EXACTLY this format:
 
-═══ SYSTEM HEALTH ═══
-- DB: ${kpis.dam_health.db_ok ? 'connected' : 'UNREACHABLE'}
-- Encryption key: ${kpis.dam_health.encryption_key_ok ? 'valid' : 'MISSING'}
-- API keys: anthropic ${kpis.dam_health.anthropic_set ? 'set' : 'MISSING'}, brave ${kpis.dam_health.brave_set ? 'set' : 'MISSING'}, vp ${kpis.dam_health.vp_set ? 'set' : 'MISSING'}, gmail-oauth ${kpis.dam_health.gmail_oauth_set ? 'set' : 'MISSING'}
-- Stale crons: ${kpis.dam_health.stale_jobs.length === 0 ? 'none — all firing on schedule' : kpis.dam_health.stale_jobs.join(', ')}
-- LLM spend today: $${kpis.cost.llm_spend_today_usd.toFixed(4)}
-- LLM spend MTD: $${kpis.cost.llm_spend_mtd_usd.toFixed(2)}
-- Daily LLM budget: $${kpis.cost.daily_budget_usd.toFixed(2)}
-- VP credits today: ${kpis.cost.vp_credits_used_today} / ${kpis.cost.vp_credits_budget_today}
+<b>SYSTEM HEALTH</b>
+DB: ${kpis.dam_health.db_ok ? 'connected' : 'UNREACHABLE'} · Encryption key: ${kpis.dam_health.encryption_key_ok ? 'valid' : 'MISSING'}
+API keys: anthropic ${kpis.dam_health.anthropic_set ? 'set' : 'MISSING'}, brave ${kpis.dam_health.brave_set ? 'set' : 'MISSING'}, vp ${kpis.dam_health.vp_set ? 'set' : 'MISSING'}, gmail-oauth ${kpis.dam_health.gmail_oauth_set ? 'set' : 'MISSING'}
+Stale crons: ${kpis.dam_health.stale_jobs.length === 0 ? 'none — all firing' : kpis.dam_health.stale_jobs.join(', ')}
+LLM spend: $${kpis.cost.llm_spend_today_usd.toFixed(4)} today · $${kpis.cost.llm_spend_mtd_usd.toFixed(2)} mtd · budget $${kpis.cost.daily_budget_usd.toFixed(2)}/day
+VP credits: ${kpis.cost.vp_credits_used_today} / ${kpis.cost.vp_credits_budget_today} today
 
-═══ SITUATION REPORT (last 24h) ═══
+<b>SITUATION REPORT</b> (last 24h)
+Research Beaver: sourced ${kpis.research_beaver.sourced_24h} of ${kpis.research_beaver.sourced_floor} floor ${kpis.research_beaver.meeting_floor ? '(on target)' : '(BELOW FLOOR)'}, avg quality ${kpis.research_beaver.scored_avg ?? '—'}, top ${kpis.research_beaver.top_quality_score ?? '—'}, pool ${kpis.research_beaver.pool_size}, ${kpis.research_beaver.strategies_used} strategies.
+Sales Beaver: ${kpis.sales_beaver.drafts_24h} drafts, ${kpis.sales_beaver.first_attempt_pass_rate_pct ?? '—'}% first-pass, ${kpis.sales_beaver.sent_24h} sent, ${kpis.sales_beaver.replies_24h} replies.
+Enforcer: ${kpis.enforcer.reviews_24h} reviews, ${kpis.enforcer.approve_rate_pct ?? '—'}% approve. Top reject: ${kpis.enforcer.top_reject_reasons.map(r => `${r.reason} (${r.n})`).join(', ') || 'none'}.
+Pipeline: ${kpis.pipeline.pending_approvals} pending MJ, ${kpis.pipeline.approved_unsent_linkedin} LinkedIn unsent, ${kpis.pipeline.approved_unsent_email} email unsent, ${kpis.pipeline.bounces_7d} bounces 7d.
+Meetings: ${kpis.meetings.this_week} this week, ${kpis.meetings.mtd} mtd, projecting ${kpis.meetings.mtd_pace_projected} by month-end (gap ${kpis.meetings.gap_to_target} of target ${kpis.meetings.monthly_target}).
 
-Research Beaver — sourced ${kpis.research_beaver.sourced_24h} of ${kpis.research_beaver.sourced_floor} floor ${kpis.research_beaver.meeting_floor ? '(on target)' : '(BELOW FLOOR)'}, avg quality ${kpis.research_beaver.scored_avg ?? '—'}, top score ${kpis.research_beaver.top_quality_score ?? '—'}, pool ${kpis.research_beaver.pool_size}, ${kpis.research_beaver.strategies_used} strategies in use.
+<b>ORDERS OF THE DAY</b>
+TASKS — what each beaver works on today, 1-2 lines.
+ACTIONS TAKEN — autonomous calls overnight, 1 line if anything.
+NEEDS YOUR CALL — forced-choice decisions for MJ, numbered. "nothing needs your call today." if none.
 
-Sales Beaver — ${kpis.sales_beaver.drafts_24h} drafts, ${kpis.sales_beaver.first_attempt_pass_rate_pct ?? '—'}% first-pass on Enforcer, ${kpis.sales_beaver.sent_24h} sent, ${kpis.sales_beaver.replies_24h} replies.
-
-Enforcer Beaver — ${kpis.enforcer.reviews_24h} reviews, ${kpis.enforcer.approve_rate_pct ?? '—'}% approve rate. Top reject reasons: ${kpis.enforcer.top_reject_reasons.map(r => `${r.reason} (${r.n})`).join(', ') || 'none'}.
-
-Pipeline state — ${kpis.pipeline.pending_approvals} pending MJ approval, ${kpis.pipeline.approved_unsent_linkedin} LinkedIn approved-not-sent, ${kpis.pipeline.approved_unsent_email} email approved-not-sent, ${kpis.pipeline.bounces_7d} bounces in last 7 days.
-
-THE NUMBER THAT MATTERS — meetings:
-- This week: ${kpis.meetings.this_week}
-- MTD: ${kpis.meetings.mtd}
-- Monthly target: ${kpis.meetings.monthly_target}
-- Linear-pace projection: ${kpis.meetings.mtd_pace_projected} by month-end (gap of ${kpis.meetings.gap_to_target} to target)
-
-═══ ORDERS OF THE DAY ═══
-
-Today's plan — surface what each beaver is working on, what strategy you're betting on this week, and what specifically NEEDS MJ'S DECISION today. Decisions you make autonomously (threshold tunes, strategy switches, coaching loop firing) get listed under "actions taken" — don't ask MJ about those.
-
-Write the brief now. Three sections. Hard-line breaks between sections. Be the GM.`;
+Write the brief now. PLAIN TEXT only. NO json wrapper, NO code fences, NO "═══" separators. Single blank line between sections. Numbers concrete, only what changed, never fabricate.`;
 
   let summary;
   try {
     const result = await callAgent('captain_orchestrator', userMessage, { clientId });
-    summary = result?.brief || result?.summary || result?.raw || null;
+    summary = extractBriefText(result);
   } catch (err) {
     console.warn('[captain] brief generation failed:', err.message);
     summary = null;
@@ -320,11 +309,87 @@ Write the brief now. Three sections. Hard-line breaks between sections. Be the G
 
   // Fallback: if LLM fails, return a structured plain-text brief so MJ
   // never gets a silent morning. Better degraded than missing.
-  if (!summary || typeof summary !== 'string') {
+  if (!summary || typeof summary !== 'string' || summary.trim().length < 20) {
     summary = renderPlainBrief(kpis);
   }
 
-  return { summary, raw_kpis: kpis };
+  return { summary: sanitizeForTelegram(summary), raw_kpis: kpis };
+}
+
+/**
+ * Extract Telegram-ready text from whatever shape callAgent returned.
+ * Sonnet sometimes wraps the brief in JSON ({brief: "..."}) even when the
+ * prompt asks for plain text. Sometimes callAgent's parse leaves the raw
+ * pretty-printed JSON in {raw: "..."}. Handle every case here so the
+ * callsite doesn't have to care.
+ */
+function extractBriefText(result) {
+  if (result == null) return null;
+  if (typeof result === 'string') return unwrapBriefString(result);
+
+  // Common shapes: {brief}, {summary}, {text}, {message}, {content}, {raw}
+  const candidates = [
+    result.brief, result.summary, result.text,
+    result.message, result.content, result.raw,
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) {
+      return unwrapBriefString(c);
+    }
+  }
+  // Object with no recognized key — last resort: stringify so MJ at least
+  // sees something and we can debug from the message body.
+  return null;
+}
+
+/**
+ * If a string is JSON-looking, parse it and re-extract. Strip code fences.
+ * Convert literal \n / \\n escapes to real newlines.
+ */
+function unwrapBriefString(s) {
+  let out = String(s);
+  // Strip code fences if Sonnet added them
+  out = out.replace(/^```(?:json|html|text)?\s*/i, '').replace(/```\s*$/i, '');
+  out = out.trim();
+
+  // If it's a JSON object/string wrapping the brief, unwrap once.
+  if ((out.startsWith('{') && out.endsWith('}')) ||
+      (out.startsWith('"') && out.endsWith('"'))) {
+    try {
+      const parsed = JSON.parse(out);
+      if (typeof parsed === 'string') {
+        out = parsed;
+      } else if (parsed && typeof parsed === 'object') {
+        const inner = parsed.brief ?? parsed.summary ?? parsed.text ?? parsed.message ?? parsed.content;
+        if (typeof inner === 'string' && inner.trim()) out = inner;
+      }
+    } catch { /* not valid JSON, keep as-is */ }
+  }
+
+  // Convert any leftover literal \n escapes to real newlines (defensive)
+  if (out.includes('\\n')) out = out.replace(/\\n/g, '\n');
+  if (out.includes('\\"')) out = out.replace(/\\"/g, '"');
+
+  return out.trim();
+}
+
+/**
+ * Final scrub before sending to Telegram. Removes the visual-noise
+ * artifacts the prompt asked the LLM to avoid but which sneak through:
+ *   - "═══..." or "===..." separator lines
+ *   - "---..." separator lines
+ *   - Multiple consecutive blank lines collapsed to one
+ */
+function sanitizeForTelegram(s) {
+  if (!s) return s;
+  let out = String(s);
+  // Drop separator-only lines (3+ of these chars and nothing else)
+  out = out.replace(/^[ \t]*[═=─-]{3,}[ \t]*$/gm, '');
+  // Drop "═══ FOO ═══" decorations — keep only the inner label, bolded
+  out = out.replace(/[═=─-]{3,}\s*([^═=─\n]+?)\s*[═=─-]{3,}/g, (_, label) => `<b>${label.trim()}</b>`);
+  // Collapse 3+ newlines to 2
+  out = out.replace(/\n{3,}/g, '\n\n');
+  return out.trim();
 }
 
 /**
@@ -340,20 +405,19 @@ function renderPlainBrief(k) {
   const lines = [
     `morning. dam health: ${health}.`,
     ``,
-    `═══ system health ═══`,
+    `<b>SYSTEM HEALTH</b>`,
     `db ${k.dam_health.db_ok ? 'ok' : 'UNREACHABLE'} · enc-key ${k.dam_health.encryption_key_ok ? 'valid' : 'MISSING'} · crons ${k.dam_health.stale_jobs.length === 0 ? 'all firing' : 'STALE: ' + k.dam_health.stale_jobs.join(', ')}`,
-    `spend today $${k.cost.llm_spend_today_usd.toFixed(4)} · mtd $${k.cost.llm_spend_mtd_usd.toFixed(2)} · vp credits ${k.cost.vp_credits_used_today}/${k.cost.vp_credits_budget_today} today`,
+    `spend $${k.cost.llm_spend_today_usd.toFixed(4)} today · $${k.cost.llm_spend_mtd_usd.toFixed(2)} mtd · vp credits ${k.cost.vp_credits_used_today}/${k.cost.vp_credits_budget_today}`,
     ``,
-    `═══ situation report ═══`,
+    `<b>SITUATION REPORT</b>`,
     `research beaver: ${k.research_beaver.sourced_24h}/${k.research_beaver.sourced_floor} sourced ${k.research_beaver.meeting_floor ? '(on target)' : '(BELOW FLOOR)'}, avg quality ${k.research_beaver.scored_avg ?? '—'}, pool ${k.research_beaver.pool_size}`,
     `sales beaver: ${k.sales_beaver.drafts_24h} drafts, ${k.sales_beaver.first_attempt_pass_rate_pct ?? '—'}% first-pass, ${k.sales_beaver.sent_24h} sent, ${k.sales_beaver.replies_24h} replies`,
     `enforcer: ${k.enforcer.approve_rate_pct ?? '—'}% approve, top reject: ${k.enforcer.top_reject_reasons[0]?.reason || 'none'}`,
     `pipeline: ${k.pipeline.pending_approvals} pending you, ${k.pipeline.approved_unsent_linkedin} linkedin unsent, ${k.pipeline.approved_unsent_email} email unsent, ${k.pipeline.bounces_7d} bounces 7d`,
-    ``,
     `meetings: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd, projecting ${k.meetings.mtd_pace_projected}/${k.meetings.monthly_target} (gap ${k.meetings.gap_to_target})`,
     ``,
-    `═══ orders of the day ═══`,
-    `(captain's llm offline — orders not generated. tomorrow's plan: clear ${k.pipeline.pending_approvals} pending approvals, hit ${k.research_beaver.sourced_floor} quality leads, watch bounces.)`,
+    `<b>ORDERS OF THE DAY</b>`,
+    `(captain's llm offline — fallback brief. plan: clear ${k.pipeline.pending_approvals} pending approvals, hit ${k.research_beaver.sourced_floor} quality leads, watch bounces.)`,
   ];
   return lines.join('\n');
 }
