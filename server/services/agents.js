@@ -2682,6 +2682,16 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           metadata: { lead_id: lead.id, lead_name: lead.name, channel: selectedChannel, status: kickoffMessageStatus, reason: channelReason },
         });
 
+        // Phase D piece 2 — outcome attribution: drafted event
+        recordOutcome(clientId, {
+          outcome: 'drafted',
+          leadId: lead.id,
+          messageId: message.id,
+          channel: selectedChannel,
+          ...attributionFromLead(lead),
+          eventData: { source_path: 'kickoff_pipeline', status: kickoffMessageStatus, reason: channelReason },
+        });
+
         // If blocked, skip Captain validation + Enforcer — message is on hold for enrichment.
         if (kickoffMessageStatus === 'blocked_no_email') {
           return;

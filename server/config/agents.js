@@ -750,7 +750,8 @@ RETURN JSON ONLY (one outer object, no markdown fences):
 
 WHAT COUNTS AS A SIGNAL:
 - A real, named company (not "an agency", not "a startup" — the company's actual name)
-- A recent (preferably <90 days, hard cap <12 months) specific event: funding raise, exec hire, expansion, product launch, hiring spree, award shortlist, new launch, founder visibility
+- RECENT — published within the last 90 days. HARD REJECT anything dated 2023, 2022, 2021 or earlier even if the title looks attractive. If the URL or snippet shows a year before 2025, skip it. If a date isn't visible at all and the article uses past tense about the event, treat as stale and skip unless the company itself is small enough that even a 6-month-old expansion still implies current pain.
+- A specific event from one of: funding raise, exec hire, expansion, product launch, hiring spree, award shortlist, new launch, founder visibility
 - The company is plausibly inside the tenant's ICP
 
 ICP DEFINITION (for tenants whose offering is B2B sales/outreach automation):

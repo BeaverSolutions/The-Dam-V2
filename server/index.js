@@ -758,6 +758,43 @@ async function start() {
       }
     }
 
+    // ── Soft-reject TTL purge (daily 03:00 UTC = 11:00 MYT) ──────────────
+    // Hard-deletes leads with status LIKE 'rejected_%' AND deleted_at older
+    // than 30 days. Stops the leads table from bloating with stale soft-
+    // rejected ICP-v2 audit rows. Keeps recent rejects for analysis (Phase D
+    // piece 1 may want to mine reject patterns to refine ICP).
+    async function runSoftRejectPurgeCron() {
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+      const utcMin  = now.getUTCMinutes();
+      if (utcHour !== 3 || utcMin > 10) return; // 03:00-03:10 UTC daily
+
+      const todayKey = `soft_reject_purge_${now.toISOString().slice(0, 10)}`;
+      const { rows } = await pool.query(
+        `SELECT 1 FROM agent_memory WHERE agent = 'system' AND key = $1 LIMIT 1`,
+        [todayKey]
+      );
+      if (rows.length > 0) return;
+
+      try {
+        const { rowCount } = await pool.query(
+          `DELETE FROM leads
+            WHERE status LIKE 'rejected_%'
+              AND deleted_at IS NOT NULL
+              AND deleted_at < NOW() - INTERVAL '30 days'`
+        );
+        logger.info({ msg: `[soft-reject-purge] removed ${rowCount} stale soft-rejected leads (>30d)` });
+
+        await pool.query(
+          `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+           SELECT id, 'system', $1, $2::jsonb, 'config' FROM clients LIMIT 1`,
+          [todayKey, JSON.stringify({ purged: rowCount, ran_at: now.toISOString() })]
+        ).catch(() => {});
+      } catch (err) {
+        logger.warn({ msg: '[soft-reject-purge] failed', err: err.message });
+      }
+    }
+
     // ── Phase D piece 3 — Quality threshold auto-tuner (Sunday 17:00 MYT) ──
     // Reads agent_outcomes from the last 14 days, computes pass-through rate
     // at each candidate threshold, picks the lowest one clearing 5% reply
@@ -856,6 +893,9 @@ async function start() {
       runQualityTunerCron()
         .then(() => { jobHealth.markRun('quality_tuner'); })
         .catch(err => { logger.warn({ msg: 'Quality-tuner poll error', err: err.message }); jobHealth.markError('quality_tuner', err.message); });
+      runSoftRejectPurgeCron()
+        .then(() => { jobHealth.markRun('soft_reject_purge'); })
+        .catch(err => { logger.warn({ msg: 'Soft-reject purge poll error', err: err.message }); jobHealth.markError('soft_reject_purge', err.message); });
     }, 10 * 60 * 1000);
     logger.info({ msg: 'Captain Beaver cron jobs registered (10min poll: 9am brief, 7pm EOD brief, hourly stuck-state monitor 9am-7pm, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, all MYT)' });
 
