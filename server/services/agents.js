@@ -168,6 +168,46 @@ function resolveSignalTier(lead) {
   return null;
 }
 
+/**
+ * Single source of truth for channel-routing decisions at draft time.
+ * Replaces the duplicated logic that lived at processExistingLeadsPipeline
+ * (~line 1537) and processLeadPipeline (~line 2606). Both sites now call
+ * this helper. Behavior locked per MJ direction 2026-04-29:
+ *   - email-first default
+ *   - LinkedIn ONLY when explicit linkedin_first_override metadata flag set
+ *     AND lead has linkedin_url AND LinkedIn not previously attempted
+ *   - Touch 1 with no verified email → blocked_no_email (HOLD for enrichment,
+ *     do NOT fall through to LinkedIn at touch 1)
+ *
+ * Touch 3+ escalation (email → LinkedIn after FU2 with no reply) is handled
+ * separately in followupSequence.escalateChannel() and is not in this helper.
+ *
+ * @param {object} lead — must have email, email_verified, email_source, linkedin_url, metadata
+ * @param {object} options
+ * @param {boolean} [options.linkedinAlreadyTried=false] — set when caller has
+ *   evidence (DB query) that LinkedIn was already attempted on this lead
+ * @returns {{channel: 'email'|'linkedin', status: 'pending_ranger'|'blocked_no_email', reason: string}}
+ */
+function selectChannel(lead, options = {}) {
+  const { linkedinAlreadyTried = false } = options;
+  const meta = lead.metadata || {};
+  const linkedinFirstOverride = meta.linkedin_first_override === true || meta.linkedin_first_override === 'true';
+  const hasVerifiedEmail = lead.email
+    && (lead.email_verified === true || lead.email_source === 'hunter' || lead.email_source === 'apollo');
+
+  if (linkedinFirstOverride && lead.linkedin_url && !linkedinAlreadyTried) {
+    return { channel: 'linkedin', status: 'pending_ranger', reason: 'linkedin_first_override metadata flag set' };
+  }
+  if (hasVerifiedEmail) {
+    return { channel: 'email', status: 'pending_ranger', reason: `Verified email (${lead.email_source || 'known'})` };
+  }
+  return {
+    channel: 'email',
+    status: 'blocked_no_email',
+    reason: 'No verified email — holding as blocked_no_email for enrichment',
+  };
+}
+
 let callAgent;
 
 try {
@@ -1534,25 +1574,11 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         }
       }
 
-      // ── Channel selection (ICP+channel patches per MJ direction 2026-04-29) ──
-      // Email-first default. LinkedIn ONLY at touch 3, or when explicit override metadata flag set.
-      // Touch 1 with unverified email → blocked_no_email (do NOT fall through to LinkedIn).
-      const meta_channel = lead.metadata || {};
-      const linkedinFirstOverride = meta_channel.linkedin_first_override === true || meta_channel.linkedin_first_override === 'true';
-      const hasVerifiedEmailSP = lead.email && (lead.email_verified === true || lead.email_source === 'hunter' || lead.email_source === 'apollo');
-
-      let channel;
-      let kickoffMessageStatus = 'pending_ranger';
-
-      if (linkedinFirstOverride && lead.linkedin_url) {
-        channel = 'linkedin';
-      } else if (hasVerifiedEmailSP) {
-        channel = 'email';
-      } else {
-        // Hold for enrichment. Persist message as blocked_no_email so the queue surfaces it
-        // for Hunter/Apollo backfill rather than auto-defaulting to LinkedIn at touch 1.
-        channel = 'email';
-        kickoffMessageStatus = 'blocked_no_email';
+      // ── Channel selection ── single source of truth in selectChannel()
+      const channelChoice_sp = selectChannel(lead);
+      const channel = channelChoice_sp.channel;
+      let kickoffMessageStatus = channelChoice_sp.status;
+      if (channelChoice_sp.status === 'blocked_no_email') {
         console.log(`[signal-pipeline] ${lead.name} — no verified email, marking blocked_no_email`);
       }
 
@@ -2585,7 +2611,58 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       }
     }
 
-    // If Hunter didn't find an email AND LinkedIn was previously attempted,
+    // ── Vibe Prospecting (Explorium) fallback enrichment ────────────────
+    // Fires only when ALL of:
+    //   (a) Hunter didn't find an email
+    //   (b) Lead's quality_score >= tenant's vp_threshold_score (default 75)
+    //   (c) Daily VP credit budget not exhausted
+    // Phase D piece 3 weekly auto-tuner adjusts vp_threshold_score based on
+    // observed pass-through rates, so this gate gets sharper over time.
+    if (!lead.email) {
+      try {
+        const tenantConfig = require('./tenantConfig');
+        const cfg = await tenantConfig.getTenantConfig(clientId);
+        const qScore = Number(lead.quality_score) || 0;
+        const threshold = cfg.vp_threshold_score ?? 75;
+
+        if (qScore < threshold) {
+          console.log(`[pipeline] VP skipped: quality_score ${qScore} < threshold ${threshold} for ${lead.name}`);
+        } else if ((cfg.vp_credits_used_today || 0) >= (cfg.vp_daily_budget_credits || 0)) {
+          console.log(`[pipeline] VP skipped: daily budget exhausted (${cfg.vp_credits_used_today}/${cfg.vp_daily_budget_credits}) for ${lead.name}`);
+        } else {
+          const vp = require('./vibeProspecting');
+          const nameParts = (lead.name || '').split(' ');
+          const result = await vp.findVerifiedEmail(clientId, {
+            firstName: nameParts[0] || '',
+            lastName:  nameParts.slice(1).join(' ') || '',
+            company:   lead.company,
+          });
+
+          // Charge actual credits used (even on partial failure VP may have spent)
+          if (result?.credits > 0) {
+            await tenantConfig.chargeVpCredits(clientId, result.credits).catch(() => {});
+          }
+
+          if (result?.ok && result.email) {
+            await pool.query(
+              `UPDATE leads SET email = $1, email_verified = $2, email_source = 'vp', updated_at = NOW()
+                WHERE id = $3 AND client_id = $4`,
+              [result.email, result.email_verified === true, lead.id, clientId]
+            );
+            lead.email          = result.email;
+            lead.email_source   = 'vp';
+            lead.email_verified = result.email_verified === true;
+            console.log(`[pipeline] VP enrichment: ${result.email} (verified=${lead.email_verified}, ${result.credits}c) for ${lead.name}`);
+          } else {
+            console.log(`[pipeline] VP enrichment no match for ${lead.name}: ${result?.error || 'unknown'} (${result?.credits || 0}c)`);
+          }
+        }
+      } catch (err) {
+        console.warn(`[pipeline] VP enrichment failed for ${lead.name}: ${err.message}`);
+      }
+    }
+
+    // If neither Hunter NOR VP found an email AND LinkedIn was previously attempted,
     // skip the lead entirely — no new channel available, recycling is waste.
     if (!lead.email && lead.linkedin_url) {
       const prevLinkedinRes = await pool.query(
@@ -2597,35 +2674,17 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       );
       if (prevLinkedinRes.rows.length > 0) {
         linkedinAlreadyTried = true;
-        console.log(`[pipeline] ${lead.name} — LinkedIn already tried, Hunter found nothing — skipping`);
+        console.log(`[pipeline] ${lead.name} — LinkedIn already tried, no enrichment found — skipping`);
         diagnostics.messages_failed++;
         return;
       }
     }
 
-    // Channel selection (ICP+channel patches per MJ direction 2026-04-29)
-    // Email-first default. LinkedIn ONLY when override metadata flag set, or as a Touch 3
-    // escalation handled separately by followupSequence.js. Touch 1 with no verified email
-    // → blocked_no_email (do NOT fall through to LinkedIn at touch 1).
-    let selectedChannel;
-    let channelReason;
-    let kickoffMessageStatus = 'pending_ranger';
-    const meta_pl = lead.metadata || {};
-    const linkedinFirstOverride = meta_pl.linkedin_first_override === true || meta_pl.linkedin_first_override === 'true';
-    const hasVerifiedEmail = lead.email && (lead.email_verified === true || lead.email_source === 'hunter' || lead.email_source === 'apollo');
-
-    if (linkedinFirstOverride && lead.linkedin_url && !linkedinAlreadyTried) {
-      selectedChannel = 'linkedin';
-      channelReason = 'linkedin_first_override metadata flag set';
-    } else if (hasVerifiedEmail) {
-      selectedChannel = 'email';
-      channelReason = `Verified email (${lead.email_source || 'known'})`;
-    } else {
-      // No verified email at touch 1 — hold for enrichment instead of falling through to LinkedIn.
-      selectedChannel = 'email';
-      channelReason = 'No verified email — holding as blocked_no_email for enrichment';
-      kickoffMessageStatus = 'blocked_no_email';
-    }
+    // Channel selection — single source of truth in selectChannel()
+    const channelChoice = selectChannel(lead, { linkedinAlreadyTried });
+    const selectedChannel = channelChoice.channel;
+    const channelReason = channelChoice.reason;
+    const kickoffMessageStatus = channelChoice.status;
 
     console.log(`[pipeline] Channel for ${lead.name}: ${selectedChannel} status=${kickoffMessageStatus} — ${channelReason}`);
 
