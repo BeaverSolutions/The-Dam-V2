@@ -1,0 +1,42 @@
+name: Validate LinkedIn Sync (manual)
+
+# Sentinel validator for POST /api/autonomous/linkedin-sync-replies.
+# Mirrors the trigger-kickoff workflow pattern. Hits the new endpoint with
+# 3 sentinel payloads (empty / outbound / no-match) and optionally a real
+# inbound on a known lead profile_url. Reports via Telegram.
+#
+# Usage:
+#   gh workflow run validate-linkedin-sync.yml
+#   gh workflow run validate-linkedin-sync.yml -f test_profile_url=https://www.linkedin.com/in/<slug>/
+#   gh workflow run validate-linkedin-sync.yml -f dry=1   # skip the real inbound call
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_profile_url:
+        description: "Optional LinkedIn profile URL of a known lead with a sent unreplied message. If set + dry!=1, a synthetic reply will be marked (revert SQL printed in body)."
+        required: false
+        default: ""
+      dry:
+        description: "Set to 1 to skip the real-inbound write step."
+        required: false
+        default: "0"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Validate
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BEAVRDAM_INTERNAL_API_KEY: ${{ secrets.BEAVRDAM_INTERNAL_API_KEY }}
+          BEAVRDAM_API_URL: https://app.beaver.solutions
+          TEST_PROFILE_URL: ${{ github.event.inputs.test_profile_url }}
+          DRY: ${{ github.event.inputs.dry }}
+        run: node scripts/validate-linkedin-sync.mjs
