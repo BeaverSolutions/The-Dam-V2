@@ -1840,6 +1840,37 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
     metadata: { plan_id, leads: leads.length, drafted: messagesDrafted, approved: approvedCount, rejected: rejectedCount },
   });
 
+  // ─── Daily KPI report to Captain (Sales + Enforcer perspectives) ──
+  // Mirrors the cold-research path in directorExecute. Without this, the
+  // signal-pipeline kickoff would never report agent perspective to
+  // Captain — and signal-pipeline IS the dominant kickoff path when pool
+  // has cached leads. Same shape as the cold-research report.
+  try {
+    const beaverState = require('./beaverState');
+    const passRate = messagesDrafted > 0
+      ? Math.round((approvedCount / messagesDrafted) * 100)
+      : null;
+
+    beaverState.reportDailyKPIs(clientId, 'sales_beaver', {
+      drafted: messagesDrafted,
+      approved_first_pass: approvedCount,
+      first_pass_rate_pct: passRate,
+      run_kind: 'signal_pipeline',
+      plan_id,
+    }).catch(err => console.warn('[sales_beaver] daily KPI report failed:', err.message));
+
+    beaverState.reportDailyKPIs(clientId, 'ranger', {
+      reviewed: messagesDrafted,
+      approved: approvedCount,
+      rejected: rejectedCount,
+      approve_rate_pct: passRate,
+      run_kind: 'signal_pipeline',
+      plan_id,
+    }).catch(err => console.warn('[ranger] daily KPI report failed:', err.message));
+  } catch (err) {
+    console.warn('[signal-pipeline] beaverState KPI wiring failed:', err.message);
+  }
+
   return {
     plan_id,
     status: 'completed',
