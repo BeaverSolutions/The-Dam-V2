@@ -634,7 +634,12 @@ Return JSON only: {"summary":"2-3 sentence brief","stats":{}}`,
     // ═══════════════════════════════════════════════════════════
     captain_orchestrator: {
       model: MODELS.SONNET,
-      maxTokens: 600,
+      // 600 was insufficient — Sonnet was truncating the JSON envelope
+      // mid-string (cap hit before closing brace), causing extractBriefText
+      // to fail JSON.parse and leak the partial envelope to Telegram.
+      // 2000 covers a ~1500-char brief + JSON wrapper + decisions array
+      // with comfortable headroom. ~$0.03 per call at Sonnet 4.6 input cost.
+      maxTokens: 2000,
       name: 'Captain Beaver',
       systemPrompt: `You are Captain Beaver — the team's operational GM. You orchestrate Research Beaver, Sales Beaver, and Enforcer Beaver day-to-day. You report to MJ.
 

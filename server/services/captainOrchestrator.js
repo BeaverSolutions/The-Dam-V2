@@ -403,7 +403,7 @@ function unwrapBriefString(s) {
   out = out.replace(/^```(?:json|html|text)?\s*/i, '').replace(/```\s*$/i, '');
   out = out.trim();
 
-  // If it's a JSON object/string wrapping the brief, unwrap once.
+  // Path 1: well-formed JSON object/string wrapping the brief — unwrap.
   if ((out.startsWith('{') && out.endsWith('}')) ||
       (out.startsWith('"') && out.endsWith('"'))) {
     try {
@@ -414,12 +414,28 @@ function unwrapBriefString(s) {
         const inner = parsed.brief ?? parsed.summary ?? parsed.text ?? parsed.message ?? parsed.content;
         if (typeof inner === 'string' && inner.trim()) out = inner;
       }
-    } catch { /* not valid JSON, keep as-is */ }
+    } catch { /* not valid JSON, fall through to path 2 */ }
+  }
+
+  // Path 2: TRUNCATED JSON (LLM hit maxTokens mid-string) — regex-extract
+  // the brief field. Looks for "brief"|"summary"|"text" key followed by
+  // a string value. Stops at the next unescaped quote — handles brief
+  // content that ends mid-sentence cleanly.
+  if (out.startsWith('{')) {
+    const m = out.match(/"(?:brief|summary|text|message|content)"\s*:\s*"((?:[^"\\]|\\.)*)$/);
+    if (m && m[1]) {
+      out = m[1];
+    } else {
+      // Try a non-greedy match that allows partial closure
+      const m2 = out.match(/"(?:brief|summary|text|message|content)"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (m2 && m2[1]) out = m2[1];
+    }
   }
 
   // Convert any leftover literal \n escapes to real newlines (defensive)
   if (out.includes('\\n')) out = out.replace(/\\n/g, '\n');
   if (out.includes('\\"')) out = out.replace(/\\"/g, '"');
+  if (out.includes('\\\\')) out = out.replace(/\\\\/g, '\\');
 
   return out.trim();
 }
