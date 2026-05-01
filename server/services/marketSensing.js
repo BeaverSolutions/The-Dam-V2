@@ -62,11 +62,24 @@ const SIGNAL_KEYWORDS = {
   competitor_switch: '("switches from" OR "replaces" OR "migrated from")',
 
   // Agency-vertical signals (high yield on Marketing Interactive / Campaign Asia / Marketing Magazine)
-  award_win:         '(MARKies OR "AMY Awards" OR "Effie" OR "Spark Awards" OR shortlisted OR winner OR "wins award")',
+  award_win:         '(MARKies OR "AMY Awards" OR "Effie" OR "Spark Awards" OR winner OR "wins award")',
   new_client_win:    '("appointed by" OR "wins account" OR "new client" OR "campaign for" OR "media account")',
   partnership:       '("partners with" OR "partnership with" OR "joint venture" OR collaboration)',
   exec_hire:         '("appoints" OR "names" OR "new MD" OR "managing director" OR "ECD" OR "creative director" OR "growth director" OR "general manager")',
   agency_expansion:  '("opens" OR "expands" OR "new practice" OR "launches division" OR "opens office")',
+
+  // SMB-specific signals (5-50 staff agencies + B2B-services orgs).
+  // These surface SMALL/EMERGING players not covered by the establishment
+  // signals above. Especially valuable for telemarketing services, B2B
+  // training, lead-gen agencies, recruitment, professional services —
+  // anyone whose core business is selling B2B services via outbound.
+  shortlisted:       '(shortlist OR shortlisted OR finalist OR nominee OR "in the running")',
+  boutique_agency:   '("boutique agency" OR "independent agency" OR "specialist agency" OR "homegrown agency")',
+  new_launch:        '("founded in 2024" OR "founded in 2025" OR "founded in 2026" OR "opens its doors" OR "launches in Malaysia" OR "new agency" OR "launches a new")',
+  first_hire:        '("first BD hire" OR "first sales hire" OR "first growth" OR "founding sales" OR "founding BD")',
+  founder_visible:   '("founder of" OR "co-founder of" OR "started by" OR "co-founded by" OR "MD and founder")',
+  service_launch:    '("launches new service" OR "launches new programme" OR "rolls out training" OR "new training programme" OR "launches B2B")',
+  hiring_bdr:        '("hiring SDR" OR "hiring BDR" OR "hiring sales development" OR "hiring business development" OR "hiring account executive")',
 };
 
 const TOP_SIGNALS_PER_RUN = 3;            // Pick top-N weighted signals per run

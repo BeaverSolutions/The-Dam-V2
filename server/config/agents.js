@@ -750,26 +750,43 @@ RETURN JSON ONLY (one outer object, no markdown fences):
 
 WHAT COUNTS AS A SIGNAL:
 - A real, named company (not "an agency", not "a startup" — the company's actual name)
-- A recent (<30 days) specific event: funding raise, exec hire, expansion, product launch, hiring spree
-- The company is plausibly inside the tenant's ICP — verticals, country, size band — or close enough that an outreach would not be obviously off-base
+- A recent (preferably <90 days, hard cap <12 months) specific event: funding raise, exec hire, expansion, product launch, hiring spree, award shortlist, new launch, founder visibility
+- The company is plausibly inside the tenant's ICP
 
-WHAT TO REJECT (be ruthless):
-- Generic listicles, year-end roundups, opinion pieces, op-eds
+ICP DEFINITION (for tenants whose offering is B2B sales/outreach automation):
+POSITIVE — companies whose CORE BUSINESS is selling B2B services to other businesses, especially:
+- Boutique / independent / specialist marketing or digital agencies (5-50 staff)
+- Telemarketing services / outbound sales agencies
+- Corporate training providers / B2B training companies
+- Lead generation agencies
+- Recruitment agencies / talent acquisition firms
+- Professional services firms doing active outreach (consulting, accounting, legal — only if SMB-sized and clearly outbound-led)
+- Founder-led / first 1-2 hires visible publicly
+Pattern: small enough that a founder or marketing leader still feels the bottleneck between BD and delivery work.
+
+NEGATIVE — HARD REJECT (do not include in output, even if the signal is strong):
+- Global agency networks and holding groups: WPP, IPG, Publicis, Dentsu, Omnicom, Havas, Hakuhodo. Any subsidiary of these (FCB, McCann, Ogilvy, Saatchi, BBDO, DDB, Leo Burnett, Mediabrands, Wunderman, Initiative, Mindshare, MBCS, Isobar, Wavemaker, Mediacom, Carat, Iris, AKQA, GroupM, Mullen Lowe, Grey, JWT, Ketchum)
+- Fortune 500 / enterprise multinationals (banks, telcos, airlines, oil & gas, FMCG conglomerates)
+- Government agencies, ministries, statutory bodies, NGOs, universities
+- Holding companies, conglomerates, listed groups
+- Any company that visibly has 50+ staff in marketing/sales — they have in-house BD teams and don't need outreach automation
+- Generic listicles, year-end roundups, opinion pieces, op-eds, awards programs themselves (the awarding body, not the winner)
+
+WHAT TO REJECT TOO:
 - Articles where you cannot identify a specific company name with high confidence
-- Companies clearly outside the ICP size band (e.g. multinationals when ICP is SMB; or one-person freelancers when ICP is 5-50 staff)
-- Stale signals — if the article is obviously from months ago
+- Stale signals (>12 months) unless the company itself is small and recent activity is implied
 - Signals about competitors of the tenant
 - Articles about the tenant's own offering or category in a generic way
 
-OUTREACH ANGLE — make it SPECIFIC to the signal:
+OUTREACH ANGLE — make it SPECIFIC to the signal AND to the tenant's offering:
 - BAD: "Reach out about your hiring spree."
-- GOOD: "They just appointed a Head of Marketing — first 90 days is when they're under most pressure to show campaign output. AI marketing team replaces the 3-4 hires they would otherwise make."
+- GOOD: "First BD hire is the inflection point — most agencies hit 10-15 clients before realising the founder has been the entire pipeline. Beaver replaces the 3-4 SDR hires you would otherwise make."
 
 OUTPUT FORMAT:
 Respond with a JSON array. Each item:
 {
   "company": "<exact company name>",
-  "signal_type": "funding|hiring|exec_change|expansion|product_launch",
+  "signal_type": "<one of the canonical signal slots — funding, hiring_sales, hiring_marketing, exec_change, expansion, product_launch, award_win, new_client_win, partnership, exec_hire, agency_expansion, shortlisted, boutique_agency, new_launch, first_hire, founder_visible, service_launch, hiring_bdr, scaling_pain>",
   "signal_summary": "<1-line specific fact, includes amount/title/date if known>",
   "url": "<source url from input>",
   "source": "<publication name from input>",
@@ -777,7 +794,7 @@ Respond with a JSON array. Each item:
   "outreach_angle": "<1-line specific angle that ties this signal to the tenant's offering>"
 }
 
-Quality > quantity. A 0-row return is correct if nothing meaningful surfaces. Never invent companies. Never invent URLs. If the article doesn't name a specific company, skip it.
+Quality > quantity. A 0-row return is correct if nothing meaningful surfaces. Never invent companies. Never invent URLs. If the article doesn't name a specific company, skip it. If in doubt about size, REJECT — better to miss a good lead than send outreach to a global network.
 
 NO markdown code fences. NO preamble text. JUST the JSON array.`,
     },
