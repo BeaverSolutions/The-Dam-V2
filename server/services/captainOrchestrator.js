@@ -275,19 +275,70 @@ function projectMonthEndMeetings(mtd) {
 async function generateMorningBrief(clientId) {
   const kpis = await collectTeamKPIs(clientId);
 
-  const userMessage = `Compose this morning's brief for ${kpis.tenant.name}. Three sections, plain text + HTML, EXACTLY this format:
+  // ── Pre-compute interpretation flags so the LLM can't misread raw numbers ──
+  // (Yesterday's brief said "VP credits exhausted (0 of 25)" — wrong, 0 USED.
+  //  Said "Research Beaver flatlined" — wrong, gated by 735-lead pool.)
+  const vpRemaining = Math.max(0, kpis.vp.credits_budget - kpis.vp.credits_used_today);
+  const vpStatus = kpis.vp.credits_used_today === 0
+    ? `unused today (${kpis.vp.credits_budget} credits available)`
+    : vpRemaining === 0
+      ? `EXHAUSTED — all ${kpis.vp.credits_budget} credits spent today, blocks new enrichment`
+      : vpRemaining < 5
+        ? `low — ${vpRemaining} of ${kpis.vp.credits_budget} remaining today`
+        : `${vpRemaining} of ${kpis.vp.credits_budget} remaining today (used ${kpis.vp.credits_used_today})`;
+
+  // Research Beaver context: sourced 0 != "flatlined" if pool is big.
+  // Cold research is gated when pool >= 5 (server/routes/autonomous.js:1325).
+  const researchStatus = kpis.research_beaver.pool_size >= 100
+    ? `idle by design — pool has ${kpis.research_beaver.pool_size} leads, sourcing gated until pool drains`
+    : kpis.research_beaver.sourced_24h >= kpis.research_beaver.sourced_floor
+      ? `on target (sourced ${kpis.research_beaver.sourced_24h} of ${kpis.research_beaver.sourced_floor} floor)`
+      : kpis.research_beaver.sourced_24h === 0
+        ? `DORMANT — 0 sourced in 24h despite pool low (${kpis.research_beaver.pool_size} leads). Investigate.`
+        : `BELOW FLOOR — sourced ${kpis.research_beaver.sourced_24h} of ${kpis.research_beaver.sourced_floor}`;
+
+  // Sales status: "0 sent" is fine if drafts_24h is high (waiting on approval).
+  const salesStatus = kpis.sales_beaver.drafts_24h === 0 && kpis.sales_beaver.sent_24h === 0
+    ? `idle (0 drafts, 0 sent in 24h)`
+    : kpis.sales_beaver.sent_24h === 0
+      ? `${kpis.sales_beaver.drafts_24h} drafts written, 0 sent — pipeline waiting on approval/send`
+      : `${kpis.sales_beaver.drafts_24h} drafts, ${kpis.sales_beaver.sent_24h} sent, ${kpis.sales_beaver.replies_24h} replies (${kpis.sales_beaver.first_attempt_pass_rate_pct ?? '—'}% first-pass)`;
+
+  // Enforcer: low approve rate is the calibration signal.
+  const enforcerStatus = kpis.enforcer.reviews_24h === 0
+    ? `idle (no reviews in 24h)`
+    : kpis.enforcer.approve_rate_pct < 30
+      ? `OVER-RESTRICTIVE — ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews. Likely calibration issue, not bad copy.`
+      : kpis.enforcer.approve_rate_pct < 60
+        ? `tight — ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews. Top reject: ${kpis.enforcer.top_reject_reasons[0]?.reason || 'mixed'}.`
+        : `healthy — ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews.`;
+
+  const overallHealth = (kpis.dam_health.db_ok && kpis.dam_health.encryption_key_ok && kpis.dam_health.stale_jobs.length === 0)
+    ? 'green'
+    : kpis.dam_health.stale_jobs.length > 0 || !kpis.dam_health.gmail_oauth_set
+      ? 'amber'
+      : 'degraded';
+
+  const userMessage = `Compose this morning's brief for ${kpis.tenant.name}. Three sections, plain text + HTML, EXACTLY this format. Lead with overall health verdict in the SYSTEM HEALTH first sentence.
+
+PRE-INTERPRETED STATUS (use these labels — do NOT re-interpret raw numbers below):
+- Overall: ${overallHealth}
+- VP: ${vpStatus}
+- Research Beaver: ${researchStatus}
+- Sales Beaver: ${salesStatus}
+- Enforcer: ${enforcerStatus}
 
 <b>SYSTEM HEALTH</b>
-DB: ${kpis.dam_health.db_ok ? 'connected' : 'UNREACHABLE'} · Encryption key: ${kpis.dam_health.encryption_key_ok ? 'valid' : 'MISSING'}
+DB: ${kpis.dam_health.db_ok ? 'connected' : 'UNREACHABLE'} · Encryption: ${kpis.dam_health.encryption_key_ok ? 'valid' : 'MISSING'}
 API keys: anthropic ${kpis.dam_health.anthropic_set ? 'set' : 'MISSING'}, brave ${kpis.dam_health.brave_set ? 'set' : 'MISSING'}, vp ${kpis.dam_health.vp_set ? 'set' : 'MISSING'}, gmail-oauth ${kpis.dam_health.gmail_oauth_set ? 'set' : 'MISSING'}
 Stale crons: ${kpis.dam_health.stale_jobs.length === 0 ? 'none — all firing' : kpis.dam_health.stale_jobs.join(', ')}
 LLM spend: $${kpis.cost.llm_spend_today_usd.toFixed(4)} today · $${kpis.cost.llm_spend_mtd_usd.toFixed(2)} mtd · budget $${kpis.cost.daily_budget_usd.toFixed(2)}/day
-VP credits: ${kpis.cost.vp_credits_used_today} / ${kpis.cost.vp_credits_budget_today} today
+VP: ${vpStatus}
 
 <b>SITUATION REPORT</b> (last 24h)
-Research Beaver: sourced ${kpis.research_beaver.sourced_24h} of ${kpis.research_beaver.sourced_floor} floor ${kpis.research_beaver.meeting_floor ? '(on target)' : '(BELOW FLOOR)'}, avg quality ${kpis.research_beaver.scored_avg ?? '—'}, top ${kpis.research_beaver.top_quality_score ?? '—'}, pool ${kpis.research_beaver.pool_size}, ${kpis.research_beaver.strategies_used} strategies.
-Sales Beaver: ${kpis.sales_beaver.drafts_24h} drafts, ${kpis.sales_beaver.first_attempt_pass_rate_pct ?? '—'}% first-pass, ${kpis.sales_beaver.sent_24h} sent, ${kpis.sales_beaver.replies_24h} replies.
-Enforcer: ${kpis.enforcer.reviews_24h} reviews, ${kpis.enforcer.approve_rate_pct ?? '—'}% approve. Top reject: ${kpis.enforcer.top_reject_reasons.map(r => `${r.reason} (${r.n})`).join(', ') || 'none'}.
+Research Beaver: ${researchStatus}. Avg quality ${kpis.research_beaver.scored_avg ?? '—'}, top ${kpis.research_beaver.top_quality_score ?? '—'}, ${kpis.research_beaver.strategies_used} strategies in use.
+Sales Beaver: ${salesStatus}.
+Enforcer: ${enforcerStatus}
 Pipeline: ${kpis.pipeline.pending_approvals} pending MJ, ${kpis.pipeline.approved_unsent_linkedin} LinkedIn unsent, ${kpis.pipeline.approved_unsent_email} email unsent, ${kpis.pipeline.bounces_7d} bounces 7d.
 Meetings: ${kpis.meetings.this_week} this week, ${kpis.meetings.mtd} mtd, projecting ${kpis.meetings.mtd_pace_projected} by month-end (gap ${kpis.meetings.gap_to_target} of target ${kpis.meetings.monthly_target}).
 
@@ -296,7 +347,7 @@ TASKS — what each beaver works on today, 1-2 lines.
 ACTIONS TAKEN — autonomous calls overnight, 1 line if anything.
 NEEDS YOUR CALL — forced-choice decisions for MJ, numbered. "nothing needs your call today." if none.
 
-Write the brief now. PLAIN TEXT only. NO json wrapper, NO code fences, NO "═══" separators. Single blank line between sections. Numbers concrete, only what changed, never fabricate.`;
+Write the brief now. Use the PRE-INTERPRETED STATUS labels above; do not re-narrate the raw numbers. NO json wrapper, NO code fences, NO "═══" separators. Single blank line between sections.`;
 
   let summary;
   try {
