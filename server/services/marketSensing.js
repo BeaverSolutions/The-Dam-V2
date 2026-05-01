@@ -24,29 +24,49 @@ const pool = require('../db/pool');
 const logger = require('../utils/logger');
 const { callAgent } = require('./claude');
 
-// MY-only news sources for v1. Each carries a domain (for site: queries)
-// and a friendly name (for surfacing to MJ + the LLM).
+// MY + SEA-agency news sources for v1. Mix of MY-general business/tech
+// publications and SEA agency-vertical publications (which heavily cover
+// MY agencies). Each carries a domain (for site: queries) and a friendly
+// name (for surfacing to MJ + the LLM).
 const MY_SOURCES = [
-  { name: 'Edge Markets MY',     domain: 'theedgemalaysia.com' },
-  { name: 'Vulcan Post MY',      domain: 'vulcanpost.com' },
-  { name: 'Digital News Asia',   domain: 'digitalnewsasia.com' },
-  { name: 'SoyaCincau',          domain: 'soyacincau.com' },
-  { name: 'Marketing Magazine',  domain: 'marketingmagazine.com.my' },
-  { name: 'Free Malaysia Today', domain: 'freemalaysiatoday.com' },
-  { name: 'The Star',            domain: 'thestar.com.my' },
+  // MY-general business/tech
+  { name: 'Edge Markets MY',      domain: 'theedgemalaysia.com' },
+  { name: 'Vulcan Post MY',       domain: 'vulcanpost.com' },
+  { name: 'Digital News Asia',    domain: 'digitalnewsasia.com' },
+  { name: 'SoyaCincau',           domain: 'soyacincau.com' },
+  { name: 'Free Malaysia Today',  domain: 'freemalaysiatoday.com' },
+  { name: 'The Star',             domain: 'thestar.com.my' },
+  // Agency-vertical (regional, heavy MY coverage)
+  { name: 'Marketing Magazine MY', domain: 'marketingmagazine.com.my' },
+  { name: 'Marketing Interactive', domain: 'marketing-interactive.com' },
+  { name: 'Campaign Asia',         domain: 'campaignasia.com' },
 ];
 
-// Generic high-signal triggers, keyed by signal_preferences slot.
-// Brave site:DOMAIN <signal-clause> [<vertical-clause>] composes per query.
+// Signal triggers, keyed by signal_preferences slot. Brave composes per
+// query as: site:DOMAIN <signal-clause>. Vertical filtering happens in
+// the Haiku extraction step (which has full ICP context) — keeping the
+// search layer broad maximizes recall, then we filter for precision.
+//
+// AGENCY-SPECIFIC slots (new — for tenants whose ICP is marketing/PR/
+// digital agencies, where funding signals are rare but award/client/
+// hire signals are abundant):
 const SIGNAL_KEYWORDS = {
-  funding:           '("raises" OR "Series A" OR "Series B" OR "seed round" OR funding OR raised)',
+  // Generic B2B signals (good for SaaS/tech/SMB ICPs)
+  funding:           '("Series A" OR "Series B" OR "seed round" OR "funding round" OR raised)',
   hiring_sales:      '("head of sales" OR "VP sales" OR "sales director" OR "hiring sales")',
   hiring_marketing:  '(CMO OR "head of marketing" OR "marketing director" OR "appoints marketing")',
   exec_change:       '("appoints" OR "named CEO" OR "named CMO" OR "new CEO" OR "new CMO")',
   expansion:         '("expansion" OR expands OR "new office" OR "Malaysia office" OR "launches in Malaysia")',
-  product_launch:    '("launches" OR "launched a" OR unveils OR "rolls out")',
+  product_launch:    '("launches" OR unveils OR "rolls out")',
   scaling_pain:      '("hiring spree" OR "doubled headcount" OR "scaling team")',
   competitor_switch: '("switches from" OR "replaces" OR "migrated from")',
+
+  // Agency-vertical signals (high yield on Marketing Interactive / Campaign Asia / Marketing Magazine)
+  award_win:         '(MARKies OR "AMY Awards" OR "Effie" OR "Spark Awards" OR shortlisted OR winner OR "wins award")',
+  new_client_win:    '("appointed by" OR "wins account" OR "new client" OR "campaign for" OR "media account")',
+  partnership:       '("partners with" OR "partnership with" OR "joint venture" OR collaboration)',
+  exec_hire:         '("appoints" OR "names" OR "new MD" OR "managing director" OR "ECD" OR "creative director" OR "growth director" OR "general manager")',
+  agency_expansion:  '("opens" OR "expands" OR "new practice" OR "launches division" OR "opens office")',
 };
 
 const TOP_SIGNALS_PER_RUN = 3;            // Pick top-N weighted signals per run
