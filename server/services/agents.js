@@ -3124,6 +3124,40 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     db_leads_processed: dbLeadsCount,
   };
 
+  // ─── Daily KPI report to Captain (Sales + Enforcer perspectives) ──
+  // Mirrors the Research Beaver pattern in services/research.js. Each beaver
+  // self-reports its 24h output to agent_memory so Captain's morning brief
+  // can read agent-perspective deltas instead of recomputing from raw tables.
+  // Failure non-fatal — directorExecute completes regardless.
+  try {
+    const beaverState = require('./beaverState');
+    const passRate = diagnostics.messages_drafted > 0
+      ? Math.round((approvedCount / diagnostics.messages_drafted) * 100)
+      : null;
+
+    beaverState.reportDailyKPIs(clientId, 'sales_beaver', {
+      drafted: diagnostics.messages_drafted,
+      drafted_failed: diagnostics.messages_failed || 0,
+      approved_first_pass: approvedCount,
+      first_pass_rate_pct: passRate,
+      followups_pending: followupsPending,
+      run_kind: dbLeadsCount > 0 ? 'pool_drain' : 'cold_research',
+      plan_id,
+    }).catch(err => console.warn('[sales_beaver] daily KPI report failed:', err.message));
+
+    // Note: Enforcer KPIs persist under agent='ranger' to match the
+    // canonical name beaverState.readAllBeaversKPIsForToday() reads from.
+    beaverState.reportDailyKPIs(clientId, 'ranger', {
+      reviewed: diagnostics.messages_drafted,
+      approved: approvedCount,
+      rejected: rejectedCount,
+      approve_rate_pct: passRate,
+      plan_id,
+    }).catch(err => console.warn('[ranger] daily KPI report failed:', err.message));
+  } catch (err) {
+    console.warn('[directorExecute] beaverState KPI wiring failed:', err.message);
+  }
+
   // Post-campaign learning — fire-and-forget, never blocks the response
   try {
     const { postCampaignDebrief } = require('./learningEngine');
