@@ -758,6 +758,37 @@ async function start() {
       }
     }
 
+    // ── Phase E — Market Sensing (08:30 MYT = 00:30 UTC) ──────────────
+    // Per-tenant scan of MY-only news sources for buying signals. Cheap
+    // (Haiku + ~21 Brave queries), high-leverage (feeds Research Beaver
+    // and Captain's brief). Self-guards on time + dedupes via agent_memory.
+    async function runMarketSensingCron() {
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+      const utcMin  = now.getUTCMinutes();
+      if (utcHour !== 0 || utcMin < 30 || utcMin > 40) return; // 00:30-00:40 UTC = 08:30-08:40 MYT
+
+      const todayKey = `market_signals_${now.toISOString().slice(0, 10)}`;
+      const { rows } = await pool.query(
+        `SELECT 1 FROM agent_memory WHERE agent = 'market_sensor' AND key = $1 LIMIT 1`,
+        [todayKey]
+      );
+      if (rows.length > 0) return; // already ran today
+
+      const { rows: clients } = await pool.query(
+        `SELECT id, slug FROM clients WHERE is_active = true AND onboarding_completed = true`
+      );
+      const { runMarketSensing } = require('./services/marketSensing');
+      for (const client of clients) {
+        try {
+          const result = await runMarketSensing(client.id);
+          logger.info({ msg: `[market-sensing] ${client.slug}: ${result.opportunities.length} opps from ${result.raw_results_count} raw` });
+        } catch (err) {
+          logger.warn({ msg: `[market-sensing] ${client.slug} failed`, err: err.message });
+        }
+      }
+    }
+
     // Poll every 10 minutes — each function self-guards against running outside its window
     setInterval(() => {
       runMorningBrief()
@@ -778,6 +809,9 @@ async function start() {
       runStuckStateMonitor()
         .then(() => { jobHealth.markRun('stuck_state_monitor'); })
         .catch(err => { logger.warn({ msg: 'Stuck-state monitor poll error', err: err.message }); jobHealth.markError('stuck_state_monitor', err.message); });
+      runMarketSensingCron()
+        .then(() => { jobHealth.markRun('market_sensing'); })
+        .catch(err => { logger.warn({ msg: 'Market-sensing poll error', err: err.message }); jobHealth.markError('market_sensing', err.message); });
     }, 10 * 60 * 1000);
     logger.info({ msg: 'Captain Beaver cron jobs registered (10min poll: 9am brief, 7pm EOD brief, hourly stuck-state monitor 9am-7pm, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, all MYT)' });
 

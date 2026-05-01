@@ -2305,6 +2305,38 @@ router.post('/trigger-morning-brief', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── POST /api/autonomous/trigger-market-sensing ─────────────
+ * Manual trigger for the Phase E market-sensing run. Bypasses the
+ * 00:30-00:40 UTC cron time-gate so we can validate the source set
+ * + LLM extraction without waiting until tomorrow morning.
+ *
+ * Body: { client_id }
+ * Auth: x-internal-key
+ */
+router.post('/trigger-market-sensing', requireInternalKey, async (req, res) => {
+  const { client_id } = req.body || {};
+  if (!client_id) return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+
+  try {
+    const { runMarketSensing } = require('../services/marketSensing');
+    const payload = await runMarketSensing(client_id);
+
+    return res.json({
+      data: {
+        client_id,
+        date: payload.date,
+        sources_queried: payload.sources_queried,
+        raw_results_count: payload.raw_results_count,
+        opportunities_count: payload.opportunities.length,
+        opportunities: payload.opportunities.slice(0, 5),  // preview only
+      },
+    });
+  } catch (err) {
+    logger.error({ msg: 'trigger-market-sensing failed', err: err.message });
+    return res.status(500).json({ error: 'Failed to run market sensing', code: 'SENSING_ERROR', message: err.message });
+  }
+});
+
 /* ─── POST /api/autonomous/vibe-prospecting/test ──────────────
  * Sentinel probe for the Vibe Prospecting (Explorium) integration.
  * Runs the full chain on a known business+prospect (Microsoft / Satya Nadella):
