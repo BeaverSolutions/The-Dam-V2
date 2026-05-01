@@ -2266,6 +2266,45 @@ router.post('/linkedin-sync-replies', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── POST /api/autonomous/trigger-morning-brief ───────────────
+ * Manual trigger for the Captain morning brief. Bypasses the cron
+ * time-gate (01:00-01:10 UTC) so we can validate format/content
+ * changes without waiting for the next natural fire.
+ *
+ * Sends to Telegram in the same format as the daily cron path.
+ *
+ * Body: { client_id }
+ * Auth: x-internal-key
+ */
+router.post('/trigger-morning-brief', requireInternalKey, async (req, res) => {
+  const { client_id } = req.body || {};
+  if (!client_id) return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+
+  try {
+    const captain = require('../services/captainOrchestrator');
+    const brief = await captain.runMorningBrief(client_id);
+    const text = brief?.summary || 'No summary generated.';
+
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+    if (chatId) {
+      const telegramService = require('../services/telegram');
+      await telegramService.sendMessage(chatId, `<b>Morning brief (manual)</b>\n\n${text}`);
+    }
+
+    return res.json({
+      data: {
+        client_id,
+        text_length: text.length,
+        text_preview: text.slice(0, 500),
+        telegram_sent: !!chatId,
+      },
+    });
+  } catch (err) {
+    logger.error({ msg: 'trigger-morning-brief failed', err: err.message });
+    return res.status(500).json({ error: 'Failed to trigger morning brief', code: 'BRIEF_ERROR', message: err.message });
+  }
+});
+
 /* ─── POST /api/autonomous/vibe-prospecting/test ──────────────
  * Sentinel probe for the Vibe Prospecting (Explorium) integration.
  * Runs the full chain on a known business+prospect (Microsoft / Satya Nadella):
