@@ -1,0 +1,45 @@
+name: Trigger Quality Tune (manual)
+
+# Manual trigger for the Phase D piece 3 weekly auto-tuner. Bypasses the
+# Sunday 09:00-09:10 UTC cron time gate so we can validate the algorithm
+# without waiting for the next Sunday.
+
+on:
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Client UUID. Default = Beaver Solutions."
+        required: false
+        default: "ce2fc8e5-617e-42d5-91fe-4275ceaa0030"
+      dry_run:
+        description: "Set to true to report what would change without writing."
+        required: false
+        default: "false"
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger
+        env:
+          API_KEY: ${{ secrets.BEAVRDAM_INTERNAL_API_KEY }}
+          CLIENT_ID: ${{ github.event.inputs.client_id }}
+          DRY: ${{ github.event.inputs.dry_run }}
+        run: |
+          curl -sS -X POST "https://app.beaver.solutions/api/autonomous/trigger-quality-tune" \
+            -H "x-internal-key: $API_KEY" \
+            -H "content-type: application/json" \
+            -d "{\"client_id\":\"$CLIENT_ID\",\"dry_run\":${DRY:-false}}" \
+            | tee /tmp/result.json
+          echo ""
+          echo "---"
+          echo "tuned: $(jq -r '.data.tuned' /tmp/result.json)"
+          echo "reason: $(jq -r '.data.reason // \"applied\"' /tmp/result.json)"
+          echo "current threshold: $(jq -r '.data.current_threshold // .data.from' /tmp/result.json)"
+          echo "proposed/new: $(jq -r '.data.proposed_threshold // .data.to // \"none\"' /tmp/result.json)"
+          echo "sent_total: $(jq -r '.data.sent_total // \"?\"' /tmp/result.json)"
+          echo "replied_total: $(jq -r '.data.replied_total // \"?\"' /tmp/result.json)"
+          echo ""
+          echo "=== Per-threshold pass-through ==="
+          jq -r '.data.buckets[]? | "  threshold \(.threshold): \(.sent) sent, \(.replied) replied, \(.rate * 100 | floor)% rate"' /tmp/result.json

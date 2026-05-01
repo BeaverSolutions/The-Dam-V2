@@ -758,6 +758,47 @@ async function start() {
       }
     }
 
+    // ── Phase D piece 3 — Quality threshold auto-tuner (Sunday 17:00 MYT) ──
+    // Reads agent_outcomes from the last 14 days, computes pass-through rate
+    // at each candidate threshold, picks the lowest one clearing 5% reply
+    // rate AND with statistically meaningful volume, writes new threshold to
+    // clients.vp_threshold_score. Logs decision via Captain action.
+    //
+    // Insufficient data → no-op + persist the analysis. Cron tolerates this
+    // for the first weeks while reply data accumulates.
+    async function runQualityTunerCron() {
+      const now = new Date();
+      const isSunday = now.getUTCDay() === 0;
+      const utcHour = now.getUTCHours();
+      const utcMin  = now.getUTCMinutes();
+      // Sunday 09:00-09:10 UTC = Sunday 17:00-17:10 MYT
+      if (!isSunday || utcHour !== 9 || utcMin > 10) return;
+
+      const todayKey = `quality_tune_${now.toISOString().slice(0, 10)}`;
+      const { rows } = await pool.query(
+        `SELECT 1 FROM agent_memory WHERE agent = 'captain_orchestrator' AND key = $1 LIMIT 1`,
+        [todayKey]
+      );
+      if (rows.length > 0) return;
+
+      const { rows: clients } = await pool.query(
+        `SELECT id, slug FROM clients WHERE is_active = true AND onboarding_completed = true`
+      );
+      const { runQualityTune } = require('./services/qualityTuner');
+      for (const client of clients) {
+        try {
+          const result = await runQualityTune(client.id);
+          if (result.tuned) {
+            logger.info({ msg: `[quality-tuner] ${client.slug}: ${result.from} → ${result.to}` });
+          } else {
+            logger.info({ msg: `[quality-tuner] ${client.slug}: no change`, reason: result.reason });
+          }
+        } catch (err) {
+          logger.warn({ msg: `[quality-tuner] ${client.slug} failed`, err: err.message });
+        }
+      }
+    }
+
     // ── Phase E — Market Sensing (08:30 MYT = 00:30 UTC) ──────────────
     // Per-tenant scan of MY-only news sources for buying signals. Cheap
     // (Haiku + ~21 Brave queries), high-leverage (feeds Research Beaver
@@ -812,6 +853,9 @@ async function start() {
       runMarketSensingCron()
         .then(() => { jobHealth.markRun('market_sensing'); })
         .catch(err => { logger.warn({ msg: 'Market-sensing poll error', err: err.message }); jobHealth.markError('market_sensing', err.message); });
+      runQualityTunerCron()
+        .then(() => { jobHealth.markRun('quality_tuner'); })
+        .catch(err => { logger.warn({ msg: 'Quality-tuner poll error', err: err.message }); jobHealth.markError('quality_tuner', err.message); });
     }, 10 * 60 * 1000);
     logger.info({ msg: 'Captain Beaver cron jobs registered (10min poll: 9am brief, 7pm EOD brief, hourly stuck-state monitor 9am-7pm, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, all MYT)' });
 
