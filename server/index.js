@@ -758,6 +758,49 @@ async function start() {
       }
     }
 
+    // ── Enforcer weekly teaching note (Sunday 18:00 MYT = Sunday 10:00 UTC) ──
+    // Fires AFTER quality tuner (Sunday 17:00 MYT) so the teaching note can
+    // include any threshold tunes Captain just made. Aggregates 7d of reject
+    // patterns + Sales improvement-after-feedback + outcomes by dimension,
+    // hands to Sonnet for a 4-6 sentence teaching note. Persists to
+    // agent_memory keyed `enforcer_teaching_YYYY-WW` for Captain's Monday
+    // brief to quote.
+    async function runEnforcerTeachingCron() {
+      const now = new Date();
+      const isSunday = now.getUTCDay() === 0;
+      const utcHour = now.getUTCHours();
+      const utcMin  = now.getUTCMinutes();
+      // Sunday 10:00-10:10 UTC = Sunday 18:00-18:10 MYT
+      if (!isSunday || utcHour !== 10 || utcMin > 10) return;
+
+      const todayKey = `enforcer_teaching_dedupe_${now.toISOString().slice(0, 10)}`;
+      const { rows } = await pool.query(
+        `SELECT 1 FROM agent_memory WHERE agent = 'system' AND key = $1 LIMIT 1`,
+        [todayKey]
+      );
+      if (rows.length > 0) return;
+
+      const { rows: clients } = await pool.query(
+        `SELECT id, slug FROM clients WHERE is_active = true AND onboarding_completed = true`
+      );
+      const { runEnforcerTeaching } = require('./services/enforcerTeaching');
+      for (const client of clients) {
+        try {
+          const result = await runEnforcerTeaching(client.id);
+          logger.info({ msg: `[enforcer-teaching] ${client.slug}: ${result.status}` });
+        } catch (err) {
+          logger.warn({ msg: `[enforcer-teaching] ${client.slug} failed`, err: err.message });
+        }
+      }
+
+      // Mark dedup
+      await pool.query(
+        `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+         SELECT id, 'system', $1, '"sent"'::jsonb, 'config' FROM clients LIMIT 1`,
+        [todayKey]
+      ).catch(() => {});
+    }
+
     // ── Soft-reject TTL purge (daily 03:00 UTC = 11:00 MYT) ──────────────
     // Hard-deletes leads with status LIKE 'rejected_%' AND deleted_at older
     // than 30 days. Stops the leads table from bloating with stale soft-
@@ -896,6 +939,9 @@ async function start() {
       runSoftRejectPurgeCron()
         .then(() => { jobHealth.markRun('soft_reject_purge'); })
         .catch(err => { logger.warn({ msg: 'Soft-reject purge poll error', err: err.message }); jobHealth.markError('soft_reject_purge', err.message); });
+      runEnforcerTeachingCron()
+        .then(() => { jobHealth.markRun('enforcer_teaching'); })
+        .catch(err => { logger.warn({ msg: 'Enforcer-teaching poll error', err: err.message }); jobHealth.markError('enforcer_teaching', err.message); });
     }, 10 * 60 * 1000);
     logger.info({ msg: 'Captain Beaver cron jobs registered (10min poll: 9am brief, 7pm EOD brief, hourly stuck-state monitor 9am-7pm, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, all MYT)' });
 

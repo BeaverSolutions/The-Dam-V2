@@ -1840,6 +1840,38 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     metadata: { plan_id, batchIndex, signal_sourced: !!use_existing_leads },
   });
 
+  // ── Beavers read Captain's morning brief at run start ───────────────
+  // Surfaces today's directives (TASKS / ACTIONS TAKEN / NEEDS YOUR CALL)
+  // so Sales Beaver context knows the strategy bet of the day, fresh
+  // market signals from Phase E, and Captain's threshold tuning calls.
+  // Logged for debugging — actual consumption is via getMemory() lookups
+  // from the per-beaver prompt builders (research, sales, enforcer).
+  try {
+    const beaverState = require('./beaverState');
+    const captainBrief = await beaverState.readCaptainBrief(clientId).catch(() => null);
+    if (captainBrief) {
+      console.log(`[director] Loaded Captain brief from agent_memory (${(captainBrief.summary || '').length} chars summary)`);
+    } else {
+      console.log('[director] No Captain brief in agent_memory — beavers run without daily directive');
+    }
+
+    // Also surface today's market signals (Phase E) so Sales Beaver can
+    // reference them as personalization seeds when drafting.
+    const today = new Date().toISOString().slice(0, 10);
+    const marketRes = await pool.query(
+      `SELECT content FROM agent_memory
+        WHERE client_id = $1 AND agent = 'market_sensor' AND key = $2
+        LIMIT 1`,
+      [clientId, `market_signals_${today}`]
+    ).catch(() => ({ rows: [] }));
+    const oppCount = marketRes.rows[0]?.content?.opportunities?.length || 0;
+    if (oppCount > 0) {
+      console.log(`[director] Phase E: ${oppCount} fresh market opportunities available for personalization`);
+    }
+  } catch (err) {
+    console.warn('[director] beaverState brief read failed (non-fatal):', err.message);
+  }
+
   // ── Phase C: Signal-sourced path ─────────────────────────────
   // If use_existing_leads is provided, skip research entirely and feed those
   // lead IDs straight to Sales Beaver + Enforcer. Signal detection IS the gate.
