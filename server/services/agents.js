@@ -1646,6 +1646,16 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
          JSON.stringify({ source: draftSource, signal: meta.signal, blocked_reason: kickoffMessageStatus === 'blocked_no_email' ? 'awaiting_email_enrichment' : undefined })]
       );
 
+      // Phase D piece 2 — outcome attribution: drafted event (signal-pipeline path)
+      recordOutcome(clientId, {
+        outcome: 'drafted',
+        leadId: lead.id,
+        messageId: msg.id,
+        channel,
+        ...attributionFromLead(lead),
+        eventData: { source_path: 'signal_pipeline', status: kickoffMessageStatus, draft_source: draftSource },
+      });
+
       // If blocked, skip Ranger and downstream processing — message is on hold for enrichment.
       if (kickoffMessageStatus === 'blocked_no_email') {
         messagesDrafted++;
@@ -1789,6 +1799,17 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
               [clientId, lead.id, channel, enfSubject, enforcerDraft.body,
                JSON.stringify({ source: 'enforcer_fallback', signal: meta.signal, original_rejection: rangerResult?.notes })]
             );
+
+            // Phase D piece 2 — outcome attribution: drafted event (Enforcer fallback)
+            recordOutcome(clientId, {
+              outcome: 'drafted',
+              leadId: lead.id,
+              messageId: enfMsg.id,
+              channel,
+              ...attributionFromLead(lead),
+              eventData: { source_path: 'enforcer_fallback', original_rejection: rangerResult?.notes },
+            });
+
             await pool.query(
               `INSERT INTO approvals (client_id, message_id, requested_by, status) VALUES ($1, $2, 'enforcer_fallback', 'pending')`,
               [clientId, enfMsg.id]
