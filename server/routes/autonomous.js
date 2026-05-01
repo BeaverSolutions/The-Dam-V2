@@ -2329,6 +2329,7 @@ router.post('/trigger-market-sensing', requireInternalKey, async (req, res) => {
         raw_results_count: payload.raw_results_count,
         opportunities_count: payload.opportunities.length,
         opportunities: payload.opportunities.slice(0, 5),  // preview only
+        raw_sample: payload.raw_sample,  // visibility into what Brave returned
       },
     });
   } catch (err) {

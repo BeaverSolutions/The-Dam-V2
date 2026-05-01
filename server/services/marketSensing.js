@@ -98,13 +98,19 @@ async function fetchSignals(clientId) {
     return [];
   }
 
+  // v1 loosens the query to signal-only (no vertical clause) — combined
+  // site: + signal + vertical was too narrow on smaller MY publications
+  // and starved the LLM input. Vertical filtering moves to the Haiku
+  // extraction step instead, which has the full ICP context.
   const queries = [];
   for (const source of MY_SOURCES) {
     for (const sig of topSignals) {
-      const q = `site:${source.domain} ${SIGNAL_KEYWORDS[sig]}${verticalsClause ? ' ' + verticalsClause : ''}`;
+      const q = `site:${source.domain} ${SIGNAL_KEYWORDS[sig]}`;
       queries.push({ source: source.name, signal: sig, query: q });
     }
   }
+  // Mark the (currently unused) vertical clause so future v2 reuse is obvious
+  void verticalsClause;
 
   const all = [];
   let okCount = 0;
@@ -260,6 +266,11 @@ async function runMarketSensing(clientId) {
     sources_queried: MY_SOURCES.length,
     raw_results_count: rawSignals.length,
     opportunities,
+    // Compact debug view — first 25 raw titles by source, so we can audit
+    // why opportunities count is low without re-querying Brave
+    raw_sample: rawSignals.slice(0, 25).map(r => ({
+      source: r.source, signal: r.signal, title: r.title.slice(0, 120), url: r.url,
+    })),
   };
 
   await persistMarketSignals(clientId, payload).catch(err =>

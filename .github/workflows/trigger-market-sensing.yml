@@ -37,5 +37,9 @@ jobs:
           fi
           echo "raw_results: $(jq -r '.data.raw_results_count' /tmp/result.json)"
           echo "opportunities: $(jq -r '.data.opportunities_count' /tmp/result.json)"
-          echo "first 5:"
+          echo ""
+          echo "=== Top 5 opportunities ==="
           jq -r '.data.opportunities[]? | "- \(.company // "?") | \(.signal_type // "?") | \(.signal_summary // "?") | \(.confidence // "?")"' /tmp/result.json
+          echo ""
+          echo "=== Raw sample (what Brave returned) ==="
+          jq -r '.data.raw_sample[]? | "[\(.source // "?") / \(.signal // "?")] \(.title // "?") :: \(.url // "?")"' /tmp/result.json
