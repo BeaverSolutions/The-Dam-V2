@@ -1675,9 +1675,20 @@ router.get('/hourly-stats', requireInternalKey, async (req, res) => {
     const cs = channelStats.rows[0];
     const ls = leadStats.rows[0];
     const rawPatterns = patternRows.rows[0]?.content;
-    const patternN = rawPatterns
-      ? Object.keys(typeof rawPatterns === 'string' ? JSON.parse(rawPatterns) : rawPatterns).length
-      : 0;
+    // Pattern memory has two possible shapes:
+    //   1. { patterns: [{company, domain, pattern, ...}, ...], ... }  ← cowork-written
+    //   2. { domain1: pattern1, domain2: pattern2, ... }              ← legacy dbBuilder
+    let patternN = 0;
+    if (rawPatterns) {
+      const parsed = typeof rawPatterns === 'string' ? JSON.parse(rawPatterns) : rawPatterns;
+      if (Array.isArray(parsed?.patterns)) {
+        patternN = parsed.patterns.length;
+      } else if (parsed && typeof parsed === 'object') {
+        // Legacy shape: top-level keys are domains. Filter out non-domain keys
+        // like 'last_updated' that may have leaked in.
+        patternN = Object.keys(parsed).filter(k => !['last_updated','doc','source'].includes(k)).length;
+      }
+    }
 
     res.json({
       data: {
@@ -1924,6 +1935,25 @@ router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
         [client_id, message_id, JSON.stringify({ notes: notes || null, lead_id: updated.lead_id })]
       );
 
+      // Phase D piece 2 — outcome attribution: sent event (LinkedIn-via-Cowork)
+      try {
+        const { rows: [leadRow] } = await pool.query(
+          `SELECT id, source, signal_tier, quality_score, metadata FROM leads WHERE id = $1 AND client_id = $2`,
+          [updated.lead_id, client_id]
+        );
+        const { recordOutcome, attributionFromLead } = require('../services/outcomeTracker');
+        recordOutcome(client_id, {
+          outcome: 'sent',
+          leadId: updated.lead_id,
+          messageId: message_id,
+          channel: 'linkedin',
+          ...attributionFromLead(leadRow),
+          eventData: { source_path: 'cowork', notes: notes || null },
+        });
+      } catch (err) {
+        logger.warn({ msg: '[linkedin-mark-sent] outcome tracker failed', err: err.message });
+      }
+
       // Schedule follow-up sequence (Day 2/5/10/18/30)
       try {
         const { scheduleFollowUps } = require('../services/followupSequence');
@@ -2150,6 +2180,25 @@ router.post('/linkedin-sync-replies', requireInternalKey, async (req, res) => {
             lead_id: candidate.lead_id,
           },
         });
+
+        // Phase D piece 2 — outcome attribution: replied event (LinkedIn path)
+        try {
+          const { rows: [leadRow] } = await pool.query(
+            `SELECT id, source, signal_tier, quality_score, metadata FROM leads WHERE id = $1 AND client_id = $2`,
+            [candidate.lead_id, client_id]
+          );
+          const { recordOutcome, attributionFromLead } = require('../services/outcomeTracker');
+          recordOutcome(client_id, {
+            outcome: 'replied',
+            leadId: candidate.lead_id,
+            messageId: candidate.message_id,
+            channel: 'linkedin',
+            ...attributionFromLead(leadRow),
+            eventData: { source_path: 'sync_endpoint', profile_url: r.profile_url, snippet: r.last_msg_text.slice(0, 200) },
+          });
+        } catch (err) {
+          logger.warn({ msg: '[linkedin-sync-replies] outcome tracker failed', err: err.message });
+        }
 
         // 5. Reply intelligence (fire-and-forget) — re-uses the same path as
         // email replies so classify + auto-draft response works for LinkedIn too.

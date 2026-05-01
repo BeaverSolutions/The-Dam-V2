@@ -93,6 +93,25 @@ async function checkRepliesForClient(clientId) {
         },
       });
 
+      // Phase D piece 2 — outcome attribution: replied event (email path)
+      try {
+        const { rows: [leadRow] } = await pool.query(
+          `SELECT id, source, signal_tier, quality_score, metadata FROM leads WHERE id = $1 AND client_id = $2`,
+          [msg.lead_id, clientId]
+        );
+        const { recordOutcome, attributionFromLead } = require('./outcomeTracker');
+        recordOutcome(clientId, {
+          outcome: 'replied',
+          leadId: msg.lead_id,
+          messageId: msg.id,
+          channel: 'email',
+          ...attributionFromLead(leadRow),
+          eventData: { provider: msg.gmail_thread_id ? 'gmail' : 'agentmail', source_path: 'polling', snippet: snippet.slice(0, 200) },
+        });
+      } catch (err) {
+        console.warn('[replyDetector] outcome tracker failed:', err.message);
+      }
+
       repliesFound++;
       newReplyIds.push(msg.id);
 

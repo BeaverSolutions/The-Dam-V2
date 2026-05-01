@@ -335,6 +335,27 @@ async function sendMessageById(clientId, message_id, provider) {
     metadata: { to: message.lead_email, lead_name: message.lead_name, provider: usedProvider, send_result: sendResult },
   });
 
+  // Phase D piece 2 — outcome attribution: record sent event (email path).
+  // Best-effort: pull lead attribution dimensions in a small follow-up query
+  // so the row carries snapshot at send-time rather than blank fields.
+  try {
+    const { rows: [leadRow] } = await pool.query(
+      `SELECT id, source, signal_tier, quality_score, metadata FROM leads WHERE id = $1 AND client_id = $2`,
+      [message.lead_id, clientId]
+    );
+    const { recordOutcome, attributionFromLead } = require('../services/outcomeTracker');
+    recordOutcome(clientId, {
+      outcome: 'sent',
+      leadId: message.lead_id,
+      messageId: message_id,
+      channel: 'email',
+      ...attributionFromLead(leadRow),
+      eventData: { provider: usedProvider, thread_id: sendResult.threadId },
+    });
+  } catch (err) {
+    console.warn('[integrations] outcome tracker failed:', err.message);
+  }
+
   // Schedule follow-ups if this is the first message sent to this lead
   try {
     const { rows: prevSent } = await pool.query(

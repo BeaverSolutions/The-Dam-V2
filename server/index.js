@@ -842,6 +842,25 @@ async function start() {
               await scheduleFollowUps(msg.client_id, msg.lead_id, new Date());
               logger.info({ msg: `[linkedin-sweep] Scheduled follow-ups for auto-graduated lead ${msg.lead_id}` });
             }
+
+            // Phase D piece 2 — outcome attribution: sent event (auto-graduate)
+            try {
+              const { rows: [leadRow] } = await pool.query(
+                `SELECT id, source, signal_tier, quality_score, metadata FROM leads WHERE id = $1 AND client_id = $2`,
+                [msg.lead_id, msg.client_id]
+              );
+              const { recordOutcome, attributionFromLead } = require('./services/outcomeTracker');
+              recordOutcome(msg.client_id, {
+                outcome: 'sent',
+                leadId: msg.lead_id,
+                messageId: msg.message_id,
+                channel: 'linkedin',
+                ...attributionFromLead(leadRow),
+                eventData: { source_path: 'auto_sweep', presumed_accepted_after_days: 3 },
+              });
+            } catch (err) {
+              logger.warn({ msg: '[linkedin-sweep] outcome tracker failed', err: err.message });
+            }
           } catch (err) {
             logger.warn({ msg: '[linkedin-sweep] Per-message error', message_id: msg.message_id, err: err.message });
           }

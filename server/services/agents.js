@@ -12,6 +12,7 @@ const hunterService = require('./hunter');
 const researchModule = require('./research');
 const { getClientConfig, buildClientContext } = require('./clientConfig');
 const { evaluateLeadQuality } = require('../utils/leadQuality');
+const { recordOutcome, attributionFromLead } = require('./outcomeTracker');
 
 // ICP+channel patches per MJ direction 2026-04-29
 // ─── ICP v2: SEA-only country, persona, vertical hard gates ─────────────────
@@ -2183,7 +2184,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     Promise.allSettled(rejectedAuditQueue.map(r => pool.query(
       `INSERT INTO leads (client_id, name, email, company, title, source,
                           pipeline_stage, status, country, linkedin_url, metadata, deleted_at)
-       VALUES ($1,$2,$3,$4,$5,'research_beaver','rejected',$6,$7,$8,$9,NOW())`,
+       VALUES ($1,$2,$3,$4,$5,'research_beaver','rejected',$6,$7,$8,$9,NOW())
+       RETURNING id`,
       [
         clientId,
         r.lead.name || 'Unknown',
@@ -2198,6 +2200,20 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     ))).then(results => {
       const persisted = results.filter(x => x.status === 'fulfilled').length;
       console.log(`[captain] ICP v2 persisted ${persisted}/${rejectedAuditQueue.length} rejected lead audit rows`);
+      // Phase D piece 2 — outcome attribution: one rejected event per persisted audit row
+      results.forEach((res, i) => {
+        if (res.status === 'fulfilled' && res.value?.rows?.[0]?.id) {
+          const r = rejectedAuditQueue[i];
+          recordOutcome(clientId, {
+            outcome: 'rejected',
+            leadId: res.value.rows[0].id,
+            sourceStrategy: 'research_beaver',
+            signalType: r.lead.metadata?.signal || null,
+            segment: r.lead.metadata?.industry || null,
+            eventData: { gate: 'icp_v2', reason: r.reason, status: r.status },
+          });
+        }
+      });
     }).catch(err => console.warn('[captain] ICP v2 audit batch insert failed:', err.message));
   }
 
@@ -2395,6 +2411,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       );
       if (res.rows.length > 0) {
         savedLeads.push({ ...res.rows[0], short_description: lead.short_description });
+        // Phase D piece 2 — outcome attribution: record sourced event
+        recordOutcome(clientId, {
+          outcome: 'sourced',
+          leadId: res.rows[0].id,
+          ...attributionFromLead(res.rows[0]),
+          eventData: { verified: lead.metadata?.verified ?? null, source_path: 'research_beaver' },
+        });
       } else {
         console.log(`[dedup] Skipped duplicate lead at DB level: ${lead.name} (${lead.linkedin_url})`);
       }
