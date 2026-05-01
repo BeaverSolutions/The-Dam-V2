@@ -1973,6 +1973,250 @@ router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── POST /api/autonomous/linkedin-sync-replies ───────────────
+ * Closes the LinkedIn-replies blindspot. Reply detector is structurally
+ * email-only (Gmail / AgentMail thread IDs). LinkedIn replies are invisible
+ * unless ingested out-of-band. This endpoint accepts a batch from the local
+ * Chrome-CDP sync script (scripts/sync-linkedin-replies-to-beavrdam.mjs in
+ * MJxClaude) and matches inbound DMs against sent LinkedIn messages.
+ *
+ * For each match:
+ *   - messages.reply_detected_at = NOW(), reply_snippet = last_msg_text
+ *   - leads.last_reply_at + advance pipeline_stage to qualifying
+ *   - stopSequence to cancel pending follow-ups (avoid noise on active threads)
+ *   - handleReply for reply intelligence (auto-classify + draft response)
+ *   - Audit log + Telegram notify
+ *
+ * Body: {
+ *   client_id,
+ *   replies: [
+ *     { profile_url, last_msg_text, last_msg_at (ISO), last_msg_from_me (bool) }
+ *   ]
+ * }
+ *
+ * Auth: x-internal-key
+ */
+
+// Normalize a LinkedIn profile URL to a comparable slug.
+// Handles: www./my./regional subdomains, /in/<slug>, trailing slash, query params.
+// Returns lowercase slug or null.
+function linkedinSlug(url) {
+  if (!url || typeof url !== 'string') return null;
+  const m = url.match(/linkedin\.com\/in\/([^/?#]+)/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+router.post('/linkedin-sync-replies', requireInternalKey, async (req, res) => {
+  const { client_id, replies } = req.body || {};
+  if (!client_id) return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+  if (!Array.isArray(replies)) return res.status(400).json({ error: 'replies must be an array', code: 'INVALID_REPLIES' });
+  if (replies.length === 0) return res.json({ data: { client_id, received: 0, new_replies: 0, details: [] } });
+  if (replies.length > 500) return res.status(400).json({ error: 'replies batch too large (max 500)', code: 'BATCH_TOO_LARGE' });
+
+  // Normalize incoming + filter to inbound-only (last message NOT from MJ)
+  const inbound = [];
+  let skippedOutboundOnly = 0;
+  for (const r of replies) {
+    if (!r || typeof r !== 'object') continue;
+    if (r.last_msg_from_me === true) { skippedOutboundOnly++; continue; }
+    const slug = linkedinSlug(r.profile_url);
+    if (!slug) continue;
+    const lastMsgAt = r.last_msg_at ? new Date(r.last_msg_at) : null;
+    if (!lastMsgAt || isNaN(lastMsgAt.getTime())) continue;
+    inbound.push({
+      slug,
+      profile_url: r.profile_url,
+      last_msg_text: String(r.last_msg_text || '').slice(0, 500),
+      last_msg_at: lastMsgAt,
+    });
+  }
+
+  if (inbound.length === 0) {
+    return res.json({
+      data: { client_id, received: replies.length, matched_leads: 0, new_replies: 0, skipped_outbound_only: skippedOutboundOnly, skipped_no_match: 0, skipped_stale: 0, details: [] },
+    });
+  }
+
+  try {
+    const slugs = [...new Set(inbound.map(r => r.slug))];
+
+    // Pull all candidate sent LinkedIn messages with no reply yet, plus the
+    // lead's normalized slug. Done in one query with regex extraction so we
+    // don't N+1 the DB on the batch.
+    const { rows: candidates } = await pool.query(
+      `SELECT
+         m.id            AS message_id,
+         m.lead_id,
+         m.sent_at,
+         l.linkedin_url,
+         lower(substring(l.linkedin_url FROM 'linkedin\\.com/in/([^/?#]+)')) AS slug
+       FROM messages m
+       JOIN leads l ON l.id = m.lead_id
+       WHERE m.client_id = $1
+         AND m.channel = 'linkedin'
+         AND m.status = 'sent'
+         AND m.reply_detected_at IS NULL
+         AND m.sent_at IS NOT NULL
+         AND l.linkedin_url IS NOT NULL
+         AND lower(substring(l.linkedin_url FROM 'linkedin\\.com/in/([^/?#]+)')) = ANY($2)`,
+      [client_id, slugs]
+    );
+
+    // Index candidates by slug → most recent unrepliedsent message per slug
+    const bySlug = new Map();
+    for (const c of candidates) {
+      if (!c.slug) continue;
+      const existing = bySlug.get(c.slug);
+      if (!existing || new Date(c.sent_at) > new Date(existing.sent_at)) {
+        bySlug.set(c.slug, c);
+      }
+    }
+
+    const { stopSequence } = require('../services/followupSequence');
+    const { handleReply } = require('../services/replyHandler');
+    const logsService = require('../services/logs');
+
+    const details = [];
+    const newReplyMessageIds = [];
+    let matchedLeads = 0;
+    let skippedNoMatch = 0;
+    let skippedStale = 0;
+
+    // Dedup inbound by slug — keep the most recent inbound per slug
+    const latestInbound = new Map();
+    for (const r of inbound) {
+      const existing = latestInbound.get(r.slug);
+      if (!existing || r.last_msg_at > existing.last_msg_at) {
+        latestInbound.set(r.slug, r);
+      }
+    }
+
+    for (const r of latestInbound.values()) {
+      const candidate = bySlug.get(r.slug);
+      if (!candidate) {
+        skippedNoMatch++;
+        details.push({ profile_url: r.profile_url, slug: r.slug, result: 'no_match' });
+        continue;
+      }
+
+      // Guard: inbound DM must be after our sent message (else it's an old
+      // reply we already saw or a chronology mismatch).
+      if (new Date(r.last_msg_at) <= new Date(candidate.sent_at)) {
+        skippedStale++;
+        details.push({ profile_url: r.profile_url, slug: r.slug, message_id: candidate.message_id, result: 'stale_pre_send' });
+        continue;
+      }
+
+      try {
+        // 1. Mark message replied
+        await pool.query(
+          `UPDATE messages
+             SET reply_detected_at = NOW(),
+                 reply_snippet = $2,
+                 updated_at = NOW()
+           WHERE id = $1
+             AND reply_detected_at IS NULL`,
+          [candidate.message_id, r.last_msg_text]
+        );
+
+        // 2. Advance lead
+        await pool.query(
+          `UPDATE leads
+             SET last_reply_at = NOW(),
+                 pipeline_stage = 'qualifying',
+                 updated_at = NOW()
+           WHERE id = $1 AND client_id = $2`,
+          [candidate.lead_id, client_id]
+        );
+
+        // 3. Cancel pending follow-ups so we don't keep DM-ing someone mid-conversation
+        try {
+          await stopSequence(candidate.lead_id, 'replied_linkedin', client_id);
+        } catch (err) {
+          logger.warn({ msg: '[linkedin-sync-replies] stopSequence failed', lead_id: candidate.lead_id, err: err.message });
+        }
+
+        // 4. Audit log
+        await logsService.createLog(client_id, {
+          agent: 'system',
+          action: 'reply_detected',
+          target_type: 'message',
+          target_id: candidate.message_id,
+          metadata: {
+            channel: 'linkedin',
+            source: 'sync_endpoint',
+            profile_url: r.profile_url,
+            snippet: r.last_msg_text.slice(0, 200),
+            lead_id: candidate.lead_id,
+          },
+        });
+
+        // 5. Reply intelligence (fire-and-forget) — re-uses the same path as
+        // email replies so classify + auto-draft response works for LinkedIn too.
+        handleReply(client_id, {
+          messageId: candidate.message_id,
+          leadId: candidate.lead_id,
+          replySnippet: r.last_msg_text,
+        }).catch(err => logger.warn({ msg: '[linkedin-sync-replies] handleReply failed', err: err.message }));
+
+        matchedLeads++;
+        newReplyMessageIds.push(candidate.message_id);
+        details.push({
+          profile_url: r.profile_url,
+          slug: r.slug,
+          lead_id: candidate.lead_id,
+          message_id: candidate.message_id,
+          result: 'marked_replied',
+        });
+      } catch (err) {
+        logger.warn({ msg: '[linkedin-sync-replies] per-message error', message_id: candidate.message_id, err: err.message });
+        details.push({ profile_url: r.profile_url, slug: r.slug, message_id: candidate.message_id, result: 'error', error: err.message });
+      }
+    }
+
+    // Telegram notify (compact preview, fire-and-forget) — mirrors replyDetector behavior
+    if (newReplyMessageIds.length > 0) {
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (chatId) {
+        try {
+          const telegramService = require('../services/telegram');
+          const appUrl = process.env.FRONTEND_URL || 'https://app.beaver.solutions';
+          const { rows: previewRows } = await pool.query(
+            `SELECT l.name, l.company
+               FROM messages m JOIN leads l ON l.id = m.lead_id
+              WHERE m.id = ANY($1) AND m.client_id = $2`,
+            [newReplyMessageIds, client_id]
+          );
+          let preview = previewRows.slice(0, 3).map(r => `• ${r.name} (${r.company}) via linkedin`).join('\n');
+          if (previewRows.length > 3) preview += `\n+ ${previewRows.length - 3} more`;
+          const text = `<b>${matchedLeads} new LinkedIn repl${matchedLeads === 1 ? 'y' : 'ies'}</b>\n\n${preview}\n\n<a href="${appUrl}/approvals">Review replies →</a>`;
+          telegramService.sendMessage(chatId, text).catch(err =>
+            logger.warn({ msg: '[linkedin-sync-replies] Telegram notify error', err: err.message })
+          );
+        } catch (err) {
+          logger.warn({ msg: '[linkedin-sync-replies] Telegram setup error', err: err.message });
+        }
+      }
+    }
+
+    return res.json({
+      data: {
+        client_id,
+        received: replies.length,
+        matched_leads: matchedLeads,
+        new_replies: newReplyMessageIds.length,
+        skipped_outbound_only: skippedOutboundOnly,
+        skipped_no_match: skippedNoMatch,
+        skipped_stale: skippedStale,
+        details,
+      },
+    });
+  } catch (err) {
+    logger.error({ msg: 'linkedin-sync-replies failed', err: err.message });
+    res.status(500).json({ error: 'Failed to sync LinkedIn replies', code: 'DB_ERROR' });
+  }
+});
+
 /* ─── POST /api/autonomous/vibe-prospecting/test ──────────────
  * Sentinel probe for the Vibe Prospecting (Explorium) integration.
  * Runs the full chain on a known business+prospect (Microsoft / Satya Nadella):
