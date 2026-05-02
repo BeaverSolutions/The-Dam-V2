@@ -855,16 +855,25 @@ export default function Dashboard() {
         <PipelineEngine
           data={{
             sourced_today: stats.sourced_today,
+            sourced_this_week: stats.sourced_this_week,
             total_in_pipeline: totalLeads,
+            pool_health: stats.pool_health,
             sent_today: sentToday ?? 0,
             sent_target: 50,
+            sent_this_week: stats.sent_this_week,
+            sent_all_time: stats.messages_sent,
+            messages_sent: stats.messages_sent,
             in_flight: stats.in_flight,
+            replies_this_week: stats.replies_this_week,
+            reply_rate_30d: replyRate30d,
+            reply_rate_lifetime: stats.reply_rate_lifetime,
+            reply_rate_trend: trend,
+            reviewed_this_week: stats.reviewed_this_week,
+            passed_this_week: stats.passed_this_week,
             enforcer_pass_rate: stats.enforcer_pass_rate,
             pending_approvals: stats.pending_approvals,
             meetings_today: stats.meetings_today ?? 0,
             meetings_this_week: stats.meetings_this_week,
-            reply_rate_30d: replyRate30d,
-            reply_rate_trend: trend,
             meetings_booked: stats.meetings_booked,
             conversion_rate: totalLeads > 0
               ? +((parseInt(stats.meetings_booked || 0, 10) / totalLeads) * 100).toFixed(1)

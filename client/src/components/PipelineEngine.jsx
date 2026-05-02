@@ -177,38 +177,76 @@ function StatCard({ Icon, accent, value, decimals, unit, prefix, label, name, de
  *   conversion_rate, meetings_next_7d
  */
 export default function PipelineEngine({ data = {}, rail = null }) {
+  const fmt = (v) => {
+    if (v == null || v === '' || Number.isNaN(v)) return '—';
+    if (typeof v === 'number') return v.toLocaleString();
+    return v;
+  };
+  const reviewed = data.reviewed_this_week ?? 0;
+  const passed = data.passed_this_week ?? 0;
+  const rejectedWk = Math.max(0, reviewed - passed);
+  const rewritePct = reviewed > 0 ? Math.round((rejectedWk / reviewed) * 100) : null;
+
   const STAGES = [
     {
-      id: 'prospecting', name: 'Research', pos: 'tl',
+      id: 'prospecting', name: 'Research Beaver', pos: 'tl',
       color: '#00B4FF', img: '/assets/beavers/research-beaver.png',
       posDeg: 315, ringR: 204, dotCount: 5, dotSpeed: 8, dotSize: 4,
-      line1: 'Sourced Today',
-      line2: data.sourced_today ?? 0,
-      line3: `${data.total_in_pipeline ?? 0} in pipeline`,
+      role: 'sourcing intel',
+      week: [
+        { k: 'Found',    v: fmt(data.sourced_this_week) },
+        { k: 'In pool',  v: fmt(data.pool_health) },
+        { k: 'Pipeline', v: fmt(data.total_in_pipeline) },
+      ],
+      lifetime: [
+        { k: 'Total leads', v: fmt(data.total_in_pipeline) },
+        { k: 'Best source', v: '—' },
+      ],
     },
     {
-      id: 'outreach', name: 'Sales', pos: 'br',
+      id: 'outreach', name: 'Sales Beaver', pos: 'br',
       color: '#FF8C00', img: '/assets/beavers/sales-beaver.png',
       posDeg: 135, ringR: 174, dotCount: 4, dotSpeed: 6, dotSize: 4,
-      line1: 'Sent Today',
-      line2: data.sent_today ?? 0,
-      line3: `${data.in_flight ?? 0} in flight`,
+      role: 'drafting outreach',
+      week: [
+        { k: 'Sent',      v: fmt(data.sent_this_week) },
+        { k: 'In flight', v: fmt(data.in_flight) },
+        { k: 'Replies',   v: fmt(data.replies_this_week) },
+      ],
+      lifetime: [
+        { k: 'Total sent', v: fmt(data.sent_all_time ?? data.messages_sent) },
+        { k: 'Reply rate', v: data.reply_rate_lifetime != null ? `${data.reply_rate_lifetime}%` : '—' },
+      ],
     },
     {
-      id: 'qualifying', name: 'Enforcer', pos: 'tr',
+      id: 'qualifying', name: 'Enforcer Beaver', pos: 'tr',
       color: '#2563EB', img: '/assets/beavers/ranger-beaver.png',
       posDeg: 45, ringR: 145, dotCount: 3, dotSpeed: 5, dotSize: 3,
-      line1: 'Pass Rate',
-      line2: data.enforcer_pass_rate != null ? `${data.enforcer_pass_rate}%` : '—',
-      line3: `${data.pending_approvals ?? 0} pending review`,
+      role: 'guarding quality',
+      week: [
+        { k: 'Reviewed',  v: fmt(reviewed) },
+        { k: 'Rejected',  v: fmt(rejectedWk) },
+        { k: 'Rewrite %', v: rewritePct != null ? `${rewritePct}%` : '—' },
+      ],
+      lifetime: [
+        { k: 'Pass rate (7d)', v: data.enforcer_pass_rate != null ? `${data.enforcer_pass_rate}%` : '—' },
+        { k: 'Pending',         v: fmt(data.pending_approvals) },
+      ],
     },
     {
-      id: 'booked', name: 'Captain', pos: 'bl',
+      id: 'booked', name: 'Captain Beaver', pos: 'bl',
       color: '#A855F7', img: '/assets/beavers/director-beaver.png',
       posDeg: 225, ringR: 121, dotCount: 2, dotSpeed: 4, dotSize: 3,
-      line1: 'Booked Today',
-      line2: data.meetings_today ?? 0,
-      line3: `${data.meetings_this_week ?? 0} this week`,
+      role: 'orchestrating crew',
+      week: [
+        { k: 'Sent',    v: fmt(data.sent_this_week) },
+        { k: 'Replies', v: fmt(data.replies_this_week) },
+        { k: 'Meets',   v: fmt(data.meetings_this_week) },
+      ],
+      lifetime: [
+        { k: 'Meetings',  v: fmt(data.meetings_booked) },
+        { k: 'Best hook', v: '—' },
+      ],
     },
   ];
 
@@ -369,12 +407,9 @@ export default function PipelineEngine({ data = {}, rail = null }) {
 
           <CenterRotator states={CENTER_STATES} />
 
-          {/* Beavers — orbital portraits with outward stat labels */}
+          {/* Beavers — orbital portraits with outward expanded stat labels */}
           {STAGES.map((s, i) => {
             const p = polar(50, 50, (beaverR / W) * 100, s.posDeg);
-            const decimals = typeof s.line2 === 'string' && s.line2.includes('.') ? 1 : 0;
-            const suffix = typeof s.line2 === 'string' && s.line2.includes('%') ? '%' : '';
-            const numericLine2 = parseFloat(s.line2);
             return (
               <div className={`beaver pos-${s.pos}`} key={s.id}
                    style={{
@@ -384,14 +419,33 @@ export default function PipelineEngine({ data = {}, rail = null }) {
                      animationDelay: `${i * 120}ms`,
                    }}>
                 <img className="beaver-img" src={s.img} alt={s.name} />
-                <div className="beaver-label">
-                  <div className="bl-1" style={{ color: s.color }}>{s.line1}</div>
-                  <div className="bl-2">
-                    {Number.isFinite(numericLine2)
-                      ? <CountUp to={numericLine2} decimals={decimals} duration={1100 + i * 100} suffix={suffix} />
-                      : '—'}
+                <div className="beaver-label beaver-label--expanded">
+                  <div className="bl-name" style={{ color: s.color }}>{s.name}</div>
+                  <div className="bl-status">
+                    <span className="bl-status-dot"></span>
+                    <span>Standby</span>
+                    <span className="bl-role">· {s.role}</span>
                   </div>
-                  <div className="bl-3">{s.line3}</div>
+                  <div className="bl-section">
+                    <div className="bl-eyebrow">This Week</div>
+                    <div className="bl-row">
+                      {s.week.map((stat, j) => (
+                        <div key={j} className="bl-stat">
+                          <div className="bl-stat-v">{stat.v}</div>
+                          <div className="bl-stat-k">{stat.k}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="bl-section bl-section--lifetime">
+                    <div className="bl-eyebrow">Lifetime</div>
+                    {s.lifetime.map((stat, j) => (
+                      <div key={j} className="bl-life-row">
+                        <span className="bl-life-k">{stat.k}</span>
+                        <span className="bl-life-v">{stat.v}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             );
