@@ -40,7 +40,7 @@ function CountUp({ to, decimals = 0, duration = 1100, prefix = '', suffix = '' }
 const ORANGE = '#FF6A00';
 const W = 720, H = 720;
 const cx = W / 2, cy = H / 2;
-const beaverR = 340;  // pushed outward ~10mm from prior 304
+const beaverR = 420;  // pushed outward another ~2cm from 340
 
 function polar(cX, cY, r, deg) {
   const rad = (deg - 90) * Math.PI / 180;
