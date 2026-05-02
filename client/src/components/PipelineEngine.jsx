@@ -368,21 +368,7 @@ export default function PipelineEngine({ data = {} }) {
 
           <CenterRotator states={CENTER_STATES} />
 
-          {/* Beavers — pure portraits, no labels (per-beaver stats live in <CrewLive />) */}
-          {STAGES.map((s, i) => {
-            const p = polar(50, 50, (beaverR / W) * 100, s.posDeg);
-            return (
-              <div className={`beaver pos-${s.pos}`} key={s.id}
-                   style={{
-                     '--accent': s.color,
-                     left: `${p.x}%`,
-                     top: `${p.y}%`,
-                     animationDelay: `${i * 120}ms`,
-                   }}>
-                <img className="beaver-img" src={s.img} alt={s.name} title={s.name} />
-              </div>
-            );
-          })}
+          {/* Beavers live in BeaverStatsCard around the engine, not on the rings */}
         </div>
       </div>
 
