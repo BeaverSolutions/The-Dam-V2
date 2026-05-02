@@ -1,13 +1,14 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
-  Users, MessageSquare, CheckCircle, Calendar, Clock,
+  Users, Calendar, Clock,
   Zap, Coffee, Sun, Moon, Sunrise, X, FileText,
-  Mail, Search, Send, AtSign, ExternalLink, CornerDownRight, RefreshCw,
-  ArrowRight, MessageCircle, Target, TrendingUp, BookOpen, BarChart2,
+  Mail, Search, Send, AtSign, ExternalLink, RefreshCw,
+  ArrowRight, MessageCircle, Target, BookOpen, BarChart2,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import BeaverAvatar, { BEAVER_COLORS, BEAVER_LABELS } from '../components/BeaverAvatar';
 import BeaverStatusBoard from '../components/BeaverStatusBoard';
+import PipelineEngine from '../components/PipelineEngine';
 import { useApi } from '../hooks/useApi';
 import { getUser } from '../utils/auth';
 
@@ -816,12 +817,9 @@ export default function Dashboard() {
   const sentiments = stats.reply_sentiments || {};
   const sentimentTotal = Object.values(sentiments).reduce((a, b) => a + b, 0);
 
-  // Reply rate hero
-  const replyRateLifetime = stats.reply_rate_lifetime ?? null;
+  // Reply rate (consumed by Pipeline Engine)
   const replyRate30d = stats.reply_rate_30d ?? null;
   const trend = stats.reply_rate_trend;
-  const trendArrow = trend === 'up' ? '↑' : trend === 'down' ? '↓' : '';
-  const trendColor = trend === 'up' ? 'var(--lime)' : trend === 'down' ? 'var(--orange)' : 'var(--text-muted)';
 
   // Calendar gate banner
   const calendarConnected = stats.integrations?.google_calendar?.connected || stats.integrations?.calendly?.connected;
@@ -850,44 +848,32 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ── Hero: Reply Rate ── */}
-      <div className="card fade-in" style={{ marginBottom: '1.25rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.875rem' }}>
-          <TrendingUp size={14} style={{ color: 'var(--lime)' }} />
-          <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Reply Rate</span>
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-          <div style={{ background: 'var(--bg)', borderRadius: 8, padding: '1rem 1.25rem' }}>
-            {statsLoading
-              ? <div className="skeleton" style={{ height: 40, width: 80 }} />
-              : <div style={{ fontSize: '2.5rem', fontWeight: 800, color: replyRateLifetime >= 5 ? 'var(--lime)' : replyRateLifetime >= 2 ? 'var(--orange)' : 'var(--text)', lineHeight: 1 }}>{replyRateLifetime !== null ? `${replyRateLifetime}%` : '—'}</div>
-            }
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>Lifetime</div>
-          </div>
-          <div style={{ background: 'var(--bg)', borderRadius: 8, padding: '1rem 1.25rem' }}>
-            {statsLoading
-              ? <div className="skeleton" style={{ height: 40, width: 80 }} />
-              : <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.4rem' }}>
-                  <div style={{ fontSize: '2.5rem', fontWeight: 800, color: replyRate30d >= 5 ? 'var(--lime)' : replyRate30d >= 2 ? 'var(--orange)' : 'var(--text)', lineHeight: 1 }}>{replyRate30d !== null ? `${replyRate30d}%` : '—'}</div>
-                  {trendArrow && <span style={{ fontSize: '1.1rem', color: trendColor, fontWeight: 700 }}>{trendArrow}</span>}
-                </div>
-            }
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>Last 30 days</div>
-          </div>
-        </div>
+      {/* ── Hero: Pipeline Engine ── */}
+      <div style={{ marginBottom: '1.25rem' }}>
+        <PipelineEngine
+          data={{
+            sourced_today: stats.sourced_today,
+            total_in_pipeline: totalLeads,
+            sent_today: sentToday ?? 0,
+            sent_target: 50,
+            in_flight: stats.in_flight,
+            enforcer_pass_rate: stats.enforcer_pass_rate,
+            pending_approvals: stats.pending_approvals,
+            meetings_today: stats.meetings_today ?? 0,
+            meetings_this_week: stats.meetings_this_week,
+            reply_rate_30d: replyRate30d,
+            reply_rate_trend: trend,
+            meetings_booked: stats.meetings_booked,
+            conversion_rate: totalLeads > 0
+              ? +((parseInt(stats.meetings_booked || 0, 10) / totalLeads) * 100).toFixed(1)
+              : 0,
+            meetings_next_7d: stats.meetings_next_7d,
+          }}
+        />
       </div>
 
-      {/* ── Stat Row: outcome cards ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: (stats.awaiting_linkedin > 0) ? 'repeat(5, 1fr)' : 'repeat(4, 1fr)', gap: '0.75rem', marginBottom: '1.25rem' }}>
-        <StatCard
-          label="Pending Approvals"
-          value={stats.pending_approvals ?? 0}
-          icon={CheckCircle}
-          color="var(--orange)"
-          loading={statsLoading}
-          onClick={() => navigate('/approvals')}
-          sub={stats.pending_approvals > 0 ? 'Needs your review' : 'Queue clear'}
-        />
+      {/* ── Action Row: items unique to triage (not in engine) ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: (stats.awaiting_linkedin > 0) ? 'repeat(2, 1fr)' : 'repeat(1, 1fr)', gap: '0.75rem', marginBottom: '1.25rem' }}>
         {(stats.awaiting_linkedin > 0) && (
           <StatCard
             label="Awaiting LinkedIn"
@@ -900,23 +886,6 @@ export default function Dashboard() {
           />
         )}
         <StatCard
-          label="Sent Today"
-          value={sentToday ?? 0}
-          icon={MessageSquare}
-          color="var(--lime)"
-          loading={statsLoading}
-          onClick={() => navigate('/messages')}
-          sub="vs 80 target"
-        />
-        <StatCard
-          label="Meetings Booked"
-          value={stats.meetings_booked ?? 0}
-          icon={Calendar}
-          color="var(--purple)"
-          loading={statsLoading}
-          onClick={() => navigate('/calendar')}
-        />
-        <StatCard
           label="Pool Health"
           value={stats.pool_health ?? 0}
           icon={Users}
@@ -927,7 +896,7 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* ── KPI bar ── */}
+      {/* ── KPI bar (today's progress + Ask Director CTA) ── */}
       <KpiCard onDirectorCommand={(cmd) => setDirectorCommand(cmd)} />
 
       {/* ── Middle: Sentiment + Enforcer | Funnel + Schedule ── */}

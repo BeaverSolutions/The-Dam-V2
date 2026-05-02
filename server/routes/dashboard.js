@@ -79,6 +79,27 @@ router.get('/stats', async (req, res, next) => {
           linkedin_awaiting AS (
             SELECT COUNT(*) AS total FROM messages
             WHERE client_id = $1 AND status = 'linkedin_requested'
+          ),
+          sourced_today AS (
+            SELECT COUNT(*) AS total FROM leads
+            WHERE client_id = $1 AND deleted_at IS NULL
+              AND created_at::date = CURRENT_DATE
+          ),
+          in_flight AS (
+            SELECT COUNT(DISTINCT lead_id) AS total FROM messages
+            WHERE client_id = $1 AND status = 'sent' AND reply_detected_at IS NULL
+          ),
+          meetings_this_week AS (
+            SELECT COUNT(*) AS total FROM calendar_events
+            WHERE client_id = $1
+              AND start_time >= date_trunc('week', CURRENT_DATE)
+              AND start_time < date_trunc('week', CURRENT_DATE) + INTERVAL '7 days'
+          ),
+          meetings_next_7d AS (
+            SELECT COUNT(*) AS total FROM calendar_events
+            WHERE client_id = $1
+              AND start_time >= NOW()
+              AND start_time < NOW() + INTERVAL '7 days'
           )
         SELECT
           (SELECT total FROM msgs_sent_all)       AS sent_all_time,
@@ -95,7 +116,11 @@ router.get('/stats', async (req, res, next) => {
           (SELECT objection FROM sentiment_counts) AS sentiment_objection,
           (SELECT no_fit    FROM sentiment_counts) AS sentiment_no_fit,
           (SELECT json_object_agg(pipeline_stage, cnt) FROM leads_by_stage) AS leads_by_stage,
-          (SELECT total FROM linkedin_awaiting)     AS awaiting_linkedin
+          (SELECT total FROM linkedin_awaiting)     AS awaiting_linkedin,
+          (SELECT total FROM sourced_today)         AS sourced_today,
+          (SELECT total FROM in_flight)             AS in_flight,
+          (SELECT total FROM meetings_this_week)    AS meetings_this_week,
+          (SELECT total FROM meetings_next_7d)      AS meetings_next_7d
       `, [clientId]),
 
       pool.query(
@@ -159,6 +184,12 @@ router.get('/stats', async (req, res, next) => {
         leads_by_stage: byStage,
         meetings_today: calRes.rows.length,
         today_events: calRes.rows,
+
+        // Engine feeds
+        sourced_today: parseInt(stats.sourced_today, 10) || 0,
+        in_flight: parseInt(stats.in_flight, 10) || 0,
+        meetings_this_week: parseInt(stats.meetings_this_week, 10) || 0,
+        meetings_next_7d: parseInt(stats.meetings_next_7d, 10) || 0,
 
         // Legacy fields kept for backward compat
         messages_sent: sentAll,

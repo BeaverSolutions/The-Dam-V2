@@ -435,7 +435,7 @@ export default function Chat() {
   };
 
   return (
-    <div className="fade-in" style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 56px - 3rem)' }}>
+    <div className="fade-in chat-shell" style={{ display: 'flex', flexDirection: 'column' }}>
       <div className="page-header" style={{ marginBottom: '1rem' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
           <BeaverAvatar agent="director" size="md" animate />
@@ -478,23 +478,25 @@ export default function Chat() {
       </div>
 
       {/* Input */}
-      <div style={{ display: 'flex', gap: '0.75rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
+      <div className="chat-input-row" style={{ display: 'flex', gap: '0.75rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
         <textarea
           className="form-input"
           rows={2}
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={handleKey}
+          enterKeyHint="send"
           placeholder="Tell the Director what to do... (Enter to send, Shift+Enter for newline)"
           style={{ resize: 'none', flex: 1 }}
         />
         <button
-          className="btn btn-primary"
+          className="btn btn-primary chat-send-btn"
           onClick={send}
           disabled={!input.trim() || loading}
-          style={{ alignSelf: 'flex-end', padding: '0.625rem' }}
+          aria-label="Send command"
         >
           <Send size={16} />
+          <span className="chat-send-label">Send</span>
         </button>
       </div>
     </div>

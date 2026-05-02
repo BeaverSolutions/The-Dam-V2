@@ -1,0 +1,380 @@
+/* ──────────────────────────────────────────────────────────
+   Pipeline Engine — JARVIS HUD
+   ──────────────────────────────────────────────────────── */
+
+.engine-panel {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg, 16px);
+  padding: 14px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: visible;
+}
+
+/* Header */
+.engine-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  z-index: 5;
+  margin-bottom: 4px;
+}
+.engine-pfx {
+  font-family: var(--mono);
+  color: var(--orange);
+  font-size: 12px;
+  font-weight: 700;
+  opacity: 0.85;
+}
+.engine-ttl {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.engine-live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(200,255,0,0.08);
+  border: 1px solid rgba(200,255,0,0.2);
+  color: var(--lime);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.engine-live-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--lime);
+  box-shadow: 0 0 6px var(--lime);
+}
+.engine-meta {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* Stage — fixed logical 700×700 canvas, scaled on mobile */
+.engine-stage {
+  position: relative;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Reserve vertical room equal to the scaled inner so beavers don't clip */
+  height: clamp(360px, 60vw, 540px);
+  margin: 0 auto;
+}
+.engine-stage-inner {
+  position: relative;
+  width: 700px;
+  height: 700px;
+  flex: 0 0 auto;
+  /* Scale the whole 700px canvas to fit the stage container */
+  transform: scale(var(--engine-scale, 0.72));
+  transform-origin: center center;
+}
+
+/* Halo behind the rings */
+.engine-halo {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 720px; height: 720px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(circle, rgba(255,107,0,0.05) 0%, transparent 60%);
+}
+
+/* SVG sits on top of the inner box */
+.engine-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  overflow: visible;
+}
+
+/* Center rotating KPI */
+.engine-center {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none;
+  z-index: 4;
+  width: 160px;
+}
+.rotor {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.rotor-in  { animation: rotor-fade-in 400ms ease-out both; }
+.rotor-out { animation: rotor-fade-out 200ms ease-in both; }
+@keyframes rotor-fade-in {
+  0%   { opacity: 0; transform: translateY(4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes rotor-fade-out {
+  0%   { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-4px); }
+}
+.rotor-lbl {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  color: var(--dim);
+  text-transform: uppercase;
+}
+.rotor-val {
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  color: #FFFFFF;
+  line-height: 1;
+  font-feature-settings: 'tnum' 1;
+}
+.rotor-sub {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-feature-settings: 'tnum' 1;
+}
+.rotor-dots {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+.rotor-dots .rd {
+  width: 4px; height: 4px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.2);
+  transition: background 200ms ease;
+}
+.rotor-dots .rd.on { background: rgba(255,255,255,1); }
+
+/* Beavers — outward labels */
+.beaver {
+  position: absolute;
+  z-index: 3;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
+  display: grid;
+  place-items: center;
+  animation: beaver-in 600ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes beaver-in {
+  0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.85); }
+  100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+.beaver-img {
+  width: 84px; height: 84px;
+  object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 4px 14px rgba(0,0,0,0.55))
+          drop-shadow(0 0 12px var(--accent, #FF6B00));
+  position: relative;
+  z-index: 2;
+}
+.beaver-label {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: 140px;
+  gap: 0;
+}
+.beaver.pos-tl .beaver-label,
+.beaver.pos-bl .beaver-label {
+  right: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  align-items: flex-end;
+  text-align: right;
+  bottom: auto; left: auto;
+}
+.beaver.pos-tr .beaver-label,
+.beaver.pos-br .beaver-label {
+  left: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  align-items: flex-start;
+  text-align: left;
+  bottom: auto; right: auto;
+}
+.bl-1 {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+.bl-2 {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #FFFFFF;
+  line-height: 1;
+  font-feature-settings: 'tnum' 1;
+  margin-top: 3px;
+  font-family: var(--mono);
+}
+.bl-3 {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--dim);
+  line-height: 1.1;
+  margin-top: 3px;
+}
+
+/* Decorative ring rotations */
+.r1-spin { animation: spin-cw 60s linear infinite; }
+.r2-spin { animation: spin-ccw 45s linear infinite; }
+.r4-spin { animation: spin-cw 30s linear infinite; }
+.r6-spin { animation: spin-ccw 20s linear infinite; }
+@keyframes spin-cw  { to { transform: rotate(360deg); } }
+@keyframes spin-ccw { to { transform: rotate(-360deg); } }
+
+/* Center sonar ping */
+.sonar-ping {
+  animation: sonar 3s ease-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+@keyframes sonar {
+  0%   { r: 104; opacity: 0;    stroke-width: 2; }
+  10%  {         opacity: 0.55; }
+  100% { r: 220; opacity: 0;    stroke-width: 0.5; }
+}
+
+/* Arc shimmer */
+.arc-shimmer {
+  stroke-dasharray: 60 1000;
+  stroke-dashoffset: 60;
+  animation: shimmer-slide 10s ease-in-out infinite;
+  opacity: 0;
+}
+@keyframes shimmer-slide {
+  0%   { stroke-dashoffset: 60;   opacity: 0; }
+  85%  { stroke-dashoffset: 60;   opacity: 0; }
+  88%  { opacity: 0.7; }
+  98%  { stroke-dashoffset: -340; opacity: 0.7; }
+  100% { stroke-dashoffset: -340; opacity: 0; }
+}
+
+/* Footer stat strip */
+.engine-stats-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-top: 12px;
+}
+.stat-card {
+  background: var(--raised, var(--bg));
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+  overflow: hidden;
+  animation: tile-in 700ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 0 0 2px 2px;
+  opacity: 0;
+  animation: card-border-pulse 1400ms ease-out 200ms 1 both;
+}
+@keyframes card-border-pulse {
+  0%   { opacity: 0;   transform: scaleX(0); }
+  20%  { opacity: 1;   transform: scaleX(1); }
+  100% { opacity: 0.2; transform: scaleX(1); }
+}
+@keyframes tile-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.stat-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.stat-card-v {
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  font-feature-settings: 'tnum' 1;
+  font-family: var(--mono);
+}
+.stat-card-u {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-left: 3px;
+  font-family: var(--mono);
+}
+.stat-card-lbl {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Responsive scaling
+   The engine-stage-inner stays 700×700 logically; we scale via CSS var
+   so every polar-positioned element (rings, beavers, center) tracks together.
+   ──────────────────────────────────────────────────────── */
+
+@media (max-width: 1280px) {
+  .engine-stage-inner { transform: scale(0.62); }
+  .engine-stage { height: clamp(340px, 56vw, 460px); }
+}
+@media (max-width: 900px) {
+  .engine-stage-inner { transform: scale(0.52); }
+  .engine-stage { height: clamp(300px, 60vw, 400px); }
+  .engine-stats-strip { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 560px) {
+  .engine-stage-inner { transform: scale(0.42); }
+  .engine-stage { height: 320px; }
+  .beaver-img { width: 80px; height: 80px; }
+  .bl-2 { font-size: 26px; }
+  .engine-meta { display: none; }
+}
+@media (max-width: 380px) {
+  .engine-stage-inner { transform: scale(0.36); }
+  .engine-stage { height: 290px; }
+}
