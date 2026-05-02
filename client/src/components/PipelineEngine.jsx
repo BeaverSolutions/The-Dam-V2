@@ -368,7 +368,33 @@ export default function PipelineEngine({ data = {} }) {
 
           <CenterRotator states={CENTER_STATES} />
 
-          {/* Beavers live in BeaverStatsCard around the engine, not on the rings */}
+          {/* Beavers — orbital portraits with outward stat labels */}
+          {STAGES.map((s, i) => {
+            const p = polar(50, 50, (beaverR / W) * 100, s.posDeg);
+            const decimals = typeof s.line2 === 'string' && s.line2.includes('.') ? 1 : 0;
+            const suffix = typeof s.line2 === 'string' && s.line2.includes('%') ? '%' : '';
+            const numericLine2 = parseFloat(s.line2);
+            return (
+              <div className={`beaver pos-${s.pos}`} key={s.id}
+                   style={{
+                     '--accent': s.color,
+                     left: `${p.x}%`,
+                     top: `${p.y}%`,
+                     animationDelay: `${i * 120}ms`,
+                   }}>
+                <img className="beaver-img" src={s.img} alt={s.name} />
+                <div className="beaver-label">
+                  <div className="bl-1" style={{ color: s.color }}>{s.line1}</div>
+                  <div className="bl-2">
+                    {Number.isFinite(numericLine2)
+                      ? <CountUp to={numericLine2} decimals={decimals} duration={1100 + i * 100} suffix={suffix} />
+                      : '—'}
+                  </div>
+                  <div className="bl-3">{s.line3}</div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 

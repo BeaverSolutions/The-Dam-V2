@@ -850,79 +850,43 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ── Hero: Crew + Engine + Rail unified composition ── */}
-      {(() => {
-        const beaverData = {
-          sourced_today: stats.sourced_today,
-          sourced_this_week: stats.sourced_this_week,
-          total_in_pipeline: totalLeads,
-          pool_health: stats.pool_health,
-          sent_today: sentToday ?? 0,
-          sent_this_week: stats.sent_this_week,
-          sent_all_time: stats.messages_sent,
-          in_flight: stats.in_flight,
-          replies_this_week: stats.replies_this_week,
-          replies_all_time: stats.leads_replied,
-          reply_rate_30d: replyRate30d,
-          reply_rate_lifetime: stats.reply_rate_lifetime,
-          reviewed_this_week: stats.reviewed_this_week,
-          passed_this_week: stats.passed_this_week,
-          enforcer_pass_rate: stats.enforcer_pass_rate,
-          pending_approvals: stats.pending_approvals,
-          meetings_today: stats.meetings_today ?? 0,
-          meetings_this_week: stats.meetings_this_week,
-          meetings_booked: stats.meetings_booked,
-          messages_sent: stats.messages_sent,
-        };
-        return (
-          <div className="dashboard-hero" style={{ marginBottom: '1.25rem' }}>
-            <div className="dashboard-hero-crew dashboard-hero-crew-left">
-              <BeaverStatsCard variant="research" data={beaverData} />
-              <BeaverStatsCard variant="captain" data={beaverData} />
-            </div>
+      {/* ── Hero: Engine (with orbital beavers + labels) + Rail on right ── */}
+      <div className="dashboard-hero" style={{ marginBottom: '1.25rem' }}>
+        <div className="dashboard-hero-engine">
+          <PipelineEngine data={{
+            sourced_today: stats.sourced_today,
+            total_in_pipeline: totalLeads,
+            sent_today: sentToday ?? 0,
+            sent_target: 50,
+            in_flight: stats.in_flight,
+            enforcer_pass_rate: stats.enforcer_pass_rate,
+            pending_approvals: stats.pending_approvals,
+            meetings_today: stats.meetings_today ?? 0,
+            meetings_this_week: stats.meetings_this_week,
+            reply_rate_30d: replyRate30d,
+            reply_rate_trend: trend,
+            meetings_booked: stats.meetings_booked,
+            conversion_rate: totalLeads > 0
+              ? +((parseInt(stats.meetings_booked || 0, 10) / totalLeads) * 100).toFixed(1)
+              : 0,
+            meetings_next_7d: stats.meetings_next_7d,
+          }} />
+        </div>
 
-            <div className="dashboard-hero-engine">
-              <PipelineEngine data={{
-                sourced_today: stats.sourced_today,
-                total_in_pipeline: totalLeads,
-                sent_today: sentToday ?? 0,
-                sent_target: 50,
-                in_flight: stats.in_flight,
-                enforcer_pass_rate: stats.enforcer_pass_rate,
-                pending_approvals: stats.pending_approvals,
-                meetings_today: stats.meetings_today ?? 0,
-                meetings_this_week: stats.meetings_this_week,
-                reply_rate_30d: replyRate30d,
-                reply_rate_trend: trend,
-                meetings_booked: stats.meetings_booked,
-                conversion_rate: totalLeads > 0
-                  ? +((parseInt(stats.meetings_booked || 0, 10) / totalLeads) * 100).toFixed(1)
-                  : 0,
-                meetings_next_7d: stats.meetings_next_7d,
-              }} />
-            </div>
-
-            <div className="dashboard-hero-crew dashboard-hero-crew-right">
-              <BeaverStatsCard variant="enforcer" data={beaverData} alignRight />
-              <BeaverStatsCard variant="sales" data={beaverData} alignRight />
-            </div>
-
-            <div className="dashboard-hero-rail">
-              <StageBreakdownRail data={{
-                leads_by_stage: byStage,
-                total_in_pipeline: totalLeads,
-                reply_sentiments: sentiments,
-                reply_rate_30d: replyRate30d,
-                reply_rate_trend: trend,
-                sourced_today: stats.sourced_today,
-                in_flight: stats.in_flight,
-                replies_this_week: stats.replies_this_week,
-                meetings_this_week: stats.meetings_this_week,
-              }} />
-            </div>
-          </div>
-        );
-      })()}
+        <div className="dashboard-hero-rail">
+          <StageBreakdownRail data={{
+            leads_by_stage: byStage,
+            total_in_pipeline: totalLeads,
+            reply_sentiments: sentiments,
+            reply_rate_30d: replyRate30d,
+            reply_rate_trend: trend,
+            sourced_today: stats.sourced_today,
+            in_flight: stats.in_flight,
+            replies_this_week: stats.replies_this_week,
+            meetings_this_week: stats.meetings_this_week,
+          }} />
+        </div>
+      </div>
 
       {/* ── Action row + supporting cards below the hero ── */}
       <div style={{ display: 'grid', gridTemplateColumns: (stats.awaiting_linkedin > 0) ? 'repeat(2, 1fr)' : 'repeat(1, 1fr)', gap: '0.75rem', marginBottom: '1.25rem' }}>

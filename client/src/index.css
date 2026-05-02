@@ -394,20 +394,12 @@ button { cursor: pointer; font-family: inherit; }
   .director-bubble-panel { width: calc(100vw - 2rem) !important; right: 1rem !important; }
 }
 
-/* === Dashboard hero composition: 4 beaver cards flank the engine, rail on far right === */
+/* === Dashboard hero composition: engine (with orbital beavers) + rail === */
 .dashboard-hero {
   display: grid;
-  /* left-cards | engine | right-cards | rail */
-  grid-template-columns: 220px minmax(0, 1fr) 220px 320px;
+  grid-template-columns: minmax(0, 1fr) 340px;
   gap: 14px;
   align-items: start;
-}
-.dashboard-hero-crew {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  align-self: stretch;
-  justify-content: space-between;
 }
 .dashboard-hero-engine {
   display: flex;
@@ -415,63 +407,12 @@ button { cursor: pointer; font-family: inherit; }
   min-width: 0;
 }
 .dashboard-hero-engine > * { flex: 1; }
-.dashboard-hero-engine .engine-stage {
-  height: clamp(320px, 38vw, 480px);
-}
-.dashboard-hero-engine .engine-stage-inner {
-  transform: scale(0.58);
-}
-.dashboard-hero-engine .engine-stats-strip {
-  grid-template-columns: repeat(2, 1fr);
-}
 .dashboard-hero-rail { min-width: 0; }
 
-/* On <1280px: drop the rail below the hero (cards still flank engine) */
-@media (max-width: 1280px) {
-  .dashboard-hero {
-    grid-template-columns: 200px minmax(0, 1fr) 200px;
-  }
-  .dashboard-hero-rail {
-    grid-column: 1 / -1;
-    margin-top: 4px;
-  }
-}
-
-/* On <960px: stack — engine on top, then 2x2 card grid, then rail */
-@media (max-width: 960px) {
-  .dashboard-hero {
-    grid-template-columns: 1fr 1fr;
-  }
-  .dashboard-hero-engine {
-    grid-column: 1 / -1;
-    grid-row: 1;
-  }
-  .dashboard-hero-crew-left {
-    grid-column: 1;
-    grid-row: 2;
-  }
-  .dashboard-hero-crew-right {
-    grid-column: 2;
-    grid-row: 2;
-  }
-  .dashboard-hero-rail {
-    grid-column: 1 / -1;
-  }
-}
-
-/* On <600px: full single-column stack */
-@media (max-width: 600px) {
+/* On <1100px: rail drops below engine */
+@media (max-width: 1100px) {
   .dashboard-hero {
     grid-template-columns: 1fr;
-  }
-  .dashboard-hero-engine,
-  .dashboard-hero-crew-left,
-  .dashboard-hero-crew-right,
-  .dashboard-hero-rail {
-    grid-column: 1;
-  }
-  .dashboard-hero-crew-right {
-    grid-row: auto;
   }
 }
 
