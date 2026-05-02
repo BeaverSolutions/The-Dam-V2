@@ -35,6 +35,47 @@ function CountUp({ to, decimals = 0, duration = 1100, prefix = '', suffix = '' }
   return <>{prefix}{v}{suffix}</>;
 }
 
+/* ─── BeaverBody — portrait + status + This Week + Lifetime, no card chrome ─── */
+
+function BeaverBody({ stage: s, side }) {
+  return (
+    <div className={`beaver-body beaver-body--${side}`} style={{ '--accent': s.color }}>
+      <div className="bb-head">
+        <img src={s.img} alt={s.name} className="bb-img" />
+        <div className="bb-meta">
+          <div className="bb-name" style={{ color: s.color }}>{s.name}</div>
+          <div className="bb-status">
+            <span className="bb-dot"></span>Standby
+          </div>
+          <div className="bb-role">{s.role}</div>
+        </div>
+      </div>
+
+      <div className="bb-section">
+        <div className="bb-eyebrow">This Week</div>
+        <div className="bb-row">
+          {s.week.map((stat, i) => (
+            <div key={i} className="bb-stat">
+              <div className="bb-stat-v">{stat.v}</div>
+              <div className="bb-stat-k">{stat.k}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="bb-section bb-section--lifetime">
+        <div className="bb-eyebrow">Lifetime</div>
+        {s.lifetime.map((stat, i) => (
+          <div key={i} className="bb-life-row">
+            <span className="bb-life-k">{stat.k}</span>
+            <span className="bb-life-v">{stat.v}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ─── Geometry ────────────────────────────────────────────── */
 
 const ORANGE = '#FF6A00';
@@ -289,6 +330,13 @@ export default function PipelineEngine({ data = {}, rail = null }) {
       </div>
 
       <div className="engine-body">
+      {/* Left beavers — Research (top) + Captain (bottom), away from the ring */}
+      <div className="engine-crew engine-crew--left">
+        {STAGES.filter(s => s.pos === 'tl' || s.pos === 'bl').map(s => (
+          <BeaverBody key={s.id} stage={s} side="left" />
+        ))}
+      </div>
+
       <div className="engine-stage">
         <div className="engine-stage-inner">
           <div className="engine-halo"></div>
@@ -407,50 +455,16 @@ export default function PipelineEngine({ data = {}, rail = null }) {
 
           <CenterRotator states={CENTER_STATES} />
 
-          {/* Beavers — orbital portraits with outward expanded stat labels */}
-          {STAGES.map((s, i) => {
-            const p = polar(50, 50, (beaverR / W) * 100, s.posDeg);
-            return (
-              <div className={`beaver pos-${s.pos}`} key={s.id}
-                   style={{
-                     '--accent': s.color,
-                     left: `${p.x}%`,
-                     top: `${p.y}%`,
-                     animationDelay: `${i * 120}ms`,
-                   }}>
-                <img className="beaver-img" src={s.img} alt={s.name} />
-                <div className="beaver-label beaver-label--expanded">
-                  <div className="bl-name" style={{ color: s.color }}>{s.name}</div>
-                  <div className="bl-status">
-                    <span className="bl-status-dot"></span>
-                    <span>Standby</span>
-                    <span className="bl-role">· {s.role}</span>
-                  </div>
-                  <div className="bl-section">
-                    <div className="bl-eyebrow">This Week</div>
-                    <div className="bl-row">
-                      {s.week.map((stat, j) => (
-                        <div key={j} className="bl-stat">
-                          <div className="bl-stat-v">{stat.v}</div>
-                          <div className="bl-stat-k">{stat.k}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="bl-section bl-section--lifetime">
-                    <div className="bl-eyebrow">Lifetime</div>
-                    {s.lifetime.map((stat, j) => (
-                      <div key={j} className="bl-life-row">
-                        <span className="bl-life-k">{stat.k}</span>
-                        <span className="bl-life-v">{stat.v}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+          {/* Engine canvas is pure HUD — beaver portraits + stats live in the
+              left/right crew columns alongside the ring. */}
         </div>
+      </div>
+
+      {/* Right beavers — Enforcer (top) + Sales (bottom), away from the ring */}
+      <div className="engine-crew engine-crew--right">
+        {STAGES.filter(s => s.pos === 'tr' || s.pos === 'br').map(s => (
+          <BeaverBody key={s.id} stage={s} side="right" />
+        ))}
       </div>
 
         {rail && <div className="engine-rail">{rail}</div>}

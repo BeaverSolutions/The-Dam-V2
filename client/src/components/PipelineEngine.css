@@ -68,17 +68,38 @@
   color: var(--text-muted);
 }
 
-/* Body — when a rail is provided, body becomes 2-col (stage | rail).
-   Without a rail, body is just the stage. */
+/* Body — 4-col grid: left crew | engine stage | right crew | rail.
+   When no rail, the trailing column is suppressed. */
 .engine-body {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns:
+    220px            /* left crew col */
+    minmax(0, 1fr)   /* engine stage */
+    220px;           /* right crew col */
+  gap: 14px;
+  align-items: stretch;
 }
 .engine-panel--with-rail .engine-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: 18px;
-  align-items: stretch;
+  grid-template-columns:
+    190px
+    minmax(0, 1fr)
+    190px
+    300px;
+}
+/* Engine itself shrinks when sharing the row with rail + 2 crew columns */
+.engine-panel--with-rail .engine-stage-inner {
+  transform: scale(0.6);
+}
+.engine-panel--with-rail .engine-stage {
+  height: clamp(380px, 42vw, 460px);
+}
+.engine-crew {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  justify-content: space-between;
+  align-self: stretch;
+  min-width: 0;
 }
 .engine-rail {
   display: flex;
@@ -88,17 +109,183 @@
   border-left: 1px solid var(--hairline);
 }
 
-/* On <1100px: rail drops below the stage inside the same panel */
-@media (max-width: 1100px) {
+/* BeaverBody — portrait + name + status + week + lifetime, no card chrome */
+.beaver-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 6px 0;
+  position: relative;
+}
+.beaver-body--left { text-align: right; }
+.beaver-body--right { text-align: left; }
+
+.bb-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.beaver-body--left .bb-head { flex-direction: row-reverse; }
+.bb-img {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  filter: drop-shadow(0 0 12px var(--accent));
+  flex-shrink: 0;
+}
+.bb-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.beaver-body--left .bb-meta { align-items: flex-end; }
+.bb-name {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  white-space: nowrap;
+}
+.bb-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.beaver-body--left .bb-status { flex-direction: row-reverse; }
+.bb-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--lime);
+  box-shadow: 0 0 4px var(--lime);
+}
+.bb-role {
+  font-size: 10px;
+  color: var(--dim);
+  font-style: italic;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.bb-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.bb-section--lifetime {
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+.bb-eyebrow {
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.bb-row {
+  display: flex;
+  gap: 8px;
+}
+.beaver-body--left .bb-row { flex-direction: row-reverse; }
+.bb-stat { flex: 1; min-width: 0; }
+.bb-stat-v {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--accent);
+  letter-spacing: -0.02em;
+  line-height: 1;
+  font-feature-settings: 'tnum' 1;
+}
+.bb-stat-k {
+  font-size: 8px;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-top: 4px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.bb-life-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+}
+.beaver-body--left .bb-life-row { flex-direction: row-reverse; }
+.bb-life-k {
+  color: var(--text-muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.bb-life-v {
+  color: var(--text);
+  font-weight: 700;
+  font-family: var(--mono);
+  font-feature-settings: 'tnum' 1;
+}
+
+/* On <1280px: drop right rail below; cards still flank engine */
+@media (max-width: 1280px) {
   .engine-panel--with-rail .engine-body {
-    grid-template-columns: 1fr;
-    gap: 14px;
+    grid-template-columns: 200px minmax(0, 1fr) 200px;
   }
   .engine-rail {
+    grid-column: 1 / -1;
     padding-left: 0;
     padding-top: 14px;
     border-left: none;
     border-top: 1px solid var(--hairline);
+    margin-top: 4px;
+  }
+}
+
+/* On <1024px: drop both crew cols below the engine, then rail below */
+@media (max-width: 1024px) {
+  .engine-body,
+  .engine-panel--with-rail .engine-body {
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .engine-stage {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+  .engine-crew--left {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .engine-crew--right {
+    grid-column: 2;
+    grid-row: 2;
+  }
+  .engine-rail {
+    grid-column: 1 / -1;
+  }
+  .beaver-body { text-align: left; }
+  .beaver-body--left .bb-head,
+  .beaver-body--left .bb-row,
+  .beaver-body--left .bb-status,
+  .beaver-body--left .bb-life-row { flex-direction: row; }
+  .beaver-body--left .bb-meta { align-items: flex-start; }
+}
+
+/* On <600px: full single column */
+@media (max-width: 600px) {
+  .engine-body,
+  .engine-panel--with-rail .engine-body {
+    grid-template-columns: 1fr;
+  }
+  .engine-crew--left,
+  .engine-crew--right {
+    grid-column: 1;
   }
 }
 
