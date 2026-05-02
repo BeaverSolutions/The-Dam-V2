@@ -394,6 +394,24 @@ button { cursor: pointer; font-family: inherit; }
   .director-bubble-panel { width: calc(100vw - 2rem) !important; right: 1rem !important; }
 }
 
+/* === Dashboard v2 grid: Crew Live (left) + Stage Breakdown rail (right) === */
+.dashboard-v2-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+.dashboard-v2-col-left,
+.dashboard-v2-col-right {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+@media (max-width: 1024px) {
+  .dashboard-v2-grid { grid-template-columns: 1fr; }
+}
+
 /* === Director Chat — flex shell that always fits the viewport === */
 /* Uses dvh on supported browsers (fixes Android Chrome URL-bar 100vh bug);
    falls back to vh elsewhere. */

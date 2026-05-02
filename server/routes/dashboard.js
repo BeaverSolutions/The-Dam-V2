@@ -100,6 +100,35 @@ router.get('/stats', async (req, res, next) => {
             WHERE client_id = $1
               AND start_time >= NOW()
               AND start_time < NOW() + INTERVAL '7 days'
+          ),
+          sourced_this_week AS (
+            SELECT COUNT(*) AS total FROM leads
+            WHERE client_id = $1 AND deleted_at IS NULL
+              AND created_at >= date_trunc('week', CURRENT_DATE)
+          ),
+          sent_this_week AS (
+            SELECT COUNT(*) AS total FROM messages
+            WHERE client_id = $1 AND status = 'sent'
+              AND sent_at >= date_trunc('week', CURRENT_DATE)
+          ),
+          replies_this_week AS (
+            SELECT COUNT(DISTINCT lead_id) AS total
+            FROM messages WHERE client_id = $1 AND reply_detected_at IS NOT NULL
+              AND reply_detected_at >= date_trunc('week', CURRENT_DATE)
+          ),
+          reviewed_this_week AS (
+            SELECT COUNT(*) AS total FROM logs
+            WHERE client_id = $1
+              AND agent = 'ranger'
+              AND action IN ('message_approved', 'message_rejected')
+              AND created_at >= date_trunc('week', CURRENT_DATE)
+          ),
+          passed_this_week AS (
+            SELECT COUNT(*) AS total FROM logs
+            WHERE client_id = $1
+              AND agent = 'ranger'
+              AND action = 'message_approved'
+              AND created_at >= date_trunc('week', CURRENT_DATE)
           )
         SELECT
           (SELECT total FROM msgs_sent_all)       AS sent_all_time,
@@ -120,7 +149,12 @@ router.get('/stats', async (req, res, next) => {
           (SELECT total FROM sourced_today)         AS sourced_today,
           (SELECT total FROM in_flight)             AS in_flight,
           (SELECT total FROM meetings_this_week)    AS meetings_this_week,
-          (SELECT total FROM meetings_next_7d)      AS meetings_next_7d
+          (SELECT total FROM meetings_next_7d)      AS meetings_next_7d,
+          (SELECT total FROM sourced_this_week)     AS sourced_this_week,
+          (SELECT total FROM sent_this_week)        AS sent_this_week,
+          (SELECT total FROM replies_this_week)     AS replies_this_week,
+          (SELECT total FROM reviewed_this_week)    AS reviewed_this_week,
+          (SELECT total FROM passed_this_week)      AS passed_this_week
       `, [clientId]),
 
       pool.query(
@@ -190,6 +224,13 @@ router.get('/stats', async (req, res, next) => {
         in_flight: parseInt(stats.in_flight, 10) || 0,
         meetings_this_week: parseInt(stats.meetings_this_week, 10) || 0,
         meetings_next_7d: parseInt(stats.meetings_next_7d, 10) || 0,
+
+        // Per-beaver weekly feeds (for Crew Live rotator)
+        sourced_this_week: parseInt(stats.sourced_this_week, 10) || 0,
+        sent_this_week: parseInt(stats.sent_this_week, 10) || 0,
+        replies_this_week: parseInt(stats.replies_this_week, 10) || 0,
+        reviewed_this_week: parseInt(stats.reviewed_this_week, 10) || 0,
+        passed_this_week: parseInt(stats.passed_this_week, 10) || 0,
 
         // Legacy fields kept for backward compat
         messages_sent: sentAll,

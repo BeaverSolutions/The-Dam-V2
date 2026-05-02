@@ -9,6 +9,8 @@ import { useNavigate } from 'react-router-dom';
 import BeaverAvatar, { BEAVER_COLORS, BEAVER_LABELS } from '../components/BeaverAvatar';
 import BeaverStatusBoard from '../components/BeaverStatusBoard';
 import PipelineEngine from '../components/PipelineEngine';
+import CrewLive from '../components/CrewLive';
+import StageBreakdownRail from '../components/StageBreakdownRail';
 import { useApi } from '../hooks/useApi';
 import { getUser } from '../utils/auth';
 
@@ -848,7 +850,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ── Hero: Pipeline Engine ── */}
+      {/* ── Hero: Pipeline Engine (full width) ── */}
       <div style={{ marginBottom: '1.25rem' }}>
         <PipelineEngine
           data={{
@@ -872,95 +874,83 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* ── Action Row: items unique to triage (not in engine) ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: (stats.awaiting_linkedin > 0) ? 'repeat(2, 1fr)' : 'repeat(1, 1fr)', gap: '0.75rem', marginBottom: '1.25rem' }}>
-        {(stats.awaiting_linkedin > 0) && (
-          <StatCard
-            label="Awaiting LinkedIn"
-            value={stats.awaiting_linkedin}
-            icon={Clock}
-            color="var(--purple)"
-            loading={statsLoading}
-            onClick={() => navigate('/approvals?tab=awaiting')}
-            sub="connection requests"
-          />
-        )}
-        <StatCard
-          label="Pool Health"
-          value={stats.pool_health ?? 0}
-          icon={Users}
-          color="var(--blue)"
-          loading={statsLoading}
-          onClick={() => navigate('/pipeline')}
-          sub="leads ready to contact"
-        />
-      </div>
+      {/* ── 2-col: Crew Live (left) + Stage Breakdown rail (right) ── */}
+      <div className="dashboard-v2-grid">
+        <div className="dashboard-v2-col-left">
+          <CrewLive data={{
+            sourced_today: stats.sourced_today,
+            sourced_this_week: stats.sourced_this_week,
+            total_in_pipeline: totalLeads,
+            pool_health: stats.pool_health,
+            sent_today: sentToday ?? 0,
+            sent_this_week: stats.sent_this_week,
+            sent_all_time: stats.messages_sent,
+            in_flight: stats.in_flight,
+            replies_this_week: stats.replies_this_week,
+            replies_all_time: stats.leads_replied,
+            reply_rate_30d: replyRate30d,
+            reply_rate_lifetime: stats.reply_rate_lifetime,
+            reviewed_this_week: stats.reviewed_this_week,
+            passed_this_week: stats.passed_this_week,
+            enforcer_pass_rate: stats.enforcer_pass_rate,
+            pending_approvals: stats.pending_approvals,
+            meetings_today: stats.meetings_today ?? 0,
+            meetings_this_week: stats.meetings_this_week,
+            meetings_booked: stats.meetings_booked,
+          }} />
 
-      {/* ── KPI bar (today's progress + Ask Director CTA) ── */}
-      <KpiCard onDirectorCommand={(cmd) => setDirectorCommand(cmd)} />
-
-      {/* ── Middle: Sentiment + Enforcer | Funnel + Schedule ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.25rem' }}>
-
-        {/* Left: Reply sentiment + enforcer pass rate */}
-        <div className="card">
-          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.75rem' }}>
-            Reply Breakdown <span style={{ fontWeight: 400 }}>(last 30 days)</span>
+          {/* Awaiting LinkedIn + Pool Health (action items, kept) */}
+          <div style={{ display: 'grid', gridTemplateColumns: (stats.awaiting_linkedin > 0) ? 'repeat(2, 1fr)' : 'repeat(1, 1fr)', gap: '0.75rem' }}>
+            {(stats.awaiting_linkedin > 0) && (
+              <StatCard
+                label="Awaiting LinkedIn"
+                value={stats.awaiting_linkedin}
+                icon={Clock}
+                color="var(--purple)"
+                loading={statsLoading}
+                onClick={() => navigate('/approvals?tab=awaiting')}
+                sub="connection requests"
+              />
+            )}
+            <StatCard
+              label="Pool Health"
+              value={stats.pool_health ?? 0}
+              icon={Users}
+              color="var(--blue)"
+              loading={statsLoading}
+              onClick={() => navigate('/pipeline')}
+              sub="leads ready to contact"
+            />
           </div>
-          {statsLoading ? (
-            Array.from({ length: 4 }).map((_, i) => <div key={i} className="skeleton" style={{ height: 18, borderRadius: 4, marginBottom: 8 }} />)
-          ) : sentimentTotal === 0 ? (
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>No replies classified yet</div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginBottom: '0.875rem' }}>
-              {[
-                { key: 'positive',  label: 'Positive',   color: 'var(--lime)' },
-                { key: 'neutral',   label: 'Neutral',    color: 'var(--blue)' },
-                { key: 'objection', label: 'Objection',  color: 'var(--orange)' },
-                { key: 'no_fit',    label: 'No Fit',     color: 'var(--text-muted)' },
-              ].map(({ key, label, color }) => {
-                const count = sentiments[key] || 0;
-                const pct = sentimentTotal > 0 ? Math.round((count / sentimentTotal) * 100) : 0;
-                return (
-                  <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <span style={{ fontSize: '0.7rem', color, fontWeight: 600, width: 62 }}>{label}</span>
-                    <div style={{ flex: 1, height: 6, background: 'var(--bg)', borderRadius: 3, overflow: 'hidden' }}>
-                      <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 3 }} />
-                    </div>
-                    <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', width: 28, textAlign: 'right' }}>{count}</span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
 
-          {/* Enforcer pass rate */}
-          {!statsLoading && stats.enforcer_pass_rate !== null && stats.enforcer_pass_rate !== undefined && (
-            <div style={{ paddingTop: '0.75rem', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Enforcer pass rate (7d)</span>
-              <span style={{ fontSize: '0.875rem', fontWeight: 700, color: stats.enforcer_pass_rate >= 70 ? 'var(--lime)' : stats.enforcer_pass_rate >= 50 ? 'var(--orange)' : 'var(--danger)', marginLeft: 'auto' }}>
-                {stats.enforcer_pass_rate}%
-              </span>
-            </div>
-          )}
-        </div>
+          {/* KPI bar with Ask Director CTA */}
+          <KpiCard onDirectorCommand={(cmd) => setDirectorCommand(cmd)} />
 
-        {/* Right: Pipeline funnel + today's schedule */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-          <div className="card" style={{ flex: 1 }}>
-            <PipelineFunnel byStage={byStage} total={totalLeads} loading={statsLoading} />
-          </div>
+          {/* Today's Schedule (kept — unique data, no dup) */}
           <div className="card">
             <TodaySchedule events={stats.today_events || []} loading={statsLoading} />
           </div>
         </div>
+
+        <div className="dashboard-v2-col-right">
+          <StageBreakdownRail data={{
+            leads_by_stage: byStage,
+            total_in_pipeline: totalLeads,
+            reply_sentiments: sentiments,
+            reply_rate_30d: replyRate30d,
+            reply_rate_trend: trend,
+            sourced_today: stats.sourced_today,
+            in_flight: stats.in_flight,
+            replies_this_week: stats.replies_this_week,
+            meetings_this_week: stats.meetings_this_week,
+          }} />
+        </div>
       </div>
 
       {/* ── Integration chips ── */}
-      <IntegrationChips integrations={stats.integrations} loading={statsLoading} />
-
-      {/* ── Weekly Learnings ── */}
-      <WeeklyLearningsCard />
+      <div style={{ marginTop: '1.25rem' }}>
+        <IntegrationChips integrations={stats.integrations} loading={statsLoading} />
+      </div>
 
       {/* ── Crew Status (operational detail) ── */}
       <BeaverStatusBoard execStatus={null} agentLogs={agentLogs} liveLogs={liveLogs} />
