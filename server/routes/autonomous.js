@@ -364,13 +364,50 @@ router.post('/kickoff', requireInternalKey, async (req, res) => {
 });
 
 /* ─── POST /api/autonomous/kickoff-all ───────────────────── */
+// 1-hour dedupe gate: rejects if any tenant has already kicked off in the
+// last 60 minutes. Prevents the failure mode where multiple manual triggers
+// (GitHub Actions workflow_dispatch, curl, etc.) burn through Brave/LLM
+// budget by fanning out repeated kickoffs across all tenants.
+//
+// Override with ?force=1 (or { force: true } in body) for legitimate
+// out-of-window runs (e.g. validating a fresh deploy).
 
 router.post('/kickoff-all', requireInternalKey, async (req, res) => {
+  const force = req.query.force === '1' || req.query.force === 'true' || req.body?.force === true;
+
+  if (!force) {
+    const { rows: recent } = await pool.query(
+      `SELECT MAX(created_at) AS last_at, COUNT(DISTINCT client_id) AS tenants
+         FROM logs
+        WHERE agent = 'director'
+          AND action = 'autonomous_kickoff'
+          AND created_at >= NOW() - INTERVAL '60 minutes'`
+    );
+    const lastAt = recent[0]?.last_at;
+    if (lastAt) {
+      const minsAgo = Math.round((Date.now() - new Date(lastAt).getTime()) / 60000);
+      return res.status(429).json({
+        error: 'Kickoff already fired within the last 60 minutes',
+        code: 'KICKOFF_DEDUPE',
+        last_at: lastAt,
+        minutes_ago: minsAgo,
+        tenants_affected: parseInt(recent[0].tenants, 10) || 0,
+        hint: 'Wait until the run completes, or pass ?force=1 to override.',
+      });
+    }
+  }
+
   const { rows: clients } = await pool.query(
     `SELECT id FROM clients`
   );
 
-  res.json({ data: { status: 'kickoff_started', clients: clients.length } });
+  res.json({
+    data: {
+      status: 'kickoff_started',
+      clients: clients.length,
+      forced: force,
+    },
+  });
 
   for (const client of clients) {
     runWithClientContext(client.id, () =>
