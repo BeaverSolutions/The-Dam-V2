@@ -68,6 +68,40 @@
   color: var(--text-muted);
 }
 
+/* Body — when a rail is provided, body becomes 2-col (stage | rail).
+   Without a rail, body is just the stage. */
+.engine-body {
+  display: flex;
+  flex-direction: column;
+}
+.engine-panel--with-rail .engine-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 18px;
+  align-items: stretch;
+}
+.engine-rail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-left: 18px;
+  border-left: 1px solid var(--hairline);
+}
+
+/* On <1100px: rail drops below the stage inside the same panel */
+@media (max-width: 1100px) {
+  .engine-panel--with-rail .engine-body {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  .engine-rail {
+    padding-left: 0;
+    padding-top: 14px;
+    border-left: none;
+    border-top: 1px solid var(--hairline);
+  }
+}
+
 /* Stage — fixed logical 700×700 canvas, scaled on mobile */
 .engine-stage {
   position: relative;

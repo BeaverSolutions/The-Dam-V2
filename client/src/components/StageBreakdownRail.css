@@ -11,6 +11,23 @@
   padding: 14px 16px;
 }
 
+/* When the rail lives inside the engine-panel, blocks lose their own
+   chrome and become hairline-separated sections of the parent panel. */
+.engine-rail .rail {
+  gap: 0;
+  height: 100%;
+}
+.engine-rail .rail-block {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--hairline);
+  border-radius: 0;
+  padding: 12px 0;
+}
+.engine-rail .rail-block:first-child { padding-top: 4px; }
+.engine-rail .rail-block:last-child { border-bottom: none; padding-bottom: 0; }
+.engine-rail .rail-block-head { margin-bottom: 10px; }
+
 .rail-block-head {
   display: flex;
   align-items: center;

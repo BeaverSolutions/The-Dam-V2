@@ -850,10 +850,10 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ── Hero: Engine (with orbital beavers + labels) + Rail on right ── */}
-      <div className="dashboard-hero" style={{ marginBottom: '1.25rem' }}>
-        <div className="dashboard-hero-engine">
-          <PipelineEngine data={{
+      {/* ── Hero: Engine + rail in the SAME panel ── */}
+      <div style={{ marginBottom: '1.25rem' }}>
+        <PipelineEngine
+          data={{
             sourced_today: stats.sourced_today,
             total_in_pipeline: totalLeads,
             sent_today: sentToday ?? 0,
@@ -870,22 +870,21 @@ export default function Dashboard() {
               ? +((parseInt(stats.meetings_booked || 0, 10) / totalLeads) * 100).toFixed(1)
               : 0,
             meetings_next_7d: stats.meetings_next_7d,
-          }} />
-        </div>
-
-        <div className="dashboard-hero-rail">
-          <StageBreakdownRail data={{
-            leads_by_stage: byStage,
-            total_in_pipeline: totalLeads,
-            reply_sentiments: sentiments,
-            reply_rate_30d: replyRate30d,
-            reply_rate_trend: trend,
-            sourced_today: stats.sourced_today,
-            in_flight: stats.in_flight,
-            replies_this_week: stats.replies_this_week,
-            meetings_this_week: stats.meetings_this_week,
-          }} />
-        </div>
+          }}
+          rail={
+            <StageBreakdownRail data={{
+              leads_by_stage: byStage,
+              total_in_pipeline: totalLeads,
+              reply_sentiments: sentiments,
+              reply_rate_30d: replyRate30d,
+              reply_rate_trend: trend,
+              sourced_today: stats.sourced_today,
+              in_flight: stats.in_flight,
+              replies_this_week: stats.replies_this_week,
+              meetings_this_week: stats.meetings_this_week,
+            }} />
+          }
+        />
       </div>
 
       {/* ── Action row + supporting cards below the hero ── */}

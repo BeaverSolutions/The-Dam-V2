@@ -176,7 +176,7 @@ function StatCard({ Icon, accent, value, decimals, unit, prefix, label, name, de
  *   meetings_booked,
  *   conversion_rate, meetings_next_7d
  */
-export default function PipelineEngine({ data = {} }) {
+export default function PipelineEngine({ data = {}, rail = null }) {
   const STAGES = [
     {
       id: 'prospecting', name: 'Research', pos: 'tl',
@@ -240,7 +240,7 @@ export default function PipelineEngine({ data = {} }) {
   ];
 
   return (
-    <div className="engine-panel">
+    <div className={`engine-panel ${rail ? 'engine-panel--with-rail' : ''}`}>
       <div className="engine-head">
         <span className="engine-pfx">{'//'}</span>
         <span className="engine-ttl">Pipeline Engine</span>
@@ -250,6 +250,7 @@ export default function PipelineEngine({ data = {} }) {
         <span className="engine-meta">{data.total_in_pipeline ?? 0} leads in motion</span>
       </div>
 
+      <div className="engine-body">
       <div className="engine-stage">
         <div className="engine-stage-inner">
           <div className="engine-halo"></div>
@@ -396,6 +397,9 @@ export default function PipelineEngine({ data = {} }) {
             );
           })}
         </div>
+      </div>
+
+        {rail && <div className="engine-rail">{rail}</div>}
       </div>
 
       <div className="engine-stats-strip">
