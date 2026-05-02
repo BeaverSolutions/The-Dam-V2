@@ -559,16 +559,26 @@ Write the brief now. Conversational-tight, lowercase opener, no fluff.`;
   let summary;
   try {
     const result = await callAgent('captain_orchestrator', userMessage, { clientId });
-    summary = result?.brief || result?.summary || result?.raw || null;
+    // Use the same unwrapper as the morning brief — handles ```json code
+    // fences and nested {brief|summary|text} JSON envelopes from Sonnet.
+    // (Bug 2026-05-02: this used to be a raw property fallback chain which
+    //  leaked the entire JSON envelope to Telegram when the model wrapped
+    //  output in markdown code fences.)
+    summary = extractBriefText(result);
   } catch (err) {
     console.warn('[captain] EOD brief generation failed:', err.message);
   }
 
-  if (!summary || typeof summary !== 'string') {
+  if (!summary || typeof summary !== 'string' || summary.trim().length < 20) {
     summary = renderPlainEodBrief(kpis, beaverReports, todaysActions);
   }
 
-  return { summary, raw_kpis: kpis, beaver_reports: beaverReports, actions_taken: todaysActions };
+  return {
+    summary: sanitizeForTelegram(summary),
+    raw_kpis: kpis,
+    beaver_reports: beaverReports,
+    actions_taken: todaysActions,
+  };
 }
 
 function renderPlainEodBrief(k, reports, actions) {
