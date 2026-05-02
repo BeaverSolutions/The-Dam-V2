@@ -952,9 +952,6 @@ export default function Dashboard() {
         <IntegrationChips integrations={stats.integrations} loading={statsLoading} />
       </div>
 
-      {/* ── Crew Status (operational detail) ── */}
-      <BeaverStatusBoard execStatus={null} agentLogs={agentLogs} liveLogs={liveLogs} />
-
       <MorningBriefModal open={briefOpen} onClose={() => setBriefOpen(false)} />
       <DirectorBubble prefilledCommand={directorCommand} onCommandUsed={() => setDirectorCommand(null)} />
     </div>
