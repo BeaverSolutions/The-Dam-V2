@@ -238,7 +238,7 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
   const { sanitiseLinkedInUrl } = require('../utils/validateLinkedIn');
   lead.linkedin_url = sanitiseLinkedInUrl(lead.linkedin_url, `db_builder ${lead.name}`);
 
-  // Must have at least one contact channel
+  // Must have at least one contact channel — quick reject before enrichment cost
   if (!lead.email && !lead.linkedin_url) return null;
 
   // Build metadata
@@ -253,7 +253,7 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
   meta.source = 'db_builder';
   if (lead.data_source) meta.data_source = lead.data_source;
 
-  // Email enrichment at source time
+  // Email enrichment at source time — last chance before the contact gate
   if (!lead.email && enrichContext?.patterns) {
     const enriched = await tryEnrichEmail(lead, enrichContext.patterns).catch(() => null);
     if (enriched) {
@@ -265,6 +265,19 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
       }
     }
     meta.outreach_route = lead.email ? 'email' : 'linkedin';
+  }
+
+  // Contact gate (MJ direction 2026-05-03): every sourced lead must have BOTH
+  // email AND linkedin_url. Misses get logged to research_misses for tuning,
+  // but the lead is NOT inserted. Manual override via metadata.linkedin_only_override.
+  const contactGate = require('./contactGate');
+  const gateResult = await contactGate.tryPersistSourcedLead(clientId, lead, {
+    sourceStrategy: 'db_builder',
+    queryUsed: searchQuery,
+    allowLinkedinOnly: !!lead.linkedin_only_override,
+  });
+  if (gateResult.missed) {
+    return null;
   }
 
   try {
@@ -420,9 +433,22 @@ async function runDbBuilder() {
         await runWithClientContext(client.id, async () => {
           const config = await getConfig(client.id);
 
+          // Wave 1 (2026-05-03): Captain may have written a rebuild_email_pool
+          // directive with a higher email-ready target than the default config.
+          // Read it before sizing the run.
+          const directivesSvc = require('./directives');
+          const dbDirectives = await directivesSvc.readPendingDirectives(client.id, 'db_builder').catch(() => []);
+          const rebuildDirective = dbDirectives.find(d => d.directive_type === 'rebuild_email_pool');
+          const consumedDirectiveIds = [];
+          if (rebuildDirective) consumedDirectiveIds.push(rebuildDirective.id);
+
           // Check pool health
           const health = await checkDbHealth(client.id);
-          const deficit = Math.max(0, config.min_ready_pool - health.total);
+          // Deficit is now computed against EMAIL-READY pool size, not raw total.
+          // LinkedIn-only leads exist but don't count toward the floor — they
+          // can't be drafted under the email-first policy.
+          const emailPoolTarget = rebuildDirective?.payload?.target_min || config.min_email_ready_pool || 100;
+          const emailDeficit = Math.max(0, emailPoolTarget - health.withEmail);
 
           await logsService.createLog(client.id, {
             agent: 'research_beaver',
@@ -432,16 +458,21 @@ async function runDbBuilder() {
               total: health.total,
               with_email: health.withEmail,
               no_email: health.noEmail,
-              target: config.min_ready_pool,
-              deficit,
-              healthy: deficit === 0,
+              email_pool_target: emailPoolTarget,
+              email_deficit: emailDeficit,
+              healthy: emailDeficit === 0,
+              captain_directive: rebuildDirective ? { reason: rebuildDirective.reason, severity: rebuildDirective.severity } : null,
             },
           });
 
-          if (deficit === 0) {
-            logger.info({ msg: '[db-builder] Pool healthy', slug: client.slug, total: health.total });
+          if (emailDeficit === 0) {
+            logger.info({ msg: '[db-builder] Email pool healthy', slug: client.slug, with_email: health.withEmail, target: emailPoolTarget });
+            if (consumedDirectiveIds.length > 0) {
+              await directivesSvc.markConsumed(client.id, consumedDirectiveIds).catch(() => {});
+            }
             return;
           }
+          const deficit = emailDeficit;
 
           // Check budget before sourcing
           const budget = await checkBudget(client.id);
@@ -467,17 +498,26 @@ async function runDbBuilder() {
             target_type: 'system',
             metadata: {
               saved: totalSaved,
-              pool_before: health.total,
-              pool_after: newHealth.total,
-              deficit_remaining: Math.max(0, config.min_ready_pool - newHealth.total),
+              pool_before_total: health.total,
+              pool_after_total: newHealth.total,
+              email_pool_before: health.withEmail,
+              email_pool_after: newHealth.withEmail,
+              email_pool_target: emailPoolTarget,
+              email_deficit_remaining: Math.max(0, emailPoolTarget - newHealth.withEmail),
             },
           });
+
+          // Mark Captain's directive consumed once the rebuild attempt is done.
+          if (consumedDirectiveIds.length > 0) {
+            await directivesSvc.markConsumed(client.id, consumedDirectiveIds).catch(() => {});
+          }
 
           logger.info({
             msg: '[db-builder] Sourcing complete',
             slug: client.slug,
             saved: totalSaved,
-            pool: newHealth.total,
+            email_pool: newHealth.withEmail,
+            email_target: emailPoolTarget,
           });
         });
       } catch (err) {

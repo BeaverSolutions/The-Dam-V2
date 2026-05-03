@@ -86,6 +86,43 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       metadata: { lead_id: leadId, lead_name: lead.name, sentiment, confidence: classification.confidence, reason: classification.reason },
     });
 
+    // Wave 2 (2026-05-03): Impromptu Telegram for high-priority replies.
+    // This is the "Captain decides impromptu" channel in MJ's notification policy.
+    // A positive reply means a prospect is engaged — every minute of delay
+    // matters. Fires once per message (no duplicates on retry).
+    if (sentiment === 'positive') {
+      try {
+        const chatId = process.env.TELEGRAM_CHAT_ID;
+        if (chatId) {
+          const dedupeKey = `reply_alert_${messageId}`;
+          const { rows: alreadyAlerted } = await pool.query(
+            `SELECT 1 FROM agent_memory
+             WHERE client_id = $1 AND agent = 'reply_handler' AND key = $2 LIMIT 1`,
+            [clientId, dedupeKey]
+          );
+          if (alreadyAlerted.length === 0) {
+            const { sendMessage } = require('./telegram');
+            const snippet = String(replySnippet || '').slice(0, 240);
+            await sendMessage(chatId,
+              `<b>Positive reply — ${lead.name}</b>\n\n` +
+              `${lead.company}${lead.title ? ` · ${lead.title}` : ''}\n` +
+              `Reason: ${classification.reason || 'positive intent'}\n\n` +
+              `<i>${snippet}${snippet.length === 240 ? '…' : ''}</i>\n\n` +
+              `Draft will land in approvals shortly.`
+            ).catch(err => console.warn('[replyHandler] Telegram alert failed:', err.message));
+            await pool.query(
+              `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+               VALUES ($1, 'reply_handler', $2, $3::jsonb, 'config')
+               ON CONFLICT (client_id, agent, key) DO NOTHING`,
+              [clientId, dedupeKey, JSON.stringify({ message_id: messageId, lead_id: leadId, fired_at: new Date().toISOString() })]
+            ).catch(() => {});
+          }
+        }
+      } catch (err) {
+        console.warn('[replyHandler] Impromptu alert failed (non-fatal):', err.message);
+      }
+    }
+
     // Track reply event for conversion data
     const sentimentEventMap = { positive: 'reply_positive', neutral: 'message_replied', objection: 'reply_objection', no_fit: 'reply_negative' };
     trackEvent(clientId, {

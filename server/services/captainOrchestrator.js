@@ -156,12 +156,75 @@ async function collectTeamKPIs(clientId) {
     [clientId]
   );
 
+  // ─── Channel-mix today (Wave 1: 30 email / 20 linkedin policy) ──
+  // Splits drafted/approved/sent per channel and pairs them with the
+  // per-channel targets stored on daily_kpi. This is what runDirectiveSweep
+  // and the channel_mix_imbalance stuck-state check read.
+  const channelMixPromise = pool.query(
+    `WITH today_msgs AS (
+       SELECT channel,
+              COUNT(*) FILTER (WHERE created_at::date = (NOW() AT TIME ZONE 'UTC')::date) AS drafted,
+              COUNT(*) FILTER (WHERE status = 'pending_approval' AND created_at::date = (NOW() AT TIME ZONE 'UTC')::date) AS pending_approval,
+              COUNT(*) FILTER (WHERE status = 'approved'         AND sent_at IS NULL) AS approved_unsent,
+              COUNT(*) FILTER (WHERE status = 'sent' AND COALESCE(sent_at, created_at)::date = (NOW() AT TIME ZONE 'UTC')::date) AS sent
+       FROM messages
+       WHERE client_id = $1
+         AND created_at >= (NOW() AT TIME ZONE 'UTC')::date - INTERVAL '1 day'
+       GROUP BY channel
+     ),
+     pool_email AS (
+       SELECT COUNT(*) AS n FROM leads
+       WHERE client_id = $1 AND deleted_at IS NULL
+         AND pipeline_stage = 'prospecting' AND status = 'new'
+         AND email IS NOT NULL
+     ),
+     pool_linkedin AS (
+       SELECT COUNT(*) AS n FROM leads
+       WHERE client_id = $1 AND deleted_at IS NULL
+         AND pipeline_stage = 'prospecting' AND status = 'new'
+         AND email IS NULL AND linkedin_url IS NOT NULL
+     ),
+     stale_approvals AS (
+       SELECT
+         COUNT(*) AS pending_n,
+         EXTRACT(EPOCH FROM (NOW() - MIN(created_at))) / 3600.0 AS oldest_hours
+       FROM approvals
+       WHERE client_id = $1 AND status = 'pending'
+     )
+     SELECT
+       COALESCE((SELECT drafted          FROM today_msgs WHERE channel = 'email'), 0)    AS email_drafted,
+       COALESCE((SELECT pending_approval FROM today_msgs WHERE channel = 'email'), 0)    AS email_pending_approval,
+       COALESCE((SELECT approved_unsent  FROM today_msgs WHERE channel = 'email'), 0)    AS email_approved_unsent,
+       COALESCE((SELECT sent             FROM today_msgs WHERE channel = 'email'), 0)    AS email_sent,
+       COALESCE((SELECT drafted          FROM today_msgs WHERE channel = 'linkedin'), 0) AS linkedin_drafted,
+       COALESCE((SELECT pending_approval FROM today_msgs WHERE channel = 'linkedin'), 0) AS linkedin_pending_approval,
+       COALESCE((SELECT approved_unsent  FROM today_msgs WHERE channel = 'linkedin'), 0) AS linkedin_approved_unsent,
+       COALESCE((SELECT sent             FROM today_msgs WHERE channel = 'linkedin'), 0) AS linkedin_sent,
+       (SELECT n FROM pool_email)    AS pool_email_ready,
+       (SELECT n FROM pool_linkedin) AS pool_linkedin_only,
+       (SELECT pending_n    FROM stale_approvals) AS approvals_pending_n,
+       (SELECT oldest_hours FROM stale_approvals) AS approvals_oldest_hours`,
+    [clientId]
+  );
+
+  const targetsPromise = pool.query(
+    `SELECT COALESCE(target_email_sent, 30) AS te,
+            COALESCE(target_linkedin_sent, 20) AS tl,
+            COALESCE(target, 50) AS total
+     FROM daily_kpi
+     WHERE client_id = $1 AND date = (NOW() AT TIME ZONE 'UTC')::date
+     LIMIT 1`,
+    [clientId]
+  );
+
   const [research, sales, enforcer, rejectReasons, pipeline,
          dbOk, cronHealth,
-         spendToday, spendMtd, meetingsWeek, meetingsMtd] = await Promise.all([
+         spendToday, spendMtd, meetingsWeek, meetingsMtd,
+         channelMix, targets] = await Promise.all([
     researchPromise, salesPromise, enforcerPromise, rejectReasonsPromise, pipelinePromise,
     dbCheckPromise, cronHealthPromise,
     spendTodayPromise, spendMtdPromise, meetingsThisWeekPromise, meetingsMtdPromise,
+    channelMixPromise, targetsPromise,
   ]);
 
   // Stale jobs derived from cronHealth — jobs in 'stale' state
@@ -250,6 +313,29 @@ async function collectTeamKPIs(clientId) {
       mtd_pace_projected: projectMonthEndMeetings(Number(meetingsMtd.rows[0].n) || 0),
       gap_to_target: Math.max(0, MONTHLY_MEETING_TARGET - projectMonthEndMeetings(Number(meetingsMtd.rows[0].n) || 0)),
     },
+    // ─── CHANNEL MIX (Wave 1: 30 email / 20 linkedin) ──
+    // Three KPIs per channel — drafted (kickoff's job), approved (MJ's job),
+    // sent (send queue's job). Captain alerts differently for each.
+    channel_mix: {
+      target_email_sent:    Number(targets.rows[0]?.te) || 30,
+      target_linkedin_sent: Number(targets.rows[0]?.tl) || 20,
+      email: {
+        drafted:           Number(channelMix.rows[0].email_drafted) || 0,
+        pending_approval:  Number(channelMix.rows[0].email_pending_approval) || 0,
+        approved_unsent:   Number(channelMix.rows[0].email_approved_unsent) || 0,
+        sent:              Number(channelMix.rows[0].email_sent) || 0,
+      },
+      linkedin: {
+        drafted:           Number(channelMix.rows[0].linkedin_drafted) || 0,
+        pending_approval:  Number(channelMix.rows[0].linkedin_pending_approval) || 0,
+        approved_unsent:   Number(channelMix.rows[0].linkedin_approved_unsent) || 0,
+        sent:              Number(channelMix.rows[0].linkedin_sent) || 0,
+      },
+      pool_email_ready:    Number(channelMix.rows[0].pool_email_ready) || 0,
+      pool_linkedin_only:  Number(channelMix.rows[0].pool_linkedin_only) || 0,
+      approvals_pending:   Number(channelMix.rows[0].approvals_pending_n) || 0,
+      approvals_oldest_hours: Number(channelMix.rows[0].approvals_oldest_hours) || 0,
+    },
   };
 }
 
@@ -274,6 +360,18 @@ function projectMonthEndMeetings(mtd) {
  */
 async function generateMorningBrief(clientId) {
   const kpis = await collectTeamKPIs(clientId);
+
+  // Wave 2 (2026-05-03): pull each beaver's most recent self-report so the
+  // brief quotes what the team thinks of itself, not just our derived numbers.
+  let beaverSelfReports = '';
+  try {
+    const introspection = require('./introspection');
+    const reports = await introspection.latestPerBeaver(clientId);
+    if (reports.length > 0) {
+      beaverSelfReports = '\n\nBEAVER SELF-REPORTS (each beaver\'s most recent self-assessment — quote verbatim where useful):\n' +
+        reports.map(r => `- ${r.agent}: ${r.summary}${r.blockers ? ` BLOCKER: ${r.blockers}` : ''}`).join('\n');
+    }
+  } catch { /* non-critical */ }
 
   // ── Pre-compute interpretation flags so the LLM can't misread raw numbers ──
   // (Yesterday's brief said "VP credits exhausted (0 of 25)" — wrong, 0 USED.
@@ -346,8 +444,13 @@ Meetings: ${kpis.meetings.this_week} this week, ${kpis.meetings.mtd} mtd, projec
 TASKS — what each beaver works on today, 1-2 lines.
 ACTIONS TAKEN — autonomous calls overnight, 1 line if anything.
 NEEDS YOUR CALL — forced-choice decisions for MJ, numbered. "nothing needs your call today." if none.
+${beaverSelfReports}
 
-Write the brief now. Use the PRE-INTERPRETED STATUS labels above; do not re-narrate the raw numbers. NO json wrapper, NO code fences, NO "═══" separators. Single blank line between sections.`;
+<b>CHANNEL MIX</b> (today's progress)
+Email: ${kpis.channel_mix.email.sent}/${kpis.channel_mix.target_email_sent} sent (${kpis.channel_mix.email.drafted} drafted) · Pool email-ready: ${kpis.channel_mix.pool_email_ready}
+LinkedIn: ${kpis.channel_mix.linkedin.sent}/${kpis.channel_mix.target_linkedin_sent} sent (${kpis.channel_mix.linkedin.drafted} drafted) · Pool linkedin-only: ${kpis.channel_mix.pool_linkedin_only}
+
+Write the brief now. Use the PRE-INTERPRETED STATUS labels above; do not re-narrate the raw numbers. Where a beaver self-report is sharp, quote it. NO json wrapper, NO code fences, NO "═══" separators. Single blank line between sections.`;
 
   let summary;
   try {
@@ -534,6 +637,31 @@ async function generateEodBrief(clientId) {
   const beaverReports = await beaverState.readAllBeaversKPIsForToday(clientId).catch(() => ({}));
   const todaysActions = await beaverState.readRecentCaptainActions(clientId, 12).catch(() => []);
 
+  // Wave 2 (2026-05-03): pull each beaver's most recent introspection self-report
+  // + Captain's directive landing report (did the directives Captain wrote actually
+  // move the metric?) + 14d cost-per-outcome rollup. Feeds the full feedback loop.
+  let beaverSelfReports = '';
+  let directiveLanding = '';
+  let costRollup = '';
+  try {
+    const introspection = require('./introspection');
+    const reports = await introspection.latestPerBeaver(clientId);
+    if (reports.length > 0) {
+      beaverSelfReports = '\n\nINTROSPECTION (each beaver\'s latest self-report):\n' +
+        reports.map(r => `- ${r.agent}: ${r.summary}${r.blockers ? ` BLOCKER: ${r.blockers}` : ''}`).join('\n');
+    }
+    const landing = await introspection.directiveLandingReport(clientId, 24);
+    const consumedRows = landing.filter(d => d.directive_status === 'consumed');
+    const expiredRows  = landing.filter(d => d.directive_status === 'expired');
+    if (landing.length > 0) {
+      directiveLanding = `\n\nDIRECTIVE LANDING (24h): ${landing.length} written, ${consumedRows.length} consumed, ${expiredRows.length} expired unread.`;
+    }
+    const outcomeCost = require('./outcomeCost');
+    const rollup = await outcomeCost.costPerOutcomeByChannel(clientId, 14);
+    const summaryLine = outcomeCost.formatRollupForBrief(rollup);
+    if (summaryLine) costRollup = `\n\nCOST PER OUTCOME (the ROI metric): ${summaryLine}`;
+  } catch { /* non-critical */ }
+
   const userMessage = `Compose today's END-OF-DAY brief for ${kpis.tenant.name}. Same conversational-tight tone as morning. Three sections: SYSTEM HEALTH, TODAY'S RESULTS, TOMORROW'S SETUP.
 
 ═══ SYSTEM HEALTH (close of day) ═══
@@ -547,12 +675,13 @@ sales beaver self-report: ${JSON.stringify(beaverReports.sales_beaver || 'no rep
 enforcer self-report: ${JSON.stringify(beaverReports.ranger || 'no report submitted').slice(0, 200)}
 
 aggregated 24h: sourced ${kpis.research_beaver.sourced_24h}, drafts ${kpis.sales_beaver.drafts_24h}, sent ${kpis.sales_beaver.sent_24h}, replies ${kpis.sales_beaver.replies_24h}
+channel mix today: email ${kpis.channel_mix.email.sent}/${kpis.channel_mix.target_email_sent} sent, linkedin ${kpis.channel_mix.linkedin.sent}/${kpis.channel_mix.target_linkedin_sent} sent
 meetings: ${kpis.meetings.this_week} this week, ${kpis.meetings.mtd} mtd, projecting ${kpis.meetings.mtd_pace_projected} (gap ${kpis.meetings.gap_to_target} to target ${kpis.meetings.monthly_target})
 
-actions you took today: ${todaysActions.length === 0 ? 'none' : todaysActions.map(a => a.action).join(', ')}
+actions you took today: ${todaysActions.length === 0 ? 'none' : todaysActions.map(a => a.action).join(', ')}${beaverSelfReports}${directiveLanding}${costRollup}
 
 ═══ TOMORROW'S SETUP ═══
-Surface what each beaver is working on tomorrow + any decisions queued for MJ overnight.
+Surface what each beaver is working on tomorrow + any decisions queued for MJ overnight. If channel mix missed targets, name what needs to change tomorrow (research focus, send pacing, your approval cadence).
 
 Write the brief now. Conversational-tight, lowercase opener, no fluff.`;
 
@@ -678,6 +807,15 @@ async function detectStuckStates(clientId) {
     });
   }
 
+  // Issues 6-8: Channel-mix imbalance (Wave 1, 2026-05-03).
+  // Three distinct alert types — see buildChannelMixIssues comments.
+  // The hourly cron in index.js dedupes by issue type per hour already;
+  // we further dedupe per day inside the cron handler before firing Telegram
+  // to respect MJ's "morning brief / EOD / impromptu only" notification policy.
+  for (const issue of buildChannelMixIssues(kpis)) {
+    issues.push(issue);
+  }
+
   return { issues, kpis_snapshot: kpis };
 }
 
@@ -762,6 +900,183 @@ async function escalateToMJ(clientId, decision) {
   return { ok: true, action: 'escalate_to_mj' };
 }
 
+/* ─── Goal-hunting directive sweep (Wave 1, 2026-05-03) ──────────────
+ *
+ * Captain's active driving function. Reads team KPIs, computes per-beaver
+ * gaps, and writes structured directives that beavers consume at the start
+ * of their next run. UPSERTs through the unique partial index so re-running
+ * every poll cycle just refreshes the live directive instead of stacking.
+ *
+ * This is what makes the system goal-hunting instead of merely reactive.
+ */
+const directives = require('./directives');
+
+async function runDirectiveSweep(clientId) {
+  const runStartedAt = new Date();
+  const kpis = await collectTeamKPIs(clientId);
+  const cm = kpis.channel_mix;
+  const written = [];
+
+  const utcHour = new Date().getUTCHours();
+  const isAfterMidday = utcHour >= 4; // 12:00 MYT = 04:00 UTC
+  const isLate = utcHour >= 9;        // 17:00 MYT = 09:00 UTC
+
+  // ── 1. Email channel: are we on track to hit target_email_sent? ──
+  const emailGap = Math.max(0, cm.target_email_sent - cm.email.sent);
+  const emailDraftedTowardTarget = cm.email.drafted; // includes pending+approved+sent
+  const emailDraftGap = Math.max(0, cm.target_email_sent - emailDraftedTowardTarget);
+
+  if (emailDraftGap > 0 && cm.pool_email_ready < emailDraftGap) {
+    // Pool can't satisfy the drafting need → tell Research to source more email-ready leads
+    const needed = emailDraftGap - cm.pool_email_ready;
+    written.push(await directives.writeDirective(
+      clientId,
+      'research_beaver',
+      'source_more_email_leads',
+      { needed_minimum: needed, by: 'today_eod', reason_kpi: { email_drafted: emailDraftedTowardTarget, email_target: cm.target_email_sent } },
+      {
+        reason: `Email at ${cm.email.sent}/${cm.target_email_sent} sent · pool email-ready ${cm.pool_email_ready} can't cover draft gap of ${emailDraftGap} · need ${needed} more email-ready leads`,
+        severity: isLate ? 'critical' : 'high',
+      }
+    ));
+  }
+
+  // ── 2. Kickoff: bias next batch toward the channel with the bigger gap ──
+  const linkedinGap = Math.max(0, cm.target_linkedin_sent - cm.linkedin.sent);
+  if (emailGap > 0 || linkedinGap > 0) {
+    written.push(await directives.writeDirective(
+      clientId,
+      'kickoff',
+      'channel_focus',
+      {
+        email:    { gap: emailGap,    target: cm.target_email_sent,    sent: cm.email.sent },
+        linkedin: { gap: linkedinGap, target: cm.target_linkedin_sent, sent: cm.linkedin.sent },
+        pool_email_ready:   cm.pool_email_ready,
+        pool_linkedin_only: cm.pool_linkedin_only,
+        // Option C: when email pool dry, kickoff may overrun linkedin to keep moving.
+        linkedin_overrun_allowed_if_email_pool_dry: true,
+      },
+      {
+        reason: `email gap ${emailGap}/${cm.target_email_sent}, linkedin gap ${linkedinGap}/${cm.target_linkedin_sent}, pool email=${cm.pool_email_ready} linkedin=${cm.pool_linkedin_only}`,
+        severity: 'normal',
+      }
+    ));
+  }
+
+  // ── 3. Sales: feed today's top reject reasons into next draft batch ──
+  const topRejects = (kpis.enforcer.top_reject_reasons || []).filter(r => r.n >= 3);
+  if (topRejects.length > 0) {
+    written.push(await directives.writeDirective(
+      clientId,
+      'sales_beaver',
+      'apply_rejection_patterns',
+      { patterns: topRejects, since: new Date(Date.now() - 24 * 3600 * 1000).toISOString() },
+      {
+        reason: `Avoid today's top reject reasons: ${topRejects.map(r => `${r.reason} (${r.n})`).join(', ')}`,
+        severity: 'normal',
+      }
+    ));
+  }
+
+  // ── 4. DB Builder: target email-ready pool size, not raw pool ──
+  const EMAIL_POOL_FLOOR = 30; // a day's worth of email-channel drafts
+  if (cm.pool_email_ready < EMAIL_POOL_FLOOR) {
+    written.push(await directives.writeDirective(
+      clientId,
+      'db_builder',
+      'rebuild_email_pool',
+      { target_min: EMAIL_POOL_FLOOR, current: cm.pool_email_ready },
+      {
+        reason: `Email-ready pool at ${cm.pool_email_ready}/${EMAIL_POOL_FLOOR} — DB Builder must source email-discoverable leads`,
+        severity: cm.pool_email_ready === 0 ? 'high' : 'normal',
+      }
+    ));
+  }
+
+  // Sweep expired directives in the same tick (cheap, dedupes the cron list)
+  await directives.expireStale().catch(() => {});
+
+  // Wave 2 (2026-05-03): Captain writes its own self-report each sweep.
+  // Briefs read this to show what Captain decided + why, not just the issues
+  // detected. Acts as a running journal of orchestration decisions.
+  try {
+    const introspection = require('./introspection');
+    const summary = written.length === 0
+      ? `Sweep clean. Email ${cm.email.sent}/${cm.target_email_sent}, linkedin ${cm.linkedin.sent}/${cm.target_linkedin_sent}. Pool email=${cm.pool_email_ready} linkedin=${cm.pool_linkedin_only}.`
+      : `Issued ${written.length} directives. Email ${cm.email.sent}/${cm.target_email_sent}, linkedin ${cm.linkedin.sent}/${cm.target_linkedin_sent}.`;
+    await introspection.writeReport(clientId, 'captain_orchestrator', {
+      runStartedAt,
+      metrics: {
+        directives_written: written.length,
+        email_sent: cm.email.sent,
+        email_target: cm.target_email_sent,
+        linkedin_sent: cm.linkedin.sent,
+        linkedin_target: cm.target_linkedin_sent,
+        pool_email_ready: cm.pool_email_ready,
+        pool_linkedin_only: cm.pool_linkedin_only,
+        approvals_pending: cm.approvals_pending,
+      },
+      summary,
+      blockers: cm.approvals_pending >= 20 && cm.approvals_oldest_hours >= 4
+        ? `Approval queue stuck: ${cm.approvals_pending} pending, oldest ${cm.approvals_oldest_hours.toFixed(1)}h.`
+        : null,
+    }).catch(() => {});
+  } catch { /* non-critical */ }
+
+  return { directives_written: written.length, kpis_snapshot: kpis };
+}
+
+/**
+ * Channel-mix imbalance check, called from detectStuckStates.
+ * Separated so the dedupe + MJ-bottleneck logic stays readable.
+ *
+ * Three distinct alert types:
+ *   - bottleneck_approvals: MJ hasn't cleared the queue → don't blame the rule
+ *   - email_behind_drafted:  pipeline hasn't drafted enough → research/source problem
+ *   - email_behind_sent:     drafts exist, sends lag → send queue / Gmail issue
+ */
+function buildChannelMixIssues(kpis) {
+  const out = [];
+  const cm = kpis.channel_mix;
+  const utcHour = new Date().getUTCHours();
+  const isAfterMidday = utcHour >= 4; // 12:00 MYT
+  if (!isAfterMidday) return out;
+
+  // MJ-bottleneck dominates: don't fire other channel alerts when this is true
+  if (cm.approvals_pending >= 20 && cm.approvals_oldest_hours >= 4) {
+    out.push({
+      severity: 'high',
+      type: 'bottleneck_approvals_mj',
+      detail: `${cm.approvals_pending} approvals waiting (oldest ${cm.approvals_oldest_hours.toFixed(1)}h). Resolve queue or today's send target is dead.`,
+      recommended_action: 'escalateToMJ',
+    });
+    return out; // suppress the channel-mix alerts when MJ is the choke point
+  }
+
+  // Drafting gap (kickoff/research problem)
+  const emailDrafted = cm.email.drafted;
+  if (emailDrafted < cm.target_email_sent * 0.5) {
+    out.push({
+      severity: 'high',
+      type: 'email_behind_drafted',
+      detail: `Email drafted ${emailDrafted}/${cm.target_email_sent} by midday. Pool email-ready=${cm.pool_email_ready}. Research/sourcing problem.`,
+      recommended_action: 'escalateToMJ',
+    });
+  }
+
+  // Sending gap (send queue / Gmail problem) — only if drafts exist but sends lag
+  if (emailDrafted >= cm.target_email_sent * 0.7 && cm.email.sent < cm.target_email_sent * 0.4) {
+    out.push({
+      severity: 'high',
+      type: 'email_behind_sent',
+      detail: `Drafted ${emailDrafted} emails but only ${cm.email.sent} sent. Send queue or Gmail issue.`,
+      recommended_action: 'escalateToMJ',
+    });
+  }
+
+  return out;
+}
+
 module.exports = {
   collectTeamKPIs,
   generateMorningBrief,
@@ -772,6 +1087,9 @@ module.exports = {
   runEodBrief,
   // Stuck-state monitor
   detectStuckStates,
+  // Goal-hunting (Wave 1, 2026-05-03)
+  runDirectiveSweep,
+  buildChannelMixIssues,
   // Tactical execution stubs
   fireCoachingLoop,
   switchResearchStrategy,

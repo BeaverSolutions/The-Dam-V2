@@ -37,8 +37,24 @@ async function getApprovals(clientId, filters = {}, pagination = {}) {
 
   const linkedinClause = excludeLinkedin ? `AND (a.notes IS NULL OR a.notes != 'linkedin_requested')` : '';
 
+  // Drift guard: when listing pending approvals, only return rows where the
+  // underlying message is still in a state that matches the approval row.
+  // Without this, approvals get stuck in "Pending" / "Awaiting Accept" forever
+  // when a message moves on via paths that bypass the approval flow
+  // (manual reject scripts, batch updates, send-orchestration outside this service).
+  // notes='linkedin_requested' → must have message.status='linkedin_requested'
+  // notes IS NULL or other → must have message.status='pending_approval'
+  const driftGuard = status === 'pending'
+    ? `AND (
+         (a.notes = 'linkedin_requested' AND m.status = 'linkedin_requested')
+         OR (a.notes IS DISTINCT FROM 'linkedin_requested' AND m.status = 'pending_approval')
+       )`
+    : '';
+
   const countResult = await pool.query(
-    `SELECT COUNT(*) FROM approvals a WHERE a.client_id = $1 AND ($2::text IS NULL OR a.status = $2) ${linkedinClause}`,
+    `SELECT COUNT(*) FROM approvals a
+     JOIN messages m ON m.id = a.message_id
+     WHERE a.client_id = $1 AND ($2::text IS NULL OR a.status = $2) ${linkedinClause} ${driftGuard}`,
     [clientId, status || null]
   );
 
@@ -50,7 +66,7 @@ async function getApprovals(clientId, filters = {}, pagination = {}) {
      FROM approvals a
      JOIN messages m ON m.id = a.message_id
      LEFT JOIN leads l ON l.id = m.lead_id
-     WHERE a.client_id = $1 AND ($2::text IS NULL OR a.status = $2) ${linkedinClause}
+     WHERE a.client_id = $1 AND ($2::text IS NULL OR a.status = $2) ${linkedinClause} ${driftGuard}
      ORDER BY a.created_at DESC
      LIMIT $3 OFFSET $4`,
     [clientId, status || null, perPage, offset]

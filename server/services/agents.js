@@ -540,11 +540,16 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
 
   if (callAgent) {
     try {
-      const [persona, fileConfig, rangerPatterns] = await Promise.all([
+      const directivesSvc = require('./directives');
+      const [persona, fileConfig, rangerPatterns, salesDirectives] = await Promise.all([
         getClientPersona(clientId),
         getClientConfig(clientId),
         // MEMORY: Load Ranger rejection patterns — brief Sales Beaver on what to avoid (Sprint 9)
         getRangerRejectionPatterns(clientId),
+        // Wave 1 (2026-05-03): Captain may have written an apply_rejection_patterns
+        // directive with TODAY's top reject reasons (>= 3 rejects). These are
+        // sharper than the historical Ranger memory — Sales Beaver applies both.
+        directivesSvc.readPendingDirectives(clientId, 'sales_beaver').catch(() => []),
       ]);
       const personaContext = buildPersonaContext(persona);
       const fileContext = buildClientContext(fileConfig);
@@ -552,6 +557,21 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
       let rangerContext = '';
       if (rangerPatterns?.length) {
         rangerContext = `\n\nRANGER REJECTION HISTORY — these patterns were rejected recently, do NOT repeat them:\n${rangerPatterns.slice(0, 5).join('\n')}`;
+      }
+
+      // Captain's directive injection — today's hot reject reasons + any other
+      // active directives. Marked consumed at end of this draft (whether the
+      // resulting message survives Enforcer or not — the directive WAS applied).
+      let captainDirectiveContext = '';
+      const consumedDirectiveIds = [];
+      const rejectDirective = salesDirectives.find(d => d.directive_type === 'apply_rejection_patterns');
+      if (rejectDirective?.payload?.patterns?.length) {
+        const lines = rejectDirective.payload.patterns
+          .slice(0, 5)
+          .map(p => `- ${p.reason} (rejected ${p.n}× today)`)
+          .join('\n');
+        captainDirectiveContext = `\n\nCAPTAIN'S DIRECTIVE — today's top reject reasons. Avoid these patterns at ALL costs:\n${lines}`;
+        consumedDirectiveIds.push(rejectDirective.id);
       }
 
       // Sender identity — resolved at template layer, NOT in prompt (ICP+channel patches per MJ direction 2026-04-29).
@@ -566,9 +586,15 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         'sales_beaver',
         `Write a ${channel} outreach message for this lead: ${context}
 ${signOffInstruction}
-${personaContext}${fileContext}${rangerContext}`,
+${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}`,
         { lead_id, channel, clientId }
       );
+
+      // Mark Captain's directive consumed once it's been folded into the prompt.
+      // Fire-and-forget — failure here doesn't invalidate the draft.
+      if (consumedDirectiveIds.length > 0) {
+        directivesSvc.markConsumed(clientId, consumedDirectiveIds).catch(() => {});
+      }
 
       // Primary: structured JSON response with body field
       if (result?.body) {
@@ -2461,11 +2487,18 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     const { sanitiseLinkedInUrl } = require('../utils/validateLinkedIn');
     lead.linkedin_url = sanitiseLinkedInUrl(lead.linkedin_url, `research_beaver ${lead.name}`);
 
-    // Contact channel gate: lead MUST have at least 1 channel (email or LinkedIn)
-    const hasAnyChannel = !!(lead.email || lead.linkedin_url);
-    if (!hasAnyChannel) {
-      console.warn(`[save] Rejecting ${lead.name} at ${lead.company} — no email or LinkedIn URL`);
-      diagnostics.reason = (diagnostics.reason || '') + ` Rejected ${lead.name}: no contact channel.`;
+    // Contact gate (MJ direction 2026-05-03): every sourced lead MUST have
+    // BOTH email AND linkedin_url. Misses logged to research_misses for
+    // sourcing-strategy tuning. Manual override via lead.linkedin_only_override.
+    const contactGate = require('./contactGate');
+    const gateResult = await contactGate.tryPersistSourcedLead(clientId, lead, {
+      sourceStrategy: 'research_beaver',
+      queryUsed: diagnostics.search_query,
+      allowLinkedinOnly: !!lead.linkedin_only_override,
+    });
+    if (gateResult.missed) {
+      console.warn(`[save] Gated out ${lead.name} at ${lead.company} — reason: ${gateResult.reason}`);
+      diagnostics.reason = (diagnostics.reason || '') + ` Gated ${lead.name}: ${gateResult.reason}.`;
       continue;
     }
 

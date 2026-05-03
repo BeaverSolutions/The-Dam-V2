@@ -319,6 +319,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {} } = {}) {
  */
 async function saveSignalLeads(clientId, leads) {
   const saved = [];
+  const contactGate = require('./contactGate');
 
   for (const lead of leads) {
     // Dedup check on LinkedIn URL
@@ -331,6 +332,19 @@ async function saveSignalLeads(clientId, leads) {
         console.log(`[signalHunt] Skipping duplicate: ${lead.linkedin_url}`);
         continue;
       }
+    }
+
+    // Contact gate (MJ direction 2026-05-03): every sourced lead must have BOTH
+    // email AND linkedin_url. Signals are pre-qualified by intent, but signal
+    // pre-qualification doesn't replace the contactability gate — even a
+    // perfect P1 lead is useless if we can't reach them.
+    const gateResult = await contactGate.tryPersistSourcedLead(clientId, lead, {
+      sourceStrategy: 'signal_hunt',
+      allowLinkedinOnly: !!lead.linkedin_only_override,
+    });
+    if (gateResult.missed) {
+      console.log(`[signalHunt] Gated out ${lead.name} — reason: ${gateResult.reason}`);
+      continue;
     }
 
     try {

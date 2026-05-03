@@ -1294,13 +1294,39 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
   const BATCH_SIZE = 20; // raised from 10 — auto-fix means more drafts survive
   let zeroStreak = 0;
 
+  // ── Channel-mix policy (Wave 1, MJ direction 2026-05-03) ──────────────
+  // 30 email + 20 linkedin = 50/day. The kickoff loop biases lead selection
+  // toward whichever channel still has gap. Targets come from daily_kpi
+  // (override per client); Captain may also write a 'channel_focus' directive
+  // with refined targets — that wins when present.
+  const directivesSvc = require('../services/directives');
+  const kickoffDirectives = await directivesSvc.readPendingDirectives(clientId, 'kickoff').catch(() => []);
+  const channelFocus = kickoffDirectives.find(d => d.directive_type === 'channel_focus');
+  const directiveIdsToConsume = kickoffDirectives.map(d => d.id);
+
+  const { rows: kpiTargetRow } = await pool.query(
+    `SELECT COALESCE(target_email_sent, 30) AS te,
+            COALESCE(target_linkedin_sent, 20) AS tl
+     FROM daily_kpi WHERE client_id = $1 AND date = $2 LIMIT 1`,
+    [clientId, today]
+  );
+  const TARGET_EMAIL_SENT    = channelFocus?.payload?.email?.target    ?? Number(kpiTargetRow[0]?.te) ?? 30;
+  const TARGET_LINKEDIN_SENT = channelFocus?.payload?.linkedin?.target ?? Number(kpiTargetRow[0]?.tl) ?? 20;
+  // Option C: LinkedIn may overrun its cap if (and only if) the email pool
+  // is genuinely dry. Captain's directive sets this; default true.
+  const LINKEDIN_OVERRUN_OK  = channelFocus?.payload?.linkedin_overrun_allowed_if_email_pool_dry ?? true;
+
   for (let batch = 1; batch <= HARD_CEILING; batch++) {
-    // Recalculate live counts
+    // Recalculate live counts — now per-channel so we can honour the 30/20 split
     const { rows: liveCount } = await pool.query(
       `SELECT
          COUNT(*) FILTER (WHERE status = 'sent'             AND DATE(COALESCE(sent_at, created_at)) = $2) AS sent,
          COUNT(*) FILTER (WHERE status = 'pending_approval' AND DATE(created_at) = $2)                     AS pending,
-         COUNT(*) FILTER (WHERE status = 'approved'         AND DATE(created_at) = $2)                     AS approved_awaiting_send
+         COUNT(*) FILTER (WHERE status = 'approved'         AND DATE(created_at) = $2)                     AS approved_awaiting_send,
+         COUNT(*) FILTER (WHERE channel = 'email'    AND status = 'sent' AND DATE(COALESCE(sent_at, created_at)) = $2) AS email_sent_today,
+         COUNT(*) FILTER (WHERE channel = 'linkedin' AND status = 'sent' AND DATE(COALESCE(sent_at, created_at)) = $2) AS linkedin_sent_today,
+         COUNT(*) FILTER (WHERE channel = 'email'    AND DATE(created_at) = $2) AS email_drafted_today,
+         COUNT(*) FILTER (WHERE channel = 'linkedin' AND DATE(created_at) = $2) AS linkedin_drafted_today
        FROM messages WHERE client_id = $1`,
       [clientId, today]
     );
@@ -1309,6 +1335,16 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     const liveApproved  = parseInt(liveCount[0].approved_awaiting_send) || 0;
     const inFlight      = livePending + liveApproved;  // count as "in the queue, not yet sent"
     const liveGap       = target - liveSent;           // ← SENT-based gap
+
+    // Per-channel SENT gaps. We chase email first; LinkedIn fills only what's left.
+    const emailSentToday    = parseInt(liveCount[0].email_sent_today) || 0;
+    const linkedinSentToday = parseInt(liveCount[0].linkedin_sent_today) || 0;
+    const emailDraftedToday    = parseInt(liveCount[0].email_drafted_today) || 0;
+    const linkedinDraftedToday = parseInt(liveCount[0].linkedin_drafted_today) || 0;
+    // Drafted+pending counts toward the gap because each one will eventually
+    // become a send. Avoids over-drafting on the same channel while drafts queue.
+    const emailGap    = Math.max(0, TARGET_EMAIL_SENT    - emailDraftedToday);
+    const linkedinGap = Math.max(0, TARGET_LINKEDIN_SENT - linkedinDraftedToday);
 
     if (liveGap <= 0) {
       console.log(`[Autonomous] Client ${clientId} batch ${batch}: SENT target met (${liveSent}/${target}). Stopping.`);
@@ -1339,22 +1375,79 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     const queueHeadroom = PENDING_CEILING - livePending;
     const draftSize = Math.min(liveGap, BATCH_SIZE, queueHeadroom);
 
+    // ── Channel-mix-aware lead pick (Wave 1, 2026-05-03) ─────────────────
+    // Decide whether THIS batch should be email-channel or linkedin-channel
+    // leads, given the per-channel gap. Drafting follows the lead's channel
+    // (email-having lead → email draft, linkedin-only lead → linkedin draft).
+    //
+    // Decision tree:
+    //   email_gap > 0 AND email-ready leads in pool → pick email-having leads
+    //   email_gap > 0 AND email pool dry             → Option C: allow linkedin overrun
+    //   email_gap = 0 AND linkedin_gap > 0           → pick linkedin-only leads
+    //   email_gap = 0 AND linkedin_gap = 0           → liveGap > 0 path takes over
+    const { rows: poolCounts } = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE email IS NOT NULL) AS email_ready,
+         COUNT(*) FILTER (WHERE email IS NULL AND linkedin_url IS NOT NULL) AS linkedin_only
+       FROM leads
+       WHERE client_id = $1
+         AND pipeline_stage = 'prospecting'
+         AND status = 'new'
+         AND deleted_at IS NULL`,
+      [clientId]
+    );
+    const poolEmailReady   = parseInt(poolCounts[0].email_ready) || 0;
+    const poolLinkedinOnly = parseInt(poolCounts[0].linkedin_only) || 0;
+
+    let chosenChannel = null; // 'email' | 'linkedin' | null (no constraint)
+    let channelReason = '';
+    if (emailGap > 0 && poolEmailReady > 0) {
+      chosenChannel = 'email';
+      channelReason = `email_gap=${emailGap}, pool_email_ready=${poolEmailReady}`;
+    } else if (emailGap > 0 && poolEmailReady === 0 && LINKEDIN_OVERRUN_OK && poolLinkedinOnly > 0) {
+      chosenChannel = 'linkedin';
+      channelReason = `email pool dry, Option C overrun on linkedin (linkedin sent ${linkedinSentToday}/${TARGET_LINKEDIN_SENT})`;
+      console.warn(`[Autonomous] Client ${clientId} batch ${batch}: email pool dry, allowing linkedin overrun (Option C)`);
+    } else if (emailGap === 0 && linkedinGap > 0 && poolLinkedinOnly > 0) {
+      chosenChannel = 'linkedin';
+      channelReason = `email target met, linkedin_gap=${linkedinGap}, pool_linkedin_only=${poolLinkedinOnly}`;
+    } else if (emailGap === 0 && linkedinGap === 0) {
+      console.log(`[Autonomous] Client ${clientId} batch ${batch}: both channels at target. Stopping.`);
+      await logAction(clientId, 'director', 'channel_targets_met', 'system', null, {
+        batch, emailDraftedToday, linkedinDraftedToday, TARGET_EMAIL_SENT, TARGET_LINKEDIN_SENT,
+      });
+      break;
+    } else {
+      // Pool dry on the channel we needed and overrun not allowed → escalate
+      console.warn(`[Autonomous] Client ${clientId} batch ${batch}: pool dry on needed channel (email_gap=${emailGap}, linkedin_gap=${linkedinGap}, pool_email=${poolEmailReady}, pool_linkedin=${poolLinkedinOnly})`);
+      await logAction(clientId, 'director', 'pool_dry_for_channel_target', 'system', null, {
+        batch, emailGap, linkedinGap, poolEmailReady, poolLinkedinOnly,
+      });
+      break;
+    }
+
     // ── DB-first: pull uncontacted leads from pool before cold research ──
     // The DB Builder keeps this pool healthy in the background. Kickoff
     // draws from it, avoiding expensive real-time research when possible.
     let usedDbPool = false;
     try {
+      // Channel-aware filter: WHERE-clause matches chosenChannel.
+      // email channel → leads with email. linkedin channel → no email + has linkedin.
+      const channelFilter = chosenChannel === 'email'
+        ? `AND email IS NOT NULL`
+        : `AND email IS NULL AND linkedin_url IS NOT NULL`;
+
       const { rows: poolLeads } = await pool.query(
         `SELECT id FROM leads
          WHERE client_id = $1
            AND pipeline_stage = 'prospecting'
            AND status = 'new'
            AND deleted_at IS NULL
+           ${channelFilter}
          ORDER BY
            CASE WHEN signal_tier = 'P1' THEN 1
                 WHEN signal_tier = 'P2' THEN 2
                 ELSE 3 END,
-           CASE WHEN email IS NOT NULL THEN 0 ELSE 1 END,
            score DESC,
            created_at ASC
          LIMIT $2`,
@@ -1422,6 +1515,52 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     }
   }
 
+  // Mark all kickoff directives consumed (they applied for THIS run).
+  if (directiveIdsToConsume.length > 0) {
+    await directivesSvc.markConsumed(clientId, directiveIdsToConsume).catch(err =>
+      console.warn('[Autonomous] markConsumed failed:', err.message)
+    );
+  }
+
+  // Wave 2 (2026-05-03): kickoff writes its self-report. Captain quotes this
+  // verbatim in morning + EOD briefs so MJ sees what the kickoff thinks it did,
+  // not just raw counters.
+  try {
+    const introspection = require('../services/introspection');
+    const { rows: finalCounts } = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE channel = 'email'    AND DATE(created_at) = $2) AS email_drafted,
+         COUNT(*) FILTER (WHERE channel = 'linkedin' AND DATE(created_at) = $2) AS linkedin_drafted,
+         COUNT(*) FILTER (WHERE channel = 'email'    AND status = 'sent' AND DATE(COALESCE(sent_at, created_at)) = $2) AS email_sent,
+         COUNT(*) FILTER (WHERE channel = 'linkedin' AND status = 'sent' AND DATE(COALESCE(sent_at, created_at)) = $2) AS linkedin_sent,
+         COUNT(*) FILTER (WHERE status = 'blocked_no_email' AND DATE(created_at) = $2) AS blocked_no_email
+       FROM messages WHERE client_id = $1`,
+      [clientId, today]
+    );
+    const fc = finalCounts[0];
+    const summary = `Kickoff produced ${fc.email_drafted} email + ${fc.linkedin_drafted} linkedin drafts. Sent so far: ${fc.email_sent}/${TARGET_EMAIL_SENT} email · ${fc.linkedin_sent}/${TARGET_LINKEDIN_SENT} linkedin. Blocked no_email: ${fc.blocked_no_email}.`;
+    const blockers = fc.blocked_no_email > 0
+      ? `${fc.blocked_no_email} drafts blocked at email gate (pool starved of email-ready leads).`
+      : null;
+    await introspection.writeReport(clientId, 'kickoff', {
+      runStartedAt: new Date(Date.now() - 30 * 60 * 1000), // ~30 min window
+      metrics: {
+        target_email_sent: TARGET_EMAIL_SENT,
+        target_linkedin_sent: TARGET_LINKEDIN_SENT,
+        email_drafted:    Number(fc.email_drafted) || 0,
+        linkedin_drafted: Number(fc.linkedin_drafted) || 0,
+        email_sent:       Number(fc.email_sent) || 0,
+        linkedin_sent:    Number(fc.linkedin_sent) || 0,
+        blocked_no_email: Number(fc.blocked_no_email) || 0,
+      },
+      summary,
+      blockers,
+      actedOnDirectives: directiveIdsToConsume,
+    }).catch(err => console.warn('[Autonomous] introspection write failed:', err.message));
+  } catch (err) {
+    console.warn('[Autonomous] introspection skipped:', err.message);
+  }
+
   // ── Kickoff verification — alert if zero output produced ──
   await verifyKickoffOutput(clientId, target);
 }
@@ -1471,22 +1610,10 @@ async function verifyKickoffOutput(clientId, target) {
         [clientId, JSON.stringify({ target, sent, pending, rejected })]
       );
     } else {
+      // Success path: log only, no Telegram. Per MJ notification policy
+      // (2026-05-03): morning brief / EOD brief / impromptu only. The morning
+      // brief reports yesterday's kickoff numbers — no need to ping per-day too.
       console.log(`[Autonomous] Kickoff verified for ${clientId}: ${totalOutput} messages produced (${sent} sent, ${pending} pending, ${drafting} drafting)`);
-
-      // Success Telegram — closes the loop on every kickoff run
-      const { rows: clientRows } = await pool.query(`SELECT name FROM clients WHERE id = $1`, [clientId]);
-      const clientName = clientRows[0]?.name || clientId;
-      const chatId = process.env.TELEGRAM_CHAT_ID;
-      if (chatId) {
-        const { sendMessage } = require('../services/telegram');
-        await sendMessage(chatId,
-          `<b>Daily Kickoff Completed</b>\n\n` +
-          `Client: <code>${clientName}</code>\n` +
-          `Target: ${target}\n` +
-          `Sent: ${sent} | Pending: ${pending} | Drafting: ${drafting} | Rejected: ${rejected}\n\n` +
-          `<a href="https://app.beaver.solutions/approvals">Review pending →</a>`
-        ).catch(err => console.warn('[telegram] Success alert failed:', err.message));
-      }
     }
   } catch (err) {
     console.warn('[Autonomous] Kickoff verification failed:', err.message);

@@ -637,22 +637,15 @@ async function start() {
         [enabledSlugs]
       );
 
+      // Notification policy (set 2026-05-03): user only gets Morning brief, EOD
+       // brief, and Captain-decided impromptu (escalateToMJ via stuck-state monitor).
+       // Daily kickoff fires the pipeline silently — no Telegram noise on start
+       // or per-client failure. Failures still hit server logs for ops visibility.
       for (const client of clients) {
         logger.info({ msg: `[daily-kickoff] Starting for ${client.slug}` });
-        const chatId = process.env.TELEGRAM_CHAT_ID;
-        if (chatId) {
-          telegramService.sendMessage(chatId,
-            `<b>Daily Kickoff Started</b>\n\nClient: <code>${client.slug}</code>\nTime: ${new Date().toLocaleTimeString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit' })} MYT\n\nFiring Research → Sales → Ranger → Approval. Watch for completion alert.`
-          ).catch(() => {});
-        }
         runWithClientContext(client.id, () =>
           runAutonomousKickoff(client.id).catch(err => {
             logger.error({ msg: `[daily-kickoff] Failed for ${client.slug}`, err: err.message });
-            if (chatId) {
-              telegramService.sendMessage(chatId,
-                `<b>Daily Kickoff Failed</b>\n\nClient: ${client.slug}\nError: ${err.message}`
-              ).catch(() => {});
-            }
           })
         );
       }
@@ -742,10 +735,27 @@ async function start() {
               } else if (issue.recommended_action === 'throttleSend') {
                 await captain.throttleSend(client.id, 30);
               } else if (issue.recommended_action === 'escalateToMJ' && chatId) {
-                // Critical issues hit Telegram immediately
-                await telegramService.sendMessage(chatId,
-                  `<b>Captain alert — ${client.slug}</b>\n\n[${issue.severity}] ${issue.type}\n${issue.detail}`
-                ).catch(() => {});
+                // Per-day dedupe: respects MJ's "morning brief / EOD / impromptu only"
+                // policy. The "impromptu" channel fires once per day per issue type, not
+                // every hour the condition holds.
+                const todayUtc = new Date().toISOString().slice(0, 10);
+                const dedupeKey = `escalation_${issue.type}_${todayUtc}`;
+                const { rows: alreadyFired } = await pool.query(
+                  `SELECT 1 FROM agent_memory
+                   WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2 LIMIT 1`,
+                  [client.id, dedupeKey]
+                );
+                if (alreadyFired.length === 0) {
+                  await telegramService.sendMessage(chatId,
+                    `<b>Captain alert — ${client.slug}</b>\n\n[${issue.severity}] ${issue.type}\n${issue.detail}`
+                  ).catch(() => {});
+                  await pool.query(
+                    `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+                     VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
+                     ON CONFLICT (client_id, agent, key) DO NOTHING`,
+                    [client.id, dedupeKey, JSON.stringify({ type: issue.type, fired_at: new Date().toISOString(), detail: issue.detail })]
+                  ).catch(() => {});
+                }
                 await captain.escalateToMJ(client.id, { type: issue.type, detail: issue.detail });
               }
             } catch (actionErr) {
@@ -910,6 +920,35 @@ async function start() {
       }
     }
 
+    // ── Captain directive sweep (Wave 1, 2026-05-03) ────────────────────────
+    // Every 30 min during working hours, Captain reads team KPIs and writes
+    // directives to the agent_directives bus. Beavers consume on next run.
+    // Cheaper than running every 10 min; KPIs don't move that fast.
+    async function runCaptainDirectiveSweep() {
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+      // 01:00-11:59 UTC = 09:00-19:59 MYT working hours
+      if (utcHour < 1 || utcHour > 11) return;
+      // Half-hour cadence — only fire on the :00 / :30 polls (poll runs every 10min)
+      if (now.getUTCMinutes() >= 10) return;
+
+      const { rows: clients } = await pool.query(
+        `SELECT id, slug FROM clients WHERE is_active = true AND onboarding_completed = true`
+      );
+      if (clients.length === 0) return;
+      const captain = require('./services/captainOrchestrator');
+      for (const client of clients) {
+        try {
+          const result = await captain.runDirectiveSweep(client.id);
+          if (result.directives_written > 0) {
+            logger.info({ msg: `[directive-sweep] ${client.slug}: ${result.directives_written} directives written` });
+          }
+        } catch (err) {
+          logger.warn({ msg: `[directive-sweep] failed for ${client.slug}`, err: err.message });
+        }
+      }
+    }
+
     // Poll every 10 minutes — each function self-guards against running outside its window
     setInterval(() => {
       runMorningBrief()
@@ -942,6 +981,9 @@ async function start() {
       runEnforcerTeachingCron()
         .then(() => { jobHealth.markRun('enforcer_teaching'); })
         .catch(err => { logger.warn({ msg: 'Enforcer-teaching poll error', err: err.message }); jobHealth.markError('enforcer_teaching', err.message); });
+      runCaptainDirectiveSweep()
+        .then(() => { jobHealth.markRun('captain_directive_sweep'); })
+        .catch(err => { logger.warn({ msg: 'Captain directive sweep error', err: err.message }); jobHealth.markError('captain_directive_sweep', err.message); });
     }, 10 * 60 * 1000);
     logger.info({ msg: 'Captain Beaver cron jobs registered (10min poll: 9am brief, 7pm EOD brief, hourly stuck-state monitor 9am-7pm, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, all MYT)' });
 
