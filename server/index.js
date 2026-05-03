@@ -920,7 +920,7 @@ async function start() {
       }
     }
 
-    // ── Captain directive sweep (Wave 1, 2026-05-03) ────────────────────────
+    // ── Captain directive sweep (Wave 1, 2026-05-03; cadence fix Wave 3) ───
     // Every 30 min during working hours, Captain reads team KPIs and writes
     // directives to the agent_directives bus. Beavers consume on next run.
     // Cheaper than running every 10 min; KPIs don't move that fast.
@@ -929,8 +929,13 @@ async function start() {
       const utcHour = now.getUTCHours();
       // 01:00-11:59 UTC = 09:00-19:59 MYT working hours
       if (utcHour < 1 || utcHour > 11) return;
-      // Half-hour cadence — only fire on the :00 / :30 polls (poll runs every 10min)
-      if (now.getUTCMinutes() >= 10) return;
+      // Half-hour cadence: poll runs every 10 min, fire on the :00-:09 and
+      // :30-:39 minute windows. Earlier code only checked < 10 which collapsed
+      // to once per hour depending on server-start offset.
+      const m = now.getUTCMinutes();
+      const inFirstWindow  = m < 10;
+      const inSecondWindow = m >= 30 && m < 40;
+      if (!inFirstWindow && !inSecondWindow) return;
 
       const { rows: clients } = await pool.query(
         `SELECT id, slug FROM clients WHERE is_active = true AND onboarding_completed = true`

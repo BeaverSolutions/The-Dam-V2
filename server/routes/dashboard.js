@@ -580,4 +580,38 @@ router.get('/llm-usage', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/dashboard/goal-hunt
+// Wave 3 (2026-05-03): the Goal Hunt widget reads here. Returns the latest
+// dam_kpi_snapshots row (Captain writes one every 30 min) plus the most
+// recent pending agent_directives so MJ can see what Captain is asking for.
+router.get('/goal-hunt', async (req, res, next) => {
+  try {
+    const clientId = req.clientId;
+    const [snapshotRes, directivesRes] = await Promise.all([
+      pool.query(
+        `SELECT email_sent, email_target, linkedin_sent, linkedin_target,
+                pool_email_ready, pool_linkedin_only, approvals_pending, taken_at
+         FROM dam_kpi_snapshots
+         WHERE client_id = $1
+         ORDER BY taken_at DESC LIMIT 1`,
+        [clientId]
+      ),
+      pool.query(
+        `SELECT target_agent, directive_type, severity, reason, created_at
+         FROM agent_directives
+         WHERE client_id = $1 AND status = 'pending' AND expires_at > NOW()
+         ORDER BY
+           CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END,
+           created_at DESC
+         LIMIT 10`,
+        [clientId]
+      ),
+    ]);
+    res.json({
+      snapshot: snapshotRes.rows[0] || null,
+      pending_directives: directivesRes.rows,
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

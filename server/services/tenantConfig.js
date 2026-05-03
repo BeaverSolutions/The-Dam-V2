@@ -185,6 +185,18 @@ async function setDailyQualityLeadFloor(clientId, floor) {
   );
 }
 
+async function setAutoApproveThreshold(clientId, score) {
+  // 0 = never auto-approve. NULL is treated as "off" too. Cap at 100.
+  // Captain's tuner uses this; manual admin set also goes through here.
+  if (score !== null && (score < 0 || score > 100)) {
+    throw new Error('auto_approve_threshold must be 0-100 or null');
+  }
+  await pool.query(
+    `UPDATE clients SET auto_approve_threshold = $1, updated_at = NOW() WHERE id = $2`,
+    [score, clientId]
+  );
+}
+
 /* ─── VP credit ledger (atomic increments) ─────────────────────────── */
 
 /**
@@ -270,6 +282,7 @@ module.exports = {
   setVpThreshold,
   setVpDailyBudget,
   setDailyQualityLeadFloor,
+  setAutoApproveThreshold,
   // Cost ledger
   chargeVpCredits,
   // Defaults (read-only)

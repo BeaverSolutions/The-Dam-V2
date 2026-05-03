@@ -875,6 +875,67 @@ async function tuneVpThreshold(clientId, deltaPoints = 5) {
 }
 
 /**
+ * Dynamic auto-approve threshold tuner (Wave 3, 2026-05-03).
+ *
+ * Closes the MJ-as-bottleneck loop. Captain raises the auto_approve_threshold
+ * (= more drafts skip MJ approval and go straight to send) when:
+ *   - Approval queue has piled up AND oldest item is stale (>4h), AND
+ *   - Sales' first-attempt pass rate is healthy enough that auto-approving
+ *     high-Enforcer-score drafts is safe.
+ *
+ * Lowers the threshold (= MJ reviews more) when:
+ *   - Queue is clear AND MJ is keeping up, OR
+ *   - Recent bounce / reply-quality signals suggest auto-approves are missing things.
+ *
+ * Conservative bands: never below 80, never above 95. 80 means only the
+ * highest-quality drafts auto-approve; 95 means almost nothing auto-approves
+ * (MJ reviews everything). Default is 75 = off (no auto-approve at all).
+ *
+ * Returns { tuned: bool, from, to, reason }.
+ */
+async function tuneAutoApprove(clientId, kpisSnapshot = null) {
+  const kpis = kpisSnapshot || await collectTeamKPIs(clientId);
+  const cfg = await tenantConfig.getTenantConfig(clientId);
+  const current = cfg.auto_approve_threshold;
+  const cm = kpis.channel_mix;
+
+  const queueOverloaded = cm.approvals_pending >= 20 && cm.approvals_oldest_hours >= 4;
+  const queueClear      = cm.approvals_pending <= 5;
+  const enforcerHealthy = (kpis.enforcer.approve_rate_pct ?? 0) >= 60 && kpis.enforcer.reviews_24h >= 10;
+  const bouncesHigh     = kpis.pipeline.bounces_7d >= 5;
+
+  const MIN = 80;
+  const MAX = 95;
+  const STEP = 3;
+
+  let target = current ?? null;
+  let reason = null;
+
+  if (queueOverloaded && enforcerHealthy && !bouncesHigh) {
+    // MJ is the choke point and Sales is producing clean drafts → loosen auto-approve.
+    const start = (current === null || current >= 95) ? 90 : current;
+    target = Math.max(MIN, Math.min(MAX, start - STEP));
+    reason = `queue overloaded (${cm.approvals_pending} pending, oldest ${cm.approvals_oldest_hours.toFixed(1)}h), enforcer healthy (${kpis.enforcer.approve_rate_pct}% approve) → loosen auto-approve to ${target}`;
+  } else if (queueClear && current !== null && current < 95) {
+    // MJ is keeping up → tighten back so MJ keeps eyes on more.
+    target = Math.min(MAX, (current ?? 90) + STEP);
+    reason = `queue clear (${cm.approvals_pending} pending) → tighten auto-approve back to ${target}`;
+  } else if (bouncesHigh && current !== null && current < 95) {
+    // Bounce signal → don't trust auto-approve; tighten or off.
+    target = Math.min(MAX, (current ?? 90) + STEP);
+    reason = `bounces elevated (${kpis.pipeline.bounces_7d}/7d) → tighten auto-approve to ${target}`;
+  }
+
+  if (target === null || target === current) {
+    return { tuned: false, from: current, to: current, reason: 'no change needed' };
+  }
+
+  await tenantConfig.setAutoApproveThreshold(clientId, target);
+  await beaverState.logCaptainAction(clientId, 'tune_auto_approve', { from: current, to: target, reason });
+  return { tuned: true, from: current, to: target, reason };
+}
+
+/**
  * Throttles send pacing on bounce signal. STUB — full implementation
  * would update tenant config or send_queue worker rate limit.
  */
@@ -993,8 +1054,44 @@ async function runDirectiveSweep(clientId) {
     ));
   }
 
+  // ── 5. Dynamic auto-approve threshold (Wave 3, 2026-05-03) ──
+  // Captain decides whether the auto_approve_threshold needs tuning based on
+  // queue state + Enforcer health. Acts directly (config UPDATE), not a
+  // directive — this is Captain's executive authority on operational config.
+  try {
+    const tuneResult = await tuneAutoApprove(clientId, kpis);
+    if (tuneResult.tuned) {
+      written.push({ id: 'auto_approve_tune', kind: 'config_change', result: tuneResult });
+    }
+  } catch (err) {
+    // Non-fatal — config tune isn't worth crashing the sweep over.
+    console.warn('[directive-sweep] tuneAutoApprove failed:', err.message);
+  }
+
   // Sweep expired directives in the same tick (cheap, dedupes the cron list)
   await directives.expireStale().catch(() => {});
+
+  // Wave 3 (2026-05-03): persist a KPI snapshot to dam_kpi_snapshots so the
+  // Dashboard's Goal Hunt widget can render the latest state without
+  // re-running collectTeamKPIs (several joins) on every page load.
+  try {
+    await pool.query(
+      `INSERT INTO dam_kpi_snapshots
+        (client_id, snapshot, email_sent, email_target, linkedin_sent, linkedin_target,
+         pool_email_ready, pool_linkedin_only, approvals_pending)
+       VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        clientId,
+        JSON.stringify(kpis),
+        cm.email.sent, cm.target_email_sent,
+        cm.linkedin.sent, cm.target_linkedin_sent,
+        cm.pool_email_ready, cm.pool_linkedin_only,
+        cm.approvals_pending,
+      ]
+    );
+  } catch (err) {
+    console.warn('[directive-sweep] dam_kpi_snapshots write failed (non-fatal):', err.message);
+  }
 
   // Wave 2 (2026-05-03): Captain writes its own self-report each sweep.
   // Briefs read this to show what Captain decided + why, not just the issues
@@ -1094,6 +1191,7 @@ module.exports = {
   fireCoachingLoop,
   switchResearchStrategy,
   tuneVpThreshold,
+  tuneAutoApprove,
   throttleSend,
   escalateToMJ,
 };

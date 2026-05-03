@@ -528,7 +528,13 @@ async function searchPersonalisationSignals(lead) {
  * =========================
  * SALES BEAVER
  * =========================
+ *
+ * Wave 3 (2026-05-03): every draft is tagged with SALES_PROMPT_VARIANT in
+ * metadata. Enables `reply_rate by variant` rollups once we A/B-test prompts.
+ * Bump this constant when materially changing the salesGenerate prompt.
  */
+const SALES_PROMPT_VARIANT = 'sales_v1_2026_05_03';
+
 async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
   await logsService.createLog(clientId, {
     agent: 'sales_beaver',
@@ -639,6 +645,7 @@ ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}`,
           subject: stripEmDashes(finalSubject) || null,
           body:    finalBody,
           status:  'pending_ranger',
+          prompt_variant: SALES_PROMPT_VARIANT,
         };
       }
 
@@ -1664,12 +1671,18 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
 
       // Insert message (ICP+channel patches per MJ direction 2026-04-29)
       // kickoffMessageStatus is 'blocked_no_email' when no verified email available.
+      // Wave 3 (2026-05-03): tag prompt_variant for reply-rate-by-variant analysis.
       const { rows: [msg] } = await pool.query(
         `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, metadata)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING *`,
         [clientId, lead.id, channel, draftSubject, draftBody, kickoffMessageStatus,
-         JSON.stringify({ source: draftSource, signal: meta.signal, blocked_reason: kickoffMessageStatus === 'blocked_no_email' ? 'awaiting_email_enrichment' : undefined })]
+         JSON.stringify({
+           source: draftSource,
+           signal: meta.signal,
+           blocked_reason: kickoffMessageStatus === 'blocked_no_email' ? 'awaiting_email_enrichment' : undefined,
+           prompt_variant: salesResult?.prompt_variant || (draftSource === 'enforcer_fallback' ? 'enforcer_fallback' : SALES_PROMPT_VARIANT),
+         })]
       );
 
       // Phase D piece 2 — outcome attribution: drafted event (signal-pipeline path)
@@ -2843,7 +2856,11 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
            RETURNING *`,
           [clientId, lead.id, selectedChannel, salesResult.subject || null, salesResult.body,
            kickoffMessageStatus,
-           JSON.stringify({ blocked_reason: kickoffMessageStatus === 'blocked_no_email' ? 'awaiting_email_enrichment' : undefined })]
+           // Wave 3 (2026-05-03): tag prompt_variant for reply-rate-by-variant analysis.
+           JSON.stringify({
+             blocked_reason: kickoffMessageStatus === 'blocked_no_email' ? 'awaiting_email_enrichment' : undefined,
+             prompt_variant: salesResult.prompt_variant || SALES_PROMPT_VARIANT,
+           })]
         );
 
         const message = msgRes.rows[0];

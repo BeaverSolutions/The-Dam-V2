@@ -762,6 +762,91 @@ function AnalyticsCard() {
 
 /* ─── Main Page ──────────────────────────────────────────── */
 
+/**
+ * GoalHuntCard — Wave 3 (2026-05-03)
+ * Renders Captain's latest dam_kpi_snapshots row + pending agent_directives.
+ * Cheap read — no extra Captain compute, just the cached snapshot table.
+ */
+function GoalHuntCard({ data }) {
+  const s = data.snapshot;
+  if (!s) return null;
+  const directives = data.pending_directives || [];
+  const emailPct    = s.email_target    > 0 ? Math.min(100, Math.round((s.email_sent    / s.email_target)    * 100)) : 0;
+  const linkedinPct = s.linkedin_target > 0 ? Math.min(100, Math.round((s.linkedin_sent / s.linkedin_target) * 100)) : 0;
+  const takenAgo = s.taken_at ? Math.max(0, Math.round((Date.now() - new Date(s.taken_at).getTime()) / 60000)) : null;
+  const sevColor = sev =>
+    sev === 'critical' ? 'var(--danger)' :
+    sev === 'high'     ? 'var(--orange)' :
+    sev === 'normal'   ? 'var(--blue)'   : 'var(--text-muted)';
+
+  return (
+    <div className="card fade-in" style={{ marginBottom: '1.25rem', padding: '1rem 1.25rem' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+        <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>Goal Hunt — today's targets</div>
+        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+          {takenAgo !== null ? `updated ${takenAgo}m ago` : ''}
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '0.75rem' }}>
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', marginBottom: '0.25rem' }}>
+            <span>Email</span>
+            <span style={{ fontWeight: 600 }}>{s.email_sent} / {s.email_target}</span>
+          </div>
+          <div style={{ height: 6, background: 'rgba(255,255,255,0.06)', borderRadius: 3, overflow: 'hidden' }}>
+            <div style={{ width: `${emailPct}%`, height: '100%', background: 'var(--lime)' }} />
+          </div>
+          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+            pool email-ready: {s.pool_email_ready}
+          </div>
+        </div>
+
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', marginBottom: '0.25rem' }}>
+            <span>LinkedIn</span>
+            <span style={{ fontWeight: 600 }}>{s.linkedin_sent} / {s.linkedin_target}</span>
+          </div>
+          <div style={{ height: 6, background: 'rgba(255,255,255,0.06)', borderRadius: 3, overflow: 'hidden' }}>
+            <div style={{ width: `${linkedinPct}%`, height: '100%', background: 'var(--blue)' }} />
+          </div>
+          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+            pool linkedin-only: {s.pool_linkedin_only}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: directives.length > 0 ? '0.5rem' : 0 }}>
+        {s.approvals_pending > 0
+          ? `${s.approvals_pending} approvals waiting for you`
+          : 'approvals queue clear'}
+      </div>
+
+      {directives.length > 0 && (
+        <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '0.6rem' }}>
+          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: '0.4rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            Captain's active directives
+          </div>
+          {directives.slice(0, 5).map((d, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', marginBottom: '0.3rem', fontSize: '0.78rem' }}>
+              <span style={{
+                color: sevColor(d.severity),
+                fontSize: '0.65rem',
+                fontWeight: 700,
+                minWidth: 60,
+                textTransform: 'uppercase',
+              }}>
+                {d.target_agent}
+              </span>
+              <span style={{ color: 'var(--text)' }}>{d.reason || d.directive_type}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const { request } = useApi();
   const navigate = useNavigate();
@@ -770,6 +855,8 @@ export default function Dashboard() {
   const [statsLoading, setStatsLoading] = useState(true);
   const [sentToday, setSentToday] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  // Wave 3 (2026-05-03): Goal Hunt widget — Captain's latest snapshot + active directives
+  const [goalHunt, setGoalHunt] = useState(null);
 
   const [agentLogs, setAgentLogs] = useState({});
   const [liveLogs, setLiveLogs] = useState([]);
@@ -791,12 +878,14 @@ export default function Dashboard() {
 
   const loadStats = useCallback(async () => {
     try {
-      const [statsRes, kpiRes] = await Promise.all([
+      const [statsRes, kpiRes, ghRes] = await Promise.all([
         request('/dashboard/stats'),
         request('/dashboard/daily-progress').catch(() => null),
+        request('/dashboard/goal-hunt').catch(() => null),
       ]);
       setStats(statsRes?.data || {});
       if (kpiRes?.data) setSentToday(kpiRes.data.sent ?? null);
+      if (ghRes) setGoalHunt(ghRes);
     } catch (err) { setError('Failed to load data'); }
     setStatsLoading(false);
   }, []);
@@ -836,6 +925,11 @@ export default function Dashboard() {
       )}
 
       <GreetingHeader onBriefOpen={() => setBriefOpen(true)} onRefresh={handleRefresh} refreshing={refreshing} />
+
+      {/* Goal Hunt — Captain's latest snapshot + active directives (Wave 3, 2026-05-03) */}
+      {goalHunt?.snapshot && (
+        <GoalHuntCard data={goalHunt} />
+      )}
 
       {/* Calendar gate banner */}
       {!statsLoading && !calendarConnected && (
