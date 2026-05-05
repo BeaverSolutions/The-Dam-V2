@@ -1385,10 +1385,15 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     //   email_gap > 0 AND email pool dry             → Option C: allow linkedin overrun
     //   email_gap = 0 AND linkedin_gap > 0           → pick linkedin-only leads
     //   email_gap = 0 AND linkedin_gap = 0           → liveGap > 0 path takes over
+    // Tiered pool counts (migration 061, 2026-05-05).
+    // Tier A = drafted-ready (provider-verified email); Tier B = linkedin-only
+    // pending Hunter retry. Pre-tiering leads (NULL) treated as Tier B if they
+    // have linkedin and Tier-A-eligible if they have a non-pattern_unknown email
+    // — strict tier filter keeps the picker honest even if backfill missed a row.
     const { rows: poolCounts } = await pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE email IS NOT NULL) AS email_ready,
-         COUNT(*) FILTER (WHERE email IS NULL AND linkedin_url IS NOT NULL) AS linkedin_only
+         COUNT(*) FILTER (WHERE lead_tier = 'A' AND email IS NOT NULL AND email <> '') AS email_ready,
+         COUNT(*) FILTER (WHERE lead_tier = 'B' AND linkedin_url IS NOT NULL AND linkedin_url <> '') AS linkedin_only
        FROM leads
        WHERE client_id = $1
          AND pipeline_stage = 'prospecting'
@@ -1432,10 +1437,11 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     let usedDbPool = false;
     try {
       // Channel-aware filter: WHERE-clause matches chosenChannel.
-      // email channel → leads with email. linkedin channel → no email + has linkedin.
+      // Tiered (migration 061): email channel pulls Tier A only (provider-verified email);
+      // linkedin channel pulls Tier B only (linkedin-only, awaiting enrichment).
       const channelFilter = chosenChannel === 'email'
-        ? `AND email IS NOT NULL`
-        : `AND email IS NULL AND linkedin_url IS NOT NULL`;
+        ? `AND lead_tier = 'A' AND email IS NOT NULL AND email <> ''`
+        : `AND lead_tier = 'B' AND linkedin_url IS NOT NULL AND linkedin_url <> ''`;
 
       const { rows: poolLeads } = await pool.query(
         `SELECT id FROM leads
