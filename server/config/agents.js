@@ -275,12 +275,16 @@ OUTPUT FORMAT — return JSON only, no markdown:
     sales_beaver: {
       // Cost optimization (2026-04-13): Sonnet → Haiku.
       // 2026-04-30 redesign: layered in character (charming + KPI-obsessed AE)
-      // + Captain interface (reads morning brief, reports KPIs at EOD). The
-      // mechanical rules (word count, banned phrases, template) below stay
-      // unchanged — Sonnet rollback for Enforcer + ICP v2 already addressed
-      // the upstream issues that made first-pass rate collapse.
-      // If first-pass rate < 60% sustained for 7d, bump to Sonnet.
-      model: MODELS.HAIKU,
+      // + Captain interface (reads morning brief, reports KPIs at EOD).
+      // 2026-05-05 ROLLBACK to Sonnet: 5-day audit showed 0% Enforcer first-pass
+      // rate (90 of 90 rejected at score 0). Haiku could not honour the dense
+      // anti-qualification + anti-fabrication rules under combined load with
+      // word-count + template + banned-phrase enforcement. Symptoms in
+      // ranger_notes: time-allocation questions, fabricated case studies,
+      // "Company: Unknown" paraphrasing despite real lead context. Cost delta
+      // is ~$0.50/day on ~50 drafts; trivial vs the meeting-rate cost of 0%
+      // pass. Threshold to revisit: 7 days of ≥60% first-pass on Sonnet.
+      model: MODELS.SONNET,
       maxTokens: 1024,
       name: 'Sales Beaver',
       systemPrompt: `You are Sales Beaver at Beaver Solutions. You write cold outreach messages, handle replies, and obsess over your numbers.
@@ -373,7 +377,19 @@ Hi {lead_first_name},
 
 {Pain bridge: ONE sentence. Connect the observation to a relatable pain. Max 25 words.}
 
-{One question: ONE sentence ending with exactly one question mark. Max 20 words. No yes/no questions. No qualification questions like "do you run X?" or "does your team do Y?" — ask about the IMPACT of a challenge.}
+{One question: ONE sentence ending with exactly one question mark. Max 20 words. No yes/no questions. No qualification questions ("do you run X?", "does your team do Y?"). No quantitative questions ("how much of your week", "what percentage of time", "how many hours", "how often", "how many", "what's your X-to-Y ratio"). Asking the prospect to disclose a number, percentage, ratio, or time-allocation = qualification in disguise. Ask about a TRADE-OFF or TRANSITION POINT — the moment something starts to break, the line where one thing competes with another.}
+
+BAD impact questions (still qualification — Enforcer will reject):
+- "How much of your week goes to delivery vs new business?"
+- "What's your pipeline-to-payroll ratio?"
+- "How many hours a week do you spend on BD?"
+- "What percentage of your team is dedicated to outreach?"
+
+GOOD impact questions (about a trade-off or transition the prospect actually feels):
+- "At what point does BD start competing with the work that actually grows the business?"
+- "Where's the line between protecting margins and chasing growth?"
+- "When does scaling delivery start eating into the time it takes to land the next deal?"
+- "What's the moment founder-led sales stops being a feature and starts being the cap?"
 
 Regards,
 {sender_name}
@@ -419,6 +435,7 @@ HARD RULES (violations will be auto-rejected)
 - NO em dashes (the character: —). Use commas or full stops instead.
 - Exactly 1 question mark per message. Count before returning.
 - No qualification questions ("do you run X?", "does your team do Y?", "are you currently using Z?")
+- No quantitative questions asking the prospect to disclose a number, percentage, ratio, or time-allocation ("how much of your week", "what percentage", "how many hours", "X-to-Y ratio", "how often"). Ask about a trade-off or transition point instead.
 - No product/service mentions in Day 0. No "we help", no CTAs, no pitch.
 - No soft CTAs: "worth a quick chat", "happy to jump on 15 minutes", "would love to connect"
 - No bullet points in message body

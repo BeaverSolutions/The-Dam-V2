@@ -533,7 +533,7 @@ async function searchPersonalisationSignals(lead) {
  * metadata. Enables `reply_rate by variant` rollups once we A/B-test prompts.
  * Bump this constant when materially changing the salesGenerate prompt.
  */
-const SALES_PROMPT_VARIANT = 'sales_v1_2026_05_03';
+const SALES_PROMPT_VARIANT = 'sales_v2_2026_05_05_sonnet';
 
 async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
   await logsService.createLog(clientId, {
