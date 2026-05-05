@@ -2572,5 +2572,101 @@ router.post('/vibe-prospecting/test', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── POST /api/autonomous/backfill-hunter-emails ─────────
+ * One-shot bulk Hunter enrichment for leads in the prospecting pool
+ * with no email. Calls existing enrichLeadsWithHunter helper.
+ *
+ * Auth: x-internal-key
+ * Body: { client_id (uuid), limit?: 200, min_confidence?: 70 }
+ * Returns: { picked, enriched, verified, skipped, errors, reasons }
+ *
+ * Idempotent: only touches rows where email IS NULL or '' (untouched leads).
+ */
+router.post('/backfill-hunter-emails', requireInternalKey, async (req, res) => {
+  const { client_id } = req.body || {};
+  const limit = Math.min(parseInt(req.body?.limit, 10) || 200, 500);
+  const minConfidence = parseInt(req.body?.min_confidence, 10) || 70;
+
+  if (!client_id) {
+    return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+  }
+
+  try {
+    const hunter = require('../services/hunter');
+    const apiKey = await hunter.getApiKey(client_id);
+    if (!apiKey) {
+      return res.status(412).json({ error: 'Hunter API key not configured for this client', code: 'NO_HUNTER_KEY' });
+    }
+
+    const { rows: leads } = await pool.query(
+      `SELECT id, name, company
+         FROM leads
+        WHERE client_id = $1
+          AND deleted_at IS NULL
+          AND pipeline_stage = 'prospecting'
+          AND status = 'new'
+          AND (email IS NULL OR email = '')
+          AND company IS NOT NULL AND company <> ''
+          AND name    IS NOT NULL AND name    <> ''
+        ORDER BY created_at DESC
+        LIMIT $2`,
+      [client_id, limit]
+    );
+
+    const counts = { picked: leads.length, enriched: 0, verified: 0, skipped: 0, errors: 0 };
+    const reasons = {};
+
+    for (const lead of leads) {
+      try {
+        const parts = (lead.name || '').trim().split(/\s+/);
+        const firstName = parts[0] || '';
+        const lastName  = parts.slice(1).join(' ') || '';
+        if (!firstName || !lastName) {
+          counts.skipped++;
+          reasons.name_unsplittable = (reasons.name_unsplittable || 0) + 1;
+          continue;
+        }
+
+        const result = await hunter.findEmail(client_id, { firstName, lastName, company: lead.company });
+        if (!result?.email) {
+          counts.skipped++;
+          reasons.no_email_found = (reasons.no_email_found || 0) + 1;
+          continue;
+        }
+        if ((result.confidence || 0) < minConfidence) {
+          counts.skipped++;
+          const k = `low_confidence_${result.confidence}`;
+          reasons[k] = (reasons[k] || 0) + 1;
+          continue;
+        }
+
+        await pool.query(
+          `UPDATE leads
+              SET email          = $1,
+                  email_verified = $2,
+                  email_source   = 'hunter_backfill',
+                  updated_at     = NOW()
+            WHERE id = $3 AND client_id = $4
+              AND (email IS NULL OR email = '')`,
+          [result.email, !!result.verified, lead.id, client_id]
+        );
+        counts.enriched++;
+        if (result.verified) counts.verified++;
+      } catch (err) {
+        counts.errors++;
+        logger.warn({ msg: '[backfill-hunter] lead error', leadId: lead.id, err: err.message });
+      }
+      // gentle pacing — Hunter has a per-second rate limit
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    logger.info({ msg: '[backfill-hunter] complete', client_id, ...counts });
+    return res.json({ ok: true, ...counts, skip_reasons: reasons });
+  } catch (err) {
+    logger.error({ msg: '[backfill-hunter] failed', err: err.message, stack: err.stack?.split('\n').slice(0, 4) });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 module.exports = router;
 module.exports.runAutonomousKickoff = runAutonomousKickoff;
