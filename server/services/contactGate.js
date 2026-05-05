@@ -55,16 +55,17 @@ async function tryPersistSourcedLead(clientId, candidate, options = {}) {
     String(candidate.email).trim() !== '' &&
     candidate.email !== 'unknown@example.com';
 
-  const emailVerified =
-    candidate.email_verified === true ||
-    candidate.email_source === 'hunter' ||
-    candidate.email_source === 'hunter_backfill' ||
-    candidate.email_source === 'apollo';
+  // Tier A REQUIRES email_verified=true (SMTP-verified by Hunter or other
+  // provider). Pattern-inferred emails (Hunter findEmail with verified=false)
+  // bounce ~10% of the time and damage sender reputation — they belong in
+  // Tier B until SMTP-verifiable. The 2026-05-05 validation kickoff caught
+  // 14 such leads in Tier A producing blocked_no_email; gate tightened.
+  const emailVerified = candidate.email_verified === true;
 
   const hasLinkedin = !!(candidate.linkedin_url && String(candidate.linkedin_url).trim());
   const score = Number(candidate.score) || 0;
 
-  // Tier A — verified email at sourcing.
+  // Tier A — SMTP-verified email at sourcing.
   if (hasUsableEmail && emailVerified) {
     return { passed: true, tier: 'A', missReason: null };
   }
