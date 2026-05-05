@@ -334,30 +334,32 @@ async function saveSignalLeads(clientId, leads) {
       }
     }
 
-    // Contact gate (MJ direction 2026-05-03): every sourced lead must have BOTH
-    // email AND linkedin_url. Signals are pre-qualified by intent, but signal
-    // pre-qualification doesn't replace the contactability gate — even a
-    // perfect P1 lead is useless if we can't reach them.
+    // Tiered contact gate (migration 061, 2026-05-05): assigns A/B tier;
+    // C rejected and logged. Signals are pre-qualified by intent but signal
+    // alone doesn't grant Tier A — channel-presence still required.
     const gateResult = await contactGate.tryPersistSourcedLead(clientId, lead, {
       sourceStrategy: 'signal_hunt',
       allowLinkedinOnly: !!lead.linkedin_only_override,
     });
-    if (gateResult.missed) {
-      console.log(`[signalHunt] Gated out ${lead.name} — reason: ${gateResult.reason}`);
+    if (!gateResult.passed) {
+      console.log(`[signalHunt] Tier C ${lead.name} — reason: ${gateResult.missReason}`);
       continue;
     }
+    const leadTier = gateResult.tier;
 
     try {
       const res = await pool.query(
         `INSERT INTO leads (client_id, name, email, company, title, signal_tier, score, source,
-                            pipeline_stage, status, email_verified, email_source, linkedin_url, metadata)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'signal_hunt','prospecting','new',$8,$9,$10,$11)
+                            pipeline_stage, status, email_verified, email_source, linkedin_url, metadata,
+                            lead_tier, tiered_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'signal_hunt','prospecting','new',$8,$9,$10,$11,$12,NOW())
          RETURNING *`,
         [
           clientId, lead.name, lead.email || null, lead.company, lead.title || null,
           lead.signal_tier, lead.score,
           lead.email_verified, lead.email_source, lead.linkedin_url,
           JSON.stringify(lead.metadata || {}),
+          leadTier,
         ]
       );
       if (res.rows.length > 0) saved.push(res.rows[0]);

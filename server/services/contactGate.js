@@ -1,96 +1,138 @@
 'use strict';
 
 /**
- * Contact gate — enforces "every sourced lead must have BOTH email AND
- * linkedin_url before saving" per MJ direction 2026-05-03.
+ * Contact gate — tiered sourcing classification (migration 061, 2026-05-05).
+ *
+ * Replaces the previous "BOTH email AND linkedin_url required at sourcing"
+ * gate, which combined with our SMB ICP and thin Hunter coverage was
+ * starving the pool (~95% rejection at sourcing in synthetic testing).
+ *
+ * The new gate enforces ICP-quality, not channel-presence:
+ *
+ *   Tier A — drafted-ready
+ *     email_verified at sourcing time (Hunter inline returned valid)
+ *
+ *   Tier B — enrichment queue (held for retry, NOT drafted yet)
+ *     no verified email + linkedin_url present + score >= 85 (P1 fit)
+ *     The Tier B retry worker (server/index.js cron) will run Hunter
+ *     up to 3x over 14 days. Success → promote to A. Exhaustion → demote
+ *     to C.
+ *
+ *   Tier C — rejected at sourcing
+ *     no verified email AND (no linkedin_url OR score < 85)
+ *     Logged to research_misses for sourcing-strategy tuning.
  *
  * Sourced leads (Research Beaver, Signal Hunt, DB Builder) MUST go through
- * tryPersistSourcedLead(). Manually-created leads (captain tools, manual
- * import, MJ override) skip the gate by calling createLead directly.
+ * tryPersistSourcedLead(). Manually-created leads (Captain tools, manual
+ * import, MJ override) skip the gate by calling createLead directly with
+ * lead_tier = 'A'.
  *
- * Failures land in research_misses so we can tune sourcing strategies over
- * time. After 3-4 weeks of data, deprioritize strategies with high no_email
- * rates.
+ * Caller contract: gate returns { passed, tier, missReason }. If passed,
+ * caller proceeds with its own INSERT and writes lead_tier = tier on the
+ * row. If not passed, caller skips the lead.
  */
 
 const pool = require('../db/pool');
 
+const TIER_B_SCORE_THRESHOLD = 85;
+
 /**
- * Gate + persist a sourced lead. Returns the inserted lead row or null
- * if the gate rejected. Caller decides what to do with null (usually:
- * just skip and continue).
+ * Gate + classify a sourced lead.
  *
  * @param {string} clientId
- * @param {object} candidate — must include name; should include email, linkedin_url, company, title
+ * @param {object} candidate — must include name; should include email, email_verified, linkedin_url, company, title, score
  * @param {object} [options]
- * @param {string} [options.sourceStrategy] — for research_misses attribution
- * @param {string} [options.queryUsed]      — query string that produced this candidate
- * @param {boolean} [options.allowLinkedinOnly=false] — manual override for genuinely valuable LinkedIn-only leads
- * @returns {Promise<{inserted: object|null, missed: boolean, reason: string|null}>}
+ * @param {string} [options.sourceStrategy]
+ * @param {string} [options.queryUsed]
+ * @param {boolean} [options.allowLinkedinOnly=false] — manual override; if true, linkedin-only leads pass into Tier B regardless of score
+ * @returns {Promise<{passed: boolean, tier: 'A'|'B'|null, missReason: string|null}>}
  */
 async function tryPersistSourcedLead(clientId, candidate, options = {}) {
   const { sourceStrategy = null, queryUsed = null, allowLinkedinOnly = false } = options;
 
-  const hasEmail    = !!(candidate.email && String(candidate.email).trim() && candidate.email !== 'unknown@example.com');
+  const hasUsableEmail =
+    !!candidate.email &&
+    String(candidate.email).trim() !== '' &&
+    candidate.email !== 'unknown@example.com';
+
+  const emailVerified =
+    candidate.email_verified === true ||
+    candidate.email_source === 'hunter' ||
+    candidate.email_source === 'hunter_backfill' ||
+    candidate.email_source === 'apollo';
+
   const hasLinkedin = !!(candidate.linkedin_url && String(candidate.linkedin_url).trim());
+  const score = Number(candidate.score) || 0;
 
-  let missReason = null;
-  if (!hasEmail && !hasLinkedin) missReason = 'neither';
-  else if (!hasEmail && !allowLinkedinOnly) missReason = 'no_email';
-  else if (!hasLinkedin) missReason = 'no_linkedin';
-
-  if (missReason) {
-    await pool.query(
-      `INSERT INTO research_misses
-         (client_id, candidate_name, candidate_company, candidate_title,
-          candidate_linkedin, candidate_email, miss_reason, source_strategy, query_used, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
-      [
-        clientId,
-        candidate.name || null,
-        candidate.company || null,
-        candidate.title || null,
-        candidate.linkedin_url || null,
-        candidate.email || null,
-        missReason,
-        sourceStrategy,
-        queryUsed,
-        JSON.stringify(candidate.metadata || {}),
-      ]
-    ).catch(err => {
-      // Logging the miss is best-effort; don't let failure here block the caller.
-      console.warn('[contactGate] research_miss insert failed:', err.message);
-    });
-    return { inserted: null, missed: true, reason: missReason };
+  // Tier A — verified email at sourcing.
+  if (hasUsableEmail && emailVerified) {
+    return { passed: true, tier: 'A', missReason: null };
   }
 
-  // Pass — let caller do the actual insert with their existing INSERT statement.
-  // tryPersistSourcedLead is a GATE, not the inserter, so each caller keeps
-  // its own column list / metadata shape.
-  return { inserted: null, missed: false, reason: null };
+  // Tier B — high-fit lead with LinkedIn channel; retry enrichment.
+  // Manual override (allowLinkedinOnly) lets through any score.
+  if (hasLinkedin && (score >= TIER_B_SCORE_THRESHOLD || allowLinkedinOnly)) {
+    return { passed: true, tier: 'B', missReason: null };
+  }
+
+  // Tier C — rejected at sourcing.
+  let missReason;
+  if (!hasUsableEmail && !hasLinkedin) {
+    missReason = 'no_channels';
+  } else if (!hasUsableEmail && hasLinkedin && score < TIER_B_SCORE_THRESHOLD) {
+    missReason = `linkedin_only_below_p1_score_${score}`;
+  } else if (hasUsableEmail && !emailVerified && !hasLinkedin) {
+    missReason = 'unverified_email_no_linkedin_fallback';
+  } else {
+    missReason = 'unclassified';
+  }
+
+  await pool.query(
+    `INSERT INTO research_misses
+       (client_id, candidate_name, candidate_company, candidate_title,
+        candidate_linkedin, candidate_email, miss_reason, source_strategy, query_used, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
+    [
+      clientId,
+      candidate.name || null,
+      candidate.company || null,
+      candidate.title || null,
+      candidate.linkedin_url || null,
+      candidate.email || null,
+      missReason,
+      sourceStrategy,
+      queryUsed,
+      JSON.stringify({ ...(candidate.metadata || {}), score }),
+    ]
+  ).catch(err => {
+    console.warn('[contactGate] research_miss insert failed:', err.message);
+  });
+
+  return { passed: false, tier: null, missReason };
 }
 
 /**
- * Bulk variant. Returns { passed: candidate[], missed: candidate[] }.
- * Caller iterates passed[] and inserts using its own INSERT statement.
+ * Bulk variant. Returns { passed: [{candidate, tier}], missed: [{candidate, reason}] }.
+ * Caller iterates passed[] and inserts using its own INSERT statement,
+ * writing lead_tier = tier on each row.
  */
 async function gateBatch(clientId, candidates, options = {}) {
   const passed = [];
   const missed = [];
   for (const c of candidates) {
     const result = await tryPersistSourcedLead(clientId, c, options);
-    if (result.missed) {
-      missed.push({ candidate: c, reason: result.reason });
+    if (result.passed) {
+      passed.push({ candidate: c, tier: result.tier });
     } else {
-      passed.push(c);
+      missed.push({ candidate: c, reason: result.missReason });
     }
   }
   return { passed, missed };
 }
 
 /**
- * "miss rate by strategy over the last N days" — used by Captain when
- * deciding which sourcing strategies to keep.
+ * "miss rate by strategy/reason over the last N days" — used by Captain
+ * when deciding which sourcing strategies to keep or kill.
  */
 async function missRateBy(clientId, dimension = 'source_strategy', days = 14) {
   const allowed = new Set(['source_strategy', 'miss_reason']);
@@ -106,4 +148,9 @@ async function missRateBy(clientId, dimension = 'source_strategy', days = 14) {
   return rows;
 }
 
-module.exports = { tryPersistSourcedLead, gateBatch, missRateBy };
+module.exports = {
+  tryPersistSourcedLead,
+  gateBatch,
+  missRateBy,
+  TIER_B_SCORE_THRESHOLD,
+};

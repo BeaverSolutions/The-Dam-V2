@@ -2500,20 +2500,22 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     const { sanitiseLinkedInUrl } = require('../utils/validateLinkedIn');
     lead.linkedin_url = sanitiseLinkedInUrl(lead.linkedin_url, `research_beaver ${lead.name}`);
 
-    // Contact gate (MJ direction 2026-05-03): every sourced lead MUST have
-    // BOTH email AND linkedin_url. Misses logged to research_misses for
-    // sourcing-strategy tuning. Manual override via lead.linkedin_only_override.
+    // Tiered contact gate (migration 061, 2026-05-05): assigns A/B tier
+    // based on email-verified vs P1-score-with-linkedin. Tier C rejected.
+    // Misses logged to research_misses for sourcing-strategy tuning.
+    // Manual override via lead.linkedin_only_override.
     const contactGate = require('./contactGate');
     const gateResult = await contactGate.tryPersistSourcedLead(clientId, lead, {
       sourceStrategy: 'research_beaver',
       queryUsed: diagnostics.search_query,
       allowLinkedinOnly: !!lead.linkedin_only_override,
     });
-    if (gateResult.missed) {
-      console.warn(`[save] Gated out ${lead.name} at ${lead.company} — reason: ${gateResult.reason}`);
-      diagnostics.reason = (diagnostics.reason || '') + ` Gated ${lead.name}: ${gateResult.reason}.`;
+    if (!gateResult.passed) {
+      console.warn(`[save] Tier C ${lead.name} at ${lead.company} — reason: ${gateResult.missReason}`);
+      diagnostics.reason = (diagnostics.reason || '') + ` Tier C ${lead.name}: ${gateResult.missReason}.`;
       continue;
     }
+    const leadTier = gateResult.tier;
 
     try {
       const meta = lead.metadata || {};
@@ -2538,12 +2540,14 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       if (lead.metadata?.verified !== undefined) meta.verified = lead.metadata.verified;
 
       const res = await pool.query(
-        // ICP+channel patches per MJ direction 2026-04-29
+        // ICP+channel patches per MJ direction 2026-04-29 + tiered sourcing migration 061 (2026-05-05).
         // signal_tier resolved from score+verified per spec; country lifted from Haiku verification.
+        // lead_tier ('A'|'B') comes from contactGate.tryPersistSourcedLead — written here with tiered_at.
         `INSERT INTO leads (client_id, name, email, company, title, signal_tier, score, source,
                             pipeline_stage, status, email_verified, email_source,
-                            apollo_enriched, apollo_person_id, apollo_org_id, linkedin_url, country, metadata)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11,$12,$13,$14,$15)
+                            apollo_enriched, apollo_person_id, apollo_org_id, linkedin_url, country, metadata,
+                            lead_tier, tiered_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
          ON CONFLICT (client_id, linkedin_url) WHERE linkedin_url IS NOT NULL AND deleted_at IS NULL
          DO NOTHING
          RETURNING *`,
@@ -2563,6 +2567,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           lead.linkedin_url || null,
           lead.country || lead.metadata?.country || lead.verification?.country || lead.verification?.haikuResult?.country || null,
           JSON.stringify({ short_description: lead.short_description || '', ...meta }),
+          leadTier,
         ]
       );
       if (res.rows.length > 0) {

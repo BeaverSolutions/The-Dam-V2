@@ -267,24 +267,26 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
     meta.outreach_route = lead.email ? 'email' : 'linkedin';
   }
 
-  // Contact gate (MJ direction 2026-05-03): every sourced lead must have BOTH
-  // email AND linkedin_url. Misses get logged to research_misses for tuning,
-  // but the lead is NOT inserted. Manual override via metadata.linkedin_only_override.
+  // Tiered contact gate (migration 061, 2026-05-05): assigns A/B tier;
+  // C rejected and logged to research_misses. Manual override via
+  // lead.linkedin_only_override forces Tier B regardless of score.
   const contactGate = require('./contactGate');
   const gateResult = await contactGate.tryPersistSourcedLead(clientId, lead, {
     sourceStrategy: 'db_builder',
     queryUsed: searchQuery,
     allowLinkedinOnly: !!lead.linkedin_only_override,
   });
-  if (gateResult.missed) {
+  if (!gateResult.passed) {
     return null;
   }
+  const leadTier = gateResult.tier;
 
   try {
     const res = await pool.query(
       `INSERT INTO leads (client_id, name, email, company, title, signal_tier, score, source,
-                          pipeline_stage, status, email_verified, email_source, linkedin_url, metadata)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11)
+                          pipeline_stage, status, email_verified, email_source, linkedin_url, metadata,
+                          lead_tier, tiered_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11,$12,NOW())
        ON CONFLICT (client_id, linkedin_url) WHERE linkedin_url IS NOT NULL AND deleted_at IS NULL
        DO NOTHING
        RETURNING id`,
@@ -300,6 +302,7 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
         lead.email_source || null,
         lead.linkedin_url || null,
         JSON.stringify(meta),
+        leadTier,
       ]
     );
     return res.rows[0]?.id || null;
