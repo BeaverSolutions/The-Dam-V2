@@ -1325,8 +1325,8 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
          COUNT(*) FILTER (WHERE status = 'approved'         AND DATE(created_at) = $2)                     AS approved_awaiting_send,
          COUNT(*) FILTER (WHERE channel = 'email'    AND status = 'sent' AND DATE(COALESCE(sent_at, created_at)) = $2) AS email_sent_today,
          COUNT(*) FILTER (WHERE channel = 'linkedin' AND status = 'sent' AND DATE(COALESCE(sent_at, created_at)) = $2) AS linkedin_sent_today,
-         COUNT(*) FILTER (WHERE channel = 'email'    AND DATE(created_at) = $2) AS email_drafted_today,
-         COUNT(*) FILTER (WHERE channel = 'linkedin' AND DATE(created_at) = $2) AS linkedin_drafted_today
+         COUNT(*) FILTER (WHERE channel = 'email'    AND DATE(created_at) = $2 AND status NOT IN ('ranger_rejected','blocked_no_email','deleted')) AS email_drafted_today,
+         COUNT(*) FILTER (WHERE channel = 'linkedin' AND DATE(created_at) = $2 AND status NOT IN ('ranger_rejected','blocked_no_email','deleted')) AS linkedin_drafted_today
        FROM messages WHERE client_id = $1`,
       [clientId, today]
     );
