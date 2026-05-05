@@ -49,10 +49,12 @@ async function main() {
   // covers AUTONOMOUS_ENABLED_CLIENTS which is currently beaver-solutions only.
   await tg(`<b>Manual Kickoff Triggered</b>\n\nTenant(s): <code>${targets.map(t => t.slug).join(', ')}</code>\nWatch for "Daily Kickoff Started" + "Completed" alerts.`);
 
-  const triggerRes = await fetch(`${API_URL}/api/autonomous/kickoff-all`, {
+  // Manual triggers always override the 60-min dedupe gate — that gate exists
+  // to stop runaway cron loops, not to block intentional validation runs.
+  const triggerRes = await fetch(`${API_URL}/api/autonomous/kickoff-all?force=1`, {
     method: 'POST',
     headers: { 'x-internal-key': API_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ force: true }),
   });
 
   const triggerJson = await triggerRes.json().catch(() => ({}));
