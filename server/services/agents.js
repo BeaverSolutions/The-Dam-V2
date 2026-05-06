@@ -39,10 +39,18 @@ const ICP_SENIOR_QUALIFIER = /\b(senior|head|chief|principal|lead\s+(of|the)|man
 
 // Companies that must be hard-rejected even if title looks senior — too big to sell to,
 // or not buyers (industry bodies, universities, government).
-const ICP_LARGE_GLOBAL_AGENCIES = /\b(wpp|publicis|omnicom|interpublic|\bipg\b|\bbbdo\b|ogilvy|mccann|\bvml\b|dentsu|havas|grey\s+group|leo\s+burnett|saatchi|\bddb\b|tbwa|\bjwt\b|wunderman|edelman|\bweber\b|burson|fleishman|hill\+knowlton)\b/i;
-const ICP_ENTERPRISE_BRANDS = /\b(deloitte|mckinsey|\bpwc\b|\bkpmg\b|\bey\b|accenture|boston\s+consulting|\bbain\b|shell|petronas|tenaga|maybank|\bcimb\b|\brhb\b|public\s+bank|hong\s+leong|sime\s+darby|axiata|celcomdigi|celcom|\bdigi\b|\bmaxis\b|\bastro\b|unilever|nestle|nestlé|procter|p&g|samsung|\blg\b|sony|panasonic|google|\bmeta\b|amazon|microsoft|apple|\bibm\b|huawei|xiaomi|canon|honda|toyota|mastercard|visa\b)\b/i;
+//
+// 2026-05-06 update: expanded MNC blocklist after pool audit found dentsu Malaysia,
+// IPG Mediabrands, Leo Burnett, GroupM, AirAsia subsidiaries leaking through. Added
+// the WPP / IPG / Publicis / Dentsu / Omnicom network sub-brands and MY-listed MNCs.
+const ICP_LARGE_GLOBAL_AGENCIES = /\b(wpp|publicis|omnicom|interpublic|\bipg\b|ipg\s+mediabrands|mediabrands|\bbbdo\b|ogilvy|mccann|\bvml\b|dentsu|dentsu\s+creative|carat|iprospect|isobar|havas|grey\s+group|leo\s+burnett|saatchi|\bddb\b|tbwa|\bjwt\b|wunderman|edelman|\bweber\b|burson|fleishman|hill\+knowlton|groupm|mindshare|wavemaker|mediacom|essence|\bmsl\b|spark\s+foundry|zenith|starcom|digitas|\bmrm\b|\binitiative\b|\bub\b|ipg\s+health|huge|r\/ga|akqa|\bsid\s+lee\b)\b/i;
+const ICP_ENTERPRISE_BRANDS = /\b(deloitte|mckinsey|\bpwc\b|\bkpmg\b|\bey\b|accenture|boston\s+consulting|\bbain\b|shell|petronas|tenaga|maybank|\bcimb\b|\brhb\b|public\s+bank|hong\s+leong|sime\s+darby|axiata|celcomdigi|celcom|\bdigi\b|\bmaxis\b|\bastro\b|airasia|air\s+asia|grab|sea\s+limited|shopee|lazada|capitaland|ihh\s+healthcare|\biskandar\b|unilever|nestle|nestlé|procter|p&g|samsung|\blg\b|sony|panasonic|google|\bmeta\b|amazon|microsoft|apple|\bibm\b|huawei|xiaomi|canon|honda|toyota|mastercard|visa\b)\b/i;
 const ICP_INDUSTRY_BODIES = /\b(women\s+in\s+pr|female\s+founders|chamber\s+of|chambers\s+of|association|trade\s+union|alliance|federation|society\s+of|members?'?\s*(network|club|association)|institute\s+of|board\s+of|council\s+of)\b/i;
-const ICP_GOV_NGO_EDU = /\b(ministry|jabatan|kementerian|government|\bpolis\b|police|army|military|ngo|non[\s-]?profit|charity|foundation|university|universiti|college|polytechnic|sekolah|school|\buitm\b|\bukm\b|training\s+(institute|provider|academy))\b/i;
+// 2026-05-06: removed `training\s+(institute|provider|academy)` from this regex.
+// Per MJ direction (Captain ICP update), B2B corporate/professional training providers
+// are now the PRIMARY ICP. Rejecting them here was fighting the new ICP. Universities,
+// colleges, polytechnics and schools (academic) remain rejected.
+const ICP_GOV_NGO_EDU = /\b(ministry|jabatan|kementerian|government|\bpolis\b|police|army|military|ngo|non[\s-]?profit|charity|foundation|university|universiti|college|polytechnic|sekolah|school|\buitm\b|\bukm\b)\b/i;
 const ICP_FREELANCE = /\b(freelance|freelancer|self[\s-]?employed|independent(\s+consultant)?|solo(\s+consultant)?|individual)\b/i;
 
 // Per-tenant sender identity. If client_id is missing, fallback to 'The Team'.
@@ -3696,6 +3704,8 @@ module.exports = {
   processExistingLeadsPipeline,  // NEW: exposed for Captain Beaver create_lead tool + POST /api/myclaw/leads
   autoFixMessage,                // NEW: exposed for Captain Beaver draft flow
   brandSafetyCheck,              // NEW: exposed for Captain Beaver draft flow
+  applyIcpV2Filter,              // 2026-05-06: exposed for kickoff pool re-validation against legacy MNC junk
+  selectChannel,                 // 2026-05-06: exposed for callers that want to test channel routing without a full draft
   // Win/Loss capture
   captureWinLoss,
   // Code-level Enforcer gates

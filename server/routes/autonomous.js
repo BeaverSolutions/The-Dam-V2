@@ -1461,19 +1461,59 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
       );
 
       if (poolLeads.length >= Math.min(draftSize, 5)) {
-        console.log(`[Autonomous] DB pool has ${poolLeads.length} leads — using pool instead of cold research`);
-        await logAction(clientId, 'director', 'db_pool_draw', 'system', null, {
-          batch, pool_size: poolLeads.length, draft_size: draftSize,
-        });
+        // 2026-05-06: Re-validate legacy pool leads against current applyIcpV2Filter.
+        // Migration 061's permissive backfill grandfathered every linkedin_url lead to
+        // Tier B without re-running the gate, so legacy MNC junk (dentsu, IPG Mediabrands,
+        // Leo Burnett, GroupM, AirAsia, etc.) leaks straight to draft. Audit each pool lead
+        // here; soft-reject failures so they exit the pool permanently instead of looping
+        // through draft → ranger_rejected every kickoff.
+        const { applyIcpV2Filter } = agentsService;
+        const { rows: poolLeadFull } = await pool.query(
+          `SELECT id, name, company, title, country, score, metadata FROM leads
+           WHERE id = ANY($1::uuid[])`,
+          [poolLeads.map(l => l.id)]
+        );
+        const passingIds = [];
+        const auditRejects = [];
+        for (const lead of poolLeadFull) {
+          const v2 = applyIcpV2Filter(lead);
+          if (v2.pass) {
+            passingIds.push(lead.id);
+          } else {
+            auditRejects.push({ id: lead.id, status: v2.status, reason: v2.reason, name: lead.name, company: lead.company });
+          }
+        }
+        if (auditRejects.length > 0) {
+          console.warn(`[Autonomous] Pool audit rejected ${auditRejects.length}/${poolLeadFull.length} leads against current ICP gate`);
+          await logAction(clientId, 'director', 'pool_audit_rejected', 'system', null, {
+            batch, rejected: auditRejects.length, total: poolLeadFull.length, sample: auditRejects.slice(0, 5),
+          });
+          // Soft-delete so they exit the pool. Status carries the gate's reason for audit queries.
+          await pool.query(
+            `UPDATE leads SET status = 'rejected_legacy_audit', deleted_at = NOW(),
+                              metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('legacy_audit_reason', $2::text)
+             WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
+            [auditRejects.map(r => r.id), 'pool_audit_2026_05_06']
+          ).catch(err => console.warn(`[Autonomous] Soft-delete of audit rejects failed:`, err.message));
+        }
 
-        await directorExecute(clientId, {
-          plan_id: uuidv4(),
-          command: `DB-POOL BATCH: Process ${poolLeads.length} pre-researched leads from the lead pool. These are already verified and saved. Draft outreach using any signal/angle data in their metadata. Do NOT re-run research.`,
-          batchIndex: batch - 1,
-          limit: draftSize,
-          use_existing_leads: poolLeads.map(l => l.id),
-        });
-        usedDbPool = true;
+        if (passingIds.length >= Math.min(draftSize, 5)) {
+          console.log(`[Autonomous] DB pool has ${passingIds.length} ICP-passing leads (after audit) — using pool instead of cold research`);
+          await logAction(clientId, 'director', 'db_pool_draw', 'system', null, {
+            batch, pool_size: passingIds.length, draft_size: draftSize, audited_out: auditRejects.length,
+          });
+
+          await directorExecute(clientId, {
+            plan_id: uuidv4(),
+            command: `DB-POOL BATCH: Process ${passingIds.length} pre-researched leads from the lead pool. These are already verified and saved. Draft outreach using any signal/angle data in their metadata. Do NOT re-run research.`,
+            batchIndex: batch - 1,
+            limit: draftSize,
+            use_existing_leads: passingIds,
+          });
+          usedDbPool = true;
+        } else {
+          console.warn(`[Autonomous] After ICP audit, pool dropped below threshold (${passingIds.length} passing). Falling back to cold research.`);
+        }
       }
     } catch (err) {
       console.warn(`[Autonomous] DB pool query failed, falling back to cold research:`, err.message);
