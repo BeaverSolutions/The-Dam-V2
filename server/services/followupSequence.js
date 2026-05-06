@@ -277,7 +277,22 @@ HARD RULES: No em dashes (—). Max 1 question mark. No bullets.`
 
 HARD RULES: No em dashes (—). Max 1 question mark. No bullets. No "Regards,".`;
 
+  // 2026-05-06 fix: explicit pre-gate constraint at the top of the prompt.
+  // The downstream cron pre-gate enforces wordCap=120 (FU) and questionCap=2.
+  // 174 historical drafts were silently skipped because Sales Beaver wrote 130+
+  // word emails or stacked 3+ questions. Stating the cap up front + repeating
+  // it as a hard rule prevents the regeneration loop.
+  // Retry path: if caller passed _retry_constraint, tighten the caps further.
+  const retryConstraint = lead?._retry_constraint;
+  const hardWordCap = retryConstraint?.wordCap ?? Math.min(config.maxWords, 110);
+  const hardQuestionCap = retryConstraint?.questionCap ?? 1;
+
   const prompt = `You are Sales Beaver writing Touch ${touchNumber} of 6 in a follow-up sequence on ${channel}.
+
+PRE-GATE CONSTRAINT (server rejects drafts that violate these — NON-NEGOTIABLE):
+- Body must be under ${hardWordCap} words. Count the words in your draft before returning.
+- Body must contain AT MOST ${hardQuestionCap} question mark. Zero or one. Never two.
+- No em dashes. No bullet points. No "checking in" / "just following up".
 
 LEAD:
 Name: ${lead.name}
@@ -292,6 +307,8 @@ TOUCH TYPE: ${config.type}
 INSTRUCTION: ${config.instruction}
 
 ${channelFormat}
+
+Before returning, verify: word count under ${hardWordCap}? Question marks ≤ ${hardQuestionCap}? If not, rewrite.
 
 Return JSON only:
 {"subject":${channel === 'email' ? '"..."' : 'null'},"body":"...","touch_number":${touchNumber}}`;

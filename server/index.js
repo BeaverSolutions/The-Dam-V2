@@ -333,21 +333,43 @@ async function start() {
                 );
                 const originalChannel = prevMessages[0]?.channel || 'email';
 
-                const draft = await draftFollowUp(fu, fu.touch_number, prevMessages);
+                let draft = await draftFollowUp(fu, fu.touch_number, prevMessages);
                 if (!draft?.body) { console.warn(`[followup-scheduler] No draft for lead ${fu.lead_id} touch ${fu.touch_number}`); continue; }
 
-                const cleanBody = draft.body.replace(/\s*\u2014\s*/g, ', ').replace(/\u2014/g, ' ');
+                let cleanBody = draft.body.replace(/\s*—\s*/g, ', ').replace(/—/g, ' ');
 
-                // Server-side hard gates — relaxed for follow-ups (touch >= 2)
-                const bodyText = cleanBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
-                const wordCount = bodyText.trim().split(/\s+/).length;
-                const questionCount = (cleanBody.match(/\?/g) || []).length;
+                // Server-side hard gates - relaxed for follow-ups (touch >= 2)
                 const wordCap = fu.touch_number >= 2 ? 120 : 80;
                 const questionCap = fu.touch_number >= 2 ? 2 : 1;
-                if ((originalChannel === 'email' && wordCount > wordCap) || questionCount > questionCap) {
-                  console.warn(`[followup-scheduler] pre-gate skip: touch=${fu.touch_number} lead=${fu.lead_id} words=${wordCount}/${wordCap} questions=${questionCount}/${questionCap}`);
-                  await pool.query(`UPDATE followup_queue SET status = 'skipped' WHERE id = $1`, [fu.id]);
-                  continue;
+
+                const gateStats = (body) => {
+                  const bt = body.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
+                  return { words: bt.trim().split(/\s+/).length, questions: (body.match(/\?/g) || []).length };
+                };
+                let { words: wordCount, questions: questionCount } = gateStats(cleanBody);
+
+                // 2026-05-06 fix: retry once with a tighter constraint before skipping.
+                // Historical: 174 follow-ups silently skipped on first-pass overflow.
+                // One regeneration attempt before falling back to skip.
+                const overCap = (originalChannel === 'email' && wordCount > wordCap) || questionCount > questionCap;
+                if (overCap) {
+                  console.warn(`[followup-scheduler] first-pass over-cap: touch=${fu.touch_number} lead=${fu.lead_id} words=${wordCount}/${wordCap} questions=${questionCount}/${questionCap} - retrying`);
+                  const retryDraft = await draftFollowUp(
+                    { ...fu, _retry_constraint: { wordCap: Math.max(40, wordCap - 30), questionCap: 1 } },
+                    fu.touch_number,
+                    prevMessages
+                  ).catch(() => null);
+                  if (retryDraft?.body) {
+                    draft = retryDraft;
+                    cleanBody = draft.body.replace(/\s*—\s*/g, ', ').replace(/—/g, ' ');
+                    ({ words: wordCount, questions: questionCount } = gateStats(cleanBody));
+                  }
+                  const stillOverCap = (originalChannel === 'email' && wordCount > wordCap) || questionCount > questionCap;
+                  if (stillOverCap) {
+                    console.warn(`[followup-scheduler] retry also over-cap, skipping: touch=${fu.touch_number} lead=${fu.lead_id} words=${wordCount}/${wordCap} questions=${questionCount}/${questionCap}`);
+                    await pool.query(`UPDATE followup_queue SET status = 'skipped' WHERE id = $1`, [fu.id]);
+                    continue;
+                  }
                 }
 
                 // Insert message + run Enforcer
