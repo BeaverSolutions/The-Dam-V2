@@ -1019,24 +1019,46 @@ async function start() {
 
         for (const msg of staleMessages) {
           try {
-            // Mark message as sent (Day 0) — presume acceptance
+            // Mark message as sent (Day 0) — presume acceptance.
+            // 2026-05-06: also stamp auto_sweep_graduated metadata so UI / audits
+            // can distinguish auto-sweep'd messages from real sends. The 'sent'
+            // status is required for the Day 2/5/10/18/30 follow-up sequence to
+            // schedule downstream — that piece must not change.
             await pool.query(
-              `UPDATE messages SET status = 'sent', sent_at = NOW(), ranger_notes = 'auto-sweep: LinkedIn auto-graduated to sent after 3 days (acceptance presumed)', updated_at = NOW()
+              `UPDATE messages
+                 SET status = 'sent',
+                     sent_at = NOW(),
+                     ranger_notes = 'auto-sweep: LinkedIn auto-graduated to sent after 3 days (acceptance presumed)',
+                     metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('auto_sweep_graduated', true, 'auto_sweep_at', NOW()::text),
+                     updated_at = NOW()
                WHERE id = $1 AND client_id = $2`,
               [msg.message_id, msg.client_id]
             );
 
-            // Resolve any pending approvals for this message
-            await pool.query(
-              `UPDATE approvals SET status = 'approved', notes = 'auto-sweep: LinkedIn auto-graduated', resolved_at = NOW()
-               WHERE message_id = $1 AND client_id = $2 AND status = 'pending'`,
-              [msg.message_id, msg.client_id]
-            ).catch(() => {});
+            // 2026-05-06 FIX: do NOT auto-resolve the linked approval.
+            // Previously this flipped approvals.status='pending' → 'approved' which
+            // removed the lead from the UI's "Awaiting Accept" tab (filter:
+            // approvals.status='pending' AND notes='linkedin_requested'). MJ then
+            // lost visibility of 51 leads in the last 14 days that were marked sent
+            // server-side but never actually accepted on LinkedIn (Chrome MCP couldn't
+            // operate the React UI on 2nd-degree leads, so invitations sat pending).
+            //
+            // New behaviour: auto-sweep still flips the message + schedules follow-ups,
+            // but the approval stays 'pending'. Real acceptance comes from either:
+            //   (a) MJ manually verifies via the Awaiting Accept UI button → approvals → 'approved'
+            //   (b) /linkedin-sync-replies detects a real reply on this lead → flips approval
+            //   (c) Eventual expiry cron (separate, not in this commit) for >14d stragglers
+            // The previous approvals.status='approved' UPDATE is removed intentionally.
 
-            // Move lead to contacted
+            // 2026-05-06: pipeline_stage stays 'outreach' (intermediate state) so the
+            // lead remains discoverable in awaiting-accept-style filters. Real
+            // verification (manual or reply-driven) advances pipeline_stage='contacted'.
+            // Keep first_contacted_at populated so historical analytics still work.
             if (msg.lead_id) {
               await pool.query(
-                `UPDATE leads SET pipeline_stage = 'contacted', first_contacted_at = COALESCE(first_contacted_at, NOW()), updated_at = NOW()
+                `UPDATE leads
+                   SET first_contacted_at = COALESCE(first_contacted_at, NOW()),
+                       updated_at = NOW()
                  WHERE id = $1 AND client_id = $2`,
                 [msg.lead_id, msg.client_id]
               );
