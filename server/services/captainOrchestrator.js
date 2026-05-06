@@ -985,6 +985,69 @@ async function escalateToMJ(clientId, decision) {
   return { ok: true, action: 'escalate_to_mj' };
 }
 
+/* ─── Phase 5.5b: Target-agent liveness check (2026-05-06) ────────────
+ *
+ * Honest orchestrator. If the target_agent of a directive hasn't logged
+ * activity recently, writing yet another directive is futile — it sits
+ * pending, expires, gets re-issued. Caller skips the directive AND fires
+ * a deduped escalateToMJ('<agent> offline') so MJ knows to act.
+ *
+ * Liveness signal = last log row from that agent in the last N hours.
+ * Returns { alive: bool, last_seen: Date|null, hours_since: number|null }.
+ */
+async function checkAgentLiveness(clientId, targetAgent, freshnessHours = 2) {
+  // Some target_agents are event-driven (kickoff, reply_handler, sales_beaver)
+  // and don't need a heartbeat — they fire when triggered. Skip the check for them.
+  const EVENT_DRIVEN = new Set(['kickoff', 'sales_beaver', 'reply_handler', 'enforcer_beaver']);
+  if (EVENT_DRIVEN.has(targetAgent)) return { alive: true, last_seen: null, hours_since: null, skipped: true };
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT MAX(created_at) AS last_seen
+       FROM logs
+       WHERE client_id = $1
+         AND (agent = $2 OR (agent = 'research_beaver' AND $2 = 'db_builder'))
+         AND created_at > NOW() - INTERVAL '24 hours'`,
+      [clientId, targetAgent]
+    );
+    const lastSeen = rows[0]?.last_seen;
+    if (!lastSeen) {
+      return { alive: false, last_seen: null, hours_since: null };
+    }
+    const hoursSince = (Date.now() - new Date(lastSeen).getTime()) / 3600000;
+    return {
+      alive: hoursSince <= freshnessHours,
+      last_seen: lastSeen,
+      hours_since: hoursSince,
+    };
+  } catch {
+    return { alive: true, last_seen: null, hours_since: null }; // fail-open — don't block sweep on a query error
+  }
+}
+
+/**
+ * Per-day deduped offline escalation. Captain writes ONE escalation per
+ * (client, target_agent, day) so the EOD brief shows the gap once, not
+ * every 30 min. Returns true if a new escalation was recorded.
+ */
+async function recordOfflineEscalation(clientId, targetAgent, hoursSince) {
+  const today = new Date().toISOString().slice(0, 10);
+  const key = `agent_offline_${targetAgent}_${today}`;
+  try {
+    const { rowCount } = await pool.query(
+      `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+       VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'journal')
+       ON CONFLICT (client_id, agent, key) DO NOTHING`,
+      [clientId, key, JSON.stringify({
+        target_agent: targetAgent,
+        hours_since_last_seen: hoursSince,
+        flagged_at: new Date().toISOString(),
+      })]
+    );
+    return rowCount > 0;
+  } catch { return false; }
+}
+
 /* ─── Phase 5.5: Directive re-push escalation helper ─────────────────
  *
  * When Captain issues a directive but the metric hasn't improved by the next
@@ -1294,20 +1357,35 @@ async function runDirectiveSweep(clientId) {
 
   if (emailDraftGap > 0 && cm.pool_email_ready < emailDraftGap) {
     // Pool can't satisfy the drafting need → tell DB Builder to source more email-ready leads.
-    // Bug fix 2026-05-06: was incorrectly targeting 'research_beaver' but dbBuilder.js reads
-    // directives addressed to 'db_builder'. research_beaver has no consumer for this type.
-    const needed = emailDraftGap - cm.pool_email_ready;
-    const emailEscSeverity = await getDirectiveEscalationSeverity(clientId, 'db_builder', 'source_more_email_leads', isLate ? 'critical' : 'high');
-    written.push(await directives.writeDirective(
-      clientId,
-      'db_builder',
-      'source_more_email_leads',
-      { needed_minimum: needed, by: 'today_eod', reason_kpi: { email_drafted: emailDraftedTowardTarget, email_target: cm.target_email_sent } },
-      {
-        reason: `Email at ${cm.email.sent}/${cm.target_email_sent} sent · pool email-ready ${cm.pool_email_ready} can't cover draft gap of ${emailDraftGap} · need ${needed} more email-ready leads`,
-        severity: emailEscSeverity,
+    // Phase 5.5b (2026-05-06): liveness gate. If db_builder hasn't logged activity in 2h,
+    // skip the directive and escalate to MJ instead — writing more directives to a dead
+    // agent is futile and pollutes the EOD landing report.
+    const liveness = await checkAgentLiveness(clientId, 'db_builder', 2);
+    if (!liveness.alive) {
+      const escalated = await recordOfflineEscalation(clientId, 'db_builder', liveness.hours_since);
+      if (escalated) {
+        await escalateToMJ(clientId, {
+          type: 'agent_offline',
+          target_agent: 'db_builder',
+          hours_since_last_seen: liveness.hours_since,
+          gap: `email pool ${cm.pool_email_ready} short by ${emailDraftGap - cm.pool_email_ready}`,
+          recommended: 'verify DB_BUILDER_ENABLED_CLIENTS env or fire run_campaign manually',
+        });
       }
-    ));
+    } else {
+      const needed = emailDraftGap - cm.pool_email_ready;
+      const emailEscSeverity = await getDirectiveEscalationSeverity(clientId, 'db_builder', 'source_more_email_leads', isLate ? 'critical' : 'high');
+      written.push(await directives.writeDirective(
+        clientId,
+        'db_builder',
+        'source_more_email_leads',
+        { needed_minimum: needed, by: 'today_eod', reason_kpi: { email_drafted: emailDraftedTowardTarget, email_target: cm.target_email_sent } },
+        {
+          reason: `Email at ${cm.email.sent}/${cm.target_email_sent} sent · pool email-ready ${cm.pool_email_ready} can't cover draft gap of ${emailDraftGap} · need ${needed} more email-ready leads`,
+          severity: emailEscSeverity,
+        }
+      ));
+    }
   }
 
   // ── 2. Kickoff: bias next batch toward the channel with the bigger gap ──
@@ -1350,18 +1428,33 @@ async function runDirectiveSweep(clientId) {
   // ── 4. DB Builder: target email-ready pool size, not raw pool ──
   const EMAIL_POOL_FLOOR = 30; // a day's worth of email-channel drafts
   if (cm.pool_email_ready < EMAIL_POOL_FLOOR) {
-    const rebuildBaseSeverity = cm.pool_email_ready === 0 ? 'high' : 'normal';
-    const rebuildEscSeverity = await getDirectiveEscalationSeverity(clientId, 'db_builder', 'rebuild_email_pool', rebuildBaseSeverity);
-    written.push(await directives.writeDirective(
-      clientId,
-      'db_builder',
-      'rebuild_email_pool',
-      { target_min: EMAIL_POOL_FLOOR, current: cm.pool_email_ready },
-      {
-        reason: `Email-ready pool at ${cm.pool_email_ready}/${EMAIL_POOL_FLOOR} — DB Builder must source email-discoverable leads`,
-        severity: rebuildEscSeverity,
+    // Phase 5.5b (2026-05-06): liveness gate before writing directive.
+    const liveness = await checkAgentLiveness(clientId, 'db_builder', 2);
+    if (!liveness.alive) {
+      const escalated = await recordOfflineEscalation(clientId, 'db_builder', liveness.hours_since);
+      if (escalated) {
+        await escalateToMJ(clientId, {
+          type: 'agent_offline',
+          target_agent: 'db_builder',
+          hours_since_last_seen: liveness.hours_since,
+          gap: `email-ready pool at ${cm.pool_email_ready}/${EMAIL_POOL_FLOOR}`,
+          recommended: 'verify DB_BUILDER_ENABLED_CLIENTS env on Railway',
+        });
       }
-    ));
+    } else {
+      const rebuildBaseSeverity = cm.pool_email_ready === 0 ? 'high' : 'normal';
+      const rebuildEscSeverity = await getDirectiveEscalationSeverity(clientId, 'db_builder', 'rebuild_email_pool', rebuildBaseSeverity);
+      written.push(await directives.writeDirective(
+        clientId,
+        'db_builder',
+        'rebuild_email_pool',
+        { target_min: EMAIL_POOL_FLOOR, current: cm.pool_email_ready },
+        {
+          reason: `Email-ready pool at ${cm.pool_email_ready}/${EMAIL_POOL_FLOOR} — DB Builder must source email-discoverable leads`,
+          severity: rebuildEscSeverity,
+        }
+      ));
+    }
   }
 
   // ── 5b. Hook performance: tell Sales Beaver which hooks are winning (Phase 5.5) ──
@@ -1538,4 +1631,7 @@ module.exports = {
   // Phase 5.5: Captain Learning Loop (2026-05-06)
   runWeeklyLearnings,
   getDirectiveEscalationSeverity,
+  // Phase 5.5b: target-agent liveness (2026-05-06)
+  checkAgentLiveness,
+  recordOfflineEscalation,
 };
