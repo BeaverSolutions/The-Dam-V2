@@ -1207,25 +1207,48 @@ Keep it under 200 words. Conversational-tight tone. No fluff.`;
 
   // ── 4. Persist to weekly_learnings + agent_memory ────────────────────
 
+  // Phase 5.5: weekly_learnings is the existing table from earlier sprints (best_hooks,
+  // ranger_top_rejections, best_industries, director_notes already present). Migration 063
+  // added plan_of_week, raw_stats, updated_at. We map our new fields onto the existing
+  // column names so dashboard.js + learningEngine.js continue to work.
+  const weekEnd = new Date(monday);
+  weekEnd.setUTCDate(weekEnd.getUTCDate() + 6);
+  const weekEndStr = weekEnd.toISOString().slice(0, 10);
+
   await pool.query(
     `INSERT INTO weekly_learnings
-       (client_id, week_start, winning_hooks, losing_patterns, segment_ranking, plan_of_week, summary_text, raw_stats)
-     VALUES ($1, $2::date, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8::jsonb)
+       (client_id, week_start, week_end,
+        total_outreach, total_replies, total_meetings, reply_rate,
+        best_hooks, best_industries, ranger_top_rejections, director_notes,
+        plan_of_week, raw_stats)
+     VALUES ($1, $2::date, $3::date,
+             $4, $5, $6, $7,
+             $8::jsonb, $9::jsonb, $10::jsonb, $11,
+             $12::jsonb, $13::jsonb)
      ON CONFLICT (client_id, week_start) DO UPDATE SET
-       winning_hooks   = EXCLUDED.winning_hooks,
-       losing_patterns = EXCLUDED.losing_patterns,
-       segment_ranking = EXCLUDED.segment_ranking,
-       plan_of_week    = EXCLUDED.plan_of_week,
-       summary_text    = EXCLUDED.summary_text,
-       raw_stats       = EXCLUDED.raw_stats,
-       updated_at      = NOW()`,
+       week_end              = EXCLUDED.week_end,
+       total_outreach        = EXCLUDED.total_outreach,
+       total_replies         = EXCLUDED.total_replies,
+       total_meetings        = EXCLUDED.total_meetings,
+       reply_rate            = EXCLUDED.reply_rate,
+       best_hooks            = EXCLUDED.best_hooks,
+       best_industries       = EXCLUDED.best_industries,
+       ranger_top_rejections = EXCLUDED.ranger_top_rejections,
+       director_notes        = EXCLUDED.director_notes,
+       plan_of_week          = EXCLUDED.plan_of_week,
+       raw_stats             = EXCLUDED.raw_stats,
+       updated_at            = NOW()`,
     [
-      clientId, weekStart,
+      clientId, weekStart, weekEndStr,
+      rawStats.outcomes.sent_7d,
+      rawStats.outcomes.replies_7d,
+      0, // total_meetings — populated by autonomous.js weekly review path; we leave 0 here
+      rawStats.outcomes.reply_rate_pct,
       JSON.stringify(winningHooks),
-      JSON.stringify(losingPatterns),
       JSON.stringify(segmentRanking),
-      JSON.stringify(planOfWeek),
+      JSON.stringify(losingPatterns),
       summaryText,
+      JSON.stringify(planOfWeek),
       JSON.stringify(rawStats),
     ]
   );

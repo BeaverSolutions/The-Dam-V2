@@ -9,24 +9,17 @@
 --   for the same company/vertical so it doesn't repeat the same mistakes.
 
 -- ── weekly_learnings ────────────────────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS weekly_learnings (
-  id               UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-  client_id        UUID         NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-  week_start       DATE         NOT NULL,
-  winning_hooks    JSONB        NOT NULL DEFAULT '[]'::jsonb,
-  losing_patterns  JSONB        NOT NULL DEFAULT '[]'::jsonb,
-  segment_ranking  JSONB        NOT NULL DEFAULT '[]'::jsonb,
-  plan_of_week     JSONB,
-  summary_text     TEXT,
-  raw_stats        JSONB,
-  created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  UNIQUE (client_id, week_start)
-);
-
-CREATE INDEX IF NOT EXISTS idx_weekly_learnings_client_week
-  ON weekly_learnings (client_id, week_start DESC);
+--
+-- NOTE: The weekly_learnings table already exists from earlier migrations (010, 023)
+-- and is heavily used by learningEngine.js + routes/autonomous.js + routes/dashboard.js.
+-- Phase 5.5 reuses the existing schema and adds plan_of_week / raw_stats / updated_at
+-- columns via migration 063. The columns we use:
+--   best_hooks            = winning hooks (existing)
+--   ranger_top_rejections = losing patterns (existing)
+--   best_industries       = segment ranking (existing)
+--   director_notes        = summary text (existing)
+--   plan_of_week          = Captain's Plan of the Week (added in 063)
+--   raw_stats             = full stat snapshot (added in 063)
 
 -- ── mistake_memory ──────────────────────────────────────────────────────────
 
