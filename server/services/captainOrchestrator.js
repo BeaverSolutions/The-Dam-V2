@@ -417,7 +417,31 @@ async function generateMorningBrief(clientId) {
       ? 'amber'
       : 'degraded';
 
-  const userMessage = `Compose this morning's brief for ${kpis.tenant.name}. Three sections, plain text + HTML, EXACTLY this format. Lead with overall health verdict in the SYSTEM HEALTH first sentence.
+  // ── Phase 5.5: Monday Plan of the Week injection ──────────────────────
+  // On Monday (UTC day 1), load Sunday's weekly plan from agent_memory and
+  // prepend it to the brief. Gives MJ the week framing before the daily ops.
+  let weeklyPlanSection = '';
+  try {
+    if (new Date().getUTCDay() === 1) { // Monday
+      const lastSunday = new Date();
+      lastSunday.setUTCDate(lastSunday.getUTCDate() - 1);
+      const day = lastSunday.getUTCDay();
+      const diff = (day + 6) % 7;
+      lastSunday.setUTCDate(lastSunday.getUTCDate() - diff);
+      const weekStart = lastSunday.toISOString().slice(0, 10);
+
+      const { rows: planRows } = await pool.query(
+        `SELECT content FROM agent_memory
+         WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2 LIMIT 1`,
+        [clientId, `weekly_plan_${weekStart}`]
+      );
+      if (planRows[0]?.content?.summary) {
+        weeklyPlanSection = `\n\n${planRows[0].content.summary}`;
+      }
+    }
+  } catch { /* non-critical */ }
+
+  const userMessage = `Compose this morning's brief for ${kpis.tenant.name}. Three sections, plain text + HTML, EXACTLY this format. Lead with overall health verdict in the SYSTEM HEALTH first sentence.${weeklyPlanSection ? '\n\nPREPEND this Plan of the Week BEFORE the SYSTEM HEALTH section (it is Monday):\n' + weeklyPlanSection : ''}
 
 PRE-INTERPRETED STATUS (use these labels — do NOT re-interpret raw numbers below):
 - Overall: ${overallHealth}
@@ -961,6 +985,264 @@ async function escalateToMJ(clientId, decision) {
   return { ok: true, action: 'escalate_to_mj' };
 }
 
+/* ─── Phase 5.5: Directive re-push escalation helper ─────────────────
+ *
+ * When Captain issues a directive but the metric hasn't improved by the next
+ * sweep cycle, severity escalates: normal → high → critical.
+ * This prevents the same soft directive sitting unconsumed (or consumed but
+ * ineffective) for hours while the gap grows.
+ *
+ * Logic: if a directive of the same type was consumed in the last 2 sweep
+ * cycles (~1h) but the metric didn't move, the caller passes a higher base
+ * severity. This helper checks if a prior consumed directive exists recently
+ * and escalates one step if so.
+ */
+async function getDirectiveEscalationSeverity(clientId, targetAgent, directiveType, baseSeverity = 'normal') {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id FROM agent_directives
+       WHERE client_id = $1
+         AND target_agent = $2
+         AND directive_type = $3
+         AND status = 'consumed'
+         AND consumed_at > NOW() - INTERVAL '2 hours'
+       LIMIT 1`,
+      [clientId, targetAgent, directiveType]
+    );
+    if (rows.length === 0) return baseSeverity;
+    // Prior consumed directive but metric still needs attention → escalate
+    const ESCALATION = { low: 'normal', normal: 'high', high: 'critical', critical: 'critical' };
+    return ESCALATION[baseSeverity] || baseSeverity;
+  } catch {
+    return baseSeverity; // non-fatal
+  }
+}
+
+/* ─── Phase 5.5: Weekly Learnings + Plan of the Week (Sunday cron) ───
+ *
+ * Synthesises 7 days of hook performance, rejection patterns, segment
+ * outcomes, and sourcing misses into a structured weekly_learnings row.
+ * Also writes a plan_of_week that the Monday morning brief surfaces.
+ *
+ * Called from index.js runWeeklyReview() on Sunday, after the existing
+ * weekly strategy synthesis. Separate from runWeeklyReview to keep concerns
+ * clean — this owns the DB write + plan generation, not the Telegram voice.
+ */
+async function runWeeklyLearnings(clientId) {
+  const now = new Date();
+
+  // Compute Monday of this week (UTC) as the canonical week_start key
+  const day = now.getUTCDay();
+  const diff = (day + 6) % 7;
+  const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - diff));
+  const weekStart = monday.toISOString().slice(0, 10);
+
+  // ── 1. Pull the raw stats for the week ──────────────────────────────
+
+  const [hookStatsRes, rejectPatternsRes, segmentRes, sourceQualityRes, outcomeRes] = await Promise.all([
+    // Hook performance — grouped, ordered by reply rate
+    pool.query(
+      `SELECT hook_text, channel,
+              SUM(times_used)::int AS total_sent,
+              SUM(replies)::int    AS total_replies,
+              CASE WHEN SUM(times_used) > 0
+                THEN ROUND((SUM(replies)::numeric / SUM(times_used)) * 100, 2)
+                ELSE 0 END         AS reply_rate
+       FROM hook_performance
+       WHERE client_id = $1
+         AND week_start >= $2::date - INTERVAL '7 days'
+       GROUP BY hook_text, channel
+       ORDER BY reply_rate DESC, total_sent DESC
+       LIMIT 10`,
+      [clientId, weekStart]
+    ),
+    // Top Enforcer rejection reasons this week
+    pool.query(
+      `SELECT COALESCE(SPLIT_PART(ranger_notes, ':', 1), 'no_note') AS reason, COUNT(*) AS n
+       FROM messages
+       WHERE client_id = $1
+         AND status = 'ranger_rejected'
+         AND created_at > NOW() - INTERVAL '7 days'
+         AND ranger_notes IS NOT NULL
+       GROUP BY reason ORDER BY n DESC LIMIT 8`,
+      [clientId]
+    ),
+    // Industry/segment breakdown of sent messages (signals which verticals are working)
+    pool.query(
+      `SELECT COALESCE(l.metadata->>'industry', 'unknown') AS segment,
+              COUNT(*) AS sent,
+              COUNT(*) FILTER (WHERE m.reply_detected_at IS NOT NULL) AS replies
+       FROM messages m
+       JOIN leads l ON l.id = m.lead_id
+       WHERE m.client_id = $1
+         AND m.status = 'sent'
+         AND m.sent_at > NOW() - INTERVAL '7 days'
+       GROUP BY segment
+       ORDER BY replies DESC, sent DESC
+       LIMIT 8`,
+      [clientId]
+    ),
+    // Research Beaver sourcing quality — avg lead score this week
+    pool.query(
+      `SELECT
+         COUNT(*) AS sourced,
+         ROUND(AVG(quality_score) FILTER (WHERE quality_score IS NOT NULL))::int AS avg_score,
+         COUNT(*) FILTER (WHERE email IS NOT NULL) AS with_email,
+         COUNT(*) FILTER (WHERE linkedin_url IS NOT NULL) AS with_linkedin
+       FROM leads
+       WHERE client_id = $1 AND created_at > NOW() - INTERVAL '7 days' AND deleted_at IS NULL`,
+      [clientId]
+    ),
+    // Outcome summary (sent / replied / meetings)
+    pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'sent' AND sent_at > NOW() - INTERVAL '7 days') AS sent_7d,
+         COUNT(*) FILTER (WHERE reply_detected_at > NOW() - INTERVAL '7 days') AS replies_7d,
+         COUNT(*) FILTER (WHERE status = 'sent' AND channel = 'email' AND sent_at > NOW() - INTERVAL '7 days') AS email_sent,
+         COUNT(*) FILTER (WHERE status = 'sent' AND channel = 'linkedin' AND sent_at > NOW() - INTERVAL '7 days') AS linkedin_sent
+       FROM messages WHERE client_id = $1`,
+      [clientId]
+    ),
+  ]);
+
+  const hookStats = hookStatsRes.rows;
+  const rejectPatterns = rejectPatternsRes.rows;
+  const segments = segmentRes.rows;
+  const srcQuality = sourceQualityRes.rows[0] || {};
+  const outcomes = outcomeRes.rows[0] || {};
+
+  // ── 2. Derive structured learnings ──────────────────────────────────
+
+  const winningHooks = hookStats.filter(h => h.total_replies >= 2 && parseFloat(h.reply_rate) >= 20);
+  const losingPatterns = rejectPatterns.map(r => ({ reason: r.reason, count: Number(r.n) }));
+  const segmentRanking = segments.map(s => ({
+    segment: s.segment,
+    sent: Number(s.sent),
+    replies: Number(s.replies),
+    reply_rate: s.sent > 0 ? Math.round((s.replies / s.sent) * 100) : 0,
+  }));
+
+  const rawStats = {
+    week_start: weekStart,
+    outcomes: {
+      sent_7d: Number(outcomes.sent_7d) || 0,
+      replies_7d: Number(outcomes.replies_7d) || 0,
+      email_sent: Number(outcomes.email_sent) || 0,
+      linkedin_sent: Number(outcomes.linkedin_sent) || 0,
+      reply_rate_pct: outcomes.sent_7d > 0
+        ? Math.round((outcomes.replies_7d / outcomes.sent_7d) * 100)
+        : 0,
+    },
+    sourcing: {
+      sourced: Number(srcQuality.sourced) || 0,
+      avg_score: srcQuality.avg_score ? Number(srcQuality.avg_score) : null,
+      with_email: Number(srcQuality.with_email) || 0,
+      with_linkedin: Number(srcQuality.with_linkedin) || 0,
+    },
+    hook_count: hookStats.length,
+    reject_pattern_count: rejectPatterns.length,
+  };
+
+  // ── 3. Generate the Plan of the Week via Sonnet ──────────────────────
+
+  let planOfWeek = null;
+  let summaryText = null;
+
+  try {
+    const bestHooksLines = winningHooks.length > 0
+      ? winningHooks.slice(0, 3).map(h => `- "${h.hook_text}" (${h.channel}, ${h.reply_rate}% reply rate, ${h.total_replies} replies)`).join('\n')
+      : '- none yet (not enough reply data)';
+
+    const topRejectLines = losingPatterns.length > 0
+      ? losingPatterns.slice(0, 5).map(p => `- ${p.reason} (${p.count}×)`).join('\n')
+      : '- none';
+
+    const bestSegLines = segmentRanking.length > 0
+      ? segmentRanking.slice(0, 3).map(s => `- ${s.segment}: ${s.sent} sent, ${s.replies} replies (${s.reply_rate}% reply rate)`).join('\n')
+      : '- no segment data yet';
+
+    const promptText = `You are Captain Beaver, orchestrator of BeavrDam. Review this week's results and write the Plan of the Week for the team.
+
+WEEK ${weekStart} RESULTS:
+- Sent: ${rawStats.outcomes.sent_7d} total (${rawStats.outcomes.email_sent} email, ${rawStats.outcomes.linkedin_sent} LinkedIn)
+- Replies: ${rawStats.outcomes.replies_7d} (${rawStats.outcomes.reply_rate_pct}% reply rate)
+- Leads sourced: ${rawStats.sourcing.sourced} (avg quality score: ${rawStats.sourcing.avg_score ?? 'n/a'}, email-ready: ${rawStats.sourcing.with_email})
+
+WINNING HOOKS (use these patterns next week):
+${bestHooksLines}
+
+TOP ENFORCER REJECTIONS (Sales Beaver must avoid):
+${topRejectLines}
+
+BEST PERFORMING SEGMENTS:
+${bestSegLines}
+
+Write a PLAN OF THE WEEK with exactly these sections. Be specific, not generic.
+
+<b>📋 WEEK PLAN</b>
+<b>Hook bias</b>: [which hook style/angle to lead with this week and why, based on winning hooks above]
+<b>Vertical focus</b>: [which 1-2 segments to prioritise based on reply rate data]
+<b>Avoid</b>: [top 2-3 Enforcer reject patterns Sales Beaver must not repeat]
+<b>Sourcing target</b>: [what email-ready pool size to aim for and any sourcing angle shifts]
+<b>MJ's one call</b>: [single most important decision only MJ can make this week — null if nothing]
+
+Keep it under 200 words. Conversational-tight tone. No fluff.`;
+
+    const result = await callAgent('captain_orchestrator', promptText, { clientId });
+    const rawText = typeof result === 'string' ? result : (result?.brief || result?.summary || result?.text || '');
+    summaryText = rawText ? rawText.trim() : null;
+
+    planOfWeek = {
+      generated_at: new Date().toISOString(),
+      winning_hooks: winningHooks.slice(0, 3),
+      avoid_patterns: losingPatterns.slice(0, 3),
+      best_segments: segmentRanking.slice(0, 3),
+      summary: summaryText,
+    };
+  } catch (err) {
+    console.warn('[weekly-learnings] plan generation failed (non-fatal):', err.message);
+    summaryText = `Week ${weekStart}: ${rawStats.outcomes.sent_7d} sent, ${rawStats.outcomes.replies_7d} replies (${rawStats.outcomes.reply_rate_pct}% reply rate). ${winningHooks.length} winning hook(s) identified.`;
+    planOfWeek = { generated_at: new Date().toISOString(), summary: summaryText };
+  }
+
+  // ── 4. Persist to weekly_learnings + agent_memory ────────────────────
+
+  await pool.query(
+    `INSERT INTO weekly_learnings
+       (client_id, week_start, winning_hooks, losing_patterns, segment_ranking, plan_of_week, summary_text, raw_stats)
+     VALUES ($1, $2::date, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8::jsonb)
+     ON CONFLICT (client_id, week_start) DO UPDATE SET
+       winning_hooks   = EXCLUDED.winning_hooks,
+       losing_patterns = EXCLUDED.losing_patterns,
+       segment_ranking = EXCLUDED.segment_ranking,
+       plan_of_week    = EXCLUDED.plan_of_week,
+       summary_text    = EXCLUDED.summary_text,
+       raw_stats       = EXCLUDED.raw_stats,
+       updated_at      = NOW()`,
+    [
+      clientId, weekStart,
+      JSON.stringify(winningHooks),
+      JSON.stringify(losingPatterns),
+      JSON.stringify(segmentRanking),
+      JSON.stringify(planOfWeek),
+      summaryText,
+      JSON.stringify(rawStats),
+    ]
+  );
+
+  // Write plan_of_week to agent_memory so Monday morning brief can read it
+  await pool.query(
+    `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+     VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'journal')
+     ON CONFLICT (client_id, agent, key) DO UPDATE
+       SET content = EXCLUDED.content, updated_at = NOW()`,
+    [clientId, `weekly_plan_${weekStart}`, JSON.stringify(planOfWeek)]
+  );
+
+  console.log(`[weekly-learnings] client=${clientId} week=${weekStart} hooks=${winningHooks.length} patterns=${losingPatterns.length} segments=${segmentRanking.length}`);
+  return { weekStart, winningHooks, losingPatterns, segmentRanking, planOfWeek, summaryText, rawStats };
+}
+
 /* ─── Goal-hunting directive sweep (Wave 1, 2026-05-03) ──────────────
  *
  * Captain's active driving function. Reads team KPIs, computes per-beaver
@@ -988,16 +1270,19 @@ async function runDirectiveSweep(clientId) {
   const emailDraftGap = Math.max(0, cm.target_email_sent - emailDraftedTowardTarget);
 
   if (emailDraftGap > 0 && cm.pool_email_ready < emailDraftGap) {
-    // Pool can't satisfy the drafting need → tell Research to source more email-ready leads
+    // Pool can't satisfy the drafting need → tell DB Builder to source more email-ready leads.
+    // Bug fix 2026-05-06: was incorrectly targeting 'research_beaver' but dbBuilder.js reads
+    // directives addressed to 'db_builder'. research_beaver has no consumer for this type.
     const needed = emailDraftGap - cm.pool_email_ready;
+    const emailEscSeverity = await getDirectiveEscalationSeverity(clientId, 'db_builder', 'source_more_email_leads', isLate ? 'critical' : 'high');
     written.push(await directives.writeDirective(
       clientId,
-      'research_beaver',
+      'db_builder',
       'source_more_email_leads',
       { needed_minimum: needed, by: 'today_eod', reason_kpi: { email_drafted: emailDraftedTowardTarget, email_target: cm.target_email_sent } },
       {
         reason: `Email at ${cm.email.sent}/${cm.target_email_sent} sent · pool email-ready ${cm.pool_email_ready} can't cover draft gap of ${emailDraftGap} · need ${needed} more email-ready leads`,
-        severity: isLate ? 'critical' : 'high',
+        severity: emailEscSeverity,
       }
     ));
   }
@@ -1042,6 +1327,8 @@ async function runDirectiveSweep(clientId) {
   // ── 4. DB Builder: target email-ready pool size, not raw pool ──
   const EMAIL_POOL_FLOOR = 30; // a day's worth of email-channel drafts
   if (cm.pool_email_ready < EMAIL_POOL_FLOOR) {
+    const rebuildBaseSeverity = cm.pool_email_ready === 0 ? 'high' : 'normal';
+    const rebuildEscSeverity = await getDirectiveEscalationSeverity(clientId, 'db_builder', 'rebuild_email_pool', rebuildBaseSeverity);
     written.push(await directives.writeDirective(
       clientId,
       'db_builder',
@@ -1049,9 +1336,40 @@ async function runDirectiveSweep(clientId) {
       { target_min: EMAIL_POOL_FLOOR, current: cm.pool_email_ready },
       {
         reason: `Email-ready pool at ${cm.pool_email_ready}/${EMAIL_POOL_FLOOR} — DB Builder must source email-discoverable leads`,
-        severity: cm.pool_email_ready === 0 ? 'high' : 'normal',
+        severity: rebuildEscSeverity,
       }
     ));
+  }
+
+  // ── 5b. Hook performance: tell Sales Beaver which hooks are winning (Phase 5.5) ──
+  // Written when ≥ 3 reply events confirm a winning hook. Positive counterpart to
+  // apply_rejection_patterns — Sales biases TOWARD these patterns, not away from them.
+  try {
+    const hookTracking = require('./hookTracking');
+    const hookStats = await hookTracking.getHookStats(clientId);
+    const winningHooks = hookStats.filter(h => h.total_replies >= 3 && parseFloat(h.reply_rate) >= 25);
+    if (winningHooks.length > 0) {
+      written.push(await directives.writeDirective(
+        clientId,
+        'sales_beaver',
+        'apply_winning_hooks',
+        {
+          hooks: winningHooks.slice(0, 5).map(h => ({
+            text: h.hook_text,
+            channel: h.channel,
+            reply_rate: h.reply_rate,
+            total_replies: h.total_replies,
+            total_sent: h.total_sent,
+          })),
+        },
+        {
+          reason: `${winningHooks.length} winning hook(s) with ≥3 replies — bias Sales Beaver toward these opening patterns`,
+          severity: 'normal',
+        }
+      ));
+    }
+  } catch (err) {
+    console.warn('[directive-sweep] winning hooks check failed (non-fatal):', err.message);
   }
 
   // ── 5. Dynamic auto-approve threshold (Wave 3, 2026-05-03) ──
@@ -1194,4 +1512,7 @@ module.exports = {
   tuneAutoApprove,
   throttleSend,
   escalateToMJ,
+  // Phase 5.5: Captain Learning Loop (2026-05-06)
+  runWeeklyLearnings,
+  getDirectiveEscalationSeverity,
 };

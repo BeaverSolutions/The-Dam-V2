@@ -604,6 +604,19 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         consumedDirectiveIds.push(rejectDirective.id);
       }
 
+      // Phase 5.5 (2026-05-06): Winning hooks directive — positive counterpart to
+      // apply_rejection_patterns. Captain writes when ≥3 reply events confirm a pattern.
+      // Injected as a SUGGESTION (not a mandate) so Sonnet can adapt to each lead's context.
+      const winningHooksDirective = salesDirectives.find(d => d.directive_type === 'apply_winning_hooks');
+      if (winningHooksDirective?.payload?.hooks?.length) {
+        const hookLines = winningHooksDirective.payload.hooks
+          .slice(0, 3)
+          .map(h => `- "${h.text}" (${h.channel}, ${h.reply_rate}% reply rate, ${h.total_replies} replies)`)
+          .join('\n');
+        captainDirectiveContext += `\n\nCAPTAIN'S DIRECTIVE — winning hook patterns (bias toward these opening angles when relevant):\n${hookLines}`;
+        consumedDirectiveIds.push(winningHooksDirective.id);
+      }
+
       // Sender identity — resolved at template layer, NOT in prompt (ICP+channel patches per MJ direction 2026-04-29).
       // The LLM must not produce its own signature; we strip and re-append below.
       const senderName = resolveSenderName(clientId, persona);
@@ -1753,6 +1766,13 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1 WHERE id = $2`,
           [`Brand safety: ${safety.reason}`, msg.id]
         );
+        // Phase 5.5: log to mistake_memory so future drafts for same company avoid this
+        pool.query(
+          `INSERT INTO mistake_memory (client_id, lead_id, agent, mistake_type, description, payload)
+           VALUES ($1, $2, 'sales_beaver', 'brand_safety_fail', $3, $4::jsonb)`,
+          [clientId, lead.id, `Brand safety failed for ${lead.company}: ${safety.reason}`,
+           JSON.stringify({ company: lead.company, reason: safety.reason, message_id: msg.id })]
+        ).catch(() => {});
         rejectedCount++;
         continue;
       }
@@ -1853,6 +1873,22 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1 WHERE id = $2`,
           [rangerResult?.notes || 'Rejected by Enforcer', msg.id]
         );
+        // Phase 5.5: log hard rejects (score < 60) to mistake_memory for cross-agent context
+        if ((rangerResult?.score ?? 100) < 60) {
+          pool.query(
+            `INSERT INTO mistake_memory (client_id, lead_id, agent, mistake_type, description, payload)
+             VALUES ($1, $2, 'sales_beaver', 'enforcer_hard_reject', $3, $4::jsonb)`,
+            [clientId, lead.id,
+             `Enforcer hard-rejected draft for ${lead.company} (score ${rangerResult?.score ?? '?'}): ${rangerResult?.notes || 'no notes'}`,
+             JSON.stringify({
+               company: lead.company,
+               score: rangerResult?.score,
+               notes: rangerResult?.notes,
+               channel,
+               message_id: msg.id,
+             })]
+          ).catch(() => {});
+        }
 
         try {
           const enforcerDraft = await rangerDraft(clientId, {

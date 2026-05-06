@@ -552,6 +552,21 @@ async function start() {
         } else if (strategy?.skipped) {
           logger.info({ msg: 'Weekly strategy skipped', reason: strategy.skipped, total_events: strategy.total_events });
         }
+
+        // Phase 5.5 (2026-05-06): Weekly Learnings + Plan of the Week.
+        // Runs after strategy synthesis on Sunday so all week data is captured.
+        // Writes to weekly_learnings table + agent_memory (Monday brief reads it).
+        // Sends Telegram summary of the plan so MJ can review before Monday.
+        try {
+          const captainOrch = require('./services/captainOrchestrator');
+          const learnings = await captainOrch.runWeeklyLearnings(clientRow.id);
+          if (learnings?.planOfWeek?.summary) {
+            await telegramService.sendMessage(chatId, `<b>📋 Plan of the Week</b>\n\n${learnings.planOfWeek.summary}`);
+            logger.info({ msg: 'Weekly learnings + plan sent via Telegram', week: learnings.weekStart });
+          }
+        } catch (learnErr) {
+          logger.warn({ msg: 'Weekly learnings failed (non-fatal)', err: learnErr.message });
+        }
       } catch (err) {
         logger.warn({ msg: 'Weekly review failed', err: err.message });
       }
