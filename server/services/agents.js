@@ -172,15 +172,17 @@ function resolveSignalTier(lead) {
  * Single source of truth for channel-routing decisions at draft time.
  * Replaces the duplicated logic that lived at processExistingLeadsPipeline
  * (~line 1537) and processLeadPipeline (~line 2606). Both sites now call
- * this helper. Behavior locked per MJ direction 2026-04-29:
- *   - email-first default
- *   - LinkedIn ONLY when explicit linkedin_first_override metadata flag set
- *     AND lead has linkedin_url AND LinkedIn not previously attempted
- *   - Touch 1 with no verified email → blocked_no_email (HOLD for enrichment,
- *     do NOT fall through to LinkedIn at touch 1)
+ * this helper. Behavior locked per MJ direction 2026-04-29 + 2026-05-06:
+ *   - Verified email present → email-first (touch 1)
+ *   - linkedin_first_override metadata flag → LinkedIn at touch 1 (per-lead manual override)
+ *   - lead_tier='B' (linkedin-only pool: linkedin_url present, no verified email)
+ *     → LinkedIn at touch 1 (this is the channel-mix policy 30 email + 20 linkedin/day)
+ *   - Neither email nor linkedin_url → blocked_no_email (HOLD for enrichment)
  *
  * Touch 3+ escalation (email → LinkedIn after FU2 with no reply) is handled
  * separately in followupSequence.escalateChannel() and is not in this helper.
+ * The touch-3 rule is FOLLOW-UP logic for emailed leads with no reply, NOT the
+ * gate for new linkedin-only leads.
  *
  * @param {object} lead — must have email, email_verified, email_source, linkedin_url, metadata
  * @param {object} options
@@ -194,6 +196,7 @@ function selectChannel(lead, options = {}) {
   const linkedinFirstOverride = meta.linkedin_first_override === true || meta.linkedin_first_override === 'true';
   const hasVerifiedEmail = lead.email
     && (lead.email_verified === true || lead.email_source === 'hunter' || lead.email_source === 'apollo');
+  const isLinkedinOnlyLead = lead.lead_tier === 'B' && lead.linkedin_url;
 
   if (linkedinFirstOverride && lead.linkedin_url && !linkedinAlreadyTried) {
     return { channel: 'linkedin', status: 'pending_ranger', reason: 'linkedin_first_override metadata flag set' };
@@ -201,10 +204,13 @@ function selectChannel(lead, options = {}) {
   if (hasVerifiedEmail) {
     return { channel: 'email', status: 'pending_ranger', reason: `Verified email (${lead.email_source || 'known'})` };
   }
+  if (isLinkedinOnlyLead && !linkedinAlreadyTried) {
+    return { channel: 'linkedin', status: 'pending_ranger', reason: 'Tier B linkedin-only lead' };
+  }
   return {
     channel: 'email',
     status: 'blocked_no_email',
-    reason: 'No verified email — holding as blocked_no_email for enrichment',
+    reason: 'No verified email and no linkedin_url — holding for enrichment',
   };
 }
 
