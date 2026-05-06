@@ -460,7 +460,7 @@ async function toolGetPipelineStatus(clientId) {
 
   return {
     date: today,
-    target: kpiRow.rows[0]?.target || 80,
+    target: kpiRow.rows[0]?.target || 50,  // 2026-05-06: per MJ KPI lock 2026-04-30 — daily target is 50, not 80
     sent_today: parseInt(counts.rows[0].sent_today) || 0,
     pending_approval: parseInt(counts.rows[0].pending) || 0,
     approved_awaiting_send: parseInt(counts.rows[0].approved_awaiting_send) || 0,

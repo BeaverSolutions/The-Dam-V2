@@ -61,7 +61,17 @@ const ICP_SENDER_IDENTITY = {
 
 // Strip any LLM-generated sign-off block from a body. Catches patterns like
 // "Regards,\nName", "Best,\nName", "Cheers,\nName", and anything trailing after them.
-const SIGNOFF_STRIP_REGEX = /\n*\s*(regards|best( regards)?|cheers|kind regards|sincerely|warm regards|thanks|thank you)[,!.]?\s*[\r\n]+[\s\S]*$/i;
+// 2026-05-06: expanded to catch "Talk soon", "Speak soon", "Looking forward",
+// "All the best", "Yours" — LLM variants that bypassed the original regex.
+const SIGNOFF_STRIP_REGEX = /\n*\s*(regards|best(\s+regards)?|cheers|kind\s+regards|sincerely|warm\s+regards|thanks|thank\s+you|talk\s+soon|speak\s+soon|looking\s+forward(\s+to[\s\S]{0,40}?)?|chat\s+soon|all\s+the\s+best|yours(\s+truly|\s+sincerely)?|see\s+you\s+soon)[,!.\s]*[\r\n]+[\s\S]*$/i;
+
+// Strips agent-name signatures the LLM appends WITHOUT a standard sign-off word.
+// Failure modes seen in production (logged 2026-05-01 + 2026-05-05):
+//   "—Bryan Beaver" / "Bryan Beaver" / "Enforcer Beaver" / "Sales Beaver"
+//   "Baver Solutions" / "Beaver Solutions" / "The Beaver Team" / "The Team at Beaver"
+// These typically appear as the final 1-2 lines after the message body.
+// Anchored to end-of-string so a real recipient name isn't accidentally stripped.
+const AGENT_NAME_STRIP_REGEX = /\n+\s*[—–-]*\s*(bryan(\s+beaver)?|enforcer(\s+beaver)?|sales(\s+beaver)?|captain(\s+beaver)?|ranger(\s+beaver)?|director(\s+beaver)?|research(\s+beaver)?|the\s+beaver(\s+(team|crew|solutions))?|the\s+team\s+at\s+beaver(\s+solutions)?|baver\s+solutions|beaver\s+solutions|the\s+beavrdam(\s+team)?|bobby(\s+beaver)?|bitton)[\s.!]*$/i;
 
 /**
  * Resolve sender identity for a given client. Hardcoded map first, then persona,
@@ -645,9 +655,13 @@ ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}`,
         // ICP+channel patches per MJ direction 2026-04-29
         // Strip any LLM-generated signature/sign-off, then deterministically append the
         // hardcoded sender identity for emails. LinkedIn DMs get no sign-off.
+        // Two-pass strip (2026-05-06): SIGNOFF first catches standard sign-offs,
+        // AGENT_NAME catches stray "Bryan Beaver" / "Enforcer Beaver" / "Beaver Solutions"
+        // tails that slip past when the LLM omits the sign-off word.
         finalBody = stripEmDashes(finalBody);
         if (typeof finalBody === 'string') {
-          const stripped = finalBody.replace(SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '');
+          let stripped = finalBody.replace(SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '');
+          stripped = stripped.replace(AGENT_NAME_STRIP_REGEX, '').replace(/\s+$/, '');
           finalBody = (channel === 'email')
             ? `${stripped}\n\nRegards,\n${senderName}`
             : stripped;
@@ -681,7 +695,9 @@ ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}`,
             subject: extractedSubject ? stripEmDashes(extractedSubject) : null,
             body:    (() => {
               // ICP+channel patches per MJ direction 2026-04-29 — strip+append in fallback path too
-              const stripped = stripEmDashes(extractedBody).replace(SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '');
+              // Two-pass strip (2026-05-06): SIGNOFF then AGENT_NAME catches "Bryan Beaver" tails.
+              let stripped = stripEmDashes(extractedBody).replace(SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '');
+              stripped = stripped.replace(AGENT_NAME_STRIP_REGEX, '').replace(/\s+$/, '');
               return channel === 'email' ? `${stripped}\n\nRegards,\n${senderName}` : stripped;
             })(),
             status:  'pending_ranger',
@@ -697,7 +713,9 @@ ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}`,
             subject: null,
             body:    (() => {
               // ICP+channel patches per MJ direction 2026-04-29 — strip+append in last-resort fallback too
-              const stripped = stripEmDashes(raw.trim()).replace(SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '');
+              // Two-pass strip (2026-05-06): SIGNOFF then AGENT_NAME catches "Bryan Beaver" tails.
+              let stripped = stripEmDashes(raw.trim()).replace(SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '');
+              stripped = stripped.replace(AGENT_NAME_STRIP_REGEX, '').replace(/\s+$/, '');
               return channel === 'email' ? `${stripped}\n\nRegards,\n${senderName}` : stripped;
             })(),
             status:  'pending_ranger',
