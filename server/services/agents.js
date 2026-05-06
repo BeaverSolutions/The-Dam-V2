@@ -1588,6 +1588,48 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
     metadata: { plan_id, lead_count: leads.length },
   });
 
+  // ── Phase 5.5 (2026-05-06): ICP audit at draft-time ──────────────────────
+  // Closes the chat-tool gap surfaced during E2E validation: legacy MNC leads
+  // (dentsu Malaysia, IPG Mediabrands, MDEC, Publicis Groupe etc.) sourced
+  // before the MNC blocklist expansion were still being picked by run_campaign
+  // because only the kickoff path was running pool-audit.
+  // Re-applying applyIcpV2Filter here catches them before draft cycles burn.
+  const auditedLeads = [];
+  let icpAuditRejected = 0;
+  for (const lead of leads) {
+    const verdict = applyIcpV2Filter(lead);
+    if (verdict.pass) {
+      auditedLeads.push(lead);
+    } else {
+      icpAuditRejected++;
+      // Soft-delete so the lead can't be re-picked next chat run.
+      // Map verdict.status to the leads_status_check enum (rejected_size,
+      // rejected_persona, rejected_vertical, rejected_country, etc).
+      const allowedStatus = ['rejected_country', 'rejected_size', 'rejected_persona',
+        'rejected_vertical', 'rejected_data_integrity', 'rejected_low_score'];
+      const safeStatus = allowedStatus.includes(verdict.status) ? verdict.status : 'rejected_persona';
+      await pool.query(
+        `UPDATE leads SET deleted_at = NOW(), status = $1,
+                metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+         WHERE id = $3 AND client_id = $4 AND deleted_at IS NULL`,
+        [safeStatus,
+         JSON.stringify({ icp_audit_reason: verdict.reason, audit_source: 'processExistingLeadsPipeline_phase_5_5' }),
+         lead.id, clientId]
+      ).catch(() => {});
+      await logsService.createLog(clientId, {
+        agent: 'director',
+        action: 'icp_v2_reject',
+        target_type: 'lead',
+        target_id: lead.id,
+        metadata: { plan_id, status: safeStatus, reason: verdict.reason, company: lead.company, title: lead.title },
+      }).catch(() => {});
+    }
+  }
+  if (icpAuditRejected > 0) {
+    console.log(`[signal-pipeline] ICP audit rejected ${icpAuditRejected}/${leads.length} legacy leads at draft-time`);
+  }
+  leads = auditedLeads;
+
   let approvedCount = 0;
   let rejectedCount = 0;
   let messagesDrafted = 0;
