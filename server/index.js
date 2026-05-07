@@ -962,6 +962,119 @@ async function start() {
       }
     }
 
+    // ── Captain KPI gap kickoff (every 30 min during working hours) ────────
+    // Captain checks if daily send target is met. If not, and no kickoff is
+    // already running, and cooldown has passed, fires another kickoff.
+    // Guards: max 6 kickoffs/day, 30-min cooldown, working hours only.
+    async function runKpiGapKickoff() {
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+      // 01:00-10:59 UTC = 09:00-18:59 MYT (stop before 19:00 — no late kickoffs)
+      if (utcHour < 1 || utcHour > 10) return;
+
+      // 30-min cadence: fire at :00-:09 and :30-:39
+      const m = now.getUTCMinutes();
+      const inFirstWindow  = m < 10;
+      const inSecondWindow = m >= 30 && m < 40;
+      if (!inFirstWindow && !inSecondWindow) return;
+
+      // Half-hour dedupe
+      const halfHourSlot = `${now.toISOString().slice(0, 13)}_${m < 30 ? '0' : '30'}`;
+      const dedupeKey = `kpi_gap_kickoff_${halfHourSlot}`;
+      const { rows: already } = await pool.query(
+        `SELECT 1 FROM agent_memory WHERE agent = 'captain_orchestrator' AND key = $1 LIMIT 1`,
+        [dedupeKey]
+      );
+      if (already.length > 0) return;
+
+      const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
+      if (enabledSlugs.length === 0) return;
+
+      const { rows: clients } = await pool.query(
+        `SELECT id, slug FROM clients WHERE slug = ANY($1) AND is_active = true AND onboarding_completed = true`,
+        [enabledSlugs]
+      );
+
+      for (const client of clients) {
+        try {
+          const today = now.toISOString().split('T')[0];
+
+          // Check daily target vs sent
+          const { rows: [kpiRow] } = await pool.query(
+            `SELECT target, outreach_sent FROM daily_kpi WHERE client_id = $1 AND date = $2`,
+            [client.id, today]
+          );
+          const target = kpiRow?.target || 50;
+          const sent = kpiRow?.outreach_sent || 0;
+          if (sent >= target) continue; // KPI met, skip
+
+          // Daily cap: max 6 kickoffs per day (count signal_pipeline_executing logs)
+          const { rows: [{ cnt: kickoffsToday }] } = await pool.query(
+            `SELECT COUNT(*)::int AS cnt FROM logs
+             WHERE client_id = $1 AND action = 'signal_pipeline_executing'
+             AND created_at >= $2::date AND created_at < ($2::date + INTERVAL '1 day')`,
+            [client.id, today]
+          );
+          if (kickoffsToday >= 6) {
+            logger.info({ msg: `[kpi-gap] ${client.slug}: ${kickoffsToday} kickoffs today, daily cap reached` });
+            continue;
+          }
+
+          // Cooldown: at least 25 min since last kickoff started
+          const { rows: lastKickoff } = await pool.query(
+            `SELECT created_at FROM logs
+             WHERE client_id = $1 AND action = 'signal_pipeline_executing'
+             ORDER BY created_at DESC LIMIT 1`,
+            [client.id]
+          );
+          if (lastKickoff.length > 0) {
+            const minsSinceLast = (now - new Date(lastKickoff[0].created_at)) / 60000;
+            if (minsSinceLast < 25) {
+              logger.info({ msg: `[kpi-gap] ${client.slug}: last kickoff ${Math.round(minsSinceLast)}m ago, cooling down` });
+              continue;
+            }
+          }
+
+          // Check if available leads exist in the pool
+          const { rows: [{ pool_size }] } = await pool.query(
+            `SELECT COUNT(*)::int AS pool_size FROM leads
+             WHERE client_id = $1 AND pipeline_stage = 'prospecting' AND status = 'new'
+             AND deleted_at IS NULL`,
+            [client.id]
+          );
+          if (pool_size < 5) {
+            logger.info({ msg: `[kpi-gap] ${client.slug}: only ${pool_size} leads in pool, skipping` });
+            continue;
+          }
+
+          // Mark this slot as checked
+          await pool.query(
+            `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+             VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
+             ON CONFLICT (client_id, agent, key) DO NOTHING`,
+            [client.id, dedupeKey, JSON.stringify({ gap: target - sent, sent, target, pool_size, kickoffs_today: kickoffsToday })]
+          ).catch(() => {});
+
+          // Fire kickoff
+          const gap = target - sent;
+          logger.info({ msg: `[kpi-gap] ${client.slug}: ${sent}/${target} sent, gap=${gap}, pool=${pool_size}, kickoff #${kickoffsToday + 1} — firing` });
+          await pool.query(
+            `INSERT INTO logs (client_id, agent, action, target_type, metadata)
+             VALUES ($1, 'captain', 'kpi_gap_kickoff', 'system', $2::jsonb)`,
+            [client.id, JSON.stringify({ sent, target, gap, pool_size, kickoff_number: kickoffsToday + 1 })]
+          ).catch(() => {});
+
+          runWithClientContext(client.id, () =>
+            runAutonomousKickoff(client.id).catch(err => {
+              logger.error({ msg: `[kpi-gap] kickoff failed for ${client.slug}`, err: err.message });
+            })
+          );
+        } catch (err) {
+          logger.warn({ msg: `[kpi-gap] check failed for ${client.slug}`, err: err.message });
+        }
+      }
+    }
+
     // ── Captain directive sweep (Wave 1, 2026-05-03; cadence fix Wave 3) ───
     // Every 30 min during working hours, Captain reads team KPIs and writes
     // directives to the agent_directives bus. Beavers consume on next run.
@@ -1031,8 +1144,11 @@ async function start() {
       runCaptainDirectiveSweep()
         .then(() => { jobHealth.markRun('captain_directive_sweep'); })
         .catch(err => { logger.warn({ msg: 'Captain directive sweep error', err: err.message }); jobHealth.markError('captain_directive_sweep', err.message); });
+      runKpiGapKickoff()
+        .then(() => { jobHealth.markRun('kpi_gap_kickoff'); })
+        .catch(err => { logger.warn({ msg: 'KPI gap kickoff poll error', err: err.message }); jobHealth.markError('kpi_gap_kickoff', err.message); });
     }, 10 * 60 * 1000);
-    logger.info({ msg: 'Captain Beaver cron jobs registered (10min poll: 9am brief, 7pm EOD brief, hourly stuck-state monitor 9am-7pm, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, all MYT)' });
+    logger.info({ msg: 'Captain Beaver cron jobs registered (10min poll: 9am brief, 7pm EOD brief, hourly stuck-state monitor 9am-7pm, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, 30min KPI gap kickoff, all MYT)' });
 
     // ── LinkedIn stale connection sweep ─────────────────────────────────────
     // Runs every 6 hours. After 3 days in `linkedin_requested`, assume the
