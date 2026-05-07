@@ -916,6 +916,11 @@ async function _runAutonomousKickoffInner(clientId) {
         const originalChannel = prevMessages[0]?.channel || 'email';
 
         const draft = await draftFollowUp(followUp, followUp.touch_number, prevMessages);
+        if (draft?.status === 'needs_more_research') {
+          console.warn(`[FollowUp] Thin-context guard: lead ${followUp.lead_id} touch ${followUp.touch_number} — ${draft.reason}`);
+          await pool.query(`UPDATE followup_queue SET status = 'skipped' WHERE id = $1`, [followUp.id]);
+          continue;
+        }
         if (!draft?.body) {
           console.warn(`[FollowUp] No draft body for lead ${followUp.lead_id} touch ${followUp.touch_number}`);
           continue;

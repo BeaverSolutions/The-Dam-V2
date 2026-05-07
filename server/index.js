@@ -334,6 +334,11 @@ async function start() {
                 const originalChannel = prevMessages[0]?.channel || 'email';
 
                 let draft = await draftFollowUp(fu, fu.touch_number, prevMessages);
+                if (draft?.status === 'needs_more_research') {
+                  console.warn(`[followup-scheduler] Thin-context guard: lead ${fu.lead_id} touch ${fu.touch_number} — ${draft.reason}`);
+                  await pool.query(`UPDATE followup_queue SET status = 'skipped' WHERE id = $1`, [fu.id]);
+                  continue;
+                }
                 if (!draft?.body) { console.warn(`[followup-scheduler] No draft for lead ${fu.lead_id} touch ${fu.touch_number}`); continue; }
 
                 let cleanBody = draft.body.replace(/\s*—\s*/g, ', ').replace(/—/g, ' ');

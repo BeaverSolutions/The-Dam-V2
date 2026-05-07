@@ -212,6 +212,20 @@ async function getLeadSequence(clientId, leadId) {
  * Draft a follow-up message for a specific touch.
  */
 async function draftFollowUp(lead, touchNumber, previousMessages) {
+  // v1.0 thin-context guard (2026-05-07): if lead context is too thin to write
+  // a non-hallucinated follow-up, return needs_more_research instead of fabricating.
+  const companyName = (lead.company || '').trim();
+  const thinCompany = !companyName || /^(unknown|independent|n\/a|self[- ]?employed|freelanc|stealth|confidential|-)$/i.test(companyName);
+  const thinTitle = !lead.title || /^(unknown|n\/a|-)$/i.test((lead.title || '').trim());
+  if (thinCompany && thinTitle) {
+    console.log(`[followup] Thin-context guard: lead ${lead.id} (${lead.name}) has no company or title — returning needs_more_research`);
+    return {
+      status: 'needs_more_research',
+      missing_fields: [thinCompany ? 'company_name' : null, thinTitle ? 'title' : null].filter(Boolean),
+      reason: 'Follow-up thin-context guard: lead has no verifiable company or title. Cannot draft without fabricating.',
+    };
+  }
+
   // ICP+channel patches per MJ direction 2026-04-29
   // Email-first sequence. Touch 1 + 2 always inherit (or default to 'email' for new sequences).
   // Touch 3 (D+7) is the FIRST point where LinkedIn becomes valid as an escalation, and only
@@ -269,7 +283,7 @@ Hi ${lead.name?.split(' ')[0] || 'there'},
 {body — max ${config.maxWords} words}
 
 Regards,
-{use sender name from previous messages or "The Team"}
+Michael
 
 HARD RULES: No em dashes (—). Max 1 question mark. No bullets.`
     : `FORMAT (${channel} DM follow-up):
@@ -294,10 +308,17 @@ PRE-GATE CONSTRAINT (server rejects drafts that violate these — NON-NEGOTIABLE
 - Body must contain AT MOST ${hardQuestionCap} question mark. Zero or one. Never two.
 - No em dashes. No bullet points. No "checking in" / "just following up".
 
+V1.0 FOLLOW-UP RULES (same standard as cold DMs — Enforcer grades follow-ups against these):
+- ANTI-FABRICATION (HARD GATE): Every company name, product, role, or fact you mention MUST come from the LEAD context or PREVIOUS MESSAGES below. If the lead context says Company: "Unknown" or Title: "Unknown", do NOT invent a company name, product, or role. Work only with what you have. Enforcer will score 0 for any fabricated claim.
+- SEGMENT PAIN: Anchor on one of the 5 approved BeavrDam pains (hours on prospecting / low reply rates / founder doing outbound / pipeline gap / inconsistent outbound). Do NOT anchor on the prospect's vertical-specific pain unless it's explicitly stated in lead context.
+- NUMBER PROVENANCE: Any "%" or numeric claim must come from approved benchmarks (1-5% reply rate generic, 10-15% personalized, 6-12 hrs/week founder outbound, 50+ DMs/week) or from the lead's verifiable trigger. No invented numbers.
+- SENDER IDENTITY: Always sign as "Michael". Never "The Team", never "Sales Beaver", never the lead's name.
+- If you cannot write a genuine, non-fabricated follow-up with the context provided, return: {"status":"needs_more_research","missing_fields":["<what's missing>"],"reason":"Insufficient context for non-fabricated follow-up."}
+
 LEAD:
 Name: ${lead.name}
 Title: ${lead.title || 'Unknown'}
-Company: ${lead.company}
+Company: ${lead.company || 'Unknown'}
 Industry: ${lead.industry || lead.metadata?.industry || 'Unknown'}
 
 PREVIOUS MESSAGES (do NOT repeat any hook, angle, or pain point):
@@ -308,7 +329,7 @@ INSTRUCTION: ${config.instruction}
 
 ${channelFormat}
 
-Before returning, verify: word count under ${hardWordCap}? Question marks ≤ ${hardQuestionCap}? If not, rewrite.
+Before returning, verify: word count under ${hardWordCap}? Question marks ≤ ${hardQuestionCap}? Every fact verifiable from lead context? If not, rewrite.
 
 Return JSON only:
 {"subject":${channel === 'email' ? '"..."' : 'null'},"body":"...","touch_number":${touchNumber}}`;
