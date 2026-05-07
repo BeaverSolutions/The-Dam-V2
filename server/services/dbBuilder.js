@@ -125,6 +125,7 @@ let _running = false;
 
 const DEFAULTS = {
   min_ready_pool: 200,
+  min_email_ready_pool: 300,   // email-ready leads floor (was missing — fell back to 100)
   batch_size: 20,
   max_batches_per_run: 3,
   budget_cap_pct: 0.5,
