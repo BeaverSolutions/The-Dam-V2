@@ -2725,7 +2725,7 @@ router.post('/backfill-hunter-emails', requireInternalKey, async (req, res) => {
  * Each redraft goes through Enforcer review. Result stays pending_approval.
  */
 router.post('/bulk-redraft', requireInternalKey, async (req, res) => {
-  const { client_id, dry_run = false } = req.body || {};
+  const { client_id, dry_run = false, rescore_only = false } = req.body || {};
   if (!client_id) {
     return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
   }
@@ -2749,6 +2749,55 @@ router.post('/bulk-redraft', requireInternalKey, async (req, res) => {
 
     if (pending.length === 0) {
       return res.json({ ok: true, message: 'No pending_approval messages to redraft', total: 0 });
+    }
+
+    // rescore_only: re-run Enforcer v1.0 on existing bodies without redrafting
+    if (rescore_only) {
+      if (dry_run) {
+        return res.json({ ok: true, dry_run: true, rescore_only: true, total: pending.length });
+      }
+      const stats = { total: pending.length, rescored: 0, passed: 0, failed: 0, errors: 0 };
+      for (const msg of pending) {
+        try {
+          const leadMeta = typeof msg.lead_metadata === 'string' ? JSON.parse(msg.lead_metadata || '{}') : (msg.lead_metadata || {});
+          const meta = typeof msg.metadata === 'string' ? JSON.parse(msg.metadata || '{}') : (msg.metadata || {});
+          const touchNumber = meta.touch_number || 0;
+
+          const rangerResult = await rangerReview(client_id, {
+            message_id: msg.id,
+            message_body: msg.body,
+            lead_context: {
+              name: msg.name, company: msg.company, title: msg.title,
+              signal: leadMeta.signal, angle: leadMeta.angle,
+              why_now: leadMeta.why_now, touch_number: touchNumber,
+            },
+          });
+
+          const score = rangerResult?.score || 0;
+          const passed = !!rangerResult?.approved;
+          if (passed) stats.passed++; else stats.failed++;
+
+          await pool.query(
+            `UPDATE messages SET ranger_score = $1, ranger_notes = $2,
+             metadata = jsonb_set(COALESCE(metadata, '{}'), '{v1_rescore}', $3::jsonb),
+             updated_at = NOW()
+             WHERE id = $4 AND client_id = $5`,
+            [
+              score,
+              `v1.0 rescore: ${passed ? 'PASS' : 'FAIL'} (${score}) — ${rangerResult?.notes || rangerResult?.reject_reason || 'reviewed'}`,
+              JSON.stringify({ rescored_at: new Date().toISOString(), old_score: msg.old_score, new_score: score, passed }),
+              msg.id, client_id,
+            ]
+          );
+          stats.rescored++;
+          logger.info({ msg: '[bulk-rescore]', message_id: msg.id, lead: msg.name, old_score: msg.old_score, new_score: score, passed });
+        } catch (err) {
+          stats.errors++;
+          logger.error({ msg: '[bulk-rescore] failed', message_id: msg.id, err: err.message });
+        }
+      }
+      logger.info({ msg: '[bulk-rescore] complete', client_id, ...stats });
+      return res.json({ ok: true, rescore_only: true, ...stats });
     }
 
     if (dry_run) {
