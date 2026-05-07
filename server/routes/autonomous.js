@@ -2719,5 +2719,159 @@ router.post('/backfill-hunter-emails', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── POST /api/autonomous/bulk-redraft ─────────────────────────────
+ * Re-draft pending_approval messages with current v1.0 outreach rules.
+ * For follow-ups: uses draftFollowUp. For Day 0: uses salesGenerate.
+ * Each redraft goes through Enforcer review. Result stays pending_approval.
+ */
+router.post('/bulk-redraft', requireInternalKey, async (req, res) => {
+  const { client_id, dry_run = false } = req.body || {};
+  if (!client_id) {
+    return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+  }
+
+  try {
+    const { draftFollowUp } = require('../services/followupSequence');
+    const { salesGenerate, rangerReview } = agentsService;
+
+    const { rows: pending } = await pool.query(
+      `SELECT m.id, m.lead_id, m.channel, m.subject, m.body, m.metadata, m.follow_up_day,
+              m.ranger_score AS old_score, m.ranger_notes AS old_notes,
+              l.name, l.company, l.title, l.industry, l.linkedin_url, l.email,
+              l.metadata AS lead_metadata
+         FROM messages m
+         JOIN leads l ON l.id = m.lead_id
+        WHERE m.client_id = $1
+          AND m.status = 'pending_approval'
+        ORDER BY m.created_at ASC`,
+      [client_id]
+    );
+
+    if (pending.length === 0) {
+      return res.json({ ok: true, message: 'No pending_approval messages to redraft', total: 0 });
+    }
+
+    if (dry_run) {
+      const followups = pending.filter(m => {
+        const meta = typeof m.metadata === 'string' ? JSON.parse(m.metadata || '{}') : (m.metadata || {});
+        return meta.is_followup;
+      });
+      return res.json({
+        ok: true, dry_run: true, total: pending.length,
+        followups: followups.length, day0: pending.length - followups.length,
+      });
+    }
+
+    const stats = { total: pending.length, redrafted: 0, skipped_thin: 0, skipped_no_draft: 0, enforcer_passed: 0, enforcer_failed: 0, errors: 0 };
+
+    for (const msg of pending) {
+      try {
+        const meta = typeof msg.metadata === 'string' ? JSON.parse(msg.metadata || '{}') : (msg.metadata || {});
+        const leadMeta = typeof msg.lead_metadata === 'string' ? JSON.parse(msg.lead_metadata || '{}') : (msg.lead_metadata || {});
+        const isFollowup = !!meta.is_followup;
+        const touchNumber = meta.touch_number || 0;
+
+        let newBody = null;
+        let newSubject = null;
+
+        if (isFollowup && touchNumber >= 2) {
+          const prevMsgs = await pool.query(
+            `SELECT channel, subject, body, metadata FROM messages
+              WHERE client_id = $1 AND lead_id = $2 AND id != $3
+                AND status NOT IN ('deleted')
+              ORDER BY created_at ASC`,
+            [client_id, msg.lead_id, msg.id]
+          );
+
+          const lead = {
+            id: msg.lead_id, name: msg.name, company: msg.company,
+            title: msg.title, industry: msg.industry || leadMeta.industry,
+            linkedin_url: msg.linkedin_url, email: msg.email,
+            metadata: leadMeta,
+          };
+
+          const draft = await draftFollowUp(lead, touchNumber, prevMsgs.rows);
+          if (draft?.status === 'needs_more_research') {
+            stats.skipped_thin++;
+            continue;
+          }
+          newBody = draft?.body;
+          newSubject = draft?.subject || null;
+        } else {
+          const contextParts = [
+            `Name: ${msg.name}`,
+            `Company: ${msg.company || 'Unknown'}`,
+            `Title: ${msg.title || 'Unknown'}`,
+            leadMeta.signal ? `Signal: ${leadMeta.signal}` : '',
+            leadMeta.angle ? `Angle: ${leadMeta.angle}` : '',
+            leadMeta.friction ? `Friction: ${leadMeta.friction}` : '',
+            leadMeta.why_now ? `Why now: ${leadMeta.why_now}` : '',
+          ].filter(Boolean).join('\n');
+
+          const salesResult = await salesGenerate(client_id, {
+            lead_id: msg.lead_id,
+            channel: msg.channel,
+            context: contextParts,
+          });
+          newBody = salesResult?.body;
+          newSubject = salesResult?.subject || null;
+        }
+
+        if (!newBody) {
+          stats.skipped_no_draft++;
+          continue;
+        }
+
+        const rangerResult = await rangerReview(client_id, {
+          message_id: msg.id,
+          message_body: newBody,
+          lead_context: {
+            name: msg.name, company: msg.company, title: msg.title,
+            signal: leadMeta.signal, angle: leadMeta.angle,
+            why_now: leadMeta.why_now, touch_number: touchNumber,
+          },
+        });
+
+        const finalBody = rangerResult?.body || newBody;
+        const score = rangerResult?.score || 0;
+        const passed = !!rangerResult?.approved;
+
+        if (passed) stats.enforcer_passed++;
+        else stats.enforcer_failed++;
+
+        await pool.query(
+          `UPDATE messages SET body = $1, subject = COALESCE($2, subject),
+           ranger_score = $3, ranger_notes = $4,
+           metadata = jsonb_set(COALESCE(metadata, '{}'), '{bulk_redraft}', $5::jsonb),
+           ranger_attempt_count = COALESCE(ranger_attempt_count, 0) + 1,
+           updated_at = NOW()
+           WHERE id = $6 AND client_id = $7`,
+          [
+            finalBody,
+            newSubject,
+            score,
+            `v1.0 redraft: ${passed ? 'PASS' : 'FAIL'} (${score}) — ${rangerResult?.notes || rangerResult?.reject_reason || 'reviewed'}`,
+            JSON.stringify({ redrafted_at: new Date().toISOString(), old_score: msg.old_score, new_score: score, passed }),
+            msg.id,
+            client_id,
+          ]
+        );
+
+        stats.redrafted++;
+        logger.info({ msg: '[bulk-redraft] redrafted', message_id: msg.id, lead: msg.name, old_score: msg.old_score, new_score: score, passed });
+      } catch (err) {
+        stats.errors++;
+        logger.error({ msg: '[bulk-redraft] message failed', message_id: msg.id, err: err.message });
+      }
+    }
+
+    logger.info({ msg: '[bulk-redraft] complete', client_id, ...stats });
+    return res.json({ ok: true, ...stats });
+  } catch (err) {
+    logger.error({ msg: '[bulk-redraft] failed', err: err.message, stack: err.stack?.split('\n').slice(0, 4) });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 module.exports = router;
 module.exports.runAutonomousKickoff = runAutonomousKickoff;
