@@ -2737,7 +2737,7 @@ router.post('/bulk-redraft', requireInternalKey, async (req, res) => {
     const { rows: pending } = await pool.query(
       `SELECT m.id, m.lead_id, m.channel, m.subject, m.body, m.metadata, m.follow_up_day,
               m.ranger_score AS old_score, m.ranger_notes AS old_notes,
-              l.name, l.company, l.title, l.industry, l.linkedin_url, l.email,
+              l.name, l.company, l.title, l.linkedin_url, l.email,
               l.metadata AS lead_metadata
          FROM messages m
          JOIN leads l ON l.id = m.lead_id
@@ -2785,7 +2785,7 @@ router.post('/bulk-redraft', requireInternalKey, async (req, res) => {
 
           const lead = {
             id: msg.lead_id, name: msg.name, company: msg.company,
-            title: msg.title, industry: msg.industry || leadMeta.industry,
+            title: msg.title, industry: leadMeta.industry,
             linkedin_url: msg.linkedin_url, email: msg.email,
             metadata: leadMeta,
           };
