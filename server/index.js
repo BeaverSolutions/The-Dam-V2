@@ -962,25 +962,22 @@ async function start() {
       }
     }
 
-    // ── Captain KPI gap kickoff (every 30 min during working hours) ────────
+    // ── Captain KPI gap kickoff (hourly during working hours) ──────────────
     // Captain checks if daily send target is met. If not, and no kickoff is
     // already running, and cooldown has passed, fires another kickoff.
-    // Guards: max 6 kickoffs/day, 30-min cooldown, working hours only.
+    // Guards: max 6 kickoffs/day, 25-min cooldown, working hours only.
     async function runKpiGapKickoff() {
       const now = new Date();
       const utcHour = now.getUTCHours();
-      // 01:00-10:59 UTC = 09:00-18:59 MYT (stop before 19:00 — no late kickoffs)
-      if (utcHour < 1 || utcHour > 10) return;
+      // 01:00-09:59 UTC = 09:00-17:59 MYT (stop before 18:00 — no late kickoffs)
+      if (utcHour < 1 || utcHour >= 10) return;
 
-      // 30-min cadence: fire at :00-:09 and :30-:39
+      // Hourly cadence: fire at :00-:09 only
       const m = now.getUTCMinutes();
-      const inFirstWindow  = m < 10;
-      const inSecondWindow = m >= 30 && m < 40;
-      if (!inFirstWindow && !inSecondWindow) return;
+      if (m >= 10) return;
 
-      // Half-hour dedupe
-      const halfHourSlot = `${now.toISOString().slice(0, 13)}_${m < 30 ? '0' : '30'}`;
-      const dedupeKey = `kpi_gap_kickoff_${halfHourSlot}`;
+      // Hourly dedupe
+      const dedupeKey = `kpi_gap_kickoff_${now.toISOString().slice(0, 13)}`;
       const { rows: already } = await pool.query(
         `SELECT 1 FROM agent_memory WHERE agent = 'captain_orchestrator' AND key = $1 LIMIT 1`,
         [dedupeKey]
