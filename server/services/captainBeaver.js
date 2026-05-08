@@ -529,13 +529,23 @@ async function toolCreateLead(clientId, input) {
     verified: true,
   };
 
+  // Phase 2 V2 Step 6 (2026-05-08): Captain create_lead is a manual producer.
+  // Operator (MJ via Telegram or UI) provides signal context; default to
+  // 'rich' since Captain only creates leads when there's a real reason.
+  // signal_dated_at defaults to NOW() — operator just observed the signal.
+  const buyingSignalStrength = metadata.buying_signal_strength
+    || (signal ? 'rich' : 'lite');
+  const signalDatedAt = metadata.signal_dated_at || new Date().toISOString();
+
   const insert = await pool.query(
     `INSERT INTO leads (client_id, name, email, company, title, linkedin_url,
-                        signal_tier, source, pipeline_stage, status, score, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'captain_beaver', 'prospecting', 'new', 0, $8::jsonb)
+                        signal_tier, source, pipeline_stage, status, score, metadata,
+                        buying_signal_strength, signal_dated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'captain_beaver', 'prospecting', 'new', 0, $8::jsonb, $9, $10)
      RETURNING *`,
     [clientId, name, email || null, company, title || null, linkedin_url || null,
-     signal_tier, JSON.stringify(metadata)]
+     signal_tier, JSON.stringify(metadata),
+     buyingSignalStrength, signalDatedAt]
   );
 
   const lead = insert.rows[0];

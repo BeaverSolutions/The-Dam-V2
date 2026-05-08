@@ -65,13 +65,27 @@ const STATUS_TO_PIPELINE = {
 };
 
 async function createLead(clientId, data) {
-  const { name, email, company, title, linkedin_url, source, signal_tier, status = 'new', score = 0, metadata = {} } = data;
+  const {
+    name, email, company, title, linkedin_url, source, signal_tier,
+    status = 'new', score = 0, metadata = {},
+  } = data;
   const pipeline_stage = data.pipeline_stage || STATUS_TO_PIPELINE[status] || 'prospecting';
+
+  // Phase 2 V2 Step 6 (2026-05-08): generic createLead helper. Used by import
+  // routes + miscellaneous internal callers. Default to 'lite' + NOW() because
+  // we don't know the upstream context. Caller can override via data.* fields.
+  const buying_signal_strength = data.buying_signal_strength
+    || metadata.buying_signal_strength
+    || 'lite';
+  const signal_dated_at = data.signal_dated_at
+    || metadata.signal_dated_at
+    || new Date().toISOString();
+
   const result = await pool.query(
-    `INSERT INTO leads (client_id, name, email, company, title, linkedin_url, source, signal_tier, status, score, pipeline_stage, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    `INSERT INTO leads (client_id, name, email, company, title, linkedin_url, source, signal_tier, status, score, pipeline_stage, metadata, buying_signal_strength, signal_dated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      RETURNING *`,
-    [clientId, name, email, company, title, linkedin_url, source, signal_tier, status, score, pipeline_stage, JSON.stringify(metadata)]
+    [clientId, name, email, company, title, linkedin_url, source, signal_tier, status, score, pipeline_stage, JSON.stringify(metadata), buying_signal_strength, signal_dated_at]
   );
   const lead = result.rows[0];
 

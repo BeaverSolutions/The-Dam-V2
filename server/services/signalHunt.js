@@ -347,12 +347,26 @@ async function saveSignalLeads(clientId, leads) {
     }
     const leadTier = gateResult.tier;
 
+    // Phase 2 V2 Step 6 (2026-05-08): buying_signal_strength + signal_dated_at.
+    // signalHunt is a SIGNAL-FIRST producer — by definition every lead it
+    // sources has a buying signal in metadata. Default to 'rich' (the source
+    // of truth IS the signal hunt) unless explicitly overridden, with the
+    // signal date pulled from metadata.signal_dated_at if Research Beaver
+    // emitted it, else NOW() (today's hunt).
+    const buyingSignalStrength = lead.buying_signal_strength
+      || lead.metadata?.buying_signal_strength
+      || 'rich';
+    const signalDatedAt = lead.signal_dated_at
+      || lead.metadata?.signal_dated_at
+      || new Date().toISOString();
+
     try {
       const res = await pool.query(
         `INSERT INTO leads (client_id, name, email, company, title, signal_tier, score, source,
                             pipeline_stage, status, email_verified, email_source, linkedin_url, metadata,
-                            lead_tier, tiered_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'signal_hunt','prospecting','new',$8,$9,$10,$11,$12,NOW())
+                            lead_tier, tiered_at,
+                            buying_signal_strength, signal_dated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'signal_hunt','prospecting','new',$8,$9,$10,$11,$12,NOW(),$13,$14)
          RETURNING *`,
         [
           clientId, lead.name, lead.email || null, lead.company, lead.title || null,
@@ -360,6 +374,7 @@ async function saveSignalLeads(clientId, leads) {
           lead.email_verified, lead.email_source, lead.linkedin_url,
           JSON.stringify(lead.metadata || {}),
           leadTier,
+          buyingSignalStrength, signalDatedAt,
         ]
       );
       if (res.rows.length > 0) saved.push(res.rows[0]);

@@ -284,11 +284,24 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
   const leadTier = gateResult.tier;
 
   try {
+    // Phase 2 V2 Step 6 (2026-05-08): buying_signal_strength + signal_dated_at
+    // contract enforcement at write time. Producer should emit these from the
+    // Research Beaver structured response. Defaults: 'lite' + NOW() if absent
+    // (graceful degradation while prompt rolls out — Step 9 adds CHECK constraint
+    // after 5 days clean production data).
+    const buyingSignalStrength = lead.buying_signal_strength
+      || (lead.metadata?.buying_signal_strength)
+      || 'lite';
+    const signalDatedAt = lead.signal_dated_at
+      || lead.metadata?.signal_dated_at
+      || new Date().toISOString();
+
     const res = await pool.query(
       `INSERT INTO leads (client_id, name, email, company, title, signal_tier, score, source,
                           pipeline_stage, status, email_verified, email_source, linkedin_url, metadata,
-                          lead_tier, tiered_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11,$12,NOW())
+                          lead_tier, tiered_at,
+                          buying_signal_strength, signal_dated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11,$12,NOW(),$13,$14)
        ON CONFLICT (client_id, linkedin_url) WHERE linkedin_url IS NOT NULL AND deleted_at IS NULL
        DO NOTHING
        RETURNING id`,
@@ -305,6 +318,8 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
         lead.linkedin_url || null,
         JSON.stringify(meta),
         leadTier,
+        buyingSignalStrength,
+        signalDatedAt,
       ]
     );
     const insertedId = res.rows[0]?.id || null;

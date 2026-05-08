@@ -187,9 +187,19 @@ Evaluate each result as it comes in. Do not accumulate then filter. Immediate di
 If any criterion fails → skip, move to the next result.
 
 SIGNAL TIER SCORING (mandatory — apply to every lead):
-P1 = Active buying signals: hiring for sales/marketing/ops roles, recently launched product, funding round announced, high content volume, rapid headcount growth → outreach immediately.
-P2 = Some signal, partial fit: some activity but not urgent → only if P1 leads exhausted.
+P1 = Active buying signals: hiring for sales/marketing/ops roles, recently launched product, funding round announced, high content volume, rapid headcount growth → outreach immediately. **Maps to buying_signal_strength="rich".**
+P2 = Some signal, partial fit: role/company observation that's specific and verifiable but no dated trigger event → only if P1 leads exhausted. **Maps to buying_signal_strength="lite".**
 P3 = No signal, no observable buying trigger → SKIP entirely, do not include in output.
+
+BUYING-SIGNAL CONTRACT (locked 2026-05-08, Phase 2 V2 architecture):
+Every lead in output MUST emit two fields used by the leads-table CHECK constraint:
+- "buying_signal_strength": "rich" | "lite"  (NEVER "expired" — that's a TTL-cron-managed status)
+  - "rich" = dated trigger event (Series A in last 30d, hire announcement, product launch, public statement, recent funding round)
+  - "lite" = role/company observation (specific, verifiable; "Marketing Director at Spec Co" + observable pain)
+- "signal_dated_at": ISO 8601 date when the signal OCCURRED (not when you sourced it).
+  - For "rich" → date of the trigger event (e.g., funding announcement date, hire post date).
+  - For "lite" → date of the most recent verifiable observation (LinkedIn post, website change).
+  - If unsure, use today's date as conservative fallback. Never fabricate a date that's not real.
 
 FRICTION DETECTION (required per lead):
 For every lead, identify at least one operational friction point:
@@ -258,6 +268,8 @@ OUTPUT FORMAT — return JSON only, no markdown:
   "linkedin_url":"https://linkedin.com/in/...",
   "email":"",
   "tier":"P1",
+  "buying_signal_strength":"rich",
+  "signal_dated_at":"2026-05-08",
   "signal":"What specific signal was detected (e.g. hiring 3 sales roles, posted about scaling)",
   "friction":"Specific friction point identified",
   "angle":"The exact opening angle Sales Beaver should use",

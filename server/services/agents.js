@@ -2756,6 +2756,19 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       if (lead.metadata?.data_source) meta.data_source = lead.metadata.data_source;
       if (lead.metadata?.verified !== undefined) meta.verified = lead.metadata.verified;
 
+      // Phase 2 V2 Step 6 (2026-05-08): buying_signal_strength + signal_dated_at.
+      // directorExecute cold-research path. Research Beaver structured response
+      // SHOULD emit these (see Step 6b prompt update). Default to 'rich' here
+      // because directorExecute is the cold-research path — these leads only
+      // exist because Research found a buying signal. signal_dated_at falls
+      // back to NOW() (today's research run) if the signal didn't emit a date.
+      const buyingSignalStrength = lead.buying_signal_strength
+        || lead.metadata?.buying_signal_strength
+        || 'rich';
+      const signalDatedAt = lead.signal_dated_at
+        || lead.metadata?.signal_dated_at
+        || new Date().toISOString();
+
       const res = await pool.query(
         // ICP+channel patches per MJ direction 2026-04-29 + tiered sourcing migration 061 (2026-05-05).
         // signal_tier resolved from score+verified per spec; country lifted from Haiku verification.
@@ -2763,8 +2776,9 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         `INSERT INTO leads (client_id, name, email, company, title, signal_tier, score, source,
                             pipeline_stage, status, email_verified, email_source,
                             apollo_enriched, apollo_person_id, apollo_org_id, linkedin_url, country, metadata,
-                            lead_tier, tiered_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
+                            lead_tier, tiered_at,
+                            buying_signal_strength, signal_dated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'research_beaver','prospecting','new',$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW(),$17,$18)
          ON CONFLICT (client_id, linkedin_url) WHERE linkedin_url IS NOT NULL AND deleted_at IS NULL
          DO NOTHING
          RETURNING *`,
@@ -2785,6 +2799,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           lead.country || lead.metadata?.country || lead.verification?.country || lead.verification?.haikuResult?.country || null,
           JSON.stringify({ short_description: lead.short_description || '', ...meta }),
           leadTier,
+          buyingSignalStrength, signalDatedAt,
         ]
       );
       if (res.rows.length > 0) {
