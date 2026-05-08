@@ -314,3 +314,24 @@
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* ── Mobile ── */
+@media (max-width: 640px) {
+  .rail-block { padding: 12px 14px; }
+  .rail-block-head { font-size: 10px; margin-bottom: 10px; }
+  .rail-stage-bar { height: 6px; }
+  .rail-health-cell { padding: 8px 10px; }
+  .rail-health-v { font-size: 20px; }
+  .rail-donut-wrap { grid-template-columns: 90px 1fr; gap: 10px; }
+  .rail-donut { width: 90px; height: 90px; }
+  .rail-donut-n { font-size: 18px; }
+  .rail-captain-v { font-size: 16px; }
+  .rail-captain-hook { font-size: 12px; padding: 6px 10px; }
+}
+@media (max-width: 480px) {
+  .rail-stage-label { font-size: 9px; }
+  .rail-stage-count { font-size: 10px; }
+  .rail-health-grid { gap: 6px; }
+  .rail-health-v { font-size: 18px; }
+  .rail-health-l { font-size: 9px; }
+}

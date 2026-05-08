@@ -487,15 +487,38 @@
   .bl-stat-v { font-size: 14px; }
 }
 @media (max-width: 640px) {
+  .engine-panel { padding: 10px 12px 14px; }
   .engine-stage-inner { transform: scale(0.42); }
-  .engine-stage { height: 340px; }
-  .beaver-label--expanded { width: 120px; max-width: 120px; gap: 4px; }
-  .bl-name { font-size: 11px; }
-  .bl-stat-v { font-size: 13px; }
+  .engine-stage { height: 300px; }
+  .beaver-label--expanded { width: 100px; max-width: 100px; gap: 2px; }
+  .beaver-label--expanded .bl-section { display: none; }
+  .beaver-img { width: 64px; height: 64px; }
+  .bl-name { font-size: 10px; }
+  .bl-status { font-size: 8px; gap: 4px; }
+  .bl-role { display: none; }
   .engine-meta { display: none; }
+  .engine-stats-strip { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .stat-card { padding: 8px 10px; }
+  .stat-card-v { font-size: 20px; }
+  .stat-card-lbl { font-size: 10px; }
+  .rotor-val { font-size: 32px; }
+  .rotor-lbl { font-size: 9px; }
+}
+@media (max-width: 480px) {
+  .engine-stage-inner { transform: scale(0.36); }
+  .engine-stage { height: 260px; }
+  .beaver-img { width: 56px; height: 56px; }
+  .beaver-label--expanded { width: 80px; max-width: 80px; }
+  .bl-name { font-size: 9px; }
+  .bl-status { display: none; }
+  .engine-head { gap: 6px; }
+  .engine-ttl { font-size: 12px; }
+  .engine-live-pill { font-size: 8px; padding: 2px 7px; }
 }
 @media (max-width: 380px) {
-  .engine-stage-inner { transform: scale(0.34); }
-  .engine-stage { height: 290px; }
-  .beaver-label--expanded { width: 100px; max-width: 100px; }
+  .engine-stage-inner { transform: scale(0.32); }
+  .engine-stage { height: 230px; }
+  .beaver-img { width: 48px; height: 48px; }
+  .beaver-label--expanded { display: none; }
+  .stat-card-v { font-size: 18px; }
 }
