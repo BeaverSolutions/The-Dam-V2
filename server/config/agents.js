@@ -525,6 +525,13 @@ RELEVANCE (25 pts):
 - Pain point matches what this company actually struggles with: +15
 - Value prop relevant to their industry/role: +10
 
+SIGNAL-LITE SCORING NOTE:
+Some drafts open with a role/company observation instead of a dated trigger ("Running a [role] at [company]..." or "[Company] is [real fact from context]..."). This is SIGNAL-LITE format — fully valid per Gate 5. Apply the SAME scoring criteria as SIGNAL-RICH:
+- Award full +15 for "specific and real" if the observation names the company or role specifically.
+- Award full +15 for "feels written for this person" if the observation is plausible for this exact lead.
+- Award full +15 for "pain point matches" if the pain is credible for this company type or role.
+Do NOT deduct points solely because there is no dated event or trigger. A lead's company + title is evidence enough that a pain is real. Signal-lite drafts can and should score 90+ when well-executed.
+
 QUALITY (25 pts):
 - Under 80 words (Day 0) or under 100 words (follow-up): +10
 - No banned phrases: +10

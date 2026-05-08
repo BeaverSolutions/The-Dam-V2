@@ -1943,9 +1943,10 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
             const enfSubject = enforcerDraft.subject || draftSubject || lead.company;
             // Insert as a NEW message (don't overwrite the rejected one)
             const { rows: [enfMsg] } = await pool.query(
-              `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, metadata)
-               VALUES ($1, $2, $3, $4, $5, 'pending_approval', $6) RETURNING *`,
+              `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, ranger_score, ranger_notes, metadata)
+               VALUES ($1, $2, $3, $4, $5, 'pending_approval', 70, $6, $7) RETURNING *`,
               [clientId, lead.id, channel, enfSubject, enforcerDraft.body,
+               'Enforcer-drafted fallback — Sales Beaver hard-rejected. Review before sending.',
                JSON.stringify({ source: 'enforcer_fallback', signal: meta.signal, original_rejection: rangerResult?.notes })]
             );
 
@@ -2945,6 +2946,11 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       if (!salesResult?.body) {
         console.warn(`[pipeline] Sales draft failed for ${lead.name} (${selectedChannel}): no body`);
         diagnostics.messages_failed++;
+        await logsService.createLog(clientId, {
+          agent: 'sales_beaver', action: 'draft_failed',
+          target_type: 'lead', target_id: lead.id,
+          metadata: { reason: 'no_body', path: 'kickoff_pipeline', channel: selectedChannel, enrichment_eligible: !!(lead.company && lead.title) },
+        }).catch(() => {});
       } else {
         diagnostics.messages_drafted++;
         execStatus.beavers.sales.drafted++;
@@ -2962,6 +2968,11 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           console.warn(`[pipeline] Dedup guard: ${lead.name} already has an active message — skipping insert`);
           diagnostics.messages_drafted--; // uncredit the increment
           diagnostics.messages_failed++;
+          await logsService.createLog(clientId, {
+            agent: 'sales_beaver', action: 'draft_failed',
+            target_type: 'lead', target_id: lead.id,
+            metadata: { reason: 'dedup_skip', path: 'kickoff_pipeline', channel: selectedChannel, existing_message_id: existingActiveMsg.rows[0].id },
+          }).catch(() => {});
           return;
         }
 
