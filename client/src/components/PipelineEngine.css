@@ -488,8 +488,17 @@
 }
 @media (max-width: 640px) {
   .engine-panel { padding: 10px 12px 14px; }
-  .engine-stage-inner { transform: scale(0.42); }
-  .engine-stage { height: 300px; }
+  .engine-stage {
+    height: 280px;
+    overflow: hidden;
+    position: relative;
+  }
+  .engine-stage-inner {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%) scale(0.42);
+  }
   .beaver-label--expanded { width: 100px; max-width: 100px; gap: 2px; }
   .beaver-label--expanded .bl-section { display: none; }
   .beaver-img { width: 64px; height: 64px; }
@@ -505,8 +514,10 @@
   .rotor-lbl { font-size: 9px; }
 }
 @media (max-width: 480px) {
-  .engine-stage-inner { transform: scale(0.36); }
-  .engine-stage { height: 260px; }
+  .engine-stage { height: 250px; }
+  .engine-stage-inner {
+    transform: translate(-50%, -50%) scale(0.38);
+  }
   .beaver-img { width: 56px; height: 56px; }
   .beaver-label--expanded { width: 80px; max-width: 80px; }
   .bl-name { font-size: 9px; }
@@ -516,8 +527,10 @@
   .engine-live-pill { font-size: 8px; padding: 2px 7px; }
 }
 @media (max-width: 380px) {
-  .engine-stage-inner { transform: scale(0.32); }
-  .engine-stage { height: 230px; }
+  .engine-stage { height: 220px; }
+  .engine-stage-inner {
+    transform: translate(-50%, -50%) scale(0.34);
+  }
   .beaver-img { width: 48px; height: 48px; }
   .beaver-label--expanded { display: none; }
   .stat-card-v { font-size: 18px; }
