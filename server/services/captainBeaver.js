@@ -226,6 +226,8 @@ const TOOLS = [
         angle:         { type: 'string', description: 'The opening hook Sales Beaver should lead with' },
         friction:      { type: 'string', description: 'The operational pain you inferred' },
         signal_tier:   { type: 'string', enum: ['P1', 'P2', 'P3'], description: 'Signal strength: P1 = active trigger, P2 = partial fit, P3 = no signal (avoid)' },
+        buying_signal_strength: { type: 'string', enum: ['rich', 'lite'], description: 'Phase 2 V2 contract: "rich" = dated trigger event (Series A in last 30d, hire announcement, product launch). "lite" = role/company observation (specific, verifiable; "Marketing Director at Spec Co"). Default rich if signal text describes a dated event; lite if only an observation. Used by leads-table CHECK constraint after Step 9 ships.' },
+        signal_dated_at: { type: 'string', description: 'Phase 2 V2 contract: ISO 8601 date when the signal OCCURRED (not when sourced). For rich = trigger event date. For lite = most recent verifiable observation. If unsure, today\'s date is acceptable. Never fabricate.' },
         confidence:    { type: 'number', description: 'Your confidence in this lead 0-100' },
       },
       required: ['name', 'company', 'signal'],
@@ -491,6 +493,10 @@ async function toolCreateLead(clientId, input) {
     name, company, title, email,
     signal, why_now, angle, friction,
     signal_tier = 'P1', confidence,
+    // Phase 2 V2 Step 7 (2026-05-08): explicit /inject-style contract fields.
+    // Captain's tool LLM can pass these to override the defaults below.
+    buying_signal_strength: explicitStrength,
+    signal_dated_at: explicitDatedAt,
   } = input;
   const { sanitiseLinkedInUrl } = require('../utils/validateLinkedIn');
   const linkedin_url = sanitiseLinkedInUrl(input.linkedin_url, `captain_beaver create_lead ${name}`);
@@ -529,13 +535,21 @@ async function toolCreateLead(clientId, input) {
     verified: true,
   };
 
-  // Phase 2 V2 Step 6 (2026-05-08): Captain create_lead is a manual producer.
-  // Operator (MJ via Telegram or UI) provides signal context; default to
-  // 'rich' since Captain only creates leads when there's a real reason.
-  // signal_dated_at defaults to NOW() — operator just observed the signal.
-  const buyingSignalStrength = metadata.buying_signal_strength
+  // Phase 2 V2 Step 6+7 (2026-05-08): Captain create_lead is the canonical
+  // "/inject" path for sync-urgency hot leads. Operator (MJ via Telegram or
+  // Captain's LLM tool-call) can pass explicit buying_signal_strength + date,
+  // OR they fall through to defaults below.
+  // Default to 'rich' since Captain only creates leads when there's a real
+  // signal — and we want urgency leads prioritized in the queue.
+  // Validate enum: only 'rich' or 'lite' accepted from caller; never 'expired'
+  // (TTL-cron managed only).
+  const allowedStrengths = ['rich', 'lite'];
+  const buyingSignalStrength = (allowedStrengths.includes(explicitStrength) ? explicitStrength : null)
+    || metadata.buying_signal_strength
     || (signal ? 'rich' : 'lite');
-  const signalDatedAt = metadata.signal_dated_at || new Date().toISOString();
+  const signalDatedAt = explicitDatedAt
+    || metadata.signal_dated_at
+    || new Date().toISOString();
 
   const insert = await pool.query(
     `INSERT INTO leads (client_id, name, email, company, title, linkedin_url,

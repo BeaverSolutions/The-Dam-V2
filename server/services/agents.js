@@ -2202,6 +2202,61 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     }
   }
 
+  // ── Phase 2 V2 Step 8 (2026-05-08): cold-research producer/consumer redirect ─
+  //
+  // When DIRECTOR_INLINE_RESEARCH_DISABLED=true, instead of running cold research
+  // inline (the path below this block, ~line 2205+), queue a research_directive
+  // for Research Beaver's autonomous loop to pick up next cycle. Caller's
+  // signature is preserved — returns { plan_id, status: 'queued' } so the 12+
+  // callers across routes/agents.js, routes/autonomous.js continue working.
+  //
+  // Default OFF — preserves existing behaviour. Flip via Railway env var after
+  // 24h shadow validation confirms Research Beaver consumer logic is reliable.
+  // Phase 2 V2 Step 9 (5-day validation gate): delete the cold-research code
+  // below this block once flag has been ON for 5 consecutive days clean.
+  //
+  // Step 8b (next session): wire dbBuilder consumer to read cold_research_request
+  // directives and execute the queued search query in the autonomous loop.
+  if (process.env.DIRECTOR_INLINE_RESEARCH_DISABLED === 'true' && command) {
+    const directivesSvc = require('./directives');
+    console.log(`[director] Cold-research INLINE DISABLED — queuing as research_directive: "${command}"`);
+    try {
+      await directivesSvc.writeDirective(
+        clientId,
+        'db_builder',
+        'cold_research_request',
+        { command, limit: limit ?? null, plan_id, batchIndex },
+        {
+          reason: `Cold research command queued via directorExecute redirect: "${command}"`,
+          severity: 'normal',
+          expiresInHours: 24,
+        }
+      );
+    } catch (err) {
+      console.error('[director] Failed to queue research_directive:', err.message);
+      // Fall through — better to run cold research inline than silently lose the command.
+      // (The flag's whole point is to NOT lose work; if directive write fails, we degrade gracefully.)
+    }
+
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'cold_research_queued',
+      metadata: {
+        plan_id, command, limit,
+        reason: 'DIRECTOR_INLINE_RESEARCH_DISABLED',
+        consumer: 'db_builder',
+      },
+    }).catch(() => {});
+
+    return {
+      success: true,
+      queued: true,
+      plan_id,
+      status: 'queued',
+      message: `Research directive queued. Research Beaver will process within ~15 minutes.`,
+    };
+  }
+
   // ── Diagnostics: track counts at each filtering stage ──
   const diagnostics = {
     research_source: null,
