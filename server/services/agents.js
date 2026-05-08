@@ -1696,31 +1696,12 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       // If the lead has no email, ALWAYS try Hunter first before falling back
       // to LinkedIn. MJ's rule: email is the primary channel; LinkedIn is only
       // used when no email is available, and for follow-up escalation after FU2.
-      if (!lead.email) {
-        try {
-          const nameParts = (lead.name || '').split(' ');
-          const hunterResult = await hunterService.findEmail(clientId, {
-            firstName: nameParts[0] || '',
-            lastName: nameParts.slice(1).join(' ') || '',
-            company: lead.company,
-          });
-          if (hunterResult?.email) {
-            await pool.query(
-              `UPDATE leads SET email = $1, email_verified = $2, email_source = 'hunter', updated_at = NOW()
-                WHERE id = $3 AND client_id = $4`,
-              [hunterResult.email, hunterResult.verified === true, lead.id, clientId]
-            );
-            lead.email = hunterResult.email;
-            lead.email_source = 'hunter';
-            lead.email_verified = hunterResult.verified === true;
-            console.log(`[signal-pipeline] Hunter sourced email for ${lead.name}: ${hunterResult.email} (email-priority)`);
-          } else {
-            console.log(`[signal-pipeline] Hunter found no email for ${lead.name} — will use LinkedIn`);
-          }
-        } catch (err) {
-          console.warn(`[signal-pipeline] Hunter lookup failed for ${lead.name}: ${err.message}`);
-        }
-      }
+      // Phase 2 Step 3 (2026-05-08): Hunter enrichment via pipeline.enrichEmail.
+      // signal_pipeline does NOT use VP (kickoff path only) — enableVp omitted.
+      await pipeline.enrichEmail(clientId, lead, {
+        pipeline_path: 'signal-pipeline',
+        hunterService,
+      });
 
       // ── Channel selection ── single source of truth in selectChannel()
       const channelChoice_sp = selectChannel(lead);
@@ -1743,31 +1724,34 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         }
       }
 
-      const salesResult = await salesGenerate(clientId, {
+      // Phase 2 Step 3 (2026-05-08): Sales Beaver + Enforcer fallback via
+      // pipeline.draftWithFallback. Returns null when both fail (silent skip).
+      // Behaviour identical to the previous inline block — same logs, same
+      // continue semantics. defaultDraftSource preserves legacy 'signal_hunt'.
+      const draft = await pipeline.draftWithFallback(clientId, {
         lead_id: lead.id,
         channel,
         context: contextParts.join('\n'),
+        salesGenerate,
+        rangerDraft,
+        enableEnforcerFallback: true,
+        lead,
+        leadAngle: meta.angle,
+        leadFriction: meta.friction,
+        pipeline_path: 'signal-pipeline',
+        defaultDraftSource: 'signal_hunt',
       });
-
-      // If Sales Beaver failed, fall back to Enforcer drafting directly
-      let draftBody = salesResult?.body;
-      let draftSubject = salesResult?.subject || null;
-      let draftSource = 'signal_hunt';
-      if (!draftBody) {
-        console.warn(`[signal-pipeline] Sales draft failed for ${lead.name} — Enforcer drafting fallback`);
-        const enforcerDraft = await rangerDraft(clientId, {
-          lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
-          lead_angle: meta.angle, lead_friction: meta.friction, rejected_body: '',
-        });
-        // rangerDraft returns {subject, body} — extract the STRING body, not the whole object
-        if (!enforcerDraft?.body || typeof enforcerDraft.body !== 'string') {
-          console.warn(`[signal-pipeline] Enforcer fallback also failed for ${lead.name} — skipping`);
-          continue;
-        }
-        draftBody = enforcerDraft.body;
-        draftSubject = enforcerDraft.subject || `${lead.company}`;
-        draftSource = 'enforcer_fallback';
+      if (!draft) {
+        // Both Sales Beaver and Enforcer fallback failed — skip this lead.
+        // (Phase 1 visibility note: this exit path is still uninstrumented in
+        //  pipeline_traces. Hotfix tracked separately — emits 'rejected'
+        //  with status='sales_api_error' so silent drops become visible.)
+        continue;
       }
+      const salesResult = { prompt_variant: draft.prompt_variant }; // preserved for downstream metadata
+      const draftBody = draft.body;
+      const draftSubject = draft.subject;
+      const draftSource = draft.draftSource;
 
       // ── Race-condition dedup guard ─────────────────────────────────────
       // Prevent duplicate messages if this lead was picked up by a parallel
@@ -2945,88 +2929,23 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       instagram: 'Write a casual Instagram DM. 1-2 sentences, under 30 words. No greeting, no sign-off. Reference something about their company. End with a casual question. Most informal channel.',
     };
 
-    // ── Email-priority rule ───────────────────────────────────────────────
-    // MJ's policy: email is the primary channel. Always try Hunter BEFORE
-    // falling back to LinkedIn, regardless of whether LinkedIn was attempted
-    // before. LinkedIn is used only when no email can be sourced.
-    // Follow-up escalation (email → LinkedIn after FU2 with no reply) is
-    // handled separately in followupSequence.escalateChannel().
+    // ── Email-priority + VP enrichment via pipeline.enrichEmail ──────────
+    // Phase 2 Step 3 (2026-05-08): Hunter + VP enrichment consolidated into
+    // pipeline.enrichEmail. Behaviour identical: Hunter always tried first,
+    // then VP fallback gated by quality_score >= vp_threshold_score AND
+    // daily credit budget. lead.email/email_verified/email_source mutated
+    // in place + DB updated. linkedinAlreadyTried tracked separately below.
     let linkedinAlreadyTried = false;
-    if (!lead.email) {
-      try {
-        const nameParts = (lead.name || '').split(' ');
-        const hunterResult = await hunterService.findEmail(clientId, {
-          firstName: nameParts[0] || '',
-          lastName: nameParts.slice(1).join(' ') || '',
-          company: lead.company,
-        });
-        if (hunterResult?.email) {
-          await pool.query(
-            `UPDATE leads SET email = $1, email_verified = $2, email_source = 'hunter', updated_at = NOW()
-              WHERE id = $3 AND client_id = $4`,
-            [hunterResult.email, hunterResult.verified === true, lead.id, clientId]
-          );
-          lead.email = hunterResult.email;
-          lead.email_source = 'hunter';
-          lead.email_verified = hunterResult.verified === true;
-          console.log(`[pipeline] Email-priority: Hunter sourced ${hunterResult.email} for ${lead.name}`);
-        } else {
-          console.log(`[pipeline] Email-priority: no email for ${lead.name} — will fall back to LinkedIn`);
-        }
-      } catch (err) {
-        console.warn(`[pipeline] Hunter lookup failed for ${lead.name}: ${err.message}`);
-      }
-    }
-
-    // ── Vibe Prospecting (Explorium) fallback enrichment ────────────────
-    // Fires only when ALL of:
-    //   (a) Hunter didn't find an email
-    //   (b) Lead's quality_score >= tenant's vp_threshold_score (default 75)
-    //   (c) Daily VP credit budget not exhausted
-    // Phase D piece 3 weekly auto-tuner adjusts vp_threshold_score based on
-    // observed pass-through rates, so this gate gets sharper over time.
-    if (!lead.email) {
-      try {
-        const tenantConfig = require('./tenantConfig');
-        const cfg = await tenantConfig.getTenantConfig(clientId);
-        const qScore = Number(lead.quality_score) || 0;
-        const threshold = cfg.vp_threshold_score ?? 75;
-
-        if (qScore < threshold) {
-          console.log(`[pipeline] VP skipped: quality_score ${qScore} < threshold ${threshold} for ${lead.name}`);
-        } else if ((cfg.vp_credits_used_today || 0) >= (cfg.vp_daily_budget_credits || 0)) {
-          console.log(`[pipeline] VP skipped: daily budget exhausted (${cfg.vp_credits_used_today}/${cfg.vp_daily_budget_credits}) for ${lead.name}`);
-        } else {
-          const vp = require('./vibeProspecting');
-          const nameParts = (lead.name || '').split(' ');
-          const result = await vp.findVerifiedEmail(clientId, {
-            firstName: nameParts[0] || '',
-            lastName:  nameParts.slice(1).join(' ') || '',
-            company:   lead.company,
-          });
-
-          // Charge actual credits used (even on partial failure VP may have spent)
-          if (result?.credits > 0) {
-            await tenantConfig.chargeVpCredits(clientId, result.credits).catch(() => {});
-          }
-
-          if (result?.ok && result.email) {
-            await pool.query(
-              `UPDATE leads SET email = $1, email_verified = $2, email_source = 'vp', updated_at = NOW()
-                WHERE id = $3 AND client_id = $4`,
-              [result.email, result.email_verified === true, lead.id, clientId]
-            );
-            lead.email          = result.email;
-            lead.email_source   = 'vp';
-            lead.email_verified = result.email_verified === true;
-            console.log(`[pipeline] VP enrichment: ${result.email} (verified=${lead.email_verified}, ${result.credits}c) for ${lead.name}`);
-          } else {
-            console.log(`[pipeline] VP enrichment no match for ${lead.name}: ${result?.error || 'unknown'} (${result?.credits || 0}c)`);
-          }
-        }
-      } catch (err) {
-        console.warn(`[pipeline] VP enrichment failed for ${lead.name}: ${err.message}`);
-      }
+    {
+      const tenantConfigService = require('./tenantConfig');
+      const vpService = require('./vibeProspecting');
+      await pipeline.enrichEmail(clientId, lead, {
+        pipeline_path: 'pipeline',
+        hunterService,
+        enableVp: true,
+        vpService,
+        tenantConfigService,
+      });
     }
 
     // If neither Hunter NOR VP found an email AND LinkedIn was previously attempted,
@@ -3058,11 +2977,23 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     const hint = CHANNEL_HINTS[selectedChannel];
 
     try {
-      const salesResult = await salesGenerate(clientId, {
+      // Phase 2 Step 3 (2026-05-08): Sales Beaver via pipeline.draftWithFallback.
+      // Kickoff path does NOT use Enforcer fallback — no-body is logged as
+      // draft_failed (kickoff treats fallback as a separate signal-pipeline
+      // recovery only). Returns null when Sales returns no body.
+      const draft = await pipeline.draftWithFallback(clientId, {
         lead_id: lead.id,
         channel: selectedChannel,
         context: contextParts.join('\n') + `\n\nCHANNEL INSTRUCTIONS: ${hint}`,
+        salesGenerate,
+        enableEnforcerFallback: false,
+        pipeline_path: 'kickoff_pipeline',
       });
+      // Synthesise the legacy salesResult shape for downstream code that
+      // reads salesResult.body / salesResult.subject / salesResult.prompt_variant.
+      const salesResult = draft
+        ? { body: draft.body, subject: draft.subject, prompt_variant: draft.prompt_variant }
+        : { body: null, subject: null, prompt_variant: null };
 
       if (!salesResult?.body) {
         console.warn(`[pipeline] Sales draft failed for ${lead.name} (${selectedChannel}): no body`);
