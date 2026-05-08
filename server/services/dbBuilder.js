@@ -12,6 +12,7 @@
  */
 
 const pool = require('../db/pool');
+const pipelineTrace = require('./pipelineTrace');
 const { runWithClientContext } = require('../middleware/clientContext');
 const { checkBudget } = require('./budget');
 const logsService = require('./logs');
@@ -306,7 +307,26 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
         leadTier,
       ]
     );
-    return res.rows[0]?.id || null;
+    const insertedId = res.rows[0]?.id || null;
+    // Phase 1 (2026-05-08): pipeline_traces enrolled at sourcing time
+    if (insertedId) {
+      pipelineTrace.traceStage(clientId, {
+        lead_id: insertedId,
+        stage: 'enrolled',
+        status: 'sourced',
+        agent: 'research_beaver',
+        score: lead.score || null,
+        pipeline_path: 'dbBuilder',
+        metadata: {
+          lead_tier: leadTier,
+          signal_tier: lead.signal_tier || null,
+          email_verified: !!lead.email_verified,
+          email_source: lead.email_source || null,
+          has_linkedin: !!lead.linkedin_url,
+        },
+      }).catch(() => {});
+    }
+    return insertedId;
   } catch (err) {
     logger.warn({ msg: '[db-builder] Failed to save lead', name: lead.name, err: err.message });
     return null;

@@ -26,6 +26,7 @@ const pool = require('../db/pool');
 const { callAgent } = require('./claude');
 const tenantConfig = require('./tenantConfig');
 const jobHealth = require('./jobHealth');
+const pipelineTrace = require('./pipelineTrace');
 
 // MJ's monthly meeting target per tenant (set 2026-04-30 with MJ).
 // Drives the "on pace for X meetings" projection in the brief.
@@ -417,6 +418,63 @@ async function generateMorningBrief(clientId) {
       ? 'amber'
       : 'degraded';
 
+  // ── Phase 1 (2026-05-08): pipeline_traces funnel — replaces metadata-mining
+  // workaround. Aggregates today's kickoffs (KL timezone) across stages and
+  // surfaces silent-drop count + Enforcer approve rate as anomaly flags.
+  // The 2026-05-08 17:37 MYT incident (95% silent drop, 56 leads vanished
+  // uninstrumented) is exactly the shape this section now exposes.
+  let funnelStatus = 'no kickoffs traced today (Phase 1 instrumentation deploys with this brief)';
+  let funnelDetailLine = '';
+  let funnelAnomalyFlag = '';
+  try {
+    const todayFunnel = await pipelineTrace.getTodayFunnel(clientId);
+    if (todayFunnel.length > 0) {
+      const stageCounts = {};
+      const kickoffs = new Set();
+      for (const row of todayFunnel) {
+        stageCounts[row.stage] = (stageCounts[row.stage] || 0) + Number(row.cnt);
+        if (row.kickoff_id) kickoffs.add(row.kickoff_id);
+      }
+      const enrolled = stageCounts.enrolled || 0;
+      const icpRej = stageCounts.icp_rejected || 0;
+      const drafted = stageCounts.drafted || 0;
+      const draftFailed = stageCounts.draft_failed || 0;
+      const reviewed = stageCounts.reviewed || 0;
+      const approved = stageCounts.approved || 0;
+      const rejected = stageCounts.rejected || 0;
+      const sent = stageCounts.sent || 0;
+      const replied = stageCounts.replied || 0;
+      // Silent drop = leads enrolled but neither drafted, draft_failed, nor icp_rejected.
+      // After Phase 1 full instrumentation, this should be ~0. If non-zero, an exit
+      // path is uninstrumented or a new bug emerged.
+      const silentDrop = Math.max(0, enrolled - drafted - draftFailed - icpRej);
+      const draftRate = enrolled > 0 ? Math.round(((drafted + draftFailed) / Math.max(1, enrolled - icpRej)) * 100) : null;
+      const approveRate = reviewed > 0 ? Math.round((approved / reviewed) * 100) : null;
+      const sendRate = approved > 0 ? Math.round((sent / approved) * 100) : null;
+      const replyRate = sent > 0 ? Math.round((replied / sent) * 100) : null;
+
+      funnelStatus = `${kickoffs.size} kickoff(s) today: ${enrolled} enrolled → ${icpRej} icp-rej → ${drafted} drafted (${draftFailed} failed) → ${reviewed} reviewed → ${approved} approved → ${sent} sent → ${replied} replied`;
+
+      funnelDetailLine = `enrolled ${enrolled} · icp-rej ${icpRej} · drafted ${drafted} (${draftRate ?? '—'}% post-icp) · draft-failed ${draftFailed} · reviewed ${reviewed} · approved ${approved} (${approveRate ?? '—'}% of reviewed) · sent ${sent} (${sendRate ?? '—'}% of approved) · replied ${replied} (${replyRate ?? '—'}% of sent)`;
+
+      const anomalies = [];
+      if (silentDrop > Math.max(2, enrolled * 0.05)) {
+        anomalies.push(`SILENT-DROP ${silentDrop} of ${enrolled} (${Math.round((silentDrop / enrolled) * 100)}%) — uninstrumented exit path`);
+      }
+      if (approveRate !== null && approveRate < 30 && reviewed >= 5) {
+        anomalies.push(`Enforcer approve ${approveRate}% on ${reviewed} reviews — calibration drift`);
+      }
+      if (sendRate !== null && sendRate < 50 && approved >= 5) {
+        anomalies.push(`send rate ${sendRate}% — approved-not-sent backlog growing`);
+      }
+      if (anomalies.length > 0) {
+        funnelAnomalyFlag = ' ⚠️ ' + anomalies.join('; ');
+      }
+    }
+  } catch (err) {
+    console.warn('[captain] funnel pull failed:', err.message);
+  }
+
   // ── Phase 5.5: Monday Plan of the Week injection ──────────────────────
   // On Monday (UTC day 1), load Sunday's weekly plan from agent_memory and
   // prepend it to the brief. Gives MJ the week framing before the daily ops.
@@ -449,6 +507,7 @@ PRE-INTERPRETED STATUS (use these labels — do NOT re-interpret raw numbers bel
 - Research Beaver: ${researchStatus}
 - Sales Beaver: ${salesStatus}
 - Enforcer: ${enforcerStatus}
+- Pipeline funnel: ${funnelStatus}${funnelAnomalyFlag}
 
 <b>SYSTEM HEALTH</b>
 DB: ${kpis.dam_health.db_ok ? 'connected' : 'UNREACHABLE'} · Encryption: ${kpis.dam_health.encryption_key_ok ? 'valid' : 'MISSING'}
@@ -462,6 +521,7 @@ Research Beaver: ${researchStatus}. Avg quality ${kpis.research_beaver.scored_av
 Sales Beaver: ${salesStatus}.
 Enforcer: ${enforcerStatus}
 Pipeline: ${kpis.pipeline.pending_approvals} pending MJ, ${kpis.pipeline.approved_unsent_linkedin} LinkedIn unsent, ${kpis.pipeline.approved_unsent_email} email unsent, ${kpis.pipeline.bounces_7d} bounces 7d.
+Funnel today (pipeline_traces — Phase 1): ${funnelDetailLine || 'no traced kickoffs yet today'}.${funnelAnomalyFlag ? ' Anomaly:' + funnelAnomalyFlag.replace(' ⚠️ ', ' ') : ''}
 Meetings: ${kpis.meetings.this_week} this week, ${kpis.meetings.mtd} mtd, projecting ${kpis.meetings.mtd_pace_projected} by month-end (gap ${kpis.meetings.gap_to_target} of target ${kpis.meetings.monthly_target}).
 
 <b>ORDERS OF THE DAY</b>

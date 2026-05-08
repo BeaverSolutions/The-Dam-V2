@@ -7,6 +7,7 @@ const pool = require('../db/pool');
 const agentsService = require('../services/agents');
 const { directorExecute, rangerReview } = agentsService;
 const { runWithClientContext } = require('../middleware/clientContext');
+const pipelineTrace = require('../services/pipelineTrace');
 const logger = require('../utils/logger');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
@@ -2149,6 +2150,16 @@ router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
          VALUES ($1, 'system', 'linkedin_sent_via_cowork', 'message', $2, $3)`,
         [client_id, message_id, JSON.stringify({ notes: notes || null, lead_id: updated.lead_id })]
       );
+      // Phase 1 (2026-05-08): pipeline_traces sent (LinkedIn manual via Cowork — was the silent backbone)
+      pipelineTrace.traceStage(client_id, {
+        lead_id: updated.lead_id,
+        message_id,
+        stage: 'sent',
+        status: 'manual_chrome_cowork',
+        agent: 'system',
+        pipeline_path: 'linkedin_mark_sent',
+        metadata: { channel: 'linkedin', notes: notes || null },
+      }).catch(() => {});
 
       // Phase D piece 2 — outcome attribution: sent event (LinkedIn-via-Cowork)
       try {
@@ -2201,6 +2212,16 @@ router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
          VALUES ($1, 'system', 'linkedin_connection_requested_via_cowork', 'message', $2, $3)`,
         [client_id, message_id, JSON.stringify({ notes: notes || null, lead_id: updated.lead_id })]
       );
+      // Phase 1 (2026-05-08): pipeline_traces — connection request is a "skipped" send waiting for accept
+      pipelineTrace.traceStage(client_id, {
+        lead_id: updated.lead_id,
+        message_id,
+        stage: 'skipped',
+        status: 'connection_requested',
+        agent: 'system',
+        pipeline_path: 'linkedin_mark_sent',
+        metadata: { channel: 'linkedin', notes: notes || null, awaiting: 'connection_accept' },
+      }).catch(() => {});
 
       return res.json({ data: { message_id, status: 'linkedin_requested' } });
     }
@@ -2211,6 +2232,16 @@ router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
        VALUES ($1, 'system', 'linkedin_send_failed_via_cowork', 'message', $2, $3)`,
       [client_id, message_id, JSON.stringify({ notes: notes || null })]
     );
+    // Phase 1 (2026-05-08): pipeline_traces send_failed (LinkedIn Cowork attempt)
+    pipelineTrace.traceStage(client_id, {
+      message_id,
+      stage: 'send_failed',
+      status: 'cowork_failed',
+      agent: 'system',
+      reason: notes || null,
+      pipeline_path: 'linkedin_mark_sent',
+      metadata: { channel: 'linkedin' },
+    }).catch(() => {});
     return res.json({ data: { message_id, status: 'failed_will_retry' } });
   } catch (err) {
     logger.error({ msg: 'linkedin-mark-sent failed', err: err.message });

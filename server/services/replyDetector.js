@@ -4,6 +4,7 @@ const pool = require('../db/pool');
 const gmailService = require('./gmail');
 const agentmailService = require('./agentmail');
 const logsService = require('./logs');
+const pipelineTrace = require('./pipelineTrace');
 const { handleReply } = require('./replyHandler');
 
 /**
@@ -92,6 +93,20 @@ async function checkRepliesForClient(clientId) {
           source: 'polling',
         },
       });
+      // Phase 1 (2026-05-08): pipeline_traces replied — closes funnel survival path to meeting_booked
+      pipelineTrace.traceStage(clientId, {
+        lead_id: msg.lead_id,
+        message_id: msg.id,
+        stage: 'replied',
+        status: 'detected',
+        agent: 'system',
+        pipeline_path: 'replyDetector',
+        metadata: {
+          provider: msg.gmail_thread_id ? 'gmail' : 'agentmail',
+          thread_id: threadId,
+          snippet: snippet.slice(0, 200),
+        },
+      }).catch(() => {});
 
       // Phase D piece 2 — outcome attribution: replied event (email path)
       try {

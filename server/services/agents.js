@@ -1809,6 +1809,18 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         eventData: { source_path: 'signal_pipeline', status: kickoffMessageStatus, draft_source: draftSource },
       });
 
+      // Phase 1 (2026-05-08): pipeline_traces drafted (signal_pipeline)
+      pipelineTrace.traceStage(clientId, {
+        lead_id: lead.id,
+        message_id: msg.id,
+        kickoff_id: plan_id,
+        stage: 'drafted',
+        status: kickoffMessageStatus,
+        agent: 'sales_beaver',
+        pipeline_path: 'signal_pipeline',
+        metadata: { channel, draft_source: draftSource, signal: meta.signal },
+      }).catch(() => {});
+
       // If blocked, skip Ranger and downstream processing — message is on hold for enrichment.
       if (kickoffMessageStatus === 'blocked_no_email') {
         messagesDrafted++;
@@ -1842,11 +1854,24 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           [clientId, lead.id, `Brand safety failed for ${lead.company}: ${safety.reason}`,
            JSON.stringify({ company: lead.company, reason: safety.reason, message_id: msg.id })]
         ).catch(() => {});
+        // Phase 1 (2026-05-08): pipeline_traces brand_safety reject (signal_pipeline)
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id,
+          message_id: msg.id,
+          kickoff_id: plan_id,
+          stage: 'rejected',
+          status: 'brand_safety',
+          agent: 'sales_beaver',
+          reason: safety.reason,
+          pipeline_path: 'signal_pipeline',
+          metadata: { company: lead.company, channel },
+        }).catch(() => {});
         rejectedCount++;
         continue;
       }
 
       let rangerResult;
+      let rangerFailedOpen = false;
       try {
         rangerResult = await rangerReview(clientId, {
           message_id: msg.id,
@@ -1859,7 +1884,22 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       } catch (err) {
         // Fail-open: auto-fix was applied, let it through
         rangerResult = { approved: true, score: 55, notes: 'Enforcer unavailable — auto-fix applied', body: fixed.body };
+        rangerFailedOpen = true;
       }
+
+      // Phase 1 (2026-05-08): pipeline_traces reviewed (Enforcer ran or failed-open)
+      pipelineTrace.traceStage(clientId, {
+        lead_id: lead.id,
+        message_id: msg.id,
+        kickoff_id: plan_id,
+        stage: 'reviewed',
+        status: rangerFailedOpen ? 'fail_open' : (rangerResult?.approved ? 'approved' : 'rejected'),
+        agent: 'enforcer_beaver',
+        score: rangerResult?.score ?? null,
+        reason: rangerResult?.notes || null,
+        pipeline_path: 'signal_pipeline',
+        metadata: { channel, fail_open: rangerFailedOpen },
+      }).catch(() => {});
 
       const finalBody = rangerResult?.body || fixed.body;
 
@@ -1933,6 +1973,18 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           target_id: msg.id,
           metadata: { channel: msg.channel, score: rangerScore, method: autoApproved ? 'auto_threshold' : 'pipeline_approved' },
         }).catch(() => {});
+        // Phase 1 (2026-05-08): pipeline_traces approved (signal_pipeline)
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id,
+          message_id: msg.id,
+          kickoff_id: plan_id,
+          stage: 'approved',
+          status: autoApproved ? 'auto_threshold' : 'pipeline_approved',
+          agent: 'enforcer_beaver',
+          score: rangerScore,
+          pipeline_path: 'signal_pipeline',
+          metadata: { channel: msg.channel, next_status: nextMessageStatus, threshold_hit: autoApproved },
+        }).catch(() => {});
 
         approvedCount++;
       } else {
@@ -1996,13 +2048,51 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
               target_type: 'message', target_id: enfMsg.id,
               metadata: { lead_name: lead.name, original_rejection: rangerResult?.notes },
             }).catch(() => {});
+            // Phase 1 (2026-05-08): pipeline_traces drafted (Enforcer fallback)
+            pipelineTrace.traceStage(clientId, {
+              lead_id: lead.id,
+              message_id: enfMsg.id,
+              kickoff_id: plan_id,
+              stage: 'drafted',
+              status: 'enforcer_fallback',
+              agent: 'enforcer_beaver',
+              score: 70,
+              reason: rangerResult?.notes || null,
+              pipeline_path: 'signal_pipeline',
+              metadata: { channel, original_rejection: rangerResult?.notes },
+            }).catch(() => {});
             approvedCount++;
             console.log(`[signal-pipeline] Enforcer fallback draft for ${lead.name} → pending_approval`);
           } else {
+            // Phase 1 (2026-05-08): pipeline_traces rejected (Enforcer hard-reject, no fallback body)
+            pipelineTrace.traceStage(clientId, {
+              lead_id: lead.id,
+              message_id: msg.id,
+              kickoff_id: plan_id,
+              stage: 'rejected',
+              status: 'enforcer_no_fallback',
+              agent: 'enforcer_beaver',
+              score: rangerResult?.score ?? null,
+              reason: rangerResult?.notes || null,
+              pipeline_path: 'signal_pipeline',
+              metadata: { channel },
+            }).catch(() => {});
             rejectedCount++;
           }
         } catch (fallbackErr) {
           console.warn(`[signal-pipeline] Enforcer fallback failed for ${lead.name}:`, fallbackErr.message);
+          // Phase 1 (2026-05-08): pipeline_traces rejected (Enforcer fallback exception)
+          pipelineTrace.traceStage(clientId, {
+            lead_id: lead.id,
+            message_id: msg.id,
+            kickoff_id: plan_id,
+            stage: 'rejected',
+            status: 'enforcer_fallback_error',
+            agent: 'enforcer_beaver',
+            reason: fallbackErr.message,
+            pipeline_path: 'signal_pipeline',
+            metadata: { channel },
+          }).catch(() => {});
           rejectedCount++;
         }
       }
