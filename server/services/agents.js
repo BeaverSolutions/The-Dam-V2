@@ -1612,45 +1612,21 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
   // before the MNC blocklist expansion were still being picked by run_campaign
   // because only the kickoff path was running pool-audit.
   // Re-applying applyIcpV2Filter here catches them before draft cycles burn.
+  // Phase 2 Step 4 (2026-05-08): per-lead audit + soft-delete + log + trace
+  // consolidated into pipeline.icpGateSoftDelete. Behaviour identical.
   const auditedLeads = [];
   let icpAuditRejected = 0;
   for (const lead of leads) {
-    const verdict = applyIcpV2Filter(lead);
-    if (verdict.pass) {
+    const result = await pipeline.icpGateSoftDelete(clientId, lead, {
+      applyIcpV2Filter,
+      kickoff_id: plan_id,
+      pipeline_path: 'signal_pipeline',
+      audit_source: 'processExistingLeadsPipeline_phase_5_5',
+    });
+    if (result.pass) {
       auditedLeads.push(lead);
     } else {
       icpAuditRejected++;
-      // Soft-delete so the lead can't be re-picked next chat run.
-      // Map verdict.status to the leads_status_check enum (rejected_size,
-      // rejected_persona, rejected_vertical, rejected_country, etc).
-      const allowedStatus = ['rejected_country', 'rejected_size', 'rejected_persona',
-        'rejected_vertical', 'rejected_data_integrity', 'rejected_low_score'];
-      const safeStatus = allowedStatus.includes(verdict.status) ? verdict.status : 'rejected_persona';
-      await pool.query(
-        `UPDATE leads SET deleted_at = NOW(), status = $1,
-                metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
-         WHERE id = $3 AND client_id = $4 AND deleted_at IS NULL`,
-        [safeStatus,
-         JSON.stringify({ icp_audit_reason: verdict.reason, audit_source: 'processExistingLeadsPipeline_phase_5_5' }),
-         lead.id, clientId]
-      ).catch(() => {});
-      await logsService.createLog(clientId, {
-        agent: 'director',
-        action: 'icp_v2_reject',
-        target_type: 'lead',
-        target_id: lead.id,
-        metadata: { plan_id, status: safeStatus, reason: verdict.reason, company: lead.company, title: lead.title },
-      }).catch(() => {});
-      pipelineTrace.traceStage(clientId, {
-        lead_id: lead.id,
-        kickoff_id: plan_id,
-        stage: 'icp_rejected',
-        status: safeStatus,
-        agent: 'director',
-        reason: verdict.reason,
-        pipeline_path: 'signal_pipeline',
-        metadata: { company: lead.company, title: lead.title, audit_source: 'phase_5_5' },
-      }).catch(() => {});
     }
   }
   if (icpAuditRejected > 0) {

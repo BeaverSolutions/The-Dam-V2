@@ -461,6 +461,112 @@ async function draftWithFallback(clientId, params) {
   };
 }
 
+// ─── STEP 4 (this commit): ICP gate (soft-delete shape) ────────────────────
+//
+// Step 4 of the Phase 2 plan is "extract pipeline.icpGate (applyIcpV2Filter +
+// soft-delete + audit)". The "soft-delete" wording maps to the signal_pipeline
+// re-audit shape (existing pool leads, UPDATE deleted_at). The kickoff fresh-
+// research INSERT shape is a different operation (covered later when we
+// audit cold-research path explicitly).
+//
+// Caller wiring stays. Caller passes applyIcpV2Filter via DI (it lives in
+// agents.js, same circular-import constraint as Step 3).
+
+const logsService = require('./logs');
+
+const ICP_REJECT_STATUS_ALLOW_LIST = [
+  'rejected_country', 'rejected_size', 'rejected_persona',
+  'rejected_vertical', 'rejected_data_integrity', 'rejected_low_score',
+];
+
+/**
+ * ICP gate for an *existing* pool lead. If verdict fails, soft-deletes the
+ * lead row, writes the icp_v2_reject log, emits the icp_rejected trace.
+ *
+ * Mirrors agents.js processExistingLeadsPipeline lines 1617-1654 (the Phase
+ * 5.5 draft-time re-audit added 2026-05-06).
+ *
+ * @param {string} clientId
+ * @param {object} lead     Has .id, .name, .company, .title (used for log + trace metadata)
+ * @param {object} options
+ *   - applyIcpV2Filter:  required, fn(lead) -> {pass, status, reason}
+ *   - kickoff_id:        optional, for the trace
+ *   - pipeline_path:     'signal_pipeline' (default) | future paths
+ *   - audit_source:      string, written to lead.metadata.audit_source
+ *
+ * @returns {Promise<{pass: true} | {pass: false, status: string, reason: string}>}
+ */
+async function icpGateSoftDelete(clientId, lead, options = {}) {
+  const {
+    applyIcpV2Filter,
+    kickoff_id = null,
+    pipeline_path = 'signal_pipeline',
+    audit_source = 'pipeline_icp_gate',
+  } = options;
+
+  if (!applyIcpV2Filter) {
+    throw new Error('icpGateSoftDelete: applyIcpV2Filter is required');
+  }
+  if (!clientId || !lead?.id) {
+    throw new Error('icpGateSoftDelete: clientId and lead.id are required');
+  }
+
+  const verdict = applyIcpV2Filter(lead);
+  if (verdict.pass) {
+    return { pass: true };
+  }
+
+  const safeStatus = ICP_REJECT_STATUS_ALLOW_LIST.includes(verdict.status)
+    ? verdict.status
+    : 'rejected_persona';
+
+  // Soft-delete so the lead can't be re-picked next chat run.
+  await pool.query(
+    `UPDATE leads SET deleted_at = NOW(), status = $1,
+            metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+     WHERE id = $3 AND client_id = $4 AND deleted_at IS NULL`,
+    [
+      safeStatus,
+      JSON.stringify({ icp_audit_reason: verdict.reason, audit_source }),
+      lead.id,
+      clientId,
+    ]
+  ).catch(() => {});
+
+  // Audit log (legacy logs table — for backward-compat tooling).
+  await logsService.createLog(clientId, {
+    agent: 'director',
+    action: 'icp_v2_reject',
+    target_type: 'lead',
+    target_id: lead.id,
+    metadata: {
+      plan_id: kickoff_id,
+      status: safeStatus,
+      reason: verdict.reason,
+      company: lead.company,
+      title: lead.title,
+    },
+  }).catch(() => {});
+
+  // Phase 1 (2026-05-08): canonical observability via pipeline_traces.
+  pipelineTrace.traceStage(clientId, {
+    lead_id: lead.id,
+    kickoff_id,
+    stage: 'icp_rejected',
+    status: safeStatus,
+    agent: 'director',
+    reason: verdict.reason,
+    pipeline_path,
+    metadata: {
+      company: lead.company,
+      title: lead.title,
+      audit_source,
+    },
+  }).catch(() => {});
+
+  return { pass: false, status: safeStatus, reason: verdict.reason };
+}
+
 module.exports = {
   isV2Enabled,
   processLead,           // Step 7 — currently throws
@@ -468,6 +574,7 @@ module.exports = {
   checkActiveMessage,    // Step 1 — concrete
   enrichEmail,           // Step 3 — concrete (Hunter + optional VP)
   draftWithFallback,     // Step 3 — concrete (Sales Beaver + optional Enforcer fallback)
+  icpGateSoftDelete,     // Step 4 — concrete (applyIcpV2Filter + soft-delete + audit + trace)
 
   // Constants for callers (e.g. acceptance tests)
   PIPELINE_V2_ENABLED,
