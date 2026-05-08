@@ -7,6 +7,7 @@
 const { v4: uuidv4 } = require('uuid');
 const logsService = require('./logs');
 const pipelineTrace = require('./pipelineTrace');
+const pipeline = require('./pipeline');
 const pool = require('../db/pool');
 const apolloService = require('./apollo');
 const hunterService = require('./hunter');
@@ -1772,32 +1773,29 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       // Prevent duplicate messages if this lead was picked up by a parallel
       // pipeline run (e.g. two concurrent directorExecute calls, or DB-first
       // + external research collision on the same lead).
-      const existingActiveMsg = await pool.query(
-        `SELECT id FROM messages WHERE client_id = $1 AND lead_id = $2
-           AND status IN ('pending_ranger', 'pending_approval', 'approved', 'pending_send', 'sent')
-         LIMIT 1`,
-        [clientId, lead.id]
-      );
-      if (existingActiveMsg.rows.length > 0) {
+      // Phase 2 Step 2 (2026-05-08): dedup guard via pipeline.checkActiveMessage
+      const existingActive = await pipeline.checkActiveMessage(clientId, lead.id);
+      if (existingActive) {
         console.warn(`[signal-pipeline] Dedup guard: ${lead.name} already has an active message — skipping insert`);
         continue;
       }
 
-      // Insert message (ICP+channel patches per MJ direction 2026-04-29)
-      // kickoffMessageStatus is 'blocked_no_email' when no verified email available.
-      // Wave 3 (2026-05-03): tag prompt_variant for reply-rate-by-variant analysis.
-      const { rows: [msg] } = await pool.query(
-        `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING *`,
-        [clientId, lead.id, channel, draftSubject, draftBody, kickoffMessageStatus,
-         JSON.stringify({
-           source: draftSource,
-           signal: meta.signal,
-           blocked_reason: kickoffMessageStatus === 'blocked_no_email' ? 'awaiting_email_enrichment' : undefined,
-           prompt_variant: salesResult?.prompt_variant || (draftSource === 'enforcer_fallback' ? 'enforcer_fallback' : SALES_PROMPT_VARIANT),
-         })]
-      );
+      // Phase 2 Step 2 (2026-05-08): persistDraft is the single source of truth
+      // for INSERT INTO messages. Composes metadata (source, signal, prompt_variant,
+      // blocked_reason) and emits pipeline_traces 'drafted' internally — the
+      // explicit traceStage call previously here is removed.
+      const msg = await pipeline.persistDraft(clientId, {
+        lead_id: lead.id,
+        channel,
+        subject: draftSubject,
+        body: draftBody,
+        status: kickoffMessageStatus,
+        draft_source: draftSource,
+        prompt_variant: salesResult?.prompt_variant,
+        signal: meta.signal,
+        kickoff_id: plan_id,
+        pipeline_path: 'signal_pipeline',
+      });
 
       // Phase D piece 2 — outcome attribution: drafted event (signal-pipeline path)
       recordOutcome(clientId, {
@@ -1809,17 +1807,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         eventData: { source_path: 'signal_pipeline', status: kickoffMessageStatus, draft_source: draftSource },
       });
 
-      // Phase 1 (2026-05-08): pipeline_traces drafted (signal_pipeline)
-      pipelineTrace.traceStage(clientId, {
-        lead_id: lead.id,
-        message_id: msg.id,
-        kickoff_id: plan_id,
-        stage: 'drafted',
-        status: kickoffMessageStatus,
-        agent: 'sales_beaver',
-        pipeline_path: 'signal_pipeline',
-        metadata: { channel, draft_source: draftSource, signal: meta.signal },
-      }).catch(() => {});
+      // (Phase 2 Step 2: drafted trace now emitted internally by pipeline.persistDraft above)
 
       // If blocked, skip Ranger and downstream processing — message is on hold for enrichment.
       if (kickoffMessageStatus === 'blocked_no_email') {
@@ -2020,14 +2008,22 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           // rangerDraft returns {subject, body} — pass the STRING body to SQL, never the whole object
           if (enforcerDraft?.body && typeof enforcerDraft.body === 'string') {
             const enfSubject = enforcerDraft.subject || draftSubject || lead.company;
-            // Insert as a NEW message (don't overwrite the rejected one)
-            const { rows: [enfMsg] } = await pool.query(
-              `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, ranger_score, ranger_notes, metadata)
-               VALUES ($1, $2, $3, $4, $5, 'pending_approval', 70, $6, $7) RETURNING *`,
-              [clientId, lead.id, channel, enfSubject, enforcerDraft.body,
-               'Enforcer-drafted fallback — Sales Beaver hard-rejected. Review before sending.',
-               JSON.stringify({ source: 'enforcer_fallback', signal: meta.signal, original_rejection: rangerResult?.notes })]
-            );
+            // Phase 2 Step 2 (2026-05-08): NEW message via pipeline.persistDraft
+            // (don't overwrite the rejected one). Pre-scored at 70 by Enforcer.
+            const enfMsg = await pipeline.persistDraft(clientId, {
+              lead_id: lead.id,
+              channel,
+              subject: enfSubject,
+              body: enforcerDraft.body,
+              status: 'pending_approval',
+              ranger_score: 70,
+              ranger_notes: 'Enforcer-drafted fallback — Sales Beaver hard-rejected. Review before sending.',
+              metadata: { original_rejection: rangerResult?.notes },
+              draft_source: 'enforcer_fallback',
+              signal: meta.signal,
+              kickoff_id: plan_id,
+              pipeline_path: 'signal_pipeline',
+            });
 
             // Phase D piece 2 — outcome attribution: drafted event (Enforcer fallback)
             recordOutcome(clientId, {
@@ -2048,19 +2044,8 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
               target_type: 'message', target_id: enfMsg.id,
               metadata: { lead_name: lead.name, original_rejection: rangerResult?.notes },
             }).catch(() => {});
-            // Phase 1 (2026-05-08): pipeline_traces drafted (Enforcer fallback)
-            pipelineTrace.traceStage(clientId, {
-              lead_id: lead.id,
-              message_id: enfMsg.id,
-              kickoff_id: plan_id,
-              stage: 'drafted',
-              status: 'enforcer_fallback',
-              agent: 'enforcer_beaver',
-              score: 70,
-              reason: rangerResult?.notes || null,
-              pipeline_path: 'signal_pipeline',
-              metadata: { channel, original_rejection: rangerResult?.notes },
-            }).catch(() => {});
+            // (Phase 2 Step 2: drafted trace now emitted internally by pipeline.persistDraft above —
+            //  agent='enforcer_beaver' inferred from draft_source='enforcer_fallback')
             approvedCount++;
             console.log(`[signal-pipeline] Enforcer fallback draft for ${lead.name} → pending_approval`);
           } else {
@@ -3100,23 +3085,18 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         diagnostics.messages_drafted++;
         execStatus.beavers.sales.drafted++;
 
-        // ── Race-condition dedup guard ─────────────────────────────────────
+        // ── Race-condition dedup guard (Phase 2 Step 2: via pipeline.checkActiveMessage) ─
         // Prevent duplicate messages if this lead snuck into two parallel
         // pipeline runs (e.g. pool + fresh research both picked it up).
-        const existingActiveMsg = await pool.query(
-          `SELECT id FROM messages WHERE client_id = $1 AND lead_id = $2
-             AND status IN ('pending_ranger', 'pending_approval', 'approved', 'pending_send', 'sent')
-           LIMIT 1`,
-          [clientId, lead.id]
-        );
-        if (existingActiveMsg.rows.length > 0) {
+        const existingActive = await pipeline.checkActiveMessage(clientId, lead.id);
+        if (existingActive) {
           console.warn(`[pipeline] Dedup guard: ${lead.name} already has an active message — skipping insert`);
           diagnostics.messages_drafted--; // uncredit the increment
           diagnostics.messages_failed++;
           await logsService.createLog(clientId, {
             agent: 'sales_beaver', action: 'draft_failed',
             target_type: 'lead', target_id: lead.id,
-            metadata: { reason: 'dedup_skip', path: 'kickoff_pipeline', channel: selectedChannel, existing_message_id: existingActiveMsg.rows[0].id },
+            metadata: { reason: 'dedup_skip', path: 'kickoff_pipeline', channel: selectedChannel, existing_message_id: existingActive.id },
           }).catch(() => {});
           pipelineTrace.traceStage(clientId, {
             lead_id: lead.id,
@@ -3125,25 +3105,23 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
             agent: 'sales_beaver',
             reason: 'dedup_skip',
             pipeline_path: 'kickoff_pipeline',
-            metadata: { channel: selectedChannel, existing_message_id: existingActiveMsg.rows[0].id },
+            metadata: { channel: selectedChannel, existing_message_id: existingActive.id },
           }).catch(() => {});
           return;
         }
 
-        const msgRes = await pool.query(
-          `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING *`,
-          [clientId, lead.id, selectedChannel, salesResult.subject || null, salesResult.body,
-           kickoffMessageStatus,
-           // Wave 3 (2026-05-03): tag prompt_variant for reply-rate-by-variant analysis.
-           JSON.stringify({
-             blocked_reason: kickoffMessageStatus === 'blocked_no_email' ? 'awaiting_email_enrichment' : undefined,
-             prompt_variant: salesResult.prompt_variant || SALES_PROMPT_VARIANT,
-           })]
-        );
-
-        const message = msgRes.rows[0];
+        // Phase 2 Step 2 (2026-05-08): INSERT via pipeline.persistDraft
+        const message = await pipeline.persistDraft(clientId, {
+          lead_id: lead.id,
+          channel: selectedChannel,
+          subject: salesResult.subject || null,
+          body: salesResult.body,
+          status: kickoffMessageStatus,
+          draft_source: 'sales_beaver',
+          prompt_variant: salesResult.prompt_variant,
+          kickoff_id: plan_id,
+          pipeline_path: 'kickoff_pipeline',
+        });
         const msgWithMeta = { ...message, lead_name: lead.name, lead_company: lead.company };
         savedMessages.push(msgWithMeta);
 
@@ -3154,15 +3132,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           target_id: message.id,
           metadata: { lead_id: lead.id, lead_name: lead.name, channel: selectedChannel, status: kickoffMessageStatus, reason: channelReason },
         });
-        pipelineTrace.traceStage(clientId, {
-          lead_id: lead.id,
-          message_id: message.id,
-          stage: 'drafted',
-          status: kickoffMessageStatus,
-          agent: 'sales_beaver',
-          pipeline_path: 'kickoff_pipeline',
-          metadata: { channel: selectedChannel, channel_reason: channelReason, prompt_variant: salesResult.prompt_variant || SALES_PROMPT_VARIANT },
-        }).catch(() => {});
+        // (Phase 2 Step 2: drafted trace now emitted internally by pipeline.persistDraft above)
 
         // Phase D piece 2 — outcome attribution: drafted event
         recordOutcome(clientId, {
