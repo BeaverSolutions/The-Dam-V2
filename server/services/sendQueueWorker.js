@@ -7,6 +7,7 @@
 
 const pool = require('../db/pool');
 const logsService = require('./logs');
+const pipelineTrace = require('./pipelineTrace');
 const { trackEvent } = require('./conversionTracker');
 
 // Retry intervals (exponential backoff)
@@ -85,6 +86,25 @@ async function processJob(job) {
     );
     console.log(`[send_queue] Sent message ${message_id} (attempt ${attempt_count + 1})`);
 
+    // Phase 1 (2026-05-08) pipeline_traces: emit `sent` so funnel survival counts
+    // include actually-delivered messages, not just approved-not-sent. Closes the
+    // silent-success gap (sendQueueWorker had zero log emission on success).
+    {
+      const { rows: [traceMsg] } = await pool.query(
+        `SELECT lead_id, channel FROM messages WHERE id = $1 AND client_id = $2`,
+        [message_id, client_id]
+      ).catch(() => ({ rows: [] }));
+      pipelineTrace.traceStage(client_id, {
+        lead_id: traceMsg?.lead_id,
+        message_id,
+        stage: 'sent',
+        status: result?.status === 'simulated' ? 'simulated' : 'success',
+        agent: 'system',
+        pipeline_path: 'sendQueue',
+        metadata: { attempt_count: attempt_count + 1, send_status: result?.status, channel: traceMsg?.channel },
+      }).catch(() => {});
+    }
+
     // Recompute daily KPI counters so outreach_sent / outreach_email / kpi_met
     // reflect the new send. Non-blocking — never fail the send on a counter sync error.
     require('./kpi').recountKpi(client_id).catch(err =>
@@ -153,6 +173,15 @@ async function processJob(job) {
         target_id: message_id,
         metadata: { error: errMsg, status: errStatus, reason: 'terminal_state' },
       }).catch(() => {});
+      pipelineTrace.traceStage(client_id, {
+        message_id,
+        stage: 'send_failed',
+        status: 'terminal_state',
+        agent: 'system',
+        reason: errMsg,
+        pipeline_path: 'sendQueue',
+        metadata: { error: errMsg, status: errStatus, attempts: newAttemptCount },
+      }).catch(() => {});
       console.warn(`[send_queue] Terminal state — ${message_id} will not be retried: ${errMsg}`);
       return;
     }
@@ -184,6 +213,19 @@ async function processJob(job) {
           alert: err.reauthRequired
             ? 'Email provider token expired/revoked — reconnect Gmail in Settings to resume sending'
             : 'Message could not be sent after 3 attempts — manual intervention required',
+        },
+      }).catch(() => {});
+      pipelineTrace.traceStage(client_id, {
+        message_id,
+        stage: 'send_failed',
+        status: forcePermanent ? 'reauth_required' : 'max_attempts',
+        agent: 'system',
+        reason: err.message,
+        pipeline_path: 'sendQueue',
+        metadata: {
+          attempts: newAttemptCount,
+          failure_class: err.failureClass || 'thrown',
+          reauth_required: err.reauthRequired === true,
         },
       }).catch(() => {});
 

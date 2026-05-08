@@ -6,6 +6,7 @@
 
 const { v4: uuidv4 } = require('uuid');
 const logsService = require('./logs');
+const pipelineTrace = require('./pipelineTrace');
 const pool = require('../db/pool');
 const apolloService = require('./apollo');
 const hunterService = require('./hunter');
@@ -1588,6 +1589,22 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
     metadata: { plan_id, lead_count: leads.length },
   });
 
+  // ── Phase 1 (2026-05-08): pipeline_traces — emit enrolled for every lead ─
+  // Closes the silent-drop visibility gap exposed by the 17:37 MYT 2026-05-08
+  // kickoff (59 leads enrolled, only 3 drafted, no draft_failed log entries
+  // because Fix 2 only covered kickoff_pipeline, not signal_pipeline).
+  for (const lead of leads) {
+    pipelineTrace.traceStage(clientId, {
+      lead_id: lead.id,
+      kickoff_id: plan_id,
+      stage: 'enrolled',
+      status: 'success',
+      agent: 'director',
+      pipeline_path: 'signal_pipeline',
+      metadata: { company: lead.company, title: lead.title, has_email: !!lead.email },
+    }).catch(() => {});
+  }
+
   // ── Phase 5.5 (2026-05-06): ICP audit at draft-time ──────────────────────
   // Closes the chat-tool gap surfaced during E2E validation: legacy MNC leads
   // (dentsu Malaysia, IPG Mediabrands, MDEC, Publicis Groupe etc.) sourced
@@ -1622,6 +1639,16 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         target_type: 'lead',
         target_id: lead.id,
         metadata: { plan_id, status: safeStatus, reason: verdict.reason, company: lead.company, title: lead.title },
+      }).catch(() => {});
+      pipelineTrace.traceStage(clientId, {
+        lead_id: lead.id,
+        kickoff_id: plan_id,
+        stage: 'icp_rejected',
+        status: safeStatus,
+        agent: 'director',
+        reason: verdict.reason,
+        pipeline_path: 'signal_pipeline',
+        metadata: { company: lead.company, title: lead.title, audit_source: 'phase_5_5' },
       }).catch(() => {});
     }
   }
@@ -1989,6 +2016,25 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
     action: 'signal_pipeline_completed',
     metadata: { plan_id, leads: leads.length, drafted: messagesDrafted, approved: approvedCount, rejected: rejectedCount },
   });
+
+  // ── Phase 1 (2026-05-08): emit pipeline_traces summary so funnel survival rate
+  // is computable without joining logs.metadata. The per-lead traces above + this
+  // summary together let `getKickoffSurvival` produce the report directly.
+  pipelineTrace.traceStage(clientId, {
+    kickoff_id: plan_id,
+    stage: 'enrolled',
+    status: 'kickoff_summary',
+    agent: 'director',
+    pipeline_path: 'signal_pipeline',
+    metadata: {
+      total_leads: leads.length,
+      drafted: messagesDrafted,
+      approved: approvedCount,
+      rejected: rejectedCount,
+      icp_audit_rejected: icpAuditRejected,
+      silent_drop_count: leads.length - messagesDrafted - rejectedCount,
+    },
+  }).catch(() => {});
 
   // ─── Daily KPI report to Captain (Sales + Enforcer perspectives) ──
   // Mirrors the cold-research path in directorExecute. Without this, the
@@ -2951,6 +2997,15 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           target_type: 'lead', target_id: lead.id,
           metadata: { reason: 'no_body', path: 'kickoff_pipeline', channel: selectedChannel, enrichment_eligible: !!(lead.company && lead.title) },
         }).catch(() => {});
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id,
+          stage: 'draft_failed',
+          status: 'no_body',
+          agent: 'sales_beaver',
+          reason: 'no_body',
+          pipeline_path: 'kickoff_pipeline',
+          metadata: { channel: selectedChannel, enrichment_eligible: !!(lead.company && lead.title) },
+        }).catch(() => {});
       } else {
         diagnostics.messages_drafted++;
         execStatus.beavers.sales.drafted++;
@@ -2972,6 +3027,15 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
             agent: 'sales_beaver', action: 'draft_failed',
             target_type: 'lead', target_id: lead.id,
             metadata: { reason: 'dedup_skip', path: 'kickoff_pipeline', channel: selectedChannel, existing_message_id: existingActiveMsg.rows[0].id },
+          }).catch(() => {});
+          pipelineTrace.traceStage(clientId, {
+            lead_id: lead.id,
+            stage: 'draft_failed',
+            status: 'dedup_skip',
+            agent: 'sales_beaver',
+            reason: 'dedup_skip',
+            pipeline_path: 'kickoff_pipeline',
+            metadata: { channel: selectedChannel, existing_message_id: existingActiveMsg.rows[0].id },
           }).catch(() => {});
           return;
         }
@@ -3000,6 +3064,15 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           target_id: message.id,
           metadata: { lead_id: lead.id, lead_name: lead.name, channel: selectedChannel, status: kickoffMessageStatus, reason: channelReason },
         });
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id,
+          message_id: message.id,
+          stage: 'drafted',
+          status: kickoffMessageStatus,
+          agent: 'sales_beaver',
+          pipeline_path: 'kickoff_pipeline',
+          metadata: { channel: selectedChannel, channel_reason: channelReason, prompt_variant: salesResult.prompt_variant || SALES_PROMPT_VARIANT },
+        }).catch(() => {});
 
         // Phase D piece 2 — outcome attribution: drafted event
         recordOutcome(clientId, {
