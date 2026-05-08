@@ -1700,6 +1700,31 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         }
       }
 
+      // ── Phase 3 pivot (2026-05-08): pre-draft lead readiness gate ─────
+      // Don't burn Sales Beaver tokens on leads with missing name / company /
+      // contact-method. Mirrors the kickoff pipeline guard added the same commit.
+      // Both pipelines now converge on Enforcer-only post-draft review.
+      const readiness_sp = pipeline.leadReadinessGate(lead);
+      if (!readiness_sp.ready) {
+        console.warn(`[signal-pipeline] Pre-draft skip: ${lead.name || 'unknown'} @ ${lead.company || 'unknown'} — ${readiness_sp.reason}`);
+        await logsService.createLog(clientId, {
+          agent: 'director', action: 'lead_not_ready',
+          target_type: 'lead', target_id: lead.id,
+          metadata: { reason: readiness_sp.reason, channel, path: 'signal_pipeline' },
+        }).catch(() => {});
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id,
+          kickoff_id: plan_id,
+          stage: 'icp_rejected',
+          status: 'lead_not_ready',
+          agent: 'director',
+          reason: readiness_sp.reason,
+          pipeline_path: 'signal_pipeline',
+          metadata: { lead_name: lead.name, lead_company: lead.company },
+        }).catch(() => {});
+        continue;
+      }
+
       // Phase 2 Step 3 (2026-05-08): Sales Beaver + Enforcer fallback via
       // pipeline.draftWithFallback. Returns null when both fail (silent skip).
       // Behaviour identical to the previous inline block — same logs, same
@@ -2952,6 +2977,34 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
     const hint = CHANNEL_HINTS[selectedChannel];
 
+    // ── Phase 3 pivot (2026-05-08): pre-draft lead readiness gate ─────
+    // Replaces the legacy captainValidate post-draft check. We don't waste
+    // Sales Beaver tokens on leads with missing name/company/contact-method.
+    // captainValidate's placeholder + empty-body checks are dropped — Enforcer
+    // already catches both via its rubric. Both pipelines now converge on
+    // Enforcer-only post-draft review.
+    const readiness = pipeline.leadReadinessGate(lead);
+    if (!readiness.ready) {
+      console.warn(`[pipeline] Pre-draft skip: ${lead.name || 'unknown'} @ ${lead.company || 'unknown'} — ${readiness.reason}`);
+      diagnostics.messages_failed++;
+      await logsService.createLog(clientId, {
+        agent: 'director', action: 'lead_not_ready',
+        target_type: 'lead', target_id: lead.id,
+        metadata: { reason: readiness.reason, channel: selectedChannel, path: 'kickoff_pipeline' },
+      }).catch(() => {});
+      pipelineTrace.traceStage(clientId, {
+        lead_id: lead.id,
+        kickoff_id: plan_id,
+        stage: 'icp_rejected',
+        status: 'lead_not_ready',
+        agent: 'director',
+        reason: readiness.reason,
+        pipeline_path: 'kickoff_pipeline',
+        metadata: { lead_name: lead.name, lead_company: lead.company },
+      }).catch(() => {});
+      return;
+    }
+
     try {
       // Phase 2 Step 3 (2026-05-08): Sales Beaver via pipeline.draftWithFallback.
       // Kickoff path does NOT use Enforcer fallback — no-body is logged as
@@ -3051,40 +3104,18 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           eventData: { source_path: 'kickoff_pipeline', status: kickoffMessageStatus, reason: channelReason },
         });
 
-        // If blocked, skip Captain validation + Enforcer — message is on hold for enrichment.
+        // If blocked, skip Enforcer — message is on hold for enrichment.
         if (kickoffMessageStatus === 'blocked_no_email') {
           return;
         }
 
-        // ── Captain validation gate — check for placeholders, missing data ──
-        const validation = await captainValidate(clientId, lead, message);
-        if (!validation.valid) {
-          if (validation.fixed_body) {
-            // Captain fixed the message — update body before Enforcer review
-            await pool.query(
-              `UPDATE messages SET body = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
-              [validation.fixed_body, message.id, clientId]
-            );
-            msgWithMeta.body = validation.fixed_body;
-            await logsService.createLog(clientId, {
-              agent: 'captain_beaver', action: 'message_fixed', target_type: 'message', target_id: message.id,
-              metadata: { notes: validation.notes },
-            });
-          } else {
-            // Captain can't fix — reject the message, skip Enforcer
-            await pool.query(
-              `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
-              [validation.notes, message.id, clientId]
-            );
-            await logsService.createLog(clientId, {
-              agent: 'captain_beaver', action: 'message_rejected', target_type: 'message', target_id: message.id,
-              metadata: { notes: validation.notes },
-            });
-            diagnostics.messages_failed++;
-            // Skip Enforcer — message is already rejected
-            return;
-          }
-        }
+        // ── Phase 3 pivot (2026-05-08): captainValidate post-draft gate REMOVED ─
+        // Lead-data integrity (name/company/contact-method) now checked pre-draft
+        // via pipeline.leadReadinessGate above. Placeholder + empty-body checks
+        // are dropped — Enforcer's rubric catches both. Per MJ direction:
+        // "buying signal is over everything" → Enforcer is THE quality gate.
+        // captainValidate function still exists in this file (no callers) and
+        // will be removed in Phase 2 Step 7 cleanup.
 
         // ── Enforcer review pipeline (server gates + AI Enforcer) ──
         await runRangerPipeline(lead, msgWithMeta);

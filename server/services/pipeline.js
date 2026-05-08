@@ -567,6 +567,52 @@ async function icpGateSoftDelete(clientId, lead, options = {}) {
   return { pass: false, status: safeStatus, reason: verdict.reason };
 }
 
+// ─── PHASE 3 PIVOT (this commit): Lead readiness gate (pre-draft) ──────────
+//
+// Per MJ direction 2026-05-08 (~23:50 MYT): "buying signal is over everything.
+// Captain should be aligned with Enforcer." After audit, captainValidate's
+// real job (lead-data integrity: name, company, contact-method) belongs
+// PRE-draft, not post-draft. Its placeholder/empty-body checks duplicate
+// Enforcer's rubric. Decision: move integrity checks pre-draft and remove
+// captainValidate post-draft entirely, so both pipelines have identical
+// post-draft flow (Enforcer only).
+//
+// This pulls Phase 3 ("Lead readiness gate", originally W3 May 26-30) ahead
+// to tonight, and de-risks Phase 2 Step 5 (pipeline.review) from HIGH to LOW
+// because both pipelines now converge on a single review shape.
+
+const PLACEHOLDER_RE = /\[NAME\]|\[COMPANY\]|\{\{|\}\}/i;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Pre-draft check: does this lead have enough metadata to be worth drafting?
+ *
+ * Pure function — no DB writes, no logs, no traces. Caller decides whether
+ * to skip (silent), enrichment-retry, or soft-delete the lead. This is the
+ * realised form of the legacy captainValidate checks 1-3 (lead-level) — moved
+ * upstream so we don't burn LLM tokens on incomplete leads.
+ *
+ * Returns:
+ *   { ready: true }
+ * or
+ *   { ready: false, reason: 'missing_name' | 'missing_company' | 'no_contact_method' }
+ */
+function leadReadinessGate(lead) {
+  if (!lead) return { ready: false, reason: 'no_lead' };
+  if (!lead.name || lead.name === 'Unknown Contact') {
+    return { ready: false, reason: 'missing_name' };
+  }
+  if (!lead.company || lead.company === 'Unknown Company') {
+    return { ready: false, reason: 'missing_company' };
+  }
+  const hasEmail = lead.email && EMAIL_RE.test(lead.email);
+  const hasLinkedIn = !!lead.linkedin_url;
+  if (!hasEmail && !hasLinkedIn) {
+    return { ready: false, reason: 'no_contact_method' };
+  }
+  return { ready: true };
+}
+
 module.exports = {
   isV2Enabled,
   processLead,           // Step 7 — currently throws
@@ -575,6 +621,7 @@ module.exports = {
   enrichEmail,           // Step 3 — concrete (Hunter + optional VP)
   draftWithFallback,     // Step 3 — concrete (Sales Beaver + optional Enforcer fallback)
   icpGateSoftDelete,     // Step 4 — concrete (applyIcpV2Filter + soft-delete + audit + trace)
+  leadReadinessGate,     // Phase 3 pivot — concrete (pre-draft data-integrity check)
 
   // Constants for callers (e.g. acceptance tests)
   PIPELINE_V2_ENABLED,
