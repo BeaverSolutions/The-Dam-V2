@@ -1136,7 +1136,7 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
         // Rationale: if we auto-fixed the mechanical issues, a 40+ score is a
         // message worth sending. Only hard brand-safety issues (checked above)
         // can kill a message now.
-        let approved = result.decision === 'approve' || result.decision === 'approve_with_edits';
+        let approved = result.decision === 'approve' || result.decision === 'approve_with_edits' || result.decision === 'approve_with_suggestions';
         const score = result.score || 0;
         if (!approved && score >= 40 && fixesApplied.length > 0) {
           // Post-autofix rescue: fixes applied + score passes floor → approve
@@ -1164,6 +1164,7 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
           notes: result.feedback || result.reject_reason || (approved ? null : `rejected:score=${score},decision=${result.decision}`),
           issues: result.reject_reason ? [result.reject_reason] : [],
           suggestions: result.suggested_edit ? [result.suggested_edit] : [],
+          two_thoughts: result.two_thoughts || null, // Fix 5: borderline suggestions
         };
       }
       // Legacy format
@@ -1884,56 +1885,75 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       const finalBody = rangerResult?.body || fixed.body;
 
       if (rangerResult?.approved) {
-        // ── Wave 1 auto-approval threshold (mirror of runRangerPipeline logic) ──
-        // Read the client's auto_approve_threshold. If Enforcer score >= threshold,
-        // skip the human queue and mark the approval as already-approved so the
-        // send queue worker picks it up. Keeps the machine running when MJ is AFK.
-        // Non-email channels still move through the flow — the Approvals UI
-        // shows auto-approved messages in the Approved tab for manual send.
+        // ── Auto-approve vs borderline surface (mirrors runRangerPipeline logic) ──
         const rangerScore = rangerResult.score || 70;
         let autoApproved = false;
+        let isBorderline = false;
         let nextMessageStatus = 'pending_approval';
         let approvalStatus = 'pending';
         let resolvedAt = null;
 
-        try {
-          const { rows: [clientRow] } = await pool.query(
-            `SELECT auto_approve_threshold FROM clients WHERE id = $1 LIMIT 1`,
-            [clientId]
-          );
-          const threshold = clientRow?.auto_approve_threshold;
-          if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
-            autoApproved = true;
-            // For email channel, go straight to pending_send so the queue worker sends it.
-            // For LinkedIn/other channels, stop at 'approved' — it's a manual-send channel.
-            nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
-            approvalStatus = 'approved';
-            resolvedAt = new Date();
-            console.log(`[pipeline] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold} (channel=${msg.channel}, next=${nextMessageStatus})`);
+        // Fix 5 (2026-05-09): Borderline with two_thoughts → always surface to MJ
+        const twoThoughts = rangerResult?.two_thoughts;
+        if (rangerScore >= 60 && rangerScore < 80 && twoThoughts && Array.isArray(twoThoughts) && twoThoughts.length > 0) {
+          isBorderline = true;
+          nextMessageStatus = 'pending_approval';
+          console.log(`[pipeline] BORDERLINE ${msg.id}: score ${rangerScore}, surfacing with ${twoThoughts.length} suggestions`);
+        } else {
+          try {
+            const { rows: [clientRow] } = await pool.query(
+              `SELECT auto_approve_threshold FROM clients WHERE id = $1 LIMIT 1`,
+              [clientId]
+            );
+            const threshold = clientRow?.auto_approve_threshold;
+            if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
+              autoApproved = true;
+              nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
+              approvalStatus = 'approved';
+              resolvedAt = new Date();
+              console.log(`[pipeline] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold} (channel=${msg.channel}, next=${nextMessageStatus})`);
+            }
+          } catch (err) {
+            console.warn('[pipeline] Failed to read auto_approve_threshold, defaulting to manual:', err.message);
           }
-        } catch (err) {
-          console.warn('[pipeline] Failed to read auto_approve_threshold, defaulting to manual:', err.message);
         }
 
-        await pool.query(
-          `UPDATE messages SET body = $1, status = $2, ranger_score = $3, ranger_notes = $4, updated_at = NOW() WHERE id = $5`,
-          [finalBody, nextMessageStatus, rangerScore,
-           autoApproved ? `Auto-approved (score ${rangerScore})` : (rangerResult.notes || 'Signal-sourced, approved'),
-           msg.id]
-        );
+        // Build ranger_notes with two thoughts for borderline
+        let rangerNotes;
+        if (isBorderline && twoThoughts) {
+          const thoughtLines = twoThoughts.map((t, i) =>
+            `${i + 1}. ${t.thought}: "${t.current_phrase}" → "${t.suggested_phrase}"`
+          ).join('\n');
+          rangerNotes = `Borderline (${rangerScore}/100) — two suggestions:\n${thoughtLines}`;
+        } else if (autoApproved) {
+          rangerNotes = `Auto-approved (score ${rangerScore})`;
+        } else {
+          rangerNotes = rangerResult.notes || 'Signal-sourced, approved';
+        }
+
+        if (isBorderline) {
+          await pool.query(
+            `UPDATE messages SET body = $1, status = $2, ranger_score = $3, ranger_notes = $4,
+             metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'), '{borderline}', 'true'), '{enforcer_suggestions}', $5::jsonb),
+             updated_at = NOW() WHERE id = $6`,
+            [finalBody, nextMessageStatus, rangerScore, rangerNotes, JSON.stringify(twoThoughts), msg.id]
+          );
+        } else {
+          await pool.query(
+            `UPDATE messages SET body = $1, status = $2, ranger_score = $3, ranger_notes = $4, updated_at = NOW() WHERE id = $5`,
+            [finalBody, nextMessageStatus, rangerScore, rangerNotes, msg.id]
+          );
+        }
 
         await pool.query(
           `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at)
            VALUES ($1, $2, $3, $4, $5)`,
           [clientId, msg.id,
-           autoApproved ? 'auto_approval' : 'signal_hunt',
+           isBorderline ? 'enforcer_borderline' : (autoApproved ? 'auto_approval' : 'signal_hunt'),
            approvalStatus,
            resolvedAt]
         );
 
-        // If auto-approved AND email channel, push it into the send queue.
-        // Channel guard inside enqueueMessage ensures non-email messages are skipped
-        // (LinkedIn / Instagram are manual-send by design).
         if (autoApproved) {
           try {
             const { enqueueMessage } = require('./sendQueueWorker');
@@ -1948,22 +1968,27 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
 
         await logsService.createLog(clientId, {
           agent: 'enforcer_beaver',
-          action: autoApproved ? 'message_auto_approved' : 'message_approved',
+          action: isBorderline ? 'message_borderline_surfaced' : (autoApproved ? 'message_auto_approved' : 'message_approved'),
           target_type: 'message',
           target_id: msg.id,
-          metadata: { channel: msg.channel, score: rangerScore, method: autoApproved ? 'auto_threshold' : 'pipeline_approved' },
+          metadata: {
+            channel: msg.channel, score: rangerScore,
+            method: isBorderline ? 'borderline_two_thoughts' : (autoApproved ? 'auto_threshold' : 'pipeline_approved'),
+            borderline: isBorderline,
+            thoughts: isBorderline ? twoThoughts : undefined,
+          },
         }).catch(() => {});
         // Phase 1 (2026-05-08): pipeline_traces approved (signal_pipeline)
         pipelineTrace.traceStage(clientId, {
           lead_id: lead.id,
           message_id: msg.id,
           kickoff_id: plan_id,
-          stage: 'approved',
-          status: autoApproved ? 'auto_threshold' : 'pipeline_approved',
+          stage: isBorderline ? 'reviewed' : 'approved',
+          status: isBorderline ? 'borderline_surfaced' : (autoApproved ? 'auto_threshold' : 'pipeline_approved'),
           agent: 'enforcer_beaver',
           score: rangerScore,
           pipeline_path: 'signal_pipeline',
-          metadata: { channel: msg.channel, next_status: nextMessageStatus, threshold_hit: autoApproved },
+          metadata: { channel: msg.channel, next_status: nextMessageStatus, borderline: isBorderline },
         }).catch(() => {});
 
         approvedCount++;
@@ -3484,50 +3509,84 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       currentBody = finalFix.body;
     }
 
-    // ── AI Enforcer approved — decide: auto-approve or human queue? ──
-    // Phase Wave 1: Auto-approval threshold
-    // Read the client's auto_approve_threshold. If the Enforcer score is >= threshold
-    // AND no brand-safety failures, skip the human queue and go straight to pending_send.
-    // This keeps the machine running when MJ is AFK.
+    // ── AI Enforcer approved — decide: auto-approve, borderline surface, or human queue? ──
     const rangerScore = rangerResult?.score || 80;
     let autoApproved = false;
+    let isBorderline = false;
     let approvalStatus = 'pending_approval';
     let nextMessageStatus = 'pending_approval';
 
-    try {
-      const { rows: [clientRow] } = await pool.query(
-        `SELECT auto_approve_threshold FROM clients WHERE id = $1 LIMIT 1`,
-        [clientId]
-      );
-      const threshold = clientRow?.auto_approve_threshold;
+    // ── Fix 5 (2026-05-09): Borderline draft surface ("Sales Beaver two thoughts") ──
+    // Score 60-79 with two_thoughts: ALWAYS surface to MJ with the two suggestions.
+    // Never auto-approve borderline drafts — the founder's eye is the value.
+    const twoThoughts = rangerResult?.two_thoughts;
+    if (rangerScore >= 60 && rangerScore < 80 && twoThoughts && Array.isArray(twoThoughts) && twoThoughts.length > 0) {
+      isBorderline = true;
+      nextMessageStatus = 'pending_approval';
+      console.log(`[enforcer] BORDERLINE ${msg.id}: score ${rangerScore}, surfacing with ${twoThoughts.length} suggestions`);
+    } else {
+      // Standard auto-approve threshold check for non-borderline
+      try {
+        const { rows: [clientRow] } = await pool.query(
+          `SELECT auto_approve_threshold FROM clients WHERE id = $1 LIMIT 1`,
+          [clientId]
+        );
+        const threshold = clientRow?.auto_approve_threshold;
 
-      if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
-        autoApproved = true;
-        approvalStatus = 'approved';
-        // Channel-aware: email goes straight to send queue. LinkedIn / other
-        // channels are manual-send by design (no Playwright in Phase 1) — they
-        // stop at 'approved' and live in the Approvals UI Approved tab with
-        // a Copy button.
-        nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
-        console.log(`[enforcer] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold} (channel=${msg.channel}, next=${nextMessageStatus})`);
+        if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
+          autoApproved = true;
+          approvalStatus = 'approved';
+          nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
+          console.log(`[enforcer] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold} (channel=${msg.channel}, next=${nextMessageStatus})`);
+        }
+      } catch (err) {
+        console.warn('[enforcer] Failed to read auto_approve_threshold, defaulting to manual:', err.message);
       }
-    } catch (err) {
-      console.warn('[enforcer] Failed to read auto_approve_threshold, defaulting to manual:', err.message);
     }
 
-    await pool.query(
-      `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
-       ranger_breakdown = $5, status = $6, updated_at = NOW()
-       WHERE id = $7 AND client_id = $8`,
-      [currentBody, currentSubject, rangerScore,
-       autoApproved ? `Auto-approved (score ${rangerScore})` : (rangerResult?.notes || 'Enforcer approved'),
-       JSON.stringify(rangerResult?.breakdown || null), nextMessageStatus, msg.id, clientId]
-    );
+    // Build ranger_notes with two thoughts visible for borderline drafts
+    let rangerNotes;
+    if (isBorderline && twoThoughts) {
+      const thoughtLines = twoThoughts.map((t, i) =>
+        `${i + 1}. ${t.thought}: "${t.current_phrase}" → "${t.suggested_phrase}"`
+      ).join('\n');
+      rangerNotes = `Borderline (${rangerScore}/100) — two suggestions:\n${thoughtLines}`;
+    } else if (autoApproved) {
+      rangerNotes = `Auto-approved (score ${rangerScore})`;
+    } else {
+      rangerNotes = rangerResult?.notes || 'Enforcer approved';
+    }
+
+    // Build metadata with borderline flag + suggestions
+    const rangerBreakdown = rangerResult?.breakdown || null;
+    const messageMetaUpdate = isBorderline
+      ? `jsonb_set(jsonb_set(COALESCE(metadata, '{}'), '{borderline}', 'true'), '{enforcer_suggestions}', $9::jsonb)`
+      : `COALESCE(metadata, '{}')`;
+
+    if (isBorderline) {
+      await pool.query(
+        `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
+         ranger_breakdown = $5, status = $6, metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'), '{borderline}', 'true'), '{enforcer_suggestions}', $7::jsonb), updated_at = NOW()
+         WHERE id = $8 AND client_id = $9`,
+        [currentBody, currentSubject, rangerScore, rangerNotes,
+         JSON.stringify(rangerBreakdown), nextMessageStatus,
+         JSON.stringify(twoThoughts), msg.id, clientId]
+      );
+    } else {
+      await pool.query(
+        `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
+         ranger_breakdown = $5, status = $6, updated_at = NOW()
+         WHERE id = $7 AND client_id = $8`,
+        [currentBody, currentSubject, rangerScore, rangerNotes,
+         JSON.stringify(rangerBreakdown), nextMessageStatus, msg.id, clientId]
+      );
+    }
 
     await pool.query(
       `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at)
        VALUES ($1, $2, $3, $4, $5)`,
-      [clientId, msg.id, autoApproved ? 'auto_approval' : 'system',
+      [clientId, msg.id,
+       isBorderline ? 'enforcer_borderline' : (autoApproved ? 'auto_approval' : 'system'),
        autoApproved ? 'approved' : 'pending',
        autoApproved ? new Date() : null]
     );
@@ -3546,12 +3605,30 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       }
     }
 
+    // Pipeline trace for borderline surface (Fix 5 visibility)
+    if (isBorderline) {
+      pipelineTrace.traceStage(clientId, {
+        lead_id: lead.id,
+        stage: 'reviewed',
+        status: 'borderline_surfaced',
+        agent: 'enforcer_beaver',
+        score: rangerScore,
+        pipeline_path: msg.metadata?.pipeline_path || 'unknown',
+        metadata: { channel: msg.channel, thoughts_count: twoThoughts.length },
+      }).catch(() => {});
+    }
+
     await logsService.createLog(clientId, {
       agent: 'enforcer_beaver',
-      action: autoApproved ? 'message_auto_approved' : 'message_approved',
+      action: isBorderline ? 'message_borderline_surfaced' : (autoApproved ? 'message_auto_approved' : 'message_approved'),
       target_type: 'message',
       target_id: msg.id,
-      metadata: { channel: msg.channel, score: rangerScore, method: autoApproved ? 'auto_threshold' : 'ai_enforcer' },
+      metadata: {
+        channel: msg.channel, score: rangerScore,
+        method: isBorderline ? 'borderline_two_thoughts' : (autoApproved ? 'auto_threshold' : 'ai_enforcer'),
+        borderline: isBorderline,
+        thoughts: isBorderline ? twoThoughts : undefined,
+      },
     });
 
     approvedCount++;

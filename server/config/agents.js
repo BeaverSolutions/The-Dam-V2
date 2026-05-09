@@ -554,8 +554,9 @@ CTA (20 pts):
 - Asks for conversation, not a hard sell: +10
 
 DECISIONS (score-based, only if auto-rejects passed):
-- 55+: approve
-- 40–54: approve_with_edits — return the full improved message. The suggested edit must be a maximum of 1 sentence change and must itself pass all hard gates.
+- 80+: approve — clean, ready for auto-approval
+- 60–79: approve_with_suggestions — the draft is GOOD ENOUGH to send as-is, but you see two specific improvements that would make it noticeably better. Return exactly TWO suggestions in "two_thoughts" array. Each thought: {"thought":"one sentence describing the improvement","current_phrase":"exact phrase to change","suggested_phrase":"your improved version"}. These surface to the founder who applies, edits, or skips. Think of it as coaching, not gatekeeping.
+- 40–59: approve_with_edits — return the full improved message. The suggested edit must be a maximum of 1 sentence change and must itself pass all hard gates.
 - Below 40: reject
 
 ADDITIONAL REJECT CONDITIONS (score-based):
@@ -567,7 +568,7 @@ ADDITIONAL REJECT CONDITIONS (score-based):
 
 NOTE: Role-based and industry-based personalisation IS valid. "Running a marketing agency in KL takes execution" is personalised if the lead is a founder of a marketing agency in KL. It does not need to reference a specific news event or LinkedIn post.
 
-FEEDBACK QUALITY (required on every rejection and approve_with_edits):
+FEEDBACK QUALITY (required on every rejection, approve_with_edits, and approve_with_suggestions):
 Always output:
 1. Which specific rule failed (gate name or scoring category)
 2. The exact phrase that caused the failure
@@ -576,7 +577,7 @@ Always output:
 Tone: encouraging but firm. "This is close — here's exactly what to fix." Never "This is terrible."
 
 Return JSON only — no markdown:
-{"decision":"approve|approve_with_edits|reject|escalate","score":85,"breakdown":{"personalisation":25,"relevance":20,"quality":25,"cta":15},"feedback":"Main strength or key issue in one sentence","failed_rule":"Gate or rule that failed — only if rejected","failed_phrase":"Exact phrase that caused the failure — only if rejected","suggested_fix":"One concrete rewrite suggestion — only if rejected or approve_with_edits","suggested_edit":"Full improved message — only if approve_with_edits","reject_reason":"Specific gate or reason — only if rejected or escalated"}`,
+{"decision":"approve|approve_with_suggestions|approve_with_edits|reject|escalate","score":85,"breakdown":{"personalisation":25,"relevance":20,"quality":25,"cta":15},"feedback":"Main strength or key issue in one sentence","two_thoughts":[{"thought":"shorten the opener","current_phrase":"exact phrase from draft","suggested_phrase":"improved version"},{"thought":"strengthen the CTA","current_phrase":"exact phrase from draft","suggested_phrase":"improved version"}],"failed_rule":"only if rejected","failed_phrase":"only if rejected","suggested_fix":"only if rejected or approve_with_edits","suggested_edit":"full improved message — only if approve_with_edits","reject_reason":"only if rejected or escalated"}`,
     },
 
     // ═══════════════════════════════════════════════════════════
