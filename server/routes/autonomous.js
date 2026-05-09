@@ -2885,20 +2885,51 @@ router.post('/bulk-redraft', requireInternalKey, async (req, res) => {
           const passed = !!rangerResult?.approved;
           if (passed) stats.passed++; else stats.failed++;
 
-          await pool.query(
-            `UPDATE messages SET ranger_score = $1, ranger_notes = $2,
-             metadata = jsonb_set(COALESCE(metadata, '{}'), '{v1_rescore}', $3::jsonb),
-             updated_at = NOW()
-             WHERE id = $4 AND client_id = $5`,
-            [
-              score,
-              `v1.0 rescore: ${passed ? 'PASS' : 'FAIL'} (${score}) — ${rangerResult?.notes || rangerResult?.reject_reason || 'reviewed'}`,
-              JSON.stringify({ rescored_at: new Date().toISOString(), old_score: msg.old_score, new_score: score, passed }),
-              msg.id, client_id,
-            ]
-          );
+          // Fix 5 (2026-05-09): Borderline detection in rescore path
+          // Mirrors signal_pipeline + runRangerPipeline borderline logic
+          const twoThoughts = rangerResult?.two_thoughts;
+          const isBorderline = passed && score >= 60 && score < 80
+            && twoThoughts && Array.isArray(twoThoughts) && twoThoughts.length > 0;
+
+          let rangerNotes;
+          if (isBorderline) {
+            const thoughtLines = twoThoughts.map((t, i) =>
+              `${i + 1}. ${t.thought}: "${t.current_phrase}" → "${t.suggested_phrase}"`
+            ).join('\n');
+            rangerNotes = `Borderline (${score}/100) — two suggestions:\n${thoughtLines}`;
+          } else {
+            rangerNotes = `v1.0 rescore: ${passed ? 'PASS' : 'FAIL'} (${score}) — ${rangerResult?.notes || rangerResult?.reject_reason || 'reviewed'}`;
+          }
+
+          const rescoreMeta = { rescored_at: new Date().toISOString(), old_score: msg.old_score, new_score: score, passed };
+
+          if (isBorderline) {
+            // Persist borderline flag + enforcer_suggestions + rescore metadata
+            await pool.query(
+              `UPDATE messages SET ranger_score = $1, ranger_notes = $2,
+               metadata = jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'),
+                 '{v1_rescore}', $3::jsonb),
+                 '{borderline}', 'true'),
+                 '{enforcer_suggestions}', $4::jsonb),
+               updated_at = NOW()
+               WHERE id = $5 AND client_id = $6`,
+              [score, rangerNotes, JSON.stringify(rescoreMeta),
+               JSON.stringify(twoThoughts), msg.id, client_id]
+            );
+            if (!stats.borderline) stats.borderline = 0;
+            stats.borderline++;
+            logger.info({ msg: '[bulk-rescore] BORDERLINE', message_id: msg.id, lead: msg.name, score, thoughts: twoThoughts.length });
+          } else {
+            await pool.query(
+              `UPDATE messages SET ranger_score = $1, ranger_notes = $2,
+               metadata = jsonb_set(COALESCE(metadata, '{}'), '{v1_rescore}', $3::jsonb),
+               updated_at = NOW()
+               WHERE id = $4 AND client_id = $5`,
+              [score, rangerNotes, JSON.stringify(rescoreMeta), msg.id, client_id]
+            );
+          }
           stats.rescored++;
-          logger.info({ msg: '[bulk-rescore]', message_id: msg.id, lead: msg.name, old_score: msg.old_score, new_score: score, passed });
+          logger.info({ msg: '[bulk-rescore]', message_id: msg.id, lead: msg.name, old_score: msg.old_score, new_score: score, passed, borderline: isBorderline });
         } catch (err) {
           stats.errors++;
           logger.error({ msg: '[bulk-rescore] failed', message_id: msg.id, err: err.message });

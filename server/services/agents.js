@@ -1826,6 +1826,17 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       const existingActive = await pipeline.checkActiveMessage(clientId, lead.id);
       if (existingActive) {
         console.warn(`[signal-pipeline] Dedup guard: ${lead.name} already has an active message — skipping insert`);
+        // Fix 5b (2026-05-09): Instrument dedup guard — was a silent drop with no trace
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id,
+          kickoff_id: plan_id,
+          stage: 'draft_failed',
+          status: 'dedup_guard',
+          agent: 'sales_beaver',
+          reason: `Lead already has active message (id: ${existingActive.id || 'unknown'})`,
+          pipeline_path: 'signal_pipeline',
+          metadata: { lead_name: lead.name, channel, existing_message_id: existingActive.id || null },
+        }).catch(() => {});
         continue;
       }
 
