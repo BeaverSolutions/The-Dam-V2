@@ -1,0 +1,19 @@
+name: Trigger Rescore (manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rescore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Rescore pending_approval messages
+        env:
+          API_KEY: ${{ secrets.BEAVRDAM_INTERNAL_API_KEY }}
+        run: |
+          curl -s -X POST https://app.beaver.solutions/api/autonomous/bulk-redraft \
+            -H "Content-Type: application/json" \
+            -H "x-internal-key: $API_KEY" \
+            -d '{"client_id": "ce2fc8e5-617e-42d5-91fe-4275ceaa0030", "rescore_only": true}' | tee /tmp/result.json
+          cat /tmp/result.json | python3 -m json.tool || true
