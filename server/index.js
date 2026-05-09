@@ -278,7 +278,7 @@ async function start() {
         postDiscordAlert('approvals polling', err.message).catch(() => {});
       });
       // Sync Google Calendar meetings → auto-advance leads to meeting_booked
-      pool.query(`SELECT id FROM clients WHERE deleted_at IS NULL`).then(({ rows }) => {
+      pool.query(`SELECT id FROM clients`).then(({ rows }) => {
         for (const { id } of rows) {
           calendarService.syncMeetings(id).catch(() => {});
         }
