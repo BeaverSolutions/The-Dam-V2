@@ -148,6 +148,11 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          {approval.message_metadata?.borderline && (
+            <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.7rem', fontWeight: 600, color: 'var(--blue)', background: 'rgba(0,180,255,0.12)', padding: '0.2rem 0.5rem', borderRadius: 100 }}>
+              Two thoughts
+            </span>
+          )}
           {approval.ranger_score != null && (
             <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.75rem', fontWeight: 700, color: scoreColor(approval.ranger_score), background: approval.ranger_score >= 80 ? 'rgba(200,255,0,0.09)' : approval.ranger_score >= 60 ? 'rgba(0,180,255,0.09)' : 'rgba(255,140,0,0.09)', padding: '0.2rem 0.5rem', borderRadius: 100 }}>
               <Shield size={11} /> {approval.ranger_score}
@@ -228,8 +233,49 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
         </div>
       )}
 
-      {/* Ranger notes */}
-      {approval.ranger_notes && (
+      {/* Borderline "two thoughts" — Fix 5 hero film promise */}
+      {approval.message_metadata?.borderline && (
+        <div style={{
+          padding: '0.65rem 0.85rem',
+          marginBottom: '0.75rem',
+          background: 'rgba(0,180,255,0.06)',
+          border: '1px solid rgba(0,180,255,0.2)',
+          borderRadius: 'var(--radius)',
+          fontSize: '0.82rem',
+          lineHeight: 1.55,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem', fontWeight: 700, color: 'var(--blue)' }}>
+            <BeaverAvatar agent="ranger" size="xs" />
+            <span>Sales Beaver has two thoughts</span>
+            <span style={{ fontSize: '0.7rem', fontWeight: 500, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+              Score {approval.ranger_score}/100
+            </span>
+          </div>
+          {approval.message_metadata.enforcer_suggestions?.map((s, i) => (
+            <div key={i} style={{
+              padding: '0.45rem 0.65rem',
+              marginBottom: i < (approval.message_metadata.enforcer_suggestions.length - 1) ? '0.4rem' : 0,
+              background: 'rgba(255,255,255,0.04)',
+              borderRadius: 4,
+              borderLeft: '3px solid var(--blue)',
+            }}>
+              <div style={{ fontWeight: 600, fontSize: '0.78rem', marginBottom: '0.25rem', color: 'var(--text)' }}>
+                {s.thought}
+              </div>
+              {s.current_phrase && s.suggested_phrase && (
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                  <span style={{ textDecoration: 'line-through', opacity: 0.7 }}>{s.current_phrase}</span>
+                  {' → '}
+                  <span style={{ color: 'var(--lime)', fontWeight: 500 }}>{s.suggested_phrase}</span>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Ranger notes (hidden when borderline suggestions are shown to avoid duplication) */}
+      {approval.ranger_notes && !approval.message_metadata?.borderline && (
         <div className="approval-ranger-notes">
           <BeaverAvatar agent="ranger" size="xs" />
           <span>{approval.ranger_notes}</span>
