@@ -266,8 +266,25 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
               borderRadius: 4,
               borderLeft: '3px solid var(--blue)',
             }}>
-              <div style={{ fontWeight: 600, fontSize: '0.78rem', marginBottom: '0.25rem', color: 'var(--text)' }}>
-                {s.thought}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.5rem' }}>
+                <div style={{ fontWeight: 600, fontSize: '0.78rem', marginBottom: '0.25rem', color: 'var(--text)', flex: 1 }}>
+                  {s.thought}
+                </div>
+                {s.current_phrase && s.suggested_phrase && !resolved && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    style={{ fontSize: '0.68rem', padding: '0.15rem 0.45rem', flexShrink: 0, color: 'var(--lime)', border: '1px solid rgba(200,255,0,0.25)' }}
+                    onClick={() => {
+                      const current = editing ? editBody : (approval.body || '');
+                      const updated = current.replace(s.current_phrase, s.suggested_phrase);
+                      setEditBody(updated);
+                      setEditing(true);
+                    }}
+                  >
+                    Apply
+                  </button>
+                )}
               </div>
               {s.current_phrase && s.suggested_phrase && (
                 <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
