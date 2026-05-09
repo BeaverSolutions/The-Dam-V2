@@ -114,7 +114,7 @@ async function createApproval(clientId, { message_id, requested_by }) {
   return result.rows[0];
 }
 
-async function resolveApproval(clientId, approvalId, { status, notes, userId }) {
+async function resolveApproval(clientId, approvalId, { status, notes, userId, edited_body }) {
   const existing = await pool.query(
     `SELECT * FROM approvals WHERE id = $1 AND client_id = $2`,
     [approvalId, clientId]
@@ -133,6 +133,52 @@ async function resolveApproval(clientId, approvalId, { status, notes, userId }) 
     `UPDATE messages SET status = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
     [messageStatus, existing.rows[0].message_id, clientId]
   );
+
+  // Fix 6: Capture founder feedback for Sales Beaver learning loop.
+  // On approve: check if body was edited (original_body snapshot in metadata).
+  // On reject: store the rejection reason.
+  try {
+    const { rows: [msg] } = await pool.query(
+      `SELECT id, lead_id, body, channel, metadata FROM messages WHERE id = $1 AND client_id = $2`,
+      [existing.rows[0].message_id, clientId]
+    );
+    if (msg) {
+      const originalBody = msg.metadata?.original_body;
+      if (status === 'approved' && originalBody && originalBody !== msg.body) {
+        // Founder edited the draft before approving — capture the diff
+        const { rows: [lead] } = await pool.query(
+          `SELECT name, company, title FROM leads WHERE id = $1 AND client_id = $2`,
+          [msg.lead_id, clientId]
+        );
+        await pool.query(
+          `INSERT INTO founder_feedback (client_id, message_id, lead_id, feedback_type, original_body, edited_body, channel, lead_context)
+           VALUES ($1, $2, $3, 'edit', $4, $5, $6, $7)`,
+          [clientId, msg.id, msg.lead_id, originalBody, msg.body, msg.channel,
+           JSON.stringify({ name: lead?.name, company: lead?.company, title: lead?.title })]
+        );
+        // Clean up the snapshot
+        await pool.query(
+          `UPDATE messages SET metadata = metadata - 'original_body' WHERE id = $1 AND client_id = $2`,
+          [msg.id, clientId]
+        );
+      } else if (status === 'rejected' && (notes || edited_body)) {
+        // Founder rejected with a reason — capture for pattern learning
+        const { rows: [lead] } = await pool.query(
+          `SELECT name, company, title FROM leads WHERE id = $1 AND client_id = $2`,
+          [msg.lead_id, clientId]
+        );
+        await pool.query(
+          `INSERT INTO founder_feedback (client_id, message_id, lead_id, feedback_type, original_body, rejection_reason, channel, lead_context)
+           VALUES ($1, $2, $3, 'rejection', $4, $5, $6, $7)`,
+          [clientId, msg.id, msg.lead_id, msg.body, notes || 'Rejected without reason', msg.channel,
+           JSON.stringify({ name: lead?.name, company: lead?.company, title: lead?.title })]
+        );
+      }
+    }
+  } catch (feedbackErr) {
+    // Non-critical — don't block the approval/rejection flow
+    console.warn('[approvals] founder_feedback capture failed:', feedbackErr.message);
+  }
 
   // Auto-enqueue approved messages for send (with retry on failure)
   if (status === 'approved') {

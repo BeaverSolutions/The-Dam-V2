@@ -70,7 +70,21 @@ async function createMessage(clientId, data) {
 }
 
 async function updateMessage(clientId, messageId, data) {
-  await getMessage(clientId, messageId);
+  const existing = await getMessage(clientId, messageId);
+
+  // Fix 6: When founder edits the body, snapshot the original so resolveApproval
+  // can detect the diff and capture it as founder_feedback.
+  if (data.body && data.body !== existing.body) {
+    const currentMeta = existing.metadata || {};
+    if (!currentMeta.original_body) {
+      // Only snapshot the FIRST original — subsequent edits keep the Sales Beaver original
+      await pool.query(
+        `UPDATE messages SET metadata = jsonb_set(COALESCE(metadata, '{}'), '{original_body}', to_jsonb($3::text))
+         WHERE id = $1 AND client_id = $2`,
+        [messageId, clientId, existing.body]
+      );
+    }
+  }
 
   const fields = ['subject', 'body', 'status', 'ranger_score', 'ranger_notes', 'revision_count'];
   const updates = [];

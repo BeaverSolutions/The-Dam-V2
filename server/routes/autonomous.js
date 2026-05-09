@@ -482,7 +482,7 @@ router.get('/pending-approvals', requireInternalKey, async (req, res) => {
 /* ─── POST /api/autonomous/approve ──────────────────────── */
 
 router.post('/approve', requireInternalKey, async (req, res) => {
-  const { approval_id, client_id } = req.body;
+  const { approval_id, client_id, edited_body } = req.body;
   if (!approval_id || !client_id) {
     return res.status(400).json({ error: 'approval_id and client_id required' });
   }
@@ -497,18 +497,72 @@ router.post('/approve', requireInternalKey, async (req, res) => {
     if (!approval) {
       return res.status(404).json({ error: 'Approval not found or already actioned', code: 'NOT_FOUND' });
     }
-    const { rows: [msg] } = await pool.query(`SELECT status FROM messages WHERE id = $1 AND client_id = $2`, [approval.message_id, client_id]);
+    const { rows: [msg] } = await pool.query(
+      `SELECT status, body, lead_id, channel, metadata FROM messages WHERE id = $1 AND client_id = $2`,
+      [approval.message_id, client_id]
+    );
     if (!msg || msg.status !== 'pending_approval') {
       return res.status(400).json({ error: `Cannot approve: message status is '${msg?.status || 'missing'}'`, code: 'INVALID_STATUS' });
     }
-    await pool.query(
-      `UPDATE messages SET status = 'approved' WHERE id = $1 AND client_id = $2`,
-      [approval.message_id, client_id]
-    );
+
+    // Fix 6: If edited_body provided and differs, capture founder feedback + update message
+    if (edited_body && edited_body !== msg.body) {
+      try {
+        const { rows: [lead] } = await pool.query(
+          `SELECT name, company, title FROM leads WHERE id = $1 AND client_id = $2`,
+          [msg.lead_id, client_id]
+        );
+        await pool.query(
+          `INSERT INTO founder_feedback (client_id, message_id, lead_id, feedback_type, original_body, edited_body, channel, lead_context)
+           VALUES ($1, $2, $3, 'edit', $4, $5, $6, $7)`,
+          [client_id, approval.message_id, msg.lead_id, msg.body, edited_body, msg.channel,
+           JSON.stringify({ name: lead?.name, company: lead?.company, title: lead?.title })]
+        );
+        await pool.query(
+          `UPDATE messages SET body = $3, status = 'approved' WHERE id = $1 AND client_id = $2`,
+          [approval.message_id, client_id, edited_body]
+        );
+      } catch (fbErr) {
+        console.warn('[autonomous] founder_feedback capture failed:', fbErr.message);
+        await pool.query(
+          `UPDATE messages SET status = 'approved' WHERE id = $1 AND client_id = $2`,
+          [approval.message_id, client_id]
+        );
+      }
+    } else {
+      await pool.query(
+        `UPDATE messages SET status = 'approved' WHERE id = $1 AND client_id = $2`,
+        [approval.message_id, client_id]
+      );
+
+      // Fix 6: Check if body was edited via UI (original_body in metadata)
+      const originalBody = msg.metadata?.original_body;
+      if (originalBody && originalBody !== msg.body) {
+        try {
+          const { rows: [lead] } = await pool.query(
+            `SELECT name, company, title FROM leads WHERE id = $1 AND client_id = $2`,
+            [msg.lead_id, client_id]
+          );
+          await pool.query(
+            `INSERT INTO founder_feedback (client_id, message_id, lead_id, feedback_type, original_body, edited_body, channel, lead_context)
+             VALUES ($1, $2, $3, 'edit', $4, $5, $6, $7)`,
+            [client_id, approval.message_id, msg.lead_id, originalBody, msg.body, msg.channel,
+             JSON.stringify({ name: lead?.name, company: lead?.company, title: lead?.title })]
+          );
+          await pool.query(
+            `UPDATE messages SET metadata = metadata - 'original_body' WHERE id = $1 AND client_id = $2`,
+            [approval.message_id, client_id]
+          );
+        } catch (fbErr) {
+          console.warn('[autonomous] founder_feedback (UI edit) capture failed:', fbErr.message);
+        }
+      }
+    }
+
     await pool.query(
       `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)
        VALUES ($1, 'claw', 'message_approved', 'message', $2, $3)`,
-      [client_id, approval.message_id, JSON.stringify({ approval_id, source: 'telegram_claw' })]
+      [client_id, approval.message_id, JSON.stringify({ approval_id, source: 'telegram_claw', had_edit: !!(edited_body || msg.metadata?.original_body) })]
     );
     res.json({ data: { approval_id, message_id: approval.message_id, status: 'approved' } });
   } catch (err) {
@@ -534,6 +588,29 @@ router.post('/reject', requireInternalKey, async (req, res) => {
     if (!approval) {
       return res.status(404).json({ error: 'Approval not found or already actioned', code: 'NOT_FOUND' });
     }
+
+    // Fix 6: Capture rejection reason as founder feedback
+    try {
+      const { rows: [msg] } = await pool.query(
+        `SELECT body, lead_id, channel FROM messages WHERE id = $1 AND client_id = $2`,
+        [approval.message_id, client_id]
+      );
+      if (msg && reason) {
+        const { rows: [lead] } = await pool.query(
+          `SELECT name, company, title FROM leads WHERE id = $1 AND client_id = $2`,
+          [msg.lead_id, client_id]
+        );
+        await pool.query(
+          `INSERT INTO founder_feedback (client_id, message_id, lead_id, feedback_type, original_body, rejection_reason, channel, lead_context)
+           VALUES ($1, $2, $3, 'rejection', $4, $5, $6, $7)`,
+          [client_id, approval.message_id, msg.lead_id, msg.body, reason, msg.channel,
+           JSON.stringify({ name: lead?.name, company: lead?.company, title: lead?.title })]
+        );
+      }
+    } catch (fbErr) {
+      console.warn('[autonomous] founder_feedback (rejection) capture failed:', fbErr.message);
+    }
+
     await pool.query(
       `UPDATE messages SET status = 'rejected' WHERE id = $1`,
       [approval.message_id]

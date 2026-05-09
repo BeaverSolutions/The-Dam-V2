@@ -334,6 +334,52 @@ async function getRangerRejectionPatterns(clientId) {
 }
 
 /**
+ * Fix 6: Pull recent founder feedback (edits + rejections) from founder_feedback table.
+ * Returns formatted few-shot examples showing how the founder corrects drafts.
+ * Sales Beaver uses these to calibrate tone, length, and style.
+ */
+async function getFounderFeedback(clientId) {
+  try {
+    const res = await pool.query(
+      `SELECT feedback_type, original_body, edited_body, rejection_reason, channel, lead_context
+       FROM founder_feedback
+       WHERE client_id = $1
+       ORDER BY created_at DESC LIMIT 10`,
+      [clientId]
+    );
+    if (res.rows.length === 0) return null;
+
+    const examples = [];
+
+    // Edit examples — show what the founder changed
+    const edits = res.rows.filter(r => r.feedback_type === 'edit' && r.edited_body);
+    for (const edit of edits.slice(0, 5)) {
+      const ctx = edit.lead_context || {};
+      examples.push(
+        `[EDIT EXAMPLE — ${edit.channel}] Lead: ${ctx.name || 'Unknown'} at ${ctx.company || 'Unknown'}` +
+        `\nOriginal draft:\n${edit.original_body}` +
+        `\nFounder's corrected version:\n${edit.edited_body}`
+      );
+    }
+
+    // Rejection examples — show what patterns the founder kills
+    const rejections = res.rows.filter(r => r.feedback_type === 'rejection' && r.rejection_reason);
+    for (const rej of rejections.slice(0, 5)) {
+      const ctx = rej.lead_context || {};
+      examples.push(
+        `[REJECTED — ${rej.channel}] Lead: ${ctx.name || 'Unknown'} at ${ctx.company || 'Unknown'}` +
+        `\nRejected draft:\n${rej.original_body}` +
+        `\nReason: ${rej.rejection_reason}`
+      );
+    }
+
+    return examples.length > 0 ? examples : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Build a shared memory brief for the Director to inject at kickoff.
  * Reads ICP, weekly learnings, recent Ranger rejections, and past agent mistakes.
  */
@@ -573,7 +619,7 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
   if (callAgent) {
     try {
       const directivesSvc = require('./directives');
-      const [persona, fileConfig, rangerPatterns, salesDirectives] = await Promise.all([
+      const [persona, fileConfig, rangerPatterns, salesDirectives, founderFeedback] = await Promise.all([
         getClientPersona(clientId),
         getClientConfig(clientId),
         // MEMORY: Load Ranger rejection patterns — brief Sales Beaver on what to avoid (Sprint 9)
@@ -582,6 +628,8 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         // directive with TODAY's top reject reasons (>= 3 rejects). These are
         // sharper than the historical Ranger memory — Sales Beaver applies both.
         directivesSvc.readPendingDirectives(clientId, 'sales_beaver').catch(() => []),
+        // Fix 6: Founder feedback — edit diffs + rejection reasons from MJ's corrections
+        getFounderFeedback(clientId),
       ]);
       const personaContext = buildPersonaContext(persona);
       const fileContext = buildClientContext(fileConfig);
@@ -589,6 +637,14 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
       let rangerContext = '';
       if (rangerPatterns?.length) {
         rangerContext = `\n\nRANGER REJECTION HISTORY — these patterns were rejected recently, do NOT repeat them:\n${rangerPatterns.slice(0, 5).join('\n')}`;
+      }
+
+      // Fix 6: Founder feedback injection — the founder's edits and rejections
+      // are the strongest signal for voice calibration. These examples show exactly
+      // how the founder wants messages to read.
+      let founderFeedbackContext = '';
+      if (founderFeedback?.length) {
+        founderFeedbackContext = `\n\nFOUNDER FEEDBACK — the founder edited or rejected these drafts. Study these examples carefully and match the founder's preferred style, tone, and length:\n\n${founderFeedback.join('\n\n---\n\n')}`;
       }
 
       // Captain's directive injection — today's hot reject reasons + any other
@@ -631,7 +687,7 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         'sales_beaver',
         `Write a ${channel} outreach message for this lead: ${context}
 ${signOffInstruction}
-${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}`,
+${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}${founderFeedbackContext}`,
         { lead_id, channel, clientId }
       );
 
@@ -4052,4 +4108,6 @@ module.exports = {
   captureWinLoss,
   // Code-level Enforcer gates
   codeEnforcerGates,
+  // Fix 6: Founder feedback loop
+  getFounderFeedback,
 };
