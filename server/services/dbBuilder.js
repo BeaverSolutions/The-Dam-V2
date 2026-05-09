@@ -481,6 +481,73 @@ async function runDbBuilder() {
           const consumedDirectiveIds = [];
           if (rebuildDirective) consumedDirectiveIds.push(rebuildDirective.id);
 
+          // ── Phase 2 V2 Step 8b (2026-05-09): cold_research_request consumer ──
+          // When DIRECTOR_INLINE_RESEARCH_DISABLED=true, directorExecute queues
+          // cold_research_request directives instead of running research inline.
+          // Process them here regardless of pool health — they're explicit commands
+          // from the director, not deficit-driven.
+          const coldResearchDirectives = dbDirectives.filter(d => d.directive_type === 'cold_research_request');
+          if (coldResearchDirectives.length > 0) {
+            const researchModule = require('./research');
+            const { rows: icpRows } = await pool.query(
+              `SELECT content FROM agent_memory
+               WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
+              [client.id]
+            );
+            const icpMemory = icpRows[0]?.content || null;
+            const enrichPatterns = await loadEmailPatterns(client.id);
+
+            for (const directive of coldResearchDirectives) {
+              const { command, limit: targetCount, plan_id } = directive.payload || {};
+              if (!command) {
+                consumedDirectiveIds.push(directive.id);
+                continue;
+              }
+
+              // Budget gate per directive
+              const budget = await checkBudget(client.id);
+              if (!budget.allowed) {
+                logger.info({ msg: '[db-builder] Budget exhausted, skipping cold_research_request', command });
+                break;
+              }
+
+              try {
+                logger.info({ msg: '[db-builder] Processing cold_research_request', command, plan_id });
+                const result = await researchModule.researchLeads(client.id, {
+                  icpMemory: icpMemory || {},
+                  targetCount: targetCount || 10,
+                  batchIndex: Date.now(),
+                  commandOverride: command,
+                });
+
+                const leads = result.leads || [];
+                let saved = 0;
+                for (const lead of leads) {
+                  const savedId = await saveLead(client.id, lead, command, { patterns: enrichPatterns });
+                  if (savedId) saved++;
+                }
+
+                await logsService.createLog(client.id, {
+                  agent: 'research_beaver',
+                  action: 'cold_research_consumed',
+                  target_type: 'system',
+                  metadata: { command, plan_id, found: leads.length, saved, directive_id: directive.id },
+                });
+
+                logger.info({ msg: '[db-builder] cold_research_request complete', command, found: leads.length, saved });
+              } catch (err) {
+                logger.warn({ msg: '[db-builder] cold_research_request failed', command, err: err.message });
+                await logsService.createLog(client.id, {
+                  agent: 'research_beaver',
+                  action: 'cold_research_error',
+                  target_type: 'system',
+                  metadata: { command, plan_id, error: err.message, directive_id: directive.id },
+                });
+              }
+              consumedDirectiveIds.push(directive.id);
+            }
+          }
+
           // Check pool health
           const health = await checkDbHealth(client.id);
           // Deficit is now computed against EMAIL-READY pool size, not raw total.

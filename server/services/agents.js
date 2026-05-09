@@ -2232,8 +2232,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // Phase 2 V2 Step 9 (5-day validation gate): delete the cold-research code
   // below this block once flag has been ON for 5 consecutive days clean.
   //
-  // Step 8b (next session): wire dbBuilder consumer to read cold_research_request
-  // directives and execute the queued search query in the autonomous loop.
+  // Step 8b (2026-05-09): dbBuilder consumer wired — reads cold_research_request
+  // directives and executes queued search query in the autonomous 15-min loop.
   if (process.env.DIRECTOR_INLINE_RESEARCH_DISABLED === 'true' && command) {
     const directivesSvc = require('./directives');
     console.log(`[director] Cold-research INLINE DISABLED — queuing as research_directive: "${command}"`);
