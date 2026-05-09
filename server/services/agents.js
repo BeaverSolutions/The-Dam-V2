@@ -1744,9 +1744,16 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       });
       if (!draft) {
         // Both Sales Beaver and Enforcer fallback failed — skip this lead.
-        // (Phase 1 visibility note: this exit path is still uninstrumented in
-        //  pipeline_traces. Hotfix tracked separately — emits 'rejected'
-        //  with status='sales_api_error' so silent drops become visible.)
+        // Phase 1 hotfix (2026-05-09): emit trace so this drop is visible in funnel.
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id,
+          kickoff_id: plan_id,
+          stage: 'draft_failed',
+          status: 'sales_and_fallback_null',
+          agent: 'sales_beaver',
+          pipeline_path: 'signal_pipeline',
+          metadata: { lead_name: lead.name, channel },
+        }).catch(() => {});
         continue;
       }
       const salesResult = { prompt_variant: draft.prompt_variant }; // preserved for downstream metadata
@@ -2068,6 +2075,16 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       }
     } catch (err) {
       console.error(`[signal-pipeline] Error processing ${lead.name}:`, err.message);
+      // Phase 1 hotfix (2026-05-09): unexpected errors were invisible in funnel.
+      pipelineTrace.traceStage(clientId, {
+        lead_id: lead.id,
+        kickoff_id: plan_id,
+        stage: 'draft_failed',
+        status: 'unexpected_error',
+        agent: 'director',
+        pipeline_path: 'signal_pipeline',
+        metadata: { lead_name: lead.name, error: err.message },
+      }).catch(() => {});
     }
   }
 
