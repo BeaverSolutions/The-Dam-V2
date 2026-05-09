@@ -7,10 +7,11 @@ import EmptyState from '../components/EmptyState';
 import FilterTabs from '../components/FilterTabs';
 
 const TABS = [
-  { value: 'pending',  label: 'Pending' },
-  { value: 'awaiting', label: 'Awaiting Accept' },
-  { value: 'approved', label: 'Approved' },
-  { value: 'rejected', label: 'Rejected' },
+  { value: 'pending',   label: 'Pending' },
+  { value: 'followups', label: 'Follow-ups' },
+  { value: 'awaiting',  label: 'Awaiting Accept' },
+  { value: 'approved',  label: 'Approved' },
+  { value: 'rejected',  label: 'Rejected' },
 ];
 
 function scoreColor(score) {
@@ -164,9 +165,15 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
         </div>
       </div>
 
-      {/* Channel + subject */}
+      {/* Channel + follow-up badge + subject */}
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', alignItems: 'center' }}>
         <span className="badge badge-muted" style={{ textTransform: 'capitalize', fontSize: '0.7rem' }}>{approval.channel}</span>
+        {approval.message_metadata?.is_followup && (
+          <span style={{ fontSize: '0.68rem', fontWeight: 600, color: 'var(--purple)', background: 'rgba(168,85,247,0.12)', padding: '0.15rem 0.45rem', borderRadius: 100 }}>
+            Follow-up{approval.follow_up_day ? ` Day ${approval.follow_up_day}` : ''}
+            {approval.message_metadata?.touch_number ? ` · Touch ${approval.message_metadata.touch_number}` : ''}
+          </span>
+        )}
         {approval.subject && <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{approval.subject}</span>}
       </div>
 
@@ -349,7 +356,7 @@ export default function Approvals() {
   const initialTab = searchParams.get('tab') || 'pending';
   const [tab, setTab]           = useState(initialTab);
   const [approvals, setApprovals] = useState([]);
-  const [counts, setCounts]     = useState({ pending: 0, awaiting: 0, approved: 0, rejected: 0 });
+  const [counts, setCounts]     = useState({ pending: 0, followups: 0, awaiting: 0, approved: 0, rejected: 0 });
   const [gmailConnected, setGmailConnected] = useState(true); // optimistic
   const [actionError, setActionError] = useState(null);
 
@@ -362,17 +369,25 @@ export default function Approvals() {
       .catch(() => setGmailConnected(false));
   }, []);
 
+  // Split all pending approvals client-side into three buckets:
+  // 1. Regular pending (Day 0 outreach needing review)
+  // 2. Follow-ups (is_followup=true, surfaced on their scheduled day)
+  // 3. Awaiting Accept (LinkedIn connection requests sent, waiting for accept)
+  const splitPending = (allPending) => {
+    const awaiting = allPending.filter(a => a.notes === 'linkedin_requested');
+    const followups = allPending.filter(a => a.notes !== 'linkedin_requested' && a.message_metadata?.is_followup);
+    const realPending = allPending.filter(a => a.notes !== 'linkedin_requested' && !a.message_metadata?.is_followup);
+    return { awaiting, followups, realPending };
+  };
+
   const load = async (tabName) => {
     try {
-      if (tabName === 'awaiting' || tabName === 'pending') {
-        // Fetch all pending in one shot (perPage=200 covers any realistic queue size).
-        // Client-side split: notes='linkedin_requested' → awaiting, everything else → pending.
+      if (tabName === 'awaiting' || tabName === 'pending' || tabName === 'followups') {
         const res = await request('/approvals?status=pending&perPage=200');
-        const allPending = res?.data || [];
-        const awaiting = allPending.filter(a => a.notes === 'linkedin_requested');
-        const realPending = allPending.filter(a => a.notes !== 'linkedin_requested');
-        setApprovals(tabName === 'awaiting' ? awaiting : realPending);
-        setCounts(prev => ({ ...prev, awaiting: awaiting.length, pending: realPending.length }));
+        const { awaiting, followups, realPending } = splitPending(res?.data || []);
+        const bucketMap = { awaiting, followups, pending: realPending };
+        setApprovals(bucketMap[tabName] || []);
+        setCounts(prev => ({ ...prev, awaiting: awaiting.length, followups: followups.length, pending: realPending.length }));
       } else {
         const res = await request(`/approvals?status=${tabName}`);
         setApprovals(res?.data || []);
@@ -383,13 +398,11 @@ export default function Approvals() {
 
   useEffect(() => { load(tab); }, [tab]);
 
-  // Refresh pending + awaiting counts on mount
+  // Refresh pending + followups + awaiting counts on mount
   useEffect(() => {
     request('/approvals?status=pending&perPage=200').then(res => {
-      const all = res?.data || [];
-      const awaiting = all.filter(a => a.notes === 'linkedin_requested');
-      const pending = all.filter(a => a.notes !== 'linkedin_requested');
-      setCounts(prev => ({ ...prev, pending: pending.length, awaiting: awaiting.length }));
+      const { awaiting, followups, realPending } = splitPending(res?.data || []);
+      setCounts(prev => ({ ...prev, pending: realPending.length, followups: followups.length, awaiting: awaiting.length }));
     }).catch(() => {});
   }, []);
 
@@ -434,7 +447,7 @@ export default function Approvals() {
       setApprovals(prev => prev.filter(a => a.id !== id));
       setCounts(prev => ({
         ...prev,
-        pending: Math.max(0, prev.pending - 1),
+        [tab]: Math.max(0, prev[tab] - 1),
         awaiting: (prev.awaiting || 0) + 1,
       }));
     } catch (err) {
@@ -458,7 +471,7 @@ export default function Approvals() {
   };
 
   const tabs = TABS.map(t => ({ ...t, count: counts[t.value] || 0 }));
-  const pending = counts.pending + (counts.awaiting || 0);
+  const pending = counts.pending + (counts.followups || 0) + (counts.awaiting || 0);
 
   return (
     <div className="fade-in">
@@ -518,10 +531,12 @@ export default function Approvals() {
       ) : approvals.length === 0 ? (
         <EmptyState
           agent="ranger"
-          title={tab === 'pending' ? 'All caught up!' : tab === 'awaiting' ? 'No pending connections' : `No ${tab} messages`}
+          title={tab === 'pending' ? 'All caught up!' : tab === 'followups' ? 'No follow-ups due' : tab === 'awaiting' ? 'No pending connections' : `No ${tab} messages`}
           description={
             tab === 'pending'
               ? "The Ranger hasn't queued any messages yet. Run a campaign from Director Chat."
+              : tab === 'followups'
+              ? "No follow-up messages due today. Follow-ups appear here on their scheduled day."
               : tab === 'awaiting'
               ? "No LinkedIn connection requests awaiting acceptance."
               : `No messages have been ${tab} yet.`
