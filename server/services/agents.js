@@ -1960,12 +1960,15 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         let approvalStatus = 'pending';
         let resolvedAt = null;
 
-        // Fix 5 (2026-05-09): Borderline with two_thoughts → always surface to MJ
+        // Fix 5c (2026-05-09): Score-based borderline detection
+        // Score 60-79 = borderline regardless of whether Enforcer returned two_thoughts.
+        // If two_thoughts are present, use them. If not, extract from feedback text.
         const twoThoughts = rangerResult?.two_thoughts;
-        if (rangerScore >= 60 && rangerScore < 80 && twoThoughts && Array.isArray(twoThoughts) && twoThoughts.length > 0) {
+        const hasTwoThoughts = twoThoughts && Array.isArray(twoThoughts) && twoThoughts.length > 0;
+        if (rangerScore >= 60 && rangerScore < 80) {
           isBorderline = true;
           nextMessageStatus = 'pending_approval';
-          console.log(`[pipeline] BORDERLINE ${msg.id}: score ${rangerScore}, surfacing with ${twoThoughts.length} suggestions`);
+          console.log(`[pipeline] BORDERLINE ${msg.id}: score ${rangerScore}, surfacing ${hasTwoThoughts ? `with ${twoThoughts.length} suggestions` : 'with feedback (no structured thoughts)'}`);
         } else {
           try {
             const { rows: [clientRow] } = await pool.query(
@@ -1987,11 +1990,13 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
 
         // Build ranger_notes with two thoughts for borderline
         let rangerNotes;
-        if (isBorderline && twoThoughts) {
+        if (isBorderline && hasTwoThoughts) {
           const thoughtLines = twoThoughts.map((t, i) =>
             `${i + 1}. ${t.thought}: "${t.current_phrase}" → "${t.suggested_phrase}"`
           ).join('\n');
           rangerNotes = `Borderline (${rangerScore}/100) — two suggestions:\n${thoughtLines}`;
+        } else if (isBorderline) {
+          rangerNotes = `Borderline (${rangerScore}/100) — ${rangerResult.notes || rangerResult.feedback || 'Review recommended'}`;
         } else if (autoApproved) {
           rangerNotes = `Auto-approved (score ${rangerScore})`;
         } else {
@@ -1999,11 +2004,15 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         }
 
         if (isBorderline) {
+          // Store borderline flag + suggestions (structured or feedback-based)
+          const suggestionsPayload = hasTwoThoughts
+            ? twoThoughts
+            : [{ thought: rangerResult.notes || rangerResult.feedback || 'Review recommended', current_phrase: '', suggested_phrase: '' }];
           await pool.query(
             `UPDATE messages SET body = $1, status = $2, ranger_score = $3, ranger_notes = $4,
              metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'), '{borderline}', 'true'), '{enforcer_suggestions}', $5::jsonb),
              updated_at = NOW() WHERE id = $6`,
-            [finalBody, nextMessageStatus, rangerScore, rangerNotes, JSON.stringify(twoThoughts), msg.id]
+            [finalBody, nextMessageStatus, rangerScore, rangerNotes, JSON.stringify(suggestionsPayload), msg.id]
           );
         } else {
           await pool.query(
@@ -3583,14 +3592,15 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     let approvalStatus = 'pending_approval';
     let nextMessageStatus = 'pending_approval';
 
-    // ── Fix 5 (2026-05-09): Borderline draft surface ("Sales Beaver two thoughts") ──
-    // Score 60-79 with two_thoughts: ALWAYS surface to MJ with the two suggestions.
+    // ── Fix 5c (2026-05-09): Score-based borderline detection ──
+    // Score 60-79 = borderline regardless of whether Enforcer returned two_thoughts.
     // Never auto-approve borderline drafts — the founder's eye is the value.
     const twoThoughts = rangerResult?.two_thoughts;
-    if (rangerScore >= 60 && rangerScore < 80 && twoThoughts && Array.isArray(twoThoughts) && twoThoughts.length > 0) {
+    const hasTwoThoughts = twoThoughts && Array.isArray(twoThoughts) && twoThoughts.length > 0;
+    if (rangerScore >= 60 && rangerScore < 80) {
       isBorderline = true;
       nextMessageStatus = 'pending_approval';
-      console.log(`[enforcer] BORDERLINE ${msg.id}: score ${rangerScore}, surfacing with ${twoThoughts.length} suggestions`);
+      console.log(`[enforcer] BORDERLINE ${msg.id}: score ${rangerScore}, surfacing ${hasTwoThoughts ? `with ${twoThoughts.length} suggestions` : 'with feedback (no structured thoughts)'}`);
     } else {
       // Standard auto-approve threshold check for non-borderline
       try {
@@ -3613,11 +3623,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
     // Build ranger_notes with two thoughts visible for borderline drafts
     let rangerNotes;
-    if (isBorderline && twoThoughts) {
+    if (isBorderline && hasTwoThoughts) {
       const thoughtLines = twoThoughts.map((t, i) =>
         `${i + 1}. ${t.thought}: "${t.current_phrase}" → "${t.suggested_phrase}"`
       ).join('\n');
       rangerNotes = `Borderline (${rangerScore}/100) — two suggestions:\n${thoughtLines}`;
+    } else if (isBorderline) {
+      rangerNotes = `Borderline (${rangerScore}/100) — ${rangerResult?.notes || rangerResult?.feedback || 'Review recommended'}`;
     } else if (autoApproved) {
       rangerNotes = `Auto-approved (score ${rangerScore})`;
     } else {
@@ -3626,9 +3638,10 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
     // Build metadata with borderline flag + suggestions
     const rangerBreakdown = rangerResult?.breakdown || null;
-    const messageMetaUpdate = isBorderline
-      ? `jsonb_set(jsonb_set(COALESCE(metadata, '{}'), '{borderline}', 'true'), '{enforcer_suggestions}', $9::jsonb)`
-      : `COALESCE(metadata, '{}')`;
+    // Store borderline flag + suggestions (structured or feedback-based)
+    const suggestionsPayload = isBorderline
+      ? (hasTwoThoughts ? twoThoughts : [{ thought: rangerResult?.notes || rangerResult?.feedback || 'Review recommended', current_phrase: '', suggested_phrase: '' }])
+      : null;
 
     if (isBorderline) {
       await pool.query(
@@ -3637,7 +3650,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
          WHERE id = $8 AND client_id = $9`,
         [currentBody, currentSubject, rangerScore, rangerNotes,
          JSON.stringify(rangerBreakdown), nextMessageStatus,
-         JSON.stringify(twoThoughts), msg.id, clientId]
+         JSON.stringify(suggestionsPayload), msg.id, clientId]
       );
     } else {
       await pool.query(

@@ -2885,23 +2885,28 @@ router.post('/bulk-redraft', requireInternalKey, async (req, res) => {
           const passed = !!rangerResult?.approved;
           if (passed) stats.passed++; else stats.failed++;
 
-          // Fix 5 (2026-05-09): Borderline detection in rescore path
-          // Mirrors signal_pipeline + runRangerPipeline borderline logic
+          // Fix 5c (2026-05-09): Score-based borderline detection in rescore path
+          // Score 60-79 + passed = borderline, regardless of whether Enforcer returned two_thoughts
           const twoThoughts = rangerResult?.two_thoughts;
-          const isBorderline = passed && score >= 60 && score < 80
-            && twoThoughts && Array.isArray(twoThoughts) && twoThoughts.length > 0;
+          const hasTwoThoughts = twoThoughts && Array.isArray(twoThoughts) && twoThoughts.length > 0;
+          const isBorderline = passed && score >= 60 && score < 80;
 
           let rangerNotes;
-          if (isBorderline) {
+          if (isBorderline && hasTwoThoughts) {
             const thoughtLines = twoThoughts.map((t, i) =>
               `${i + 1}. ${t.thought}: "${t.current_phrase}" → "${t.suggested_phrase}"`
             ).join('\n');
             rangerNotes = `Borderline (${score}/100) — two suggestions:\n${thoughtLines}`;
+          } else if (isBorderline) {
+            rangerNotes = `Borderline (${score}/100) — ${rangerResult?.notes || rangerResult?.feedback || rangerResult?.reject_reason || 'Review recommended'}`;
           } else {
             rangerNotes = `v1.0 rescore: ${passed ? 'PASS' : 'FAIL'} (${score}) — ${rangerResult?.notes || rangerResult?.reject_reason || 'reviewed'}`;
           }
 
           const rescoreMeta = { rescored_at: new Date().toISOString(), old_score: msg.old_score, new_score: score, passed };
+          const suggestionsPayload = isBorderline
+            ? (hasTwoThoughts ? twoThoughts : [{ thought: rangerResult?.notes || rangerResult?.feedback || 'Review recommended', current_phrase: '', suggested_phrase: '' }])
+            : null;
 
           if (isBorderline) {
             // Persist borderline flag + enforcer_suggestions + rescore metadata
@@ -2914,11 +2919,11 @@ router.post('/bulk-redraft', requireInternalKey, async (req, res) => {
                updated_at = NOW()
                WHERE id = $5 AND client_id = $6`,
               [score, rangerNotes, JSON.stringify(rescoreMeta),
-               JSON.stringify(twoThoughts), msg.id, client_id]
+               JSON.stringify(suggestionsPayload), msg.id, client_id]
             );
             if (!stats.borderline) stats.borderline = 0;
             stats.borderline++;
-            logger.info({ msg: '[bulk-rescore] BORDERLINE', message_id: msg.id, lead: msg.name, score, thoughts: twoThoughts.length });
+            logger.info({ msg: '[bulk-rescore] BORDERLINE', message_id: msg.id, lead: msg.name, score, hasTwoThoughts });
           } else {
             await pool.query(
               `UPDATE messages SET ranger_score = $1, ranger_notes = $2,
