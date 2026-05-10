@@ -1,9 +1,6 @@
 name: Hourly Status Report
 
 on:
-  schedule:
-    # 01:07 to 11:07 UTC = 09:07 to 19:07 MYT (off the :00/:30 to avoid GitHub's cron congestion).
-    - cron: '7 1-11 * * *'
   workflow_dispatch: {}
 
 jobs:
