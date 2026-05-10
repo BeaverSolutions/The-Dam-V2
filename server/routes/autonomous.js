@@ -45,6 +45,9 @@ async function requireInternalKey(req, res, next) {
   next();
 }
 
+// Defense-in-depth: apply auth at router level so no future route skips it.
+router.use(requireInternalKey);
+
 /* ─── POST /api/autonomous/chat ───────────────────────────
  * Claw ↔ Dam conversational bot endpoint.
  * Mounted here (not under /api/myclaw) so Claw's existing DAM_INTERNAL_KEY

@@ -1647,10 +1647,21 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
     metadata: { plan_id, lead_count: leads.length },
   });
 
+  // ── P0-D (2026-05-10): 24h enrolled dedup — skip leads already enrolled recently
+  // Prevents the 75× re-enrollment pattern (18 leads × 75 = 1,350 wasted traces).
+  const { rows: recentEnrolled } = await pool.query(
+    `SELECT DISTINCT lead_id FROM pipeline_traces
+     WHERE client_id = $1 AND stage = 'enrolled' AND created_at > NOW() - INTERVAL '24 hours'`,
+    [clientId]
+  ).catch(() => ({ rows: [] }));
+  const recentEnrolledSet = new Set(recentEnrolled.map(r => r.lead_id));
+  const dedupedLeads = leads.filter(l => !recentEnrolledSet.has(l.id));
+  if (dedupedLeads.length < leads.length) {
+    console.log(`[signal-pipeline] 24h enrolled dedup: skipped ${leads.length - dedupedLeads.length}/${leads.length} already-enrolled leads`);
+  }
+  leads = dedupedLeads;
+
   // ── Phase 1 (2026-05-08): pipeline_traces — emit enrolled for every lead ─
-  // Closes the silent-drop visibility gap exposed by the 17:37 MYT 2026-05-08
-  // kickoff (59 leads enrolled, only 3 drafted, no draft_failed log entries
-  // because Fix 2 only covered kickoff_pipeline, not signal_pipeline).
   for (const lead of leads) {
     pipelineTrace.traceStage(clientId, {
       lead_id: lead.id,
@@ -1697,6 +1708,26 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
 
   for (const lead of leads) {
     try {
+      // ── P0-D (2026-05-10): per-lead draft-failure circuit breaker ──────
+      // If this lead has failed drafting 3+ times in the last 24h, skip it.
+      // Prevents the ddc09f6a pattern: 30 draft_failed in 35 min ($0.535 burned).
+      const { rows: failRows } = await pool.query(
+        `SELECT COUNT(*)::int AS fails FROM pipeline_traces
+         WHERE client_id = $1 AND lead_id = $2 AND stage = 'draft_failed'
+           AND created_at > NOW() - INTERVAL '24 hours'`,
+        [clientId, lead.id]
+      ).catch(() => ({ rows: [{ fails: 0 }] }));
+      if (failRows[0].fails >= 3) {
+        console.warn(`[signal-pipeline] Circuit breaker: ${lead.name} has ${failRows[0].fails} draft_failed in 24h — skipping`);
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id, kickoff_id: plan_id,
+          stage: 'draft_failed', status: 'circuit_breaker_skip',
+          agent: 'director', pipeline_path: 'signal_pipeline',
+          metadata: { recent_failures: failRows[0].fails },
+        }).catch(() => {});
+        continue;
+      }
+
       // Build Sales Beaver context from the signal metadata
       const meta = lead.metadata || {};
       const contextParts = [
@@ -1742,6 +1773,13 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       let kickoffMessageStatus = channelChoice_sp.status;
       if (channelChoice_sp.status === 'blocked_no_email') {
         console.log(`[signal-pipeline] ${lead.name} — no verified email, marking blocked_no_email`);
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id, kickoff_id: plan_id,
+          stage: 'channel_blocked', status: 'blocked_no_email',
+          agent: 'director', pipeline_path: 'signal_pipeline',
+          reason: channelChoice_sp.reason,
+          metadata: { lead_name: lead.name },
+        }).catch(() => {});
       }
 
       if (channel === 'linkedin') {
@@ -1750,9 +1788,13 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           [clientId, lead.id]
         );
         if (prevLinkedinRes.rows.length > 0) {
-          // LinkedIn already attempted + Hunter above didn't find email → skip
-          // (avoids recycling ghost leads with no new channel to try)
           console.log(`[signal-pipeline] ${lead.name} — LinkedIn already tried, Hunter found nothing — skipping`);
+          pipelineTrace.traceStage(clientId, {
+            lead_id: lead.id, kickoff_id: plan_id,
+            stage: 'channel_exhausted', status: 'linkedin_already_tried',
+            agent: 'director', pipeline_path: 'signal_pipeline',
+            metadata: { lead_name: lead.name, channel },
+          }).catch(() => {});
           continue;
         }
       }
@@ -3068,6 +3110,25 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       return;
     }
 
+    // P0-D: per-lead circuit breaker (same as signal_pipeline)
+    const { rows: failRows } = await pool.query(
+      `SELECT COUNT(*)::int AS fails FROM pipeline_traces
+       WHERE client_id = $1 AND lead_id = $2 AND stage = 'draft_failed'
+         AND created_at > NOW() - INTERVAL '24 hours'`,
+      [clientId, lead.id]
+    ).catch(() => ({ rows: [{ fails: 0 }] }));
+    if (failRows[0].fails >= 3) {
+      console.warn(`[pipeline] Circuit breaker: ${lead.name} has ${failRows[0].fails} draft_failed in 24h — skipping`);
+      pipelineTrace.traceStage(clientId, {
+        lead_id: lead.id, kickoff_id: plan_id,
+        stage: 'draft_failed', status: 'circuit_breaker_skip',
+        agent: 'director', pipeline_path: 'kickoff_pipeline',
+        metadata: { recent_failures: failRows[0].fails },
+      }).catch(() => {});
+      diagnostics.messages_failed++;
+      return;
+    }
+
     const meta = lead.metadata || {};
     const contextParts = [
       `Name: ${lead.name}`,
@@ -3150,6 +3211,12 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       if (prevLinkedinRes.rows.length > 0) {
         linkedinAlreadyTried = true;
         console.log(`[pipeline] ${lead.name} — LinkedIn already tried, no enrichment found — skipping`);
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id, kickoff_id: plan_id,
+          stage: 'channel_exhausted', status: 'linkedin_already_tried',
+          agent: 'director', pipeline_path: 'kickoff_pipeline',
+          metadata: { lead_name: lead.name },
+        }).catch(() => {});
         diagnostics.messages_failed++;
         return;
       }

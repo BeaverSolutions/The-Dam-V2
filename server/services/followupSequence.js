@@ -35,8 +35,8 @@ const holidaySet = new Set(MY_HOLIDAYS_2026);
  */
 function nextBusinessDay(date) {
   const d = new Date(date);
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
+  let guard = 0;
+  while (guard++ < 365) {
     const day = d.getDay();
     if (day === 6) d.setDate(d.getDate() + 2);      // Saturday → Monday
     else if (day === 0) d.setDate(d.getDate() + 1);  // Sunday  → Monday
@@ -48,6 +48,7 @@ function nextBusinessDay(date) {
     }
     break;
   }
+  if (guard >= 365) throw new Error(`nextBusinessDay: exceeded 365 iterations from ${date}`);
   return d;
 }
 

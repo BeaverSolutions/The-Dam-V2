@@ -513,6 +513,15 @@ async function icpGateSoftDelete(clientId, lead, options = {}) {
 
   const verdict = applyIcpV2Filter(lead);
   if (verdict.pass) {
+    pipelineTrace.traceStage(clientId, {
+      lead_id: lead.id,
+      kickoff_id,
+      stage: 'icp_passed',
+      status: 'pass',
+      agent: 'director',
+      pipeline_path,
+      metadata: { company: lead.company, title: lead.title },
+    }).catch(() => {});
     return { pass: true };
   }
 
