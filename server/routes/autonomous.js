@@ -1286,6 +1286,35 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     console.warn('[Autonomous] Ranger feedback loop error:', err.message);
   }
 
+  // ── Staleness TTL: approved LinkedIn messages > 7 days unsent = dead weight ─
+  // These pile up because LinkedIn needs connection acceptance before send.
+  // Sweep them out of the active pipeline so they stop inflating the queue
+  // and blocking new drafts via PENDING_CEILING.
+  try {
+    const { rows: staleMessages } = await pool.query(
+      `UPDATE messages
+       SET status = 'stale_unsent',
+           metadata = COALESCE(metadata, '{}'::jsonb) || '{"stale_reason": "approved_linkedin_7d_no_send"}'::jsonb,
+           updated_at = NOW()
+       WHERE client_id = $1
+         AND channel = 'linkedin'
+         AND status = 'approved'
+         AND sent_at IS NULL
+         AND created_at < NOW() - INTERVAL '7 days'
+       RETURNING id, lead_id`,
+      [clientId]
+    );
+    if (staleMessages.length > 0) {
+      console.log(`[Autonomous] Staleness TTL: moved ${staleMessages.length} LinkedIn approved-but-unsent (>7d) to stale_unsent`);
+      await logAction(clientId, 'director', 'stale_linkedin_sweep', 'system', null, {
+        count: staleMessages.length,
+        lead_ids: staleMessages.map(m => m.lead_id).slice(0, 10),
+      });
+    }
+  } catch (err) {
+    console.warn('[Autonomous] Staleness sweep error (non-fatal):', err.message);
+  }
+
   // Re-check gap after processing follow-ups
   const { rows: refreshCounts } = await pool.query(
     `SELECT COUNT(*) FILTER (WHERE status = 'sent' AND DATE(sent_at) = $2) AS total_sent
@@ -1438,12 +1467,14 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
       break;
     }
 
-    // Circuit breaker: if approval queue is swamped, stop drafting and alert
-    if (livePending >= PENDING_CEILING) {
-      console.warn(`[Autonomous] Client ${clientId} batch ${batch}: approval queue swamped (${livePending} pending). Alerting + stopping drafts.`);
+    // Circuit breaker: if approval queue + unsent approved are swamped, stop drafting.
+    // Approved LinkedIn messages pile up because they need manual send + connection acceptance.
+    // Drafting more into a queue that never drains is pure cost burn.
+    if ((livePending + liveApproved) >= PENDING_CEILING) {
+      console.warn(`[Autonomous] Client ${clientId} batch ${batch}: queue swamped (${livePending} pending + ${liveApproved} approved unsent). Stopping drafts.`);
       await logAction(clientId, 'director', 'approval_queue_swamped', 'system', null, {
         batch, livePending, liveApproved, liveSent, target,
-        message: `${livePending} messages waiting for MJ approval — stop drafting, clear the queue`,
+        message: `${livePending} pending + ${liveApproved} approved unsent — stop drafting until queue drains`,
       });
       // Alert via Discord bot (sendTelegramAlert not available in this codebase)
       try {

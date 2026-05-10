@@ -1647,17 +1647,18 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
     metadata: { plan_id, lead_count: leads.length },
   });
 
-  // ── P0-D (2026-05-10): 24h enrolled dedup — skip leads already enrolled recently
-  // Prevents the 75× re-enrollment pattern (18 leads × 75 = 1,350 wasted traces).
+  // ── Same-day enrolled dedup (MYT calendar day) ──────────────────────────
+  // Once enrolled today, never re-enrolled today. Prevents the 75× pattern.
   const { rows: recentEnrolled } = await pool.query(
     `SELECT DISTINCT lead_id FROM pipeline_traces
-     WHERE client_id = $1 AND stage = 'enrolled' AND created_at > NOW() - INTERVAL '24 hours'`,
+     WHERE client_id = $1 AND stage = 'enrolled'
+       AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date`,
     [clientId]
   ).catch(() => ({ rows: [] }));
   const recentEnrolledSet = new Set(recentEnrolled.map(r => r.lead_id));
   const dedupedLeads = leads.filter(l => !recentEnrolledSet.has(l.id));
   if (dedupedLeads.length < leads.length) {
-    console.log(`[signal-pipeline] 24h enrolled dedup: skipped ${leads.length - dedupedLeads.length}/${leads.length} already-enrolled leads`);
+    console.log(`[signal-pipeline] Same-day dedup: skipped ${leads.length - dedupedLeads.length}/${leads.length} already-enrolled leads`);
   }
   leads = dedupedLeads;
 
@@ -1824,10 +1825,27 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         continue;
       }
 
-      // Phase 2 Step 3 (2026-05-08): Sales Beaver + Enforcer fallback via
-      // pipeline.draftWithFallback. Returns null when both fail (silent skip).
-      // Behaviour identical to the previous inline block — same logs, same
-      // continue semantics. defaultDraftSource preserves legacy 'signal_hunt'.
+      // ── Dedup guard BEFORE draft (saves Sonnet tokens) ─────────────────
+      // Moved ahead of draftWithFallback: if lead already has an active message,
+      // skip immediately. Previously this ran AFTER the Sonnet call, burning
+      // $0.018/call on leads that would just get discarded.
+      const existingActive = await pipeline.checkActiveMessage(clientId, lead.id);
+      if (existingActive) {
+        console.warn(`[signal-pipeline] Dedup guard: ${lead.name} already has an active message — skipping`);
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id,
+          kickoff_id: plan_id,
+          stage: 'draft_skipped',
+          status: 'dedup_guard',
+          agent: 'director',
+          reason: `Lead already has active message (id: ${existingActive.id || 'unknown'})`,
+          pipeline_path: 'signal_pipeline',
+          metadata: { lead_name: lead.name, channel, existing_message_id: existingActive.id || null },
+        }).catch(() => {});
+        continue;
+      }
+
+      // Sales Beaver + Enforcer fallback via pipeline.draftWithFallback.
       const draft = await pipeline.draftWithFallback(clientId, {
         lead_id: lead.id,
         channel,
@@ -1842,8 +1860,6 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         defaultDraftSource: 'signal_hunt',
       });
       if (!draft) {
-        // Both Sales Beaver and Enforcer fallback failed — skip this lead.
-        // Phase 1 hotfix (2026-05-09): emit trace so this drop is visible in funnel.
         pipelineTrace.traceStage(clientId, {
           lead_id: lead.id,
           kickoff_id: plan_id,
@@ -1855,32 +1871,10 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         }).catch(() => {});
         continue;
       }
-      const salesResult = { prompt_variant: draft.prompt_variant }; // preserved for downstream metadata
+      const salesResult = { prompt_variant: draft.prompt_variant };
       const draftBody = draft.body;
       const draftSubject = draft.subject;
       const draftSource = draft.draftSource;
-
-      // ── Race-condition dedup guard ─────────────────────────────────────
-      // Prevent duplicate messages if this lead was picked up by a parallel
-      // pipeline run (e.g. two concurrent directorExecute calls, or DB-first
-      // + external research collision on the same lead).
-      // Phase 2 Step 2 (2026-05-08): dedup guard via pipeline.checkActiveMessage
-      const existingActive = await pipeline.checkActiveMessage(clientId, lead.id);
-      if (existingActive) {
-        console.warn(`[signal-pipeline] Dedup guard: ${lead.name} already has an active message — skipping insert`);
-        // Fix 5b (2026-05-09): Instrument dedup guard — was a silent drop with no trace
-        pipelineTrace.traceStage(clientId, {
-          lead_id: lead.id,
-          kickoff_id: plan_id,
-          stage: 'draft_failed',
-          status: 'dedup_guard',
-          agent: 'sales_beaver',
-          reason: `Lead already has active message (id: ${existingActive.id || 'unknown'})`,
-          pipeline_path: 'signal_pipeline',
-          metadata: { lead_name: lead.name, channel, existing_message_id: existingActive.id || null },
-        }).catch(() => {});
-        continue;
-      }
 
       // Phase 2 Step 2 (2026-05-08): persistDraft is the single source of truth
       // for INSERT INTO messages. Composes metadata (source, signal, prompt_variant,
@@ -3261,10 +3255,24 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     }
 
     try {
-      // Phase 2 Step 3 (2026-05-08): Sales Beaver via pipeline.draftWithFallback.
-      // Kickoff path does NOT use Enforcer fallback — no-body is logged as
-      // draft_failed (kickoff treats fallback as a separate signal-pipeline
-      // recovery only). Returns null when Sales returns no body.
+      // ── Dedup guard BEFORE draft (saves Sonnet tokens) ───────────────
+      const existingActive = await pipeline.checkActiveMessage(clientId, lead.id);
+      if (existingActive) {
+        console.warn(`[pipeline] Dedup guard: ${lead.name} already has an active message — skipping`);
+        diagnostics.messages_failed++;
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id,
+          stage: 'draft_skipped',
+          status: 'dedup_guard',
+          agent: 'director',
+          reason: 'dedup_guard',
+          pipeline_path: 'kickoff_pipeline',
+          metadata: { channel: selectedChannel, existing_message_id: existingActive.id },
+        }).catch(() => {});
+        return;
+      }
+
+      // Sales Beaver draft via pipeline.draftWithFallback.
       const draft = await pipeline.draftWithFallback(clientId, {
         lead_id: lead.id,
         channel: selectedChannel,
@@ -3273,8 +3281,6 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         enableEnforcerFallback: false,
         pipeline_path: 'kickoff_pipeline',
       });
-      // Synthesise the legacy salesResult shape for downstream code that
-      // reads salesResult.body / salesResult.subject / salesResult.prompt_variant.
       const salesResult = draft
         ? { body: draft.body, subject: draft.subject, prompt_variant: draft.prompt_variant }
         : { body: null, subject: null, prompt_variant: null };
@@ -3282,11 +3288,6 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       if (!salesResult?.body) {
         console.warn(`[pipeline] Sales draft failed for ${lead.name} (${selectedChannel}): no body`);
         diagnostics.messages_failed++;
-        await logsService.createLog(clientId, {
-          agent: 'sales_beaver', action: 'draft_failed',
-          target_type: 'lead', target_id: lead.id,
-          metadata: { reason: 'no_body', path: 'kickoff_pipeline', channel: selectedChannel, enrichment_eligible: !!(lead.company && lead.title) },
-        }).catch(() => {});
         pipelineTrace.traceStage(clientId, {
           lead_id: lead.id,
           stage: 'draft_failed',
@@ -3299,31 +3300,6 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       } else {
         diagnostics.messages_drafted++;
         execStatus.beavers.sales.drafted++;
-
-        // ── Race-condition dedup guard (Phase 2 Step 2: via pipeline.checkActiveMessage) ─
-        // Prevent duplicate messages if this lead snuck into two parallel
-        // pipeline runs (e.g. pool + fresh research both picked it up).
-        const existingActive = await pipeline.checkActiveMessage(clientId, lead.id);
-        if (existingActive) {
-          console.warn(`[pipeline] Dedup guard: ${lead.name} already has an active message — skipping insert`);
-          diagnostics.messages_drafted--; // uncredit the increment
-          diagnostics.messages_failed++;
-          await logsService.createLog(clientId, {
-            agent: 'sales_beaver', action: 'draft_failed',
-            target_type: 'lead', target_id: lead.id,
-            metadata: { reason: 'dedup_skip', path: 'kickoff_pipeline', channel: selectedChannel, existing_message_id: existingActive.id },
-          }).catch(() => {});
-          pipelineTrace.traceStage(clientId, {
-            lead_id: lead.id,
-            stage: 'draft_failed',
-            status: 'dedup_skip',
-            agent: 'sales_beaver',
-            reason: 'dedup_skip',
-            pipeline_path: 'kickoff_pipeline',
-            metadata: { channel: selectedChannel, existing_message_id: existingActive.id },
-          }).catch(() => {});
-          return;
-        }
 
         // Phase 2 Step 2 (2026-05-08): INSERT via pipeline.persistDraft
         const message = await pipeline.persistDraft(clientId, {
