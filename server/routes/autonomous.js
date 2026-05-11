@@ -1062,7 +1062,13 @@ async function _runAutonomousKickoffInner(clientId) {
 
         let enforcerApproved = false;
         try {
-          const rangerResult = await rangerReview(clientId, { message_id: savedMsg.id, message_body: cleanBody });
+          const rangerResult = await rangerReview(clientId, {
+            message_id: savedMsg.id, message_body: cleanBody,
+            lead_context: {
+              touch_number: followUp.touch_number, is_followup: true, name: followUp.name, channel: originalChannel,
+              company: followUp.company, title: followUp.title, signal: followUp.metadata?.signal, angle: followUp.metadata?.angle, why_now: followUp.metadata?.why_now,
+            },
+          });
           enforcerApproved = !!rangerResult?.approved;
           const newStatus = enforcerApproved ? 'pending_approval' : 'ranger_rejected';
           await pool.query(
@@ -1089,24 +1095,31 @@ async function _runAutonomousKickoffInner(clientId) {
             const threshold = clientRow?.auto_approve_threshold;
             if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
               autoApproved = true;
-              const sendStatus = (originalChannel === 'email') ? 'pending_send' : 'approved';
-              await pool.query(
-                `UPDATE messages SET status = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
-                [sendStatus, savedMsg.id, clientId]
-              );
+              if (originalChannel === 'email') {
+                await pool.query(`UPDATE messages SET status = 'pending_send', updated_at = NOW() WHERE id = $1 AND client_id = $2`, [savedMsg.id, clientId]);
+              } else {
+                await pool.query(`UPDATE messages SET status = 'linkedin_requested', updated_at = NOW() WHERE id = $1 AND client_id = $2`, [savedMsg.id, clientId]);
+              }
             }
           } catch (err) {
             console.warn('[FollowUp] Auto-approve threshold check failed:', err.message);
           }
 
-          await pool.query(
-            `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [clientId, savedMsg.id,
-             autoApproved ? 'auto_approval' : 'system',
-             autoApproved ? 'approved' : 'pending',
-             autoApproved ? new Date() : null]
-          );
+          if (autoApproved && originalChannel !== 'email') {
+            await pool.query(
+              `INSERT INTO approvals (client_id, message_id, requested_by, status, notes) VALUES ($1, $2, 'auto_approval', 'pending', 'linkedin_requested')`,
+              [clientId, savedMsg.id]
+            );
+          } else {
+            await pool.query(
+              `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [clientId, savedMsg.id,
+               autoApproved ? 'auto_approval' : 'system',
+               autoApproved ? 'approved' : 'pending',
+               autoApproved ? new Date() : null]
+            );
+          }
 
           // Auto-enqueue email follow-ups for send queue
           if (autoApproved && originalChannel === 'email') {
@@ -1223,7 +1236,13 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
           // Run through Enforcer
           let enforcerApproved = false;
           try {
-            const rangerResult = await rangerReview(clientId, { message_id: savedMsg.id, message_body: cleanBody });
+            const rangerResult = await rangerReview(clientId, {
+              message_id: savedMsg.id, message_body: cleanBody,
+              lead_context: {
+                name: escalation.lead_name, company: escalation.lead_company, title: escalation.lead?.title,
+                is_channel_escalation: true, original_channel: escalation.original_channel, new_channel: escalation.new_channel,
+              },
+            });
             enforcerApproved = !!rangerResult?.approved;
             await pool.query(
               `UPDATE messages SET status = $1, ranger_score = $2, ranger_notes = $3, updated_at = NOW() WHERE id = $4`,

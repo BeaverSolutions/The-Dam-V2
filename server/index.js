@@ -392,7 +392,10 @@ async function start() {
                   const result = await rangerReview(client_id, {
                     message_id: savedMsg.id,
                     message_body: cleanBody,
-                    lead_context: { touch_number: fu.touch_number, is_followup: true, name: fu.name, channel: originalChannel },
+                    lead_context: {
+                      touch_number: fu.touch_number, is_followup: true, name: fu.name, channel: originalChannel,
+                      company: fu.company, title: fu.title, signal: fu.metadata?.signal, angle: fu.metadata?.angle, why_now: fu.metadata?.why_now,
+                    },
                   });
                   approved = !!result?.approved;
                   await pool.query(
@@ -411,14 +414,19 @@ async function start() {
                   const autoApproved = threshold != null && score >= threshold;
 
                   if (autoApproved) {
-                    const sendStatus = (originalChannel === 'email') ? 'pending_send' : 'approved';
-                    await pool.query(`UPDATE messages SET status = $1, updated_at = NOW() WHERE id = $2`, [sendStatus, savedMsg.id]);
-                    await pool.query(
-                      `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at) VALUES ($1, $2, 'auto_approval', 'approved', NOW())`,
-                      [client_id, savedMsg.id]
-                    );
                     if (originalChannel === 'email') {
+                      await pool.query(`UPDATE messages SET status = 'pending_send', updated_at = NOW() WHERE id = $1`, [savedMsg.id]);
+                      await pool.query(
+                        `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at) VALUES ($1, $2, 'auto_approval', 'approved', NOW())`,
+                        [client_id, savedMsg.id]
+                      );
                       await enqueueMessage(client_id, savedMsg.id).catch(() => {});
+                    } else {
+                      await pool.query(`UPDATE messages SET status = 'linkedin_requested', updated_at = NOW() WHERE id = $1`, [savedMsg.id]);
+                      await pool.query(
+                        `INSERT INTO approvals (client_id, message_id, requested_by, status, notes) VALUES ($1, $2, 'auto_approval', 'pending', 'linkedin_requested')`,
+                        [client_id, savedMsg.id]
+                      );
                     }
                   } else {
                     await pool.query(`INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`, [client_id, savedMsg.id]);
