@@ -442,10 +442,15 @@ async function start() {
       }
     }
 
-    setInterval(() => { processFollowUps().catch(() => {}); }, 30 * 60 * 1000); // Every 30 minutes
-    // Run once on startup after a 2-minute delay (let DB migrations complete first)
-    setTimeout(() => { processFollowUps().catch(() => {}); }, 2 * 60 * 1000);
-    logger.info({ msg: 'Follow-up scheduler started (30 min interval)' });
+    // DISABLED 2026-05-11 — moved to Captain-led daily planning.
+    // Captain plans follow-ups at 09:00 MYT in captainOrchestrator.planFollowUps(),
+    // posts brief to Telegram for MJ approval, then executes via tool calls.
+    // No 30-min auto-fire — every follow-up requires Captain's per-lead angle directive
+    // and MJ approval. See projects/beavrdam-rebuild/FOLLOWUP-ARCHITECTURE.md.
+    //
+    // setInterval(() => { processFollowUps().catch(() => {}); }, 30 * 60 * 1000);
+    // setTimeout(() => { processFollowUps().catch(() => {}); }, 2 * 60 * 1000);
+    logger.info({ msg: 'Follow-up scheduler DISABLED — Captain-led daily planning replaces 30-min cron' });
 
     // DB Builder — Research Beaver maintains lead pool health
     const { runDbBuilder } = require('./services/dbBuilder');
@@ -528,6 +533,18 @@ async function start() {
         }
         await telegramService.sendMessage(chatId, `<b>Morning brief</b>\n\n${text}`);
         logger.info({ msg: 'Morning brief sent via Telegram' });
+
+        // Captain's follow-up planning runs after the morning brief.
+        // Generates per-lead angle directives + Telegram brief for MJ approval.
+        // No auto-execution — MJ approves via Telegram chat ("approve all" or per-item).
+        // See projects/beavrdam-rebuild/FOLLOWUP-ARCHITECTURE.md
+        try {
+          const captain = require('./services/captainOrchestrator');
+          const plan = await captain.runFollowUpPlanning(clientRow.id);
+          logger.info({ msg: 'Follow-up plan generated', planned: plan.planned, skipped: plan.skipped, total: plan.total_due });
+        } catch (planErr) {
+          logger.warn({ msg: 'Follow-up planning failed', err: planErr.message });
+        }
       } catch (err) {
         logger.warn({ msg: 'Morning brief failed', err: err.message });
       }

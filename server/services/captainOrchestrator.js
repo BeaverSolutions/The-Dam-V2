@@ -826,6 +826,243 @@ async function runEodBrief(clientId) {
   return brief;
 }
 
+/* ─── Captain-led follow-up planning (2026-05-11) ─────────────────── */
+
+/**
+ * The 10 cold-start angle templates Captain rotates through for the first 50
+ * sent follow-ups (then overlaid with learned signal from shared/followup_learnings).
+ *
+ * Source: projects/beavrdam-rebuild/ANGLE-TEMPLATE-LIBRARY.md
+ */
+const ANGLE_TEMPLATES = [
+  { id: 1, name: 'Hiring Signal', when_use: 'Lead\'s company posted a relevant role (BD/Sales/Marketing) in last 30 days', best_touches: [2, 3] },
+  { id: 2, name: 'Founder-Doing-Outbound', when_use: 'Lead is founder/CEO at company under 20 staff', best_touches: [2] },
+  { id: 3, name: 'Industry Contrarian', when_use: 'Lead is in vertical with clear pattern', best_touches: [3, 4] },
+  { id: 4, name: 'Recent Company News', when_use: 'Verifiable recent event (funding, partnership, launch, exec hire)', best_touches: [2, 3] },
+  { id: 5, name: 'Role-Specific Question', when_use: 'Title suggests clear pain (Head of Growth, CRO, VP Sales)', best_touches: [2] },
+  { id: 6, name: 'Peer Reference', when_use: 'Real peer comparison available; no fabrication', best_touches: [3, 4] },
+  { id: 7, name: 'Market Shift', when_use: 'Macro shift in vertical (AI adoption, hiring freeze, regulation)', best_touches: [4, 5] },
+  { id: 8, name: 'Timing Check', when_use: 'Default safe angle — short, low pressure', best_touches: [3, 5] },
+  { id: 9, name: 'Break-up', when_use: 'Touch 5 ALWAYS — planned exit', best_touches: [5] },
+  { id: 10, name: 'Re-awaken', when_use: 'Touch 6 ONLY — requires NEW context (post/hire/news)', best_touches: [6] },
+];
+
+/**
+ * Generate Captain's follow-up plan for today.
+ *
+ * One Sonnet call analyzes ALL due follow-ups in a single batch — gives Sonnet
+ * the full context of every lead's history so it can propose distinct angles
+ * (not the same template for every lead in the same segment).
+ *
+ * Returns: { date, total_due, planned, skipped, leads: [{lead_id, lead_name, company, touch_number, channel, proposed_angle, angle_template_id, reason, skip}] }
+ */
+async function planFollowUps(clientId) {
+  const followupSequence = require('./followupSequence');
+  const today = new Date().toISOString().slice(0, 10);
+
+  // 1. Load all due follow-ups with full context
+  const dueWithContext = await followupSequence.getDueFollowUpsWithContext(clientId);
+
+  if (dueWithContext.length === 0) {
+    const emptyPlan = {
+      date: today,
+      total_due: 0,
+      planned: 0,
+      skipped: 0,
+      leads: [],
+      summary: 'No follow-ups due today.',
+    };
+    await persistFollowUpPlan(clientId, emptyPlan);
+    return emptyPlan;
+  }
+
+  // 2. Auto-skip leads with thin context (no fabrication possible)
+  const planned = [];
+  const skipped = [];
+  for (const item of dueWithContext) {
+    const company = (item.lead.company || '').trim();
+    const thinCompany = !company || /^(unknown|independent|n\/a|self[- ]?employed|freelanc|stealth|confidential|-)$/i.test(company);
+    if (thinCompany) {
+      skipped.push({
+        lead_id: item.lead_id,
+        lead_name: item.lead.name,
+        company: item.lead.company || 'Unknown',
+        touch_number: item.touch_number,
+        skip: true,
+        skip_reason: 'Thin context — no real company name. Cannot write non-fabricated follow-up.',
+      });
+    } else {
+      planned.push(item);
+    }
+  }
+
+  // 3. If everything was skipped, persist + return early
+  if (planned.length === 0) {
+    const planObj = {
+      date: today,
+      total_due: dueWithContext.length,
+      planned: 0,
+      skipped: skipped.length,
+      leads: skipped,
+      summary: `${skipped.length} follow-ups due, all skipped (thin context).`,
+    };
+    await persistFollowUpPlan(clientId, planObj);
+    return planObj;
+  }
+
+  // 4. Sonnet batch call: propose an angle per planned lead
+  const userMessage = `You are Captain Beaver planning today's follow-up batch. For EACH lead below, choose ONE angle from the template library and write a specific per-lead angle directive that Sales Beaver will execute.
+
+ANGLE TEMPLATE LIBRARY (pick one per lead):
+${ANGLE_TEMPLATES.map(t => `${t.id}. ${t.name} — ${t.when_use} (best at touches ${t.best_touches.join(',')})`).join('\n')}
+
+HARD RULES (binding):
+- Touch 5 ALWAYS = template 9 (Break-up). No exceptions.
+- Touch 6 ALWAYS = template 10 (Re-awaken) IF new context exists in lead.signal/notes/metadata. If no new context, skip the lead.
+- Never reuse the same angle template the lead has received in a previous message (check previous_messages.metadata.angle_template_id if present).
+- Anti-fabrication absolute: if you cite a hiring signal, funding, etc., it MUST appear in lead.signal or lead.notes. Do NOT invent.
+- The proposed_angle must be SPECIFIC to this lead — not a generic template instruction. Reference what you actually know.
+- If you cannot find a non-fabricated angle for a lead, mark skip=true with skip_reason.
+
+LEADS TO PLAN (${planned.length}):
+${JSON.stringify(planned.map(p => ({
+  lead_id: p.lead_id,
+  lead_name: p.lead.name,
+  title: p.lead.title,
+  company: p.lead.company,
+  industry: p.lead.industry,
+  signal: p.lead.signal,
+  notes: p.lead.notes,
+  touch_number: p.touch_number,
+  previous_message_summaries: p.previous_messages.map(m => ({
+    channel: m.channel,
+    subject: m.subject,
+    body_preview: (m.body || '').substring(0, 200),
+  })),
+  rejection_history_count: p.rejection_history.length,
+})), null, 2)}
+
+Return JSON ONLY in this exact shape:
+{
+  "leads": [
+    {
+      "lead_id": "uuid",
+      "lead_name": "...",
+      "company": "...",
+      "touch_number": N,
+      "channel": "email|linkedin",
+      "proposed_angle": "Specific 1-2 sentence angle directive Sales Beaver must follow",
+      "angle_template_id": 1-10,
+      "reason": "Why this angle for this lead (one sentence)",
+      "skip": false
+    }
+  ]
+}`;
+
+  let proposals;
+  try {
+    const result = await callAgent('captain_orchestrator', userMessage, { clientId });
+    // Unwrap potential markdown code fence
+    const raw = typeof result === 'string' ? result : (result?.brief || result?.summary || result?.text || JSON.stringify(result));
+    const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+    proposals = JSON.parse(cleaned);
+  } catch (err) {
+    console.warn('[captain] plan generation failed:', err.message);
+    // Fallback: use default template per touch number
+    proposals = {
+      leads: planned.map(p => ({
+        lead_id: p.lead_id,
+        lead_name: p.lead.name,
+        company: p.lead.company,
+        touch_number: p.touch_number,
+        channel: p.previous_messages[0]?.channel || 'email',
+        proposed_angle: `Default template fallback — Captain LLM unavailable. Touch ${p.touch_number} standard instruction.`,
+        angle_template_id: p.touch_number === 5 ? 9 : p.touch_number === 6 ? 10 : 8,
+        reason: 'Captain LLM unavailable, fallback to safe default',
+        skip: false,
+      })),
+    };
+  }
+
+  const planObj = {
+    date: today,
+    total_due: dueWithContext.length,
+    planned: proposals.leads.filter(l => !l.skip).length,
+    skipped: skipped.length + proposals.leads.filter(l => l.skip).length,
+    leads: [...proposals.leads, ...skipped],
+    summary: `${proposals.leads.filter(l => !l.skip).length} planned, ${skipped.length + proposals.leads.filter(l => l.skip).length} skipped of ${dueWithContext.length} due.`,
+  };
+
+  await persistFollowUpPlan(clientId, planObj);
+  return planObj;
+}
+
+async function persistFollowUpPlan(clientId, plan) {
+  await pool.query(
+    `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+     VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
+     ON CONFLICT (client_id, agent, key) DO UPDATE
+       SET content = EXCLUDED.content, updated_at = NOW()`,
+    [clientId, `followup_plan_${plan.date}`, JSON.stringify(plan)]
+  );
+}
+
+/**
+ * Format the follow-up plan for Telegram delivery.
+ * Concise summary if >10 items (redirect to web app), full detail if <=10.
+ */
+function formatPlanForTelegram(plan) {
+  if (plan.total_due === 0) return '📋 No follow-ups due today.';
+
+  const planned = plan.leads.filter(l => !l.skip);
+  const skipped = plan.leads.filter(l => l.skip);
+
+  // Per MJ rule: >10 → redirect to web app
+  if (planned.length > 10) {
+    return `📋 <b>Follow-up Plan — ${plan.date}</b>\n\n${planned.length} follow-ups planned, ${skipped.length} skipped (${plan.total_due} due total).\n\nReview and approve in the BeavrDam app — too many for Telegram batch.\n\nReply <code>approve all</code> to greenlight Captain's angles as-is, or use the web app to review per-lead.`;
+  }
+
+  const lines = [`📋 <b>Follow-up Plan — ${plan.date}</b>`, ''];
+  lines.push(`<b>${planned.length} planned · ${skipped.length} skipped · ${plan.total_due} due total</b>`);
+  lines.push('');
+
+  planned.forEach((lead, idx) => {
+    lines.push(`<b>${idx + 1}. ${lead.company} — ${lead.lead_name}</b> (Touch ${lead.touch_number}, ${lead.channel})`);
+    lines.push(`Angle: ${lead.proposed_angle}`);
+    if (lead.reason) lines.push(`<i>Why: ${lead.reason}</i>`);
+    lines.push('');
+  });
+
+  if (skipped.length > 0) {
+    lines.push('<b>Skipped:</b>');
+    skipped.forEach(s => {
+      lines.push(`• ${s.company} — ${s.lead_name}: ${s.skip_reason || 'skipped by Captain'}`);
+    });
+    lines.push('');
+  }
+
+  lines.push(`Reply <code>approve all</code> to execute all angles, or specify changes per lead.`);
+  return lines.join('\n');
+}
+
+/**
+ * Run the daily follow-up planning routine: plan + Telegram dispatch.
+ * Called by the daily cron at 09:00 MYT after the morning brief.
+ */
+async function runFollowUpPlanning(clientId) {
+  const plan = await planFollowUps(clientId);
+  const telegram = require('./telegram');
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+
+  if (chatId && plan.total_due > 0) {
+    const message = formatPlanForTelegram(plan);
+    await telegram.sendMessage(chatId, message).catch(err =>
+      console.warn('[captain] follow-up plan Telegram send failed:', err.message)
+    );
+  }
+  return plan;
+}
+
 /* ─── Stuck-state monitor ─────────────────────────────────────────── */
 
 /**
@@ -1694,4 +1931,10 @@ module.exports = {
   // Phase 5.5b: target-agent liveness (2026-05-06)
   checkAgentLiveness,
   recordOfflineEscalation,
+  // Captain-led follow-up planning (2026-05-11)
+  planFollowUps,
+  runFollowUpPlanning,
+  formatPlanForTelegram,
+  persistFollowUpPlan,
+  ANGLE_TEMPLATES,
 };

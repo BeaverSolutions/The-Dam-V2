@@ -110,6 +110,8 @@ TOOLS (Anthropic tool_use — call directly, no HTTP):
 - run_campaign             ← USE THIS for any "find leads / run outreach / start campaign" request. Fires the full parallel pipeline.
 - clear_pending_messages   ← USE THIS to reject/clear old pending messages for specific leads (e.g. stale LinkedIn DMs). Pass lead_ids + note.
 - draft_email_for_leads    ← USE THIS to find emails (via Hunter) and queue email outreach for specific lead IDs. Run AFTER clear_pending_messages.
+- read_followup_plan       ← USE THIS when MJ asks about today's follow-ups. Returns YOUR plan with per-lead angles you proposed at 09:00 MYT.
+- execute_followup_plan    ← USE THIS when MJ approves follow-ups ("approve all", "approve except XYZ", "go with these angles"). Drafts via Sales Beaver with YOUR angle directive, runs Enforcer, queues for send.
 - search_internal_leads    check the DB for existing leads (call this before run_campaign to show what's already there)
 - get_pipeline_status      live KPIs: sent today, pending approval, leads today, rejected today
 - get_approvals_pending    list messages awaiting approval with Enforcer notes
@@ -119,6 +121,14 @@ TOOLS (Anthropic tool_use — call directly, no HTTP):
 - write_memory             write a durable learning back to agent_memory
 - web_search_brave         open-web search (Brave → CSE → DuckDuckGo fallback) — ONLY after search_internal_leads returns empty
 - get_client_config        read the client's ICP and persona
+
+FOLLOW-UP APPROVAL WORKFLOW (binding):
+1. At 09:00 MYT daily, you autonomously generate a follow-up plan (per-lead angle directive for each due follow-up). The plan is posted to Telegram and stored in agent_memory.
+2. MJ approves via Telegram chat. Common messages: "approve all", "approve all except Acme", "change angle for John Doe to ask about hiring", "skip the break-ups today".
+3. When MJ approves, call execute_followup_plan with the matching lead_ids (or no lead_ids = all non-skipped). Pass angle_overrides if MJ changed any specific angles.
+4. Report back: "Executed X follow-ups: Y approved by Enforcer, Z rejected."
+5. NEVER execute follow-ups without MJ's explicit approval. The system is designed to WAIT.
+6. If MJ asks "what's on the plan today?" → call read_followup_plan, format concisely.
 
 RESPONSE RULES (HARD — do not violate these to save API cost and respect MJ's time):
 - BE TERSE. Default: 1-2 sentences per response. Max 4. Expand only when MJ explicitly asks for detail.
@@ -383,6 +393,31 @@ const TOOLS = [
         note:     { type: 'string', description: 'Optional context note logged to memory (e.g. "email fallback after LinkedIn no-response")' },
       },
       required: ['lead_ids'],
+    },
+  },
+  {
+    name: 'read_followup_plan',
+    description: 'Read today\'s follow-up plan from agent_memory. Returns the per-lead angles you proposed at 09:00 MYT. Use when MJ asks about today\'s follow-ups or before executing them.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        date: { type: 'string', description: 'Plan date in YYYY-MM-DD. Defaults to today (MYT).' },
+      },
+    },
+  },
+  {
+    name: 'execute_followup_plan',
+    description: 'Execute approved follow-ups from today\'s plan. Drafts each lead\'s message with Captain\'s prescribed angle, runs Enforcer, queues for send (email) or approval (LinkedIn). Use when MJ says "approve all" or specifies which leads to execute. After executing, report counts back to MJ.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        lead_ids: { type: 'array', items: { type: 'string' }, description: 'Specific lead UUIDs from today\'s plan to execute. Omit to execute ALL non-skipped leads in the plan.' },
+        date:     { type: 'string', description: 'Plan date YYYY-MM-DD. Defaults to today (MYT).' },
+        angle_overrides: {
+          type: 'object',
+          description: 'Optional per-lead angle replacements. Key = lead_id, value = new angle string. Use when MJ changes the angle for specific leads in conversation.',
+        },
+      },
     },
   },
 ];
@@ -1061,6 +1096,96 @@ async function toolDraftEmailForLeads(clientId, { lead_ids, note } = {}) {
   };
 }
 
+// ─── Captain-led follow-up tools (2026-05-11) ─────────────────────────────
+
+async function toolReadFollowUpPlan(clientId, { date } = {}) {
+  const planDate = date || new Date().toISOString().slice(0, 10);
+  const { rows } = await pool.query(
+    `SELECT content FROM agent_memory
+     WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2
+     LIMIT 1`,
+    [clientId, `followup_plan_${planDate}`]
+  );
+  if (rows.length === 0) {
+    return {
+      ok: false,
+      message: `No follow-up plan exists for ${planDate}. The daily plan runs at 09:00 MYT.`,
+    };
+  }
+  return { ok: true, plan: rows[0].content };
+}
+
+async function toolExecuteFollowUpPlan(clientId, { lead_ids, date, angle_overrides } = {}) {
+  const planDate = date || new Date().toISOString().slice(0, 10);
+  const { rows } = await pool.query(
+    `SELECT content FROM agent_memory
+     WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2
+     LIMIT 1`,
+    [clientId, `followup_plan_${planDate}`]
+  );
+  if (rows.length === 0) {
+    return { ok: false, error: `No plan for ${planDate}. Run planFollowUps first.` };
+  }
+  const plan = rows[0].content;
+  const overrides = angle_overrides || {};
+
+  // Filter: non-skipped leads only, optionally filtered by lead_ids
+  let toExecute = plan.leads.filter(l => !l.skip);
+  if (Array.isArray(lead_ids) && lead_ids.length > 0) {
+    const wanted = new Set(lead_ids);
+    toExecute = toExecute.filter(l => wanted.has(l.lead_id));
+  }
+
+  if (toExecute.length === 0) {
+    return { ok: false, error: 'No matching planned follow-ups in the plan.' };
+  }
+
+  const { executeApprovedFollowUp } = require('./followupSequence');
+  const results = [];
+
+  for (const planLead of toExecute) {
+    // Find the followup_queue row for this lead + date + touch
+    const { rows: [fu] } = await pool.query(
+      `SELECT id FROM followup_queue
+       WHERE client_id = $1 AND lead_id = $2 AND touch_number = $3 AND status = 'pending'
+       ORDER BY scheduled_for ASC LIMIT 1`,
+      [clientId, planLead.lead_id, planLead.touch_number]
+    );
+    if (!fu) {
+      results.push({ lead_id: planLead.lead_id, lead_name: planLead.lead_name, status: 'skipped', reason: 'no pending followup_queue row' });
+      continue;
+    }
+    const angle = overrides[planLead.lead_id] || planLead.proposed_angle;
+    try {
+      const r = await executeApprovedFollowUp(clientId, fu.id, angle);
+      results.push({ lead_id: planLead.lead_id, lead_name: planLead.lead_name, ...r });
+    } catch (err) {
+      results.push({ lead_id: planLead.lead_id, lead_name: planLead.lead_name, status: 'error', reason: err.message });
+    }
+  }
+
+  const approved = results.filter(r => r.status === 'approved').length;
+  const rejected = results.filter(r => r.status === 'rejected').length;
+  const skipped = results.filter(r => r.status === 'skipped' || r.status === 'error').length;
+
+  // Mark plan as executed
+  await pool.query(
+    `UPDATE agent_memory SET content = jsonb_set(content, '{executed_at}', to_jsonb(NOW()::text), true), updated_at = NOW()
+     WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2`,
+    [clientId, `followup_plan_${planDate}`]
+  );
+
+  return {
+    ok: true,
+    executed: results.length,
+    approved,
+    rejected,
+    skipped,
+    results,
+    message: `Executed ${results.length} follow-ups: ${approved} approved by Enforcer, ${rejected} rejected, ${skipped} skipped/errored.`,
+  };
+}
+
 // ─── Tool dispatcher ──────────────────────────────────────────────────────
 
 function buildToolHandler(clientId) {
@@ -1084,6 +1209,8 @@ function buildToolHandler(clientId) {
         case 'run_campaign':            return await toolRunCampaign(clientId, input || {});
         case 'clear_pending_messages':  return await toolClearPendingMessages(clientId, input || {});
         case 'draft_email_for_leads':   return await toolDraftEmailForLeads(clientId, input || {});
+        case 'read_followup_plan':      return await toolReadFollowUpPlan(clientId, input || {});
+        case 'execute_followup_plan':   return await toolExecuteFollowUpPlan(clientId, input || {});
         default:                        return { error: `Unknown tool: ${toolName}` };
       }
     } catch (err) {

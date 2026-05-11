@@ -210,9 +210,110 @@ async function getLeadSequence(clientId, leadId) {
 }
 
 /**
- * Draft a follow-up message for a specific touch.
+ * Get all due follow-ups for a client with FULL lead context + previous messages.
+ * Used by Captain's daily planning step — gives Sonnet enough context to propose
+ * per-lead angles without making N+1 queries.
+ *
+ * Returns an array of { ...followup, lead: {...}, previous_messages: [...], rejection_history: [...] }
  */
-async function draftFollowUp(lead, touchNumber, previousMessages) {
+async function getDueFollowUpsWithContext(clientId) {
+  const today = new Date().toISOString().split('T')[0];
+
+  // 1. Get due follow-ups joined with full lead row
+  const { rows: dueRows } = await pool.query(
+    `SELECT fq.*,
+            l.id AS lead_id_full,
+            l.name, l.title, l.email, l.company, l.linkedin_url,
+            l.metadata, l.quality_score,
+            l.metadata->>'industry' AS industry,
+            l.metadata->>'signal' AS signal,
+            l.metadata->>'notes' AS notes,
+            l.sequence_status, l.sequence_touch,
+            l.first_contacted_at, l.last_reply_at
+     FROM followup_queue fq
+     JOIN leads l ON l.id = fq.lead_id
+     WHERE fq.client_id = $1
+       AND fq.scheduled_for <= $2
+       AND fq.status = 'pending'
+       AND l.sequence_status = 'active'
+       AND l.last_reply_at IS NULL
+       AND l.deleted_at IS NULL
+     ORDER BY fq.scheduled_for ASC`,
+    [clientId, today]
+  );
+
+  if (dueRows.length === 0) return [];
+
+  // 2. Bulk-fetch previous messages for all leads in one query
+  const leadIds = dueRows.map(r => r.lead_id);
+  const { rows: msgRows } = await pool.query(
+    `SELECT lead_id, subject, body, channel, status, metadata, ranger_score, ranger_notes, created_at
+     FROM messages
+     WHERE lead_id = ANY($1::uuid[]) AND client_id = $2
+     ORDER BY lead_id, created_at ASC`,
+    [leadIds, clientId]
+  );
+
+  // 3. Group messages by lead_id, separate ranger-rejected for rejection history
+  const messagesByLead = new Map();
+  const rejectionsByLead = new Map();
+  for (const m of msgRows) {
+    if (m.status === 'ranger_rejected') {
+      if (!rejectionsByLead.has(m.lead_id)) rejectionsByLead.set(m.lead_id, []);
+      rejectionsByLead.get(m.lead_id).push({
+        score: m.ranger_score,
+        notes: m.ranger_notes,
+        body_preview: (m.body || '').substring(0, 100),
+      });
+    } else if (['sent', 'pending_send', 'approved', 'delivered'].includes(m.status)) {
+      if (!messagesByLead.has(m.lead_id)) messagesByLead.set(m.lead_id, []);
+      messagesByLead.get(m.lead_id).push({
+        subject: m.subject,
+        body: m.body,
+        channel: m.channel,
+        metadata: m.metadata,
+        sent_at: m.created_at,
+      });
+    }
+  }
+
+  // 4. Compose enriched rows
+  return dueRows.map(fu => ({
+    followup_id: fu.id,
+    lead_id: fu.lead_id,
+    touch_number: fu.touch_number,
+    scheduled_for: fu.scheduled_for,
+    lead: {
+      id: fu.lead_id,
+      name: fu.name,
+      title: fu.title,
+      email: fu.email,
+      company: fu.company,
+      linkedin_url: fu.linkedin_url,
+      industry: fu.industry,
+      signal: fu.signal,
+      notes: fu.notes,
+      quality_score: fu.quality_score,
+      metadata: fu.metadata,
+      sequence_touch: fu.sequence_touch,
+      first_contacted_at: fu.first_contacted_at,
+    },
+    previous_messages: messagesByLead.get(fu.lead_id) || [],
+    rejection_history: rejectionsByLead.get(fu.lead_id) || [],
+  }));
+}
+
+/**
+ * Draft a follow-up message for a specific touch.
+ *
+ * @param lead Lead object with context.
+ * @param touchNumber 2-6.
+ * @param previousMessages Array of prior message bodies/subjects.
+ * @param captainAngle Optional. Captain's prescribed angle for this touch.
+ *                     When present, Sales Beaver MUST follow it (no choice in angle).
+ *                     When absent, Sales Beaver falls back to legacy behavior.
+ */
+async function draftFollowUp(lead, touchNumber, previousMessages, captainAngle = null) {
   // v1.0 thin-context guard (2026-05-07): if lead context is too thin to write
   // a non-hallucinated follow-up, return needs_more_research instead of fabricating.
   const companyName = (lead.company || '').trim();
@@ -330,14 +431,26 @@ ${previousSummary || 'No previous messages'}
 
 TOUCH TYPE: ${config.type}
 INSTRUCTION: ${config.instruction}
+${captainAngle ? `
+═══════════════════════════════════════════════════
+CAPTAIN'S ANGLE DIRECTIVE (BINDING — NOT A SUGGESTION)
+═══════════════════════════════════════════════════
+Captain has analyzed this lead's full context, previous messages, and rejection
+history. Your draft MUST follow this angle:
 
+${captainAngle}
+
+You may NOT choose a different angle. Your job is to write the message that
+executes Captain's directive cleanly. The Enforcer will check whether your draft
+follows the angle and reject it if you ignored the directive.
+` : ''}
 ═══════════════════════════════════════════════════
 THINK BEFORE YOU WRITE (mandatory reasoning step)
 ═══════════════════════════════════════════════════
 Before drafting, answer these 4 questions in a "thinking" field:
 1. What angles/hooks did I already use in previous messages to this person?
 2. What do I ACTUALLY know about this specific company or person from the lead context that I haven't used yet?
-3. What is my chosen angle for THIS touch, and why is it different from everything before?
+3. What is my chosen angle for THIS touch, and why is it different from everything before?${captainAngle ? ' (Note: angle is BINDING per Captain directive above.)' : ''}
 4. Can I write this without any fabricated facts? If not, what's missing?
 
 ${channelFormat}
@@ -451,4 +564,135 @@ async function escalateChannel(clientId, leadId) {
   };
 }
 
-module.exports = { scheduleFollowUps, stopSequence, pauseSequence, resumeSequence, getDueFollowUps, getLeadSequence, draftFollowUp, getStaleLeads, nextBusinessDay, MY_HOLIDAYS_2026, escalateChannel };
+/**
+ * Execute ONE approved follow-up: draft with Captain's angle, run Enforcer,
+ * enqueue for send. Replaces the inline processing logic that used to live
+ * in the 30-min cron (now disabled).
+ *
+ * Returns: { status: 'approved'|'rejected'|'skipped'|'error', message_id, score }
+ */
+async function executeApprovedFollowUp(clientId, followupId, captainAngle) {
+  const { rangerReview } = require('./agents');
+  const { enqueueMessage } = require('./sendQueueWorker');
+
+  // 1. Load the follow-up + lead context + previous messages
+  const { rows: [fu] } = await pool.query(
+    `SELECT fq.*, l.name, l.title, l.email, l.company, l.linkedin_url,
+            l.metadata, l.metadata->>'industry' AS industry,
+            l.metadata->>'notes' AS notes, l.metadata->>'signal' AS signal
+     FROM followup_queue fq
+     JOIN leads l ON l.id = fq.lead_id
+     WHERE fq.id = $1 AND fq.client_id = $2`,
+    [followupId, clientId]
+  );
+  if (!fu) return { status: 'error', reason: 'followup_not_found' };
+  if (fu.status !== 'pending') return { status: 'skipped', reason: `already_${fu.status}` };
+
+  const { rows: prevMessages } = await pool.query(
+    `SELECT subject, body, metadata, channel FROM messages
+     WHERE lead_id = $1 AND client_id = $2 AND status IN ('sent', 'pending_send', 'approved', 'delivered')
+     ORDER BY created_at ASC`,
+    [fu.lead_id, clientId]
+  );
+  const originalChannel = prevMessages[0]?.channel || 'email';
+
+  // 2. Draft with Captain's angle directive
+  let draft;
+  try {
+    draft = await draftFollowUp(fu, fu.touch_number, prevMessages, captainAngle);
+  } catch (err) {
+    console.warn(`[followup-exec] draft failed for ${fu.id}: ${err.message}`);
+    return { status: 'error', reason: err.message };
+  }
+
+  if (draft?.status === 'needs_more_research') {
+    await pool.query(`UPDATE followup_queue SET status = 'skipped' WHERE id = $1`, [fu.id]);
+    return { status: 'skipped', reason: 'needs_more_research' };
+  }
+  if (!draft?.body) {
+    return { status: 'error', reason: 'empty_draft' };
+  }
+
+  const cleanBody = draft.body.replace(/\s*—\s*/g, ', ').replace(/—/g, ' ');
+
+  // 3. Server-side hard gates (same as old cron)
+  const wordCap = fu.touch_number >= 2 ? 120 : 80;
+  const questionCap = fu.touch_number >= 2 ? 2 : 1;
+  const bodyText = cleanBody.replace(/^Hi\s+\w+,?\s*/i, '').replace(/\s*Regards,?\s*.*/is, '');
+  const wordCount = bodyText.trim().split(/\s+/).length;
+  const questionCount = (cleanBody.match(/\?/g) || []).length;
+  if ((originalChannel === 'email' && wordCount > wordCap) || questionCount > questionCap) {
+    await pool.query(`UPDATE followup_queue SET status = 'skipped' WHERE id = $1`, [fu.id]);
+    return { status: 'skipped', reason: `over_cap:words=${wordCount}/${wordCap},q=${questionCount}/${questionCap}` };
+  }
+
+  // 4. Insert message + run Enforcer
+  const followUpDay = fu.touch_number === 2 ? 2 : fu.touch_number === 3 ? 5 : fu.touch_number === 4 ? 10 : fu.touch_number === 5 ? 18 : 30;
+  const { rows: [savedMsg] } = await pool.query(
+    `INSERT INTO messages (client_id, lead_id, subject, body, status, metadata, channel, follow_up_day)
+     VALUES ($1, $2, $3, $4, 'pending_ranger', $5, $6, $7) RETURNING id`,
+    [clientId, fu.lead_id, draft.subject || null, cleanBody,
+     JSON.stringify({ ...draft, is_followup: true, touch_number: fu.touch_number, captain_angle: captainAngle || null }),
+     originalChannel, followUpDay]
+  );
+
+  let approved = false;
+  let score = 0;
+  try {
+    const result = await rangerReview(clientId, {
+      message_id: savedMsg.id,
+      message_body: cleanBody,
+      lead_context: { touch_number: fu.touch_number, is_followup: true, name: fu.name, channel: originalChannel, captain_angle: captainAngle },
+    });
+    approved = !!result?.approved;
+    score = result?.score || 0;
+    await pool.query(
+      `UPDATE messages SET status = $1, ranger_score = $2, ranger_notes = $3, updated_at = NOW() WHERE id = $4`,
+      [approved ? 'pending_approval' : 'ranger_rejected', score, result?.notes || (approved ? 'Enforcer approved' : `ranger_rejected:score=${score}`), savedMsg.id]
+    );
+  } catch (err) {
+    await pool.query(`UPDATE messages SET status = 'ranger_rejected', ranger_notes = 'Enforcer unavailable', updated_at = NOW() WHERE id = $1`, [savedMsg.id]);
+  }
+
+  // 5. Auto-approval routing (only if Enforcer approved)
+  if (approved) {
+    const { rows: [clientRow] } = await pool.query(`SELECT auto_approve_threshold FROM clients WHERE id = $1`, [clientId]);
+    const threshold = clientRow?.auto_approve_threshold;
+    const autoApproved = threshold != null && score >= threshold;
+
+    if (autoApproved) {
+      const sendStatus = (originalChannel === 'email') ? 'pending_send' : 'approved';
+      await pool.query(`UPDATE messages SET status = $1, updated_at = NOW() WHERE id = $2`, [sendStatus, savedMsg.id]);
+      await pool.query(
+        `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at) VALUES ($1, $2, 'auto_approval', 'approved', NOW())`,
+        [clientId, savedMsg.id]
+      );
+      if (originalChannel === 'email') {
+        await enqueueMessage(clientId, savedMsg.id).catch(() => {});
+      }
+    } else {
+      await pool.query(`INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`, [clientId, savedMsg.id]);
+    }
+  }
+
+  await pool.query(`UPDATE followup_queue SET status = $1, message_id = $2 WHERE id = $3`,
+    [approved ? 'sent' : 'skipped', savedMsg.id, fu.id]);
+
+  return { status: approved ? 'approved' : 'rejected', message_id: savedMsg.id, score };
+}
+
+module.exports = {
+  scheduleFollowUps,
+  stopSequence,
+  pauseSequence,
+  resumeSequence,
+  getDueFollowUps,
+  getDueFollowUpsWithContext,
+  getLeadSequence,
+  draftFollowUp,
+  executeApprovedFollowUp,
+  getStaleLeads,
+  nextBusinessDay,
+  MY_HOLIDAYS_2026,
+  escalateChannel,
+};
