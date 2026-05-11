@@ -484,6 +484,37 @@ async function start() {
     const telegramService = require('./services/telegram');
     const { directorBrief } = require('./services/agents');
 
+    // Research Beaver pre-enrichment: fires at 00:30–00:40 UTC (08:30–08:40 MYT),
+    // BEFORE the morning brief at 01:00 UTC (09:00 MYT). Refreshes lead signals
+    // for any follow-ups due today so Captain plans with fresh context.
+    async function runResearchEnrichment() {
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+      const utcMin  = now.getUTCMinutes();
+      if (utcHour !== 0 || utcMin < 30 || utcMin > 40) return; // 0:30–0:40 UTC window
+
+      const dedupeKey = `research_enrichment_${now.toISOString().slice(0, 10)}`;
+      const { rows } = await pool.query(
+        `SELECT 1 FROM agent_memory WHERE agent = 'research_beaver' AND key = $1 LIMIT 1`,
+        [dedupeKey]
+      );
+      if (rows.length > 0) return; // already ran today
+
+      try {
+        const { rows: [clientRow] } = await pool.query(
+          `SELECT id FROM clients WHERE slug = $1 LIMIT 1`,
+          [process.env.TELEGRAM_CLIENT_SLUG || 'beaver-solutions']
+        );
+        if (!clientRow) return;
+
+        const { runDailyEnrichmentPass } = require('./services/researchEnrichment');
+        const result = await runDailyEnrichmentPass(clientRow.id);
+        logger.info({ msg: 'Research enrichment pass complete', ...result });
+      } catch (err) {
+        logger.warn({ msg: 'Research enrichment pass failed', err: err.message });
+      }
+    }
+
     async function runMorningBrief() {
       const now = new Date();
       const utcHour = now.getUTCHours();
@@ -1125,6 +1156,9 @@ async function start() {
 
     // Poll every 10 minutes — each function self-guards against running outside its window
     setInterval(() => {
+      runResearchEnrichment()
+        .then(() => { jobHealth.markRun('research_enrichment'); })
+        .catch(err => { logger.warn({ msg: 'Research enrichment poll error', err: err.message }); jobHealth.markError('research_enrichment', err.message); });
       runMorningBrief()
         .then(() => { jobHealth.markRun('morning_brief'); })
         .catch(err => { logger.warn({ msg: 'Morning brief poll error', err: err.message }); jobHealth.markError('morning_brief', err.message); });

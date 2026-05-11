@@ -148,6 +148,19 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       [leadId, clientId]
     );
 
+    // Phase 4 (2026-05-11): record reply outcome to followup_learnings for
+    // Captain's next-day angle bias + Enforcer self-calibration. Idempotent
+    // on message_id — updates the existing outcome entry created when the
+    // message went through Enforcer.
+    try {
+      const { postFollowUpOutcome } = require('./learningEngine');
+      await postFollowUpOutcome(clientId, {
+        messageId,
+        reply_outcome: sentiment,
+        reply_at: new Date().toISOString(),
+      });
+    } catch (e) { /* non-critical */ }
+
     if (sentiment === 'no_fit') {
       await pool.query(
         `UPDATE leads SET pipeline_stage = 'closed', status = 'closed_lost',

@@ -303,6 +303,224 @@ async function postReplyLearning(clientId, {
   }
 }
 
+// ─── Phase 4: Captain-led follow-up learning (2026-05-11) ──────────────────
+// Unified outcome capture for follow-ups. Every event (Enforcer decision,
+// MJ approval/rejection/edit, reply detection, 7-day silence) writes a row
+// to shared/followup_learnings. Each beaver reads this dataset before their
+// work:
+//   - Captain → biases angle template selection toward winners
+//   - Sales Beaver → adapts tone/length based on what passed Enforcer + got replies
+//   - Enforcer → calibrates threshold based on MJ override rate + reply rate
+//   - Research Beaver → prioritizes signal types that produced replies
+//
+// Schema (each entry in shared/followup_learnings array):
+// {
+//   ts: ISO timestamp,
+//   message_id: uuid,
+//   lead_id: uuid,
+//   company: string,
+//   industry: string,
+//   touch_number: 2-6,
+//   channel: 'email'|'linkedin',
+//   angle_template_id: 1-10 (from Captain's plan),
+//   captain_angle_preview: 80-char snippet,
+//   enforcer_score: 0-100,
+//   enforcer_passed: boolean,
+//   enforcer_rejection_reason: string|null,
+//   mj_action: 'approved'|'rejected'|'edited'|'pending'|null,
+//   mj_override: boolean (true when MJ disagreed with Enforcer),
+//   reply_outcome: 'positive'|'neutral'|'objection'|'no_fit'|'no_reply_7d'|null,
+//   reply_at: ISO|null,
+// }
+
+/**
+ * Record an outcome event for a follow-up message. Idempotent on message_id —
+ * subsequent calls with the same message_id update the same entry (rather than
+ * creating duplicates as the message moves through stages).
+ *
+ * Called at multiple lifecycle points:
+ *   - After Enforcer review: { messageId, leadId, ... enforcerScore, enforcerPassed }
+ *   - After MJ approval/rejection: { messageId, mjAction, mjOverride }
+ *   - After reply detected: { messageId, replyOutcome, replyAt }
+ *   - After 7-day silence: { messageId, replyOutcome: 'no_reply_7d' }
+ */
+async function postFollowUpOutcome(clientId, update) {
+  if (!update?.messageId) return;
+  try {
+    const existing = await getMemory(clientId, 'shared', 'followup_learnings');
+    const list = Array.isArray(existing) ? existing : [];
+
+    const idx = list.findIndex(e => e.message_id === update.messageId);
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...update, message_id: update.messageId, updated_at: new Date().toISOString() };
+    } else {
+      list.unshift({
+        ts: new Date().toISOString(),
+        message_id: update.messageId,
+        ...update,
+      });
+    }
+    // Keep most-recent 200 (~30 days at 7 follow-ups/day average)
+    await setMemory(clientId, 'shared', 'followup_learnings', list.slice(0, 200));
+  } catch (err) {
+    logger.warn({ msg: 'postFollowUpOutcome failed', err: err.message });
+  }
+}
+
+/**
+ * Record an MJ override event. Called when MJ approves a ranger_rejected
+ * message OR rejects a pending_approval (Enforcer approved). This is the
+ * primary signal for Enforcer self-calibration.
+ */
+async function recordMJOverride(clientId, { messageId, originalDecision, mjDecision, mjEditedBody }) {
+  await postFollowUpOutcome(clientId, {
+    messageId,
+    mj_action: mjDecision,
+    mj_override: originalDecision !== mjDecision,
+    mj_edited: !!mjEditedBody,
+  });
+}
+
+/**
+ * Summarize follow-up learnings for Captain's planning prompt.
+ * Returns a compact text block that Captain reads before proposing angles.
+ *
+ * Surfaces:
+ *   - Winning angle templates (most replies in last 30 entries)
+ *   - Losing angle templates (most Enforcer rejections)
+ *   - MJ override patterns (where MJ disagreed with Enforcer)
+ */
+async function summarizeFollowUpLearnings(clientId, opts = {}) {
+  try {
+    const list = await getMemory(clientId, 'shared', 'followup_learnings');
+    if (!Array.isArray(list) || list.length === 0) {
+      return 'No follow-up learnings yet — this is a cold-start day. Use templates per the angle library defaults.';
+    }
+
+    const recent = list.slice(0, opts.lookback || 100);
+
+    // Tally by angle_template_id
+    const tally = new Map();
+    for (const e of recent) {
+      const id = e.angle_template_id;
+      if (!id) continue;
+      const row = tally.get(id) || { template_id: id, count: 0, passed: 0, rejected: 0, positive_reply: 0, neutral_reply: 0, no_reply: 0 };
+      row.count++;
+      if (e.enforcer_passed) row.passed++; else row.rejected++;
+      if (e.reply_outcome === 'positive') row.positive_reply++;
+      else if (e.reply_outcome === 'neutral' || e.reply_outcome === 'objection') row.neutral_reply++;
+      else if (e.reply_outcome === 'no_reply_7d') row.no_reply++;
+      tally.set(id, row);
+    }
+
+    const winners = [...tally.values()].filter(r => r.positive_reply > 0)
+      .sort((a, b) => (b.positive_reply / Math.max(1, b.count)) - (a.positive_reply / Math.max(1, a.count)))
+      .slice(0, 3);
+    const losers = [...tally.values()].filter(r => r.rejected >= 3 && r.passed === 0)
+      .sort((a, b) => b.rejected - a.rejected)
+      .slice(0, 3);
+
+    // MJ override patterns
+    const overrides = recent.filter(e => e.mj_override).length;
+    const overrideRate = recent.length > 0 ? Math.round(100 * overrides / recent.length) : 0;
+
+    const lines = [`Follow-up learnings (last ${recent.length} outcomes):`];
+    if (winners.length > 0) {
+      lines.push('WINNING ANGLES (bias toward these when applicable):');
+      winners.forEach(w => {
+        const rate = Math.round(100 * w.positive_reply / w.count);
+        lines.push(`  - Template #${w.template_id}: ${w.positive_reply}/${w.count} positive replies (${rate}%)`);
+      });
+    }
+    if (losers.length > 0) {
+      lines.push('LOSING ANGLES (avoid unless context dictates):');
+      losers.forEach(l => {
+        lines.push(`  - Template #${l.template_id}: ${l.rejected} rejections, 0 passes`);
+      });
+    }
+    lines.push(`MJ override rate: ${overrideRate}% (${overrides}/${recent.length}). ${overrideRate > 20 ? 'Enforcer threshold may need adjustment.' : 'Calibration in band.'}`);
+
+    return lines.join('\n');
+  } catch (err) {
+    logger.warn({ msg: 'summarizeFollowUpLearnings failed', err: err.message });
+    return '';
+  }
+}
+
+/**
+ * Compute Enforcer's self-calibration recommendation.
+ * Weighted signal: 30% MJ override rate (fast) + 70% reply rate (slow ground truth).
+ *
+ * Returns:
+ *   {
+ *     current_threshold_estimate: number,
+ *     mj_override_rate_pct: number,
+ *     reply_rate_pct: number,
+ *     reply_sample_size: number,
+ *     recommendation: 'increase'|'decrease'|'hold',
+ *     adjustment_points: -5..+5,
+ *     reasoning: string,
+ *   }
+ */
+async function computeEnforcerCalibration(clientId) {
+  try {
+    const list = await getMemory(clientId, 'shared', 'followup_learnings');
+    if (!Array.isArray(list) || list.length < 10) {
+      return { recommendation: 'hold', reasoning: 'Insufficient data — need 10+ outcomes to calibrate.' };
+    }
+
+    // 7-day override window
+    const cutoff7d = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const window7d = list.filter(e => new Date(e.ts).getTime() > cutoff7d);
+    const overrideRate = window7d.length > 0
+      ? Math.round(100 * window7d.filter(e => e.mj_override).length / window7d.length)
+      : 0;
+
+    // 30-day reply window
+    const cutoff30d = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const window30d = list.filter(e => new Date(e.ts).getTime() > cutoff30d);
+    const replied = window30d.filter(e => e.reply_outcome && e.reply_outcome !== 'no_reply_7d');
+    const replyRate = window30d.length > 0
+      ? Math.round(100 * replied.length / window30d.length)
+      : null;
+
+    // Decision matrix
+    let recommendation = 'hold';
+    let adjustmentPoints = 0;
+    let reasoning = '';
+
+    if (overrideRate > 30 && replyRate !== null && replyRate < 3) {
+      recommendation = 'increase';
+      adjustmentPoints = 5;
+      reasoning = `Override rate ${overrideRate}% AND reply rate ${replyRate}% — Enforcer is too LENIENT (approving slop). Raise threshold +5.`;
+    } else if (overrideRate >= 20 && overrideRate <= 30) {
+      // Within auto-calibrate band
+      recommendation = 'decrease';
+      adjustmentPoints = -5;
+      reasoning = `Override rate ${overrideRate}% in 20-30% band — MJ approving Enforcer's rejections. Loosen threshold -5.`;
+    } else if (overrideRate < 20 && replyRate !== null && replyRate >= 5) {
+      recommendation = 'hold';
+      reasoning = `Override rate ${overrideRate}%, reply rate ${replyRate}%. Calibration in band — no change.`;
+    } else if (overrideRate > 30) {
+      recommendation = 'alert_mj';
+      reasoning = `Override rate ${overrideRate}% >30% threshold drift requires MJ manual decision.`;
+    }
+
+    return {
+      mj_override_rate_pct: overrideRate,
+      reply_rate_pct: replyRate,
+      reply_sample_size: window30d.length,
+      override_sample_size: window7d.length,
+      recommendation,
+      adjustment_points: adjustmentPoints,
+      reasoning,
+    };
+  } catch (err) {
+    logger.warn({ msg: 'computeEnforcerCalibration failed', err: err.message });
+    return { recommendation: 'hold', reasoning: `Error: ${err.message}` };
+  }
+}
+
 // ─── Weekly review generator ───────────────────────────────────────────────
 
 /**
@@ -651,4 +869,11 @@ module.exports = {
   generateWeeklyReview,
   generateWeeklyStrategy,
   injectMemoryContext,
+  // Phase 4: Captain-led follow-up learning (2026-05-11)
+  postFollowUpOutcome,
+  recordMJOverride,
+  summarizeFollowUpLearnings,
+  computeEnforcerCalibration,
+  setMemory,
+  getMemory,
 };

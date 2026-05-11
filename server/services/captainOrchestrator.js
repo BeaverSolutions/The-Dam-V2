@@ -910,10 +910,17 @@ async function planFollowUps(clientId) {
     return planObj;
   }
 
-  // 4. Sonnet batch call: propose an angle per planned lead
+  // 4. Pull learning context — bias proposals toward winning templates
+  let learningsBlock = '';
+  try {
+    const { summarizeFollowUpLearnings } = require('./learningEngine');
+    learningsBlock = await summarizeFollowUpLearnings(clientId);
+  } catch (e) { /* non-critical */ }
+
+  // 5. Sonnet batch call: propose an angle per planned lead
   const userMessage = `You are Captain Beaver planning today's follow-up batch. For EACH lead below, choose ONE angle from the template library and write a specific per-lead angle directive that Sales Beaver will execute.
 
-ANGLE TEMPLATE LIBRARY (pick one per lead):
+${learningsBlock ? `LEARNING CONTEXT (use this to bias your angle selection):\n${learningsBlock}\n\n` : ''}ANGLE TEMPLATE LIBRARY (pick one per lead):
 ${ANGLE_TEMPLATES.map(t => `${t.id}. ${t.name} — ${t.when_use} (best at touches ${t.best_touches.join(',')})`).join('\n')}
 
 HARD RULES (binding):

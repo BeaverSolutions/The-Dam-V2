@@ -181,6 +181,31 @@ async function resolveApproval(clientId, approvalId, { status, notes, userId, ed
     console.warn('[approvals] founder_feedback capture failed:', feedbackErr.message);
   }
 
+  // Phase 4 (2026-05-11): record MJ's decision to followup_learnings for
+  // Enforcer self-calibration. An "override" is when MJ disagrees with what
+  // Enforcer decided. Since pending_approval messages all passed Enforcer,
+  // a 'rejected' here is a true override. An 'approved' with body edit is
+  // a partial override (Enforcer's draft was acceptable but needed tweaking).
+  try {
+    const { recordMJOverride } = require('./learningEngine');
+    const { rows: [msg2] } = await pool.query(
+      `SELECT id, body, metadata FROM messages WHERE id = $1 AND client_id = $2`,
+      [existing.rows[0].message_id, clientId]
+    );
+    if (msg2) {
+      const wasEdited = msg2.metadata?.original_body && msg2.metadata.original_body !== msg2.body;
+      await recordMJOverride(clientId, {
+        messageId: existing.rows[0].message_id,
+        originalDecision: 'approved', // Enforcer's decision (pending_approval = Enforcer approved)
+        mjDecision: status,
+        mjEditedBody: wasEdited ? msg2.body : null,
+      });
+    }
+  } catch (overrideErr) {
+    // Non-critical — don't block approval flow
+    console.warn('[approvals] MJ override capture failed:', overrideErr.message);
+  }
+
   // Auto-enqueue approved messages for send (with retry on failure)
   if (status === 'approved') {
     const enqueueResult = await enqueueMessage(clientId, existing.rows[0].message_id).catch(err => {

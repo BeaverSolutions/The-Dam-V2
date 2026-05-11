@@ -571,9 +571,10 @@ async function escalateChannel(clientId, leadId) {
  *
  * Returns: { status: 'approved'|'rejected'|'skipped'|'error', message_id, score }
  */
-async function executeApprovedFollowUp(clientId, followupId, captainAngle) {
+async function executeApprovedFollowUp(clientId, followupId, captainAngle, angleTemplateId) {
   const { rangerReview } = require('./agents');
   const { enqueueMessage } = require('./sendQueueWorker');
+  const { postFollowUpOutcome } = require('./learningEngine');
 
   // 1. Load the follow-up + lead context + previous messages
   const { rows: [fu] } = await pool.query(
@@ -638,6 +639,7 @@ async function executeApprovedFollowUp(clientId, followupId, captainAngle) {
 
   let approved = false;
   let score = 0;
+  let rejectReason = null;
   try {
     const result = await rangerReview(clientId, {
       message_id: savedMsg.id,
@@ -646,13 +648,33 @@ async function executeApprovedFollowUp(clientId, followupId, captainAngle) {
     });
     approved = !!result?.approved;
     score = result?.score || 0;
+    rejectReason = approved ? null : (result?.reject_reason || result?.notes || `ranger_rejected:score=${score}`);
     await pool.query(
       `UPDATE messages SET status = $1, ranger_score = $2, ranger_notes = $3, updated_at = NOW() WHERE id = $4`,
-      [approved ? 'pending_approval' : 'ranger_rejected', score, result?.notes || (approved ? 'Enforcer approved' : `ranger_rejected:score=${score}`), savedMsg.id]
+      [approved ? 'pending_approval' : 'ranger_rejected', score, result?.notes || (approved ? 'Enforcer approved' : rejectReason), savedMsg.id]
     );
   } catch (err) {
     await pool.query(`UPDATE messages SET status = 'ranger_rejected', ranger_notes = 'Enforcer unavailable', updated_at = NOW() WHERE id = $1`, [savedMsg.id]);
+    rejectReason = 'enforcer_unavailable';
   }
+
+  // Phase 4: capture outcome to learning store
+  await postFollowUpOutcome(clientId, {
+    messageId: savedMsg.id,
+    leadId: fu.lead_id,
+    company: fu.company,
+    industry: fu.industry,
+    touch_number: fu.touch_number,
+    channel: originalChannel,
+    angle_template_id: angleTemplateId || null,
+    captain_angle_preview: captainAngle ? captainAngle.substring(0, 80) : null,
+    enforcer_score: score,
+    enforcer_passed: approved,
+    enforcer_rejection_reason: rejectReason,
+    mj_action: null,
+    mj_override: false,
+    reply_outcome: null,
+  }).catch(() => {});
 
   // 5. Auto-approval routing (only if Enforcer approved)
   if (approved) {

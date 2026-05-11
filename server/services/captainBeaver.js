@@ -1178,8 +1178,9 @@ async function toolExecuteFollowUpPlan(clientId, { lead_ids, date, angle_overrid
       continue;
     }
     const angle = overrides[planLead.lead_id] || planLead.proposed_angle;
+    const templateId = planLead.angle_template_id || null;
     try {
-      const r = await executeApprovedFollowUp(clientId, fu.id, angle);
+      const r = await executeApprovedFollowUp(clientId, fu.id, angle, templateId);
       results.push({ lead_id: planLead.lead_id, lead_name: planLead.lead_name, ...r });
     } catch (err) {
       results.push({ lead_id: planLead.lead_id, lead_name: planLead.lead_name, status: 'error', reason: err.message });
