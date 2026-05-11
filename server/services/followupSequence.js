@@ -322,6 +322,8 @@ Name: ${lead.name}
 Title: ${lead.title || 'Unknown'}
 Company: ${lead.company || 'Unknown'}
 Industry: ${lead.industry || lead.metadata?.industry || 'Unknown'}
+${lead.metadata?.signal ? `Signal: ${lead.metadata.signal}` : ''}
+${lead.metadata?.notes ? `Notes: ${lead.metadata.notes}` : ''}
 
 PREVIOUS MESSAGES (do NOT repeat any hook, angle, or pain point):
 ${previousSummary || 'No previous messages'}
@@ -329,12 +331,21 @@ ${previousSummary || 'No previous messages'}
 TOUCH TYPE: ${config.type}
 INSTRUCTION: ${config.instruction}
 
+═══════════════════════════════════════════════════
+THINK BEFORE YOU WRITE (mandatory reasoning step)
+═══════════════════════════════════════════════════
+Before drafting, answer these 4 questions in a "thinking" field:
+1. What angles/hooks did I already use in previous messages to this person?
+2. What do I ACTUALLY know about this specific company or person from the lead context that I haven't used yet?
+3. What is my chosen angle for THIS touch, and why is it different from everything before?
+4. Can I write this without any fabricated facts? If not, what's missing?
+
 ${channelFormat}
 
 Before returning, verify: word count under ${hardWordCap}? Question marks ≤ ${hardQuestionCap}? Every fact verifiable from lead context? If not, rewrite.
 
 Return JSON only:
-{"subject":${channel === 'email' ? '"..."' : 'null'},"body":"...","touch_number":${touchNumber}}`;
+{"thinking":"Your 4-point analysis here","subject":${channel === 'email' ? '"..."' : 'null'},"body":"...","touch_number":${touchNumber}}`;
 
   return await callAgent('sales_beaver', prompt);
 }
