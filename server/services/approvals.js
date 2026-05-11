@@ -213,34 +213,54 @@ async function resolveApproval(clientId, approvalId, { status, notes, userId, ed
       return { enqueued: false, reason: err.message };
     });
 
-    // For manual-send channels (LinkedIn, Instagram): "Approve (Manual Send)" means
-    // the user has already copied + sent the message. Mark as 'sent' and schedule follow-ups.
+    // For manual-send channels (LinkedIn, Instagram): content is approved but
+    // hasn't been sent yet. LinkedIn routes to linkedin_requested so user can
+    // click "DM Sent" after manually sending. Other channels mark sent immediately.
     if (enqueueResult && !enqueueResult.enqueued && enqueueResult.reason?.startsWith('manual_send_channel')) {
-      await pool.query(
-        `UPDATE messages SET status = 'sent', sent_at = NOW(), updated_at = NOW()
-         WHERE id = $1 AND client_id = $2`,
+      const { rows: [channelCheck] } = await pool.query(
+        `SELECT channel FROM messages WHERE id = $1 AND client_id = $2`,
         [existing.rows[0].message_id, clientId]
       );
 
-      // Schedule follow-ups for this lead (Day 2/5/10/18/30 cadence)
-      try {
-        const { rows: [msg] } = await pool.query(
-          `SELECT lead_id FROM messages WHERE id = $1`, [existing.rows[0].message_id]
+      if (channelCheck?.channel === 'linkedin') {
+        // LinkedIn: revert to pending + linkedin_requested so it appears in
+        // "Ready to Send" tab. User clicks "DM Sent" after manual send.
+        await pool.query(
+          `UPDATE approvals SET status = 'pending', notes = 'linkedin_requested', resolved_at = NULL, updated_at = NOW()
+           WHERE id = $1 AND client_id = $2`,
+          [approvalId, clientId]
         );
-        if (msg?.lead_id) {
-          const { rows: prevSent } = await pool.query(
-            `SELECT COUNT(*) AS cnt FROM messages
-             WHERE lead_id = $1 AND client_id = $2 AND status = 'sent'`,
-            [msg.lead_id, clientId]
+        await pool.query(
+          `UPDATE messages SET status = 'linkedin_requested', updated_at = NOW()
+           WHERE id = $1 AND client_id = $2`,
+          [existing.rows[0].message_id, clientId]
+        );
+      } else {
+        // Other manual-send channels (Instagram, etc.): mark sent immediately
+        await pool.query(
+          `UPDATE messages SET status = 'sent', sent_at = NOW(), updated_at = NOW()
+           WHERE id = $1 AND client_id = $2`,
+          [existing.rows[0].message_id, clientId]
+        );
+        try {
+          const { rows: [msg] } = await pool.query(
+            `SELECT lead_id FROM messages WHERE id = $1`, [existing.rows[0].message_id]
           );
-          if (parseInt(prevSent[0].cnt) <= 1) {
-            const { scheduleFollowUps } = require('./followupSequence');
-            await scheduleFollowUps(clientId, msg.lead_id, new Date());
-            console.log(`[approvals] Scheduled follow-ups for manual-send lead ${msg.lead_id}`);
+          if (msg?.lead_id) {
+            const { rows: prevSent } = await pool.query(
+              `SELECT COUNT(*) AS cnt FROM messages
+               WHERE lead_id = $1 AND client_id = $2 AND status = 'sent'`,
+              [msg.lead_id, clientId]
+            );
+            if (parseInt(prevSent[0].cnt) <= 1) {
+              const { scheduleFollowUps } = require('./followupSequence');
+              await scheduleFollowUps(clientId, msg.lead_id, new Date());
+              console.log(`[approvals] Scheduled follow-ups for manual-send lead ${msg.lead_id}`);
+            }
           }
+        } catch (err) {
+          console.warn('[approvals] Follow-up scheduling failed for manual send:', err.message);
         }
-      } catch (err) {
-        console.warn('[approvals] Follow-up scheduling failed for manual send:', err.message);
       }
     }
   }
@@ -315,13 +335,14 @@ async function markConnectionAccepted(clientId, approvalId, { userId }) {
   if (rows.length === 0) throw new AppError('Approval not found', 404, 'NOT_FOUND');
   const approval = rows[0];
 
-  // Allow from linkedin_requested messages (notes='linkedin_requested')
+  // Allow from linkedin_requested OR approved messages (approved = went through
+  // resolveApproval path but hasn't been manually sent yet)
   const { rows: msgRows } = await pool.query(
     `SELECT status FROM messages WHERE id = $1 AND client_id = $2`,
     [approval.message_id, clientId]
   );
-  if (msgRows[0]?.status !== 'linkedin_requested') {
-    throw new AppError(`Message not in linkedin_requested status (currently: ${msgRows[0]?.status})`, 400, 'WRONG_STATUS');
+  if (msgRows[0]?.status !== 'linkedin_requested' && msgRows[0]?.status !== 'approved') {
+    throw new AppError(`Message not in linkedin_requested or approved status (currently: ${msgRows[0]?.status})`, 400, 'WRONG_STATUS');
   }
 
   // Resolve the approval

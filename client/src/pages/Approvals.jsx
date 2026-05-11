@@ -9,7 +9,7 @@ import FilterTabs from '../components/FilterTabs';
 const TABS = [
   { value: 'pending',   label: 'Pending' },
   { value: 'followups', label: 'Follow-ups' },
-  { value: 'awaiting',  label: 'Awaiting Accept' },
+  { value: 'awaiting',  label: 'Ready to Send' },
   { value: 'approved',  label: 'Approved' },
   { value: 'rejected',  label: 'Rejected' },
 ];
@@ -160,7 +160,7 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
             </span>
           )}
           <span className={`badge badge-${tab === 'approved' ? 'lime' : tab === 'rejected' ? 'orange' : tab === 'awaiting' ? 'blue' : 'muted'}`} style={{ textTransform: 'capitalize' }}>
-            {tab === 'awaiting' ? 'Awaiting Accept' : tab}
+            {tab === 'awaiting' ? 'Ready to Send' : tab}
           </span>
         </div>
       </div>
@@ -315,7 +315,7 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
           borderRadius: 'var(--radius)', fontSize: '0.78rem', color: 'var(--text)',
         }}>
           <Clock size={14} style={{ color: 'var(--purple)', flexShrink: 0 }} />
-          <span>Connection request sent. Waiting for prospect to accept. Click <strong>Accepted + Sent</strong> after you've sent the DM.</span>
+          <span>Approved. After sending the DM on LinkedIn, click <strong>DM Sent</strong> to start the follow-up sequence.</span>
         </div>
       )}
 
@@ -323,7 +323,7 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
       {isAwaiting && (
         <div className="approval-actions">
           <button className="btn btn-success btn-sm" onClick={handleConnectionAccepted} disabled={acting}>
-            <UserCheck size={13} /> {acting ? 'Confirming…' : 'Accepted + Sent'}
+            <UserCheck size={13} /> {acting ? 'Confirming…' : 'DM Sent'}
           </button>
           <button className="btn btn-danger btn-sm" onClick={handleReject} disabled={acting}>
             <XCircle size={13} /> No Response
@@ -345,7 +345,7 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
             <>
               {isLinkedin ? (
                 <button className="btn btn-primary btn-sm" onClick={handleConnectionSent} disabled={acting}>
-                  <Send size={13} /> {acting ? 'Marking…' : 'Connection Sent'}
+                  <Send size={13} /> {acting ? 'Approving…' : 'Approve'}
                 </button>
               ) : (
                 <button className="btn btn-success btn-sm" onClick={handleApproveAndSend} disabled={acting}>
@@ -475,7 +475,7 @@ export default function Approvals() {
   const handleConnectionAccepted = async (id) => {
     setActionError(null);
     try {
-      await request(`/approvals/${id}/connection-accepted`, { method: 'POST' });
+      await request(`/approvals/${id}/dm-sent`, { method: 'POST' });
       setApprovals(prev => prev.filter(a => a.id !== id));
       setCounts(prev => ({
         ...prev,
@@ -555,7 +555,7 @@ export default function Approvals() {
               : tab === 'followups'
               ? "No follow-up messages due today. Follow-ups appear here on their scheduled day."
               : tab === 'awaiting'
-              ? "No LinkedIn connection requests awaiting acceptance."
+              ? "No LinkedIn messages ready to send."
               : `No messages have been ${tab} yet.`
           }
         />

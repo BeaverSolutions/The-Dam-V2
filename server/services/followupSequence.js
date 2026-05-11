@@ -53,9 +53,47 @@ function nextBusinessDay(date) {
 }
 
 /**
- * Schedule follow-up touches 2, 3, 4 when a lead is first contacted.
+ * Schedule follow-up touches 2-6 when a lead is first contacted.
+ *
+ * GUARD (2026-05-11): Refuses to schedule unless touch 1 has actual delivery proof.
+ *   - Email: any prior message with gmail_message_id OR agentmail_message_id populated
+ *   - LinkedIn: any prior message with status='sent' AND sent_at NOT NULL
+ *               (status='linkedin_requested' is NOT sufficient — that's connection
+ *                request only, the DM hasn't been delivered yet)
+ *
+ * Background: 33 leads were infected with phantom follow-ups (linkedin_requested,
+ * simulated-sent email, ranger_rejected cold) because scheduleFollowUps was called
+ * before the cold message actually went out. Day 2 follow-ups would then draft on
+ * leads who never received touch 1 — breaking the conversation logic and wasting
+ * Sonnet drafts. Guard prevents recurrence.
  */
 async function scheduleFollowUps(clientId, leadId, firstContactDate) {
+  // ─── Delivery-proof guard ────────────────────────────────────────────
+  const { rows: proof } = await pool.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE channel = 'email'
+                          AND (gmail_message_id IS NOT NULL OR agentmail_message_id IS NOT NULL))
+         AS email_delivered,
+       COUNT(*) FILTER (WHERE channel IN ('linkedin', 'instagram')
+                          AND status = 'sent'
+                          AND sent_at IS NOT NULL)
+         AS manual_send_confirmed
+     FROM messages
+     WHERE lead_id = $1 AND client_id = $2`,
+    [leadId, clientId]
+  );
+  const emailDelivered = parseInt(proof[0]?.email_delivered || 0, 10);
+  const manualSent = parseInt(proof[0]?.manual_send_confirmed || 0, 10);
+
+  if (emailDelivered === 0 && manualSent === 0) {
+    console.warn(
+      `[FollowUp] REFUSED to schedule for lead ${leadId}: no delivery proof for touch 1. ` +
+      `email_delivered=${emailDelivered}, manual_send_confirmed=${manualSent}. ` +
+      `Caller should only invoke scheduleFollowUps AFTER the cold message has actually been delivered.`
+    );
+    return { scheduled: false, reason: 'no_delivery_proof_for_touch_1' };
+  }
+
   const base = new Date(firstContactDate);
 
   // Extended cadence (Day 0 = initial, not scheduled here):
@@ -100,6 +138,7 @@ async function scheduleFollowUps(clientId, leadId, firstContactDate) {
   );
 
   console.log(`[FollowUp] Scheduled ${schedule.length} follow-ups for lead ${leadId} (Day 2/5/10/18/30)`);
+  return { scheduled: true, count: schedule.length };
 }
 
 /**

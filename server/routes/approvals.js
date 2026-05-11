@@ -63,7 +63,20 @@ router.post('/:id/connection-sent',
   }
 );
 
-// Mark connection as accepted + message sent (linkedin_requested → sent)
+// Mark DM as sent (linkedin_requested → sent) — triggers follow-up scheduling
+router.post('/:id/dm-sent',
+  [param('id').isUUID(), validate],
+  async (req, res, next) => {
+    try {
+      const result = await approvalsService.markConnectionAccepted(req.clientId, req.params.id, {
+        userId: req.user.userId,
+      });
+      res.json({ data: result });
+    } catch (err) { next(err); }
+  }
+);
+
+// Legacy alias — keep for backward compat
 router.post('/:id/connection-accepted',
   [param('id').isUUID(), validate],
   async (req, res, next) => {

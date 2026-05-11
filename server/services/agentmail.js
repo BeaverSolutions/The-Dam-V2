@@ -44,13 +44,26 @@ async function getOrCreateInbox(clientId, clientSlug) {
     .replace(/[^a-z0-9-]/g, '')
     .slice(0, 30);
 
-  const inbox = await client.inboxes.create({
-    username,
-    displayName: 'Sales Beaver',
-  });
+  let inbox;
+  try {
+    inbox = await client.inboxes.create({
+      username,
+      displayName: 'Sales Beaver',
+    });
+  } catch (createErr) {
+    if (createErr.statusCode === 403 || createErr.name === 'IsTakenError' || /taken|exists|already/i.test(createErr.message)) {
+      const listResult = await client.inboxes.list();
+      const inboxes = listResult.inboxes || listResult.data || listResult;
+      inbox = (Array.isArray(inboxes) ? inboxes : []).find(i => i.username === username);
+      if (!inbox) throw new Error(`Inbox username '${username}' is taken but not found via list`);
+      console.log(`[agentmail] Recovered existing inbox for username '${username}'`);
+    } else {
+      throw createErr;
+    }
+  }
 
   const inboxData = {
-    inbox_id: inbox.inboxId,
+    inbox_id: inbox.inboxId || inbox.inbox_id,
     email: inbox.email,
     username,
   };
