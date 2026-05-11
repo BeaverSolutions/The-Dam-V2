@@ -396,6 +396,14 @@ const TOOLS = [
     },
   },
   {
+    name: 'plan_followups_now',
+    description: 'Manually generate today\'s follow-up plan. Use when MJ explicitly asks to "plan follow-ups" or "create today\'s plan" — typically for testing or if the daily 09:00 cron didn\'t fire. Generates per-lead angle directives and posts the brief to Telegram. Returns the plan summary.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
     name: 'read_followup_plan',
     description: 'Read today\'s follow-up plan from agent_memory. Returns the per-lead angles you proposed at 09:00 MYT. Use when MJ asks about today\'s follow-ups or before executing them.',
     input_schema: {
@@ -1098,6 +1106,20 @@ async function toolDraftEmailForLeads(clientId, { lead_ids, note } = {}) {
 
 // ─── Captain-led follow-up tools (2026-05-11) ─────────────────────────────
 
+async function toolPlanFollowUpsNow(clientId) {
+  const captain = require('./captainOrchestrator');
+  const plan = await captain.runFollowUpPlanning(clientId);
+  return {
+    ok: true,
+    plan_date: plan.date,
+    total_due: plan.total_due,
+    planned: plan.planned,
+    skipped: plan.skipped,
+    summary: plan.summary,
+    message: `Plan generated. ${plan.planned} planned, ${plan.skipped} skipped of ${plan.total_due} due. Telegram brief sent. Reply with "approve all" or per-lead changes.`,
+  };
+}
+
 async function toolReadFollowUpPlan(clientId, { date } = {}) {
   const planDate = date || new Date().toISOString().slice(0, 10);
   const { rows } = await pool.query(
@@ -1209,6 +1231,7 @@ function buildToolHandler(clientId) {
         case 'run_campaign':            return await toolRunCampaign(clientId, input || {});
         case 'clear_pending_messages':  return await toolClearPendingMessages(clientId, input || {});
         case 'draft_email_for_leads':   return await toolDraftEmailForLeads(clientId, input || {});
+        case 'plan_followups_now':      return await toolPlanFollowUpsNow(clientId, input || {});
         case 'read_followup_plan':      return await toolReadFollowUpPlan(clientId, input || {});
         case 'execute_followup_plan':   return await toolExecuteFollowUpPlan(clientId, input || {});
         default:                        return { error: `Unknown tool: ${toolName}` };
