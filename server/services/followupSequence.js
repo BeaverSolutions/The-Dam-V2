@@ -240,29 +240,29 @@ async function draftFollowUp(lead, touchNumber, previousMessages) {
 
   const touchConfig = {
     2: {
-      type: 'FU1 Day 2 — Different angle on same pain',
-      instruction: 'Write from a completely different angle than the Day 0 message. Do NOT say "just following up" or "checking in". Lead with a new observation or insight about their business. One question at the end.',
-      maxWords: 80,
+      type: 'FU1 Day 2 — Genuine question about their business',
+      instruction: 'Ask a genuine question about their business that shows you looked at their company. Do NOT reuse any pain point, stat, or angle from the Day 0 message. No numbers, no percentages. Just a short, curious question about how they handle outbound or pipeline today.',
+      maxWords: 60,
     },
     3: {
-      type: 'FU2 Day 5 — One-line social proof',
-      instruction: 'One specific result or social proof. Under 20 words for the core line. Example: "We helped a similar property company go from 0 to 12 meetings in 3 weeks." Then one soft question.',
-      maxWords: 40,
+      type: 'FU2 Day 5 — Timing check (one sentence)',
+      instruction: 'Reference the core idea from message 1 in one clause, then ask if timing is better now. Entire message must be ONE or TWO sentences. No stats, no proof, no pitch. Example tone: "Still thinking about whether automating outreach makes sense for [company] right now?"',
+      maxWords: 30,
     },
     4: {
-      type: 'FU3 Day 10 — Bump with new framing',
-      instruction: 'Reframe the value prop from a completely new angle. Do NOT sound like a follow-up. Short, punchy. One question.',
+      type: 'FU3 Day 10 — Contrarian observation',
+      instruction: 'Share one contrarian or non-obvious observation about their industry or role. No pitch, no CTA beyond a soft question. The goal is to sound like a peer sharing an insight, not a seller following up. Do NOT reference any prior message.',
       maxWords: 40,
     },
     5: {
       type: 'FU4 Day 18 — Easy out / break-up',
-      instruction: 'Honest break-up. "Last one from me for now. If timing is off, happy to leave it here. But if {specific pain} is on your mind, the door\'s open." Under 40 words. No CTA pressure.',
-      maxWords: 40,
+      instruction: 'Honest break-up. "Last one from me for now. If timing is off, happy to leave it here. But if [reference their specific situation from lead context] changes, the door is open." Under 30 words. No pressure.',
+      maxWords: 30,
     },
     6: {
-      type: 'FU5 Day 30 — Re-awaken with new trigger',
-      instruction: 'Come back with a SPECIFIC new angle or signal. Reference something different from every prior message. This is the "nurture wake-up" message. Often converts because it feels fresh, not like a sequence. One question.',
-      maxWords: 60,
+      type: 'FU5 Day 30 — Re-awaken with new context',
+      instruction: 'Come back referencing something NEW about the lead — a LinkedIn post they made, a job they posted, a company milestone, or a market shift in their vertical. If no new context is available from lead data, reference a general trend in their industry. Must feel like a fresh conversation, not touch 6 of a sequence. One question.',
+      maxWords: 50,
     },
   };
 
@@ -309,10 +309,11 @@ PRE-GATE CONSTRAINT (server rejects drafts that violate these — NON-NEGOTIABLE
 - Body must contain AT MOST ${hardQuestionCap} question mark. Zero or one. Never two.
 - No em dashes. No bullet points. No "checking in" / "just following up".
 
-V1.0 FOLLOW-UP RULES (same standard as cold DMs — Enforcer grades follow-ups against these):
-- ANTI-FABRICATION (HARD GATE): Every company name, product, role, or fact you mention MUST come from the LEAD context or PREVIOUS MESSAGES below. If the lead context says Company: "Unknown" or Title: "Unknown", do NOT invent a company name, product, or role. Work only with what you have. Enforcer will score 0 for any fabricated claim.
-- SEGMENT PAIN: Anchor on one of the 5 approved BeavrDam pains (hours on prospecting / low reply rates / founder doing outbound / pipeline gap / inconsistent outbound). Do NOT anchor on the prospect's vertical-specific pain unless it's explicitly stated in lead context.
-- NUMBER PROVENANCE: Any "%" or numeric claim must come from approved benchmarks (1-5% reply rate generic, 10-15% personalized, 6-12 hrs/week founder outbound, 50+ DMs/week) or from the lead's verifiable trigger. No invented numbers.
+FOLLOW-UP RULES (these override cold-DM rules for follow-ups):
+- ANTI-FABRICATION (HARD GATE): Every company name, product, role, or fact you mention MUST come from the LEAD context or PREVIOUS MESSAGES below. If the lead context says Company: "Unknown" or Title: "Unknown", do NOT invent a company name, product, or role. Work only with what you have.
+- NO STATS OR NUMBERS: Do NOT use any percentage, statistic, or numeric benchmark in follow-ups. No "X% reply rate", no "Y hours/week", no "Z DMs/week". Follow-ups are conversational, not pitches. If a previous message already cited a number, do NOT repeat it.
+- ANTI-REPETITION: Your draft must NOT reuse any hook, angle, pain point, or phrase from PREVIOUS MESSAGES below. Each touch must feel like a new thought, not a rephrased version of the last one.
+- BREVITY: Follow-ups should read like a quick text from a peer, not a sales email. Shorter is always better.
 - SENDER IDENTITY: Always sign as "Michael". Never "The Team", never "Sales Beaver", never the lead's name.
 - If you cannot write a genuine, non-fabricated follow-up with the context provided, return: {"status":"needs_more_research","missing_fields":["<what's missing>"],"reason":"Insufficient context for non-fabricated follow-up."}
 

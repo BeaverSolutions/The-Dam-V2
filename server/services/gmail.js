@@ -2,6 +2,7 @@
 
 const logsService = require('./logs');
 const secrets = require('./secrets');
+const telegram = require('./telegram');
 
 let google;
 try {
@@ -289,6 +290,12 @@ async function sendEmail(clientId, { to, subject, body, messageDbId }) {
       try {
         await disconnect(clientId);
         console.warn(`[gmail] Purged Gmail tokens for client ${clientId} — reauth required`);
+        const chatId = process.env.TELEGRAM_CHAT_ID;
+        if (chatId) {
+          telegram.sendMessage(chatId,
+            `⚠️ <b>Gmail disconnected</b> (${failureClass})\n\nToken expired or revoked. Reconnect Gmail in BeavrDam Settings → Integrations.\n\nLast error: <code>${msg.substring(0, 100)}</code>`
+          ).catch(() => {});
+        }
       } catch (purgeErr) {
         console.warn(`[gmail] Failed to purge dead tokens: ${purgeErr.message}`);
       }
