@@ -2858,6 +2858,79 @@ router.post('/dry-run-followup-drafts', requireInternalKey, async (req, res) => 
   }
 });
 
+/* ─── POST /api/autonomous/execute-followup-batch ──────────────
+ * Run executeApprovedFollowUp for N pending/skipped follow-ups, with
+ * safeMode=true so all approved drafts land in pending_approval (no auto-send,
+ * even for email above threshold). Use for validation runs of the v1.0
+ * follow-up format against real prod leads.
+ *
+ * Side effects:
+ *  - WRITES rows to messages, approvals, followup_queue
+ *  - Marks followup_queue rows as 'sent' (approved) or 'skipped' (rejected)
+ *  - Drafts approved by Enforcer land in pending_approval status (MJ reviews in UI)
+ *  - NO emails actually sent. NO LinkedIn auto-routing. MJ has full control.
+ *
+ * Body: { client_id, count: number (default 5, max 20) }
+ * Auth: x-internal-key
+ */
+router.post('/execute-followup-batch', requireInternalKey, async (req, res) => {
+  const { client_id, count = 5 } = req.body || {};
+  if (!client_id || !UUID_RE.test(String(client_id))) {
+    return res.status(400).json({ error: 'client_id required (UUID)' });
+  }
+  const n = Math.max(1, Math.min(20, parseInt(count, 10) || 5));
+
+  try {
+    const { executeApprovedFollowUp } = require('../services/followupSequence');
+
+    // Pull N due follow-ups. Include pending OR skipped (skipped ones might
+    // have been wrongly skipped under the old broken prompt — give them another shot).
+    const { rows: fus } = await pool.query(
+      `SELECT fq.id AS fu_id, fq.touch_number, fq.status AS fu_status, l.name, l.company
+       FROM followup_queue fq
+       JOIN leads l ON l.id = fq.lead_id
+       WHERE fq.client_id = $1
+         AND fq.status IN ('pending','skipped')
+         AND fq.scheduled_for::date <= CURRENT_DATE
+         AND l.sequence_status = 'active'
+         AND l.deleted_at IS NULL
+       ORDER BY (fq.status = 'pending') DESC, fq.scheduled_for ASC
+       LIMIT $2`,
+      [client_id, n]
+    );
+
+    if (fus.length === 0) {
+      return res.json({ data: { count: 0, results: [], note: 'no due followups' } });
+    }
+
+    // If row was previously skipped, flip back to pending so executeApprovedFollowUp
+    // doesn't bail on "already_skipped" status guard
+    await pool.query(
+      `UPDATE followup_queue SET status='pending' WHERE id = ANY($1::uuid[]) AND client_id=$2 AND status='skipped'`,
+      [fus.map(f => f.fu_id), client_id]
+    );
+
+    const results = [];
+    for (const fu of fus) {
+      const r = await executeApprovedFollowUp(client_id, fu.fu_id, null, null, { safeMode: true });
+      results.push({ lead_name: fu.name, company: fu.company, touch: fu.touch_number, ...r });
+    }
+
+    const summary = {
+      count: results.length,
+      approved: results.filter(r => r.status === 'approved').length,
+      rejected: results.filter(r => r.status === 'rejected').length,
+      errored: results.filter(r => r.status === 'error').length,
+      skipped: results.filter(r => r.status === 'skipped').length,
+    };
+
+    return res.json({ data: { summary, results } });
+  } catch (err) {
+    logger.error({ msg: 'execute-followup-batch failed', err: err.message, stack: err.stack });
+    return res.status(500).json({ error: 'Failed to run batch', code: 'BATCH_ERROR', message: err.message });
+  }
+});
+
 /* ─── POST /api/autonomous/vibe-prospecting/test ──────────────
  * Sentinel probe for the Vibe Prospecting (Explorium) integration.
  * Runs the full chain on a known business+prospect (Microsoft / Satya Nadella):

@@ -631,7 +631,11 @@ async function escalateChannel(clientId, leadId) {
  *
  * Returns: { status: 'approved'|'rejected'|'skipped'|'error', message_id, score }
  */
-async function executeApprovedFollowUp(clientId, followupId, captainAngle, angleTemplateId) {
+async function executeApprovedFollowUp(clientId, followupId, captainAngle, angleTemplateId, opts = {}) {
+  const { safeMode = false } = opts;
+  // safeMode=true: skip auto-approval routing. Drafts land in pending_approval
+  // (or ranger_rejected if Enforcer fails). MJ reviews in UI. NO auto-send.
+  // Use during validation runs when you don't want emails to actually fire.
   const { rangerReview } = require('./agents');
   const { enqueueMessage } = require('./sendQueueWorker');
   const { postFollowUpOutcome } = require('./learningEngine');
@@ -741,28 +745,34 @@ async function executeApprovedFollowUp(clientId, followupId, captainAngle, angle
 
   // 5. Auto-approval routing (only if Enforcer approved)
   if (approved) {
-    const { rows: [clientRow] } = await pool.query(`SELECT auto_approve_threshold FROM clients WHERE id = $1`, [clientId]);
-    const threshold = clientRow?.auto_approve_threshold;
-    const autoApproved = threshold != null && score >= threshold;
-
-    if (autoApproved) {
-      if (originalChannel === 'email') {
-        await pool.query(`UPDATE messages SET status = 'pending_send', updated_at = NOW() WHERE id = $1`, [savedMsg.id]);
-        await pool.query(
-          `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at) VALUES ($1, $2, 'auto_approval', 'approved', NOW())`,
-          [clientId, savedMsg.id]
-        );
-        await enqueueMessage(clientId, savedMsg.id).catch(() => {});
-      } else {
-        // LinkedIn: route to "Ready to Send" tab. MJ sends DM manually, then clicks "DM Sent".
-        await pool.query(`UPDATE messages SET status = 'linkedin_requested', updated_at = NOW() WHERE id = $1`, [savedMsg.id]);
-        await pool.query(
-          `INSERT INTO approvals (client_id, message_id, requested_by, status, notes) VALUES ($1, $2, 'auto_approval', 'pending', 'linkedin_requested')`,
-          [clientId, savedMsg.id]
-        );
-      }
+    if (safeMode) {
+      // Validation-run path: skip ALL auto-routing. Always land in pending_approval
+      // so MJ reviews every draft in UI. NO auto-send, even for email above threshold.
+      await pool.query(`INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system_safe_mode')`, [clientId, savedMsg.id]);
     } else {
-      await pool.query(`INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`, [clientId, savedMsg.id]);
+      const { rows: [clientRow] } = await pool.query(`SELECT auto_approve_threshold FROM clients WHERE id = $1`, [clientId]);
+      const threshold = clientRow?.auto_approve_threshold;
+      const autoApproved = threshold != null && score >= threshold;
+
+      if (autoApproved) {
+        if (originalChannel === 'email') {
+          await pool.query(`UPDATE messages SET status = 'pending_send', updated_at = NOW() WHERE id = $1`, [savedMsg.id]);
+          await pool.query(
+            `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at) VALUES ($1, $2, 'auto_approval', 'approved', NOW())`,
+            [clientId, savedMsg.id]
+          );
+          await enqueueMessage(clientId, savedMsg.id).catch(() => {});
+        } else {
+          // LinkedIn: route to "Ready to Send" tab. MJ sends DM manually, then clicks "DM Sent".
+          await pool.query(`UPDATE messages SET status = 'linkedin_requested', updated_at = NOW() WHERE id = $1`, [savedMsg.id]);
+          await pool.query(
+            `INSERT INTO approvals (client_id, message_id, requested_by, status, notes) VALUES ($1, $2, 'auto_approval', 'pending', 'linkedin_requested')`,
+            [clientId, savedMsg.id]
+          );
+        }
+      } else {
+        await pool.query(`INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'system')`, [clientId, savedMsg.id]);
+      }
     }
   }
 
