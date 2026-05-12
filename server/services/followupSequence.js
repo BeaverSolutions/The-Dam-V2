@@ -378,31 +378,34 @@ async function draftFollowUp(lead, touchNumber, previousMessages, captainAngle =
     console.log(`[followup] Touch 3 escalation for lead ${lead.id}: email → linkedin`);
   }
 
+  // PER-TOUCH ROLE per BEAVER_FOLLOWUP_FORMAT.md v1.0 (2026-05-12).
+  // Each touch must ALSO satisfy the 4-part structure enforced in FOLLOW-UP RULES below.
+  // MIRROR OF MJxClaude/sales-assets/BEAVER_FOLLOWUP_FORMAT.md — keep in sync.
   const touchConfig = {
     2: {
-      type: 'FU1 Day 2 — Genuine question about their business',
-      instruction: 'Ask a genuine question about their business that shows you looked at their company. Do NOT reuse any pain point, stat, or angle from the Day 0 message. No numbers, no percentages. Just a short, curious question about how they handle outbound or pipeline today.',
-      maxWords: 60,
+      type: 'FU2 Day 2 — New angle, reference touch 1',
+      instruction: 'Reference touch 1 SPECIFICALLY — name the point you made. Then offer a different angle on the same outbound pain. The diagnostic question must be NARROWER than the one in touch 1.',
+      maxWords: 70,
     },
     3: {
-      type: 'FU2 Day 5 — Timing check (one sentence)',
-      instruction: 'Reference the core idea from message 1 in one clause, then ask if timing is better now. Entire message must be ONE or TWO sentences. No stats, no proof, no pitch. Example tone: "Still thinking about whether automating outreach makes sense for [company] right now?"',
-      maxWords: 30,
+      type: 'FU3 Day 5 — Pattern interrupt with new trigger',
+      instruction: 'Pattern interrupt. Reference a NEW verifiable signal about them from the last 7-14 days (their LinkedIn post, hire, talk, milestone). Do NOT reference touch 1. New angle, new ask.',
+      maxWords: 60,
     },
     4: {
-      type: 'FU3 Day 10 — Contrarian observation',
-      instruction: 'Share one contrarian or non-obvious observation about their industry or role. No pitch, no CTA beyond a soft question. The goal is to sound like a peer sharing an insight, not a seller following up. Do NOT reference any prior message.',
-      maxWords: 40,
+      type: 'FU4 Day 10 — Contrarian observation',
+      instruction: 'Share one contrarian or non-obvious observation about their industry, role, or growth stage. Peer voice, not vendor. Soft diagnostic question. Do NOT reference any prior message.',
+      maxWords: 70,
     },
     5: {
-      type: 'FU4 Day 18 — Easy out / break-up',
-      instruction: 'Honest break-up. "Last one from me for now. If timing is off, happy to leave it here. But if [reference their specific situation from lead context] changes, the door is open." Under 30 words. No pressure.',
-      maxWords: 30,
+      type: 'FU5 Day 18 — Soft break-up',
+      instruction: 'Honest break-up. "Last note from me for now." Door-open clause referencing their specific situation from lead context. No pressure. Still has all 4 parts (reference, insight, ask, opt-out).',
+      maxWords: 50,
     },
     6: {
-      type: 'FU5 Day 30 — Re-awaken with new context',
-      instruction: 'Come back referencing something NEW about the lead — a LinkedIn post they made, a job they posted, a company milestone, or a market shift in their vertical. If no new context is available from lead data, reference a general trend in their industry. Must feel like a fresh conversation, not touch 6 of a sequence. One question.',
-      maxWords: 50,
+      type: 'FU6 Day 30 — Re-awaken with new context',
+      instruction: 'Come back referencing a NEW verifiable trigger from the last 30 days (LinkedIn post, hire, milestone, vertical shift). Must feel like a fresh conversation, not "touch 6 of 6". One specific question.',
+      maxWords: 70,
     },
   };
 
@@ -416,30 +419,25 @@ async function draftFollowUp(lead, touchNumber, previousMessages, captainAngle =
     })
     .join('\n---\n');
 
-  // Channel-specific format instructions
+  // Channel-specific format instructions per BEAVER_FOLLOWUP_FORMAT.md sign-off rules
   const channelFormat = channel === 'email'
     ? `FORMAT (email follow-up):
 Hi ${lead.name?.split(' ')[0] || 'there'},
 
-{body — max ${config.maxWords} words}
+{body — max ${config.maxWords} words. Must contain all 4 parts: reference/trigger, insight, 1-3-word-answerable diagnostic Q, opt-out clause.}
 
-Regards,
 Michael
 
-HARD RULES: No em dashes (—). Max 1 question mark. No bullets.`
+HARD RULES: No em dashes (—). Max 1 question mark. No bullets. Sign-off is "Michael" alone on a line — NO "Regards,", NO "Best,", NO "Cheers,", NO comma sign-off line.`
     : `FORMAT (${channel} DM follow-up):
-{body — max ${config.maxWords} words. No greeting, no sign-off. Casual tone.}
+{body — max ${config.maxWords} words. Must contain all 4 parts: reference/trigger, insight, 1-3-word-answerable diagnostic Q, opt-out clause. Casual tone. No greeting line. Name "Michael" only if natural at end.}
 
-HARD RULES: No em dashes (—). Max 1 question mark. No bullets. No "Regards,".`;
+HARD RULES: No em dashes (—). Max 1 question mark. No bullets. NO formal sign-off ("Regards,", "Best,", "Cheers,").`;
 
-  // 2026-05-06 fix: explicit pre-gate constraint at the top of the prompt.
-  // The downstream cron pre-gate enforces wordCap=120 (FU) and questionCap=2.
-  // 174 historical drafts were silently skipped because Sales Beaver wrote 130+
-  // word emails or stacked 3+ questions. Stating the cap up front + repeating
-  // it as a hard rule prevents the regeneration loop.
+  // Per-touch word cap from config (BEAVER_FOLLOWUP_FORMAT.md v1.0).
   // Retry path: if caller passed _retry_constraint, tighten the caps further.
   const retryConstraint = lead?._retry_constraint;
-  const hardWordCap = retryConstraint?.wordCap ?? Math.min(config.maxWords, 110);
+  const hardWordCap = retryConstraint?.wordCap ?? config.maxWords;
   const hardQuestionCap = retryConstraint?.questionCap ?? 1;
 
   const prompt = `You are Sales Beaver writing Touch ${touchNumber} of 6 in a follow-up sequence on ${channel}.
@@ -447,15 +445,33 @@ HARD RULES: No em dashes (—). Max 1 question mark. No bullets. No "Regards,".`
 PRE-GATE CONSTRAINT (server rejects drafts that violate these — NON-NEGOTIABLE):
 - Body must be under ${hardWordCap} words. Count the words in your draft before returning.
 - Body must contain AT MOST ${hardQuestionCap} question mark. Zero or one. Never two.
-- No em dashes. No bullet points. No "checking in" / "just following up".
+- No em dashes. No bullet points.
 
-FOLLOW-UP RULES (these override cold-DM rules for follow-ups):
-- ANTI-FABRICATION (HARD GATE): Every company name, product, role, or fact you mention MUST come from the LEAD context or PREVIOUS MESSAGES below. If the lead context says Company: "Unknown" or Title: "Unknown", do NOT invent a company name, product, or role. Work only with what you have.
-- NO STATS OR NUMBERS: Do NOT use any percentage, statistic, or numeric benchmark in follow-ups. No "X% reply rate", no "Y hours/week", no "Z DMs/week". Follow-ups are conversational, not pitches. If a previous message already cited a number, do NOT repeat it.
-- ANTI-REPETITION: Your draft must NOT reuse any hook, angle, pain point, or phrase from PREVIOUS MESSAGES below. Each touch must feel like a new thought, not a rephrased version of the last one.
-- BREVITY: Follow-ups should read like a quick text from a peer, not a sales email. Shorter is always better.
-- SENDER IDENTITY: Always sign as "Michael". Never "The Team", never "Sales Beaver", never the lead's name.
-- If you cannot write a genuine, non-fabricated follow-up with the context provided, return: {"status":"needs_more_research","missing_fields":["<what's missing>"],"reason":"Insufficient context for non-fabricated follow-up."}
+FOLLOW-UP RULES (v1.0 — these override cold-DM rules for follow-ups):
+
+THE 4-PART STRUCTURE (mandatory — every follow-up must have all four):
+1. REFERENCE OR NEW TRIGGER (exactly one): Either name a specific point from a previous touch in this sequence ("Sent you a note Tuesday on [specific thing]...") OR cite a NEW verifiable event from the last 7-30 days about them (LinkedIn post, hire, talk, milestone). Never both, never neither.
+2. INSIGHT: One non-obvious observation tied to their specific situation. Peer voice, not vendor. NOT a pitch, NOT a stat, NOT generic industry commentary.
+3. NARROWER ASK: A diagnostic question answerable in 1-3 words. Each touch the question gets MORE specific. NEVER "does this make sense?" / "any thoughts?" / "wdyt?" / "want to chat?" — those are qualification frames, not questions.
+4. OPT-OUT: One graceful exit clause. e.g. "If timing's off, happy to close the loop." / "If this isn't on your plate, no worries — I'll move on." NEVER absent.
+
+BANNED PHRASES (instant regenerate — case-insensitive):
+- "still thinking" / "just thinking" / "still wondering"
+- "just checking in" / "circling back" / "following up on" / "touching base"
+- "does X make sense" (qualification frame)
+- "for [Company] right now?" (template tell)
+- "any thoughts" / "wdyt" / "let me know your thoughts"
+- "Most founders" / "Most [role]s I talk to" / "Most [persona] I come across" (cold-tell)
+- "quick favor" / "quick ask"
+- "Hope this finds you well" / "Hope you're doing well" / "Hope all is well"
+- Formal sign-offs: "Regards,", "Best regards,", "Sincerely,", "Cheers,"
+
+OTHER HARD RULES:
+- ANTI-FABRICATION: Every company name, product, role, or fact MUST come from LEAD context or PREVIOUS MESSAGES. Lead context "Unknown" → return needs_more_research.
+- NO STATS OR NUMBERS: No percentage, statistic, or numeric benchmark in follow-ups. The cold message owned the stat — follow-ups don't repeat them.
+- ANTI-REPETITION: NEVER reuse a hook, angle, pain point, or phrase from PREVIOUS MESSAGES. Each touch is a new thought, not a rephrased version of the last.
+- SENDER IDENTITY: Sign as "Michael". Never "The Team", never "Sales Beaver", never the lead's name.
+- If you cannot write a non-fabricated follow-up with the context provided, return: {"status":"needs_more_research","missing_fields":["<what's missing>"],"reason":"Insufficient context for non-fabricated follow-up."}
 
 LEAD:
 Name: ${lead.name}
@@ -484,20 +500,25 @@ executes Captain's directive cleanly. The Enforcer will check whether your draft
 follows the angle and reject it if you ignored the directive.
 ` : ''}
 ═══════════════════════════════════════════════════
-THINK BEFORE YOU WRITE (mandatory reasoning step)
+THINK BEFORE YOU WRITE (mandatory reasoning + self-check)
 ═══════════════════════════════════════════════════
-Before drafting, answer these 4 questions in a "thinking" field:
-1. What angles/hooks did I already use in previous messages to this person?
-2. What do I ACTUALLY know about this specific company or person from the lead context that I haven't used yet?
-3. What is my chosen angle for THIS touch, and why is it different from everything before?${captainAngle ? ' (Note: angle is BINDING per Captain directive above.)' : ''}
-4. Can I write this without any fabricated facts? If not, what's missing?
+Before drafting, fill out this self-check in your "thinking" field. ALL 8 items must pass. If any fail, regenerate or return needs_more_research.
 
+1. PART 1 (Reference OR new trigger): Quote the exact phrase you'll use. Confirm: it's either a reference to a prior touch OR a NEW verifiable signal — not both, not neither.
+2. PART 2 (Insight): Quote it. Confirm: not a stat, not a pitch, not generic industry commentary.
+3. PART 3 (1-3-word-answerable diagnostic Q): Quote it. Confirm: not "does this make sense?" / "any thoughts?" / "want to chat?".
+4. PART 4 (Opt-out clause): Quote it.
+5. Anti-repetition: List the hooks/angles used in PREVIOUS MESSAGES. Confirm yours is DIFFERENT.
+6. Banned-phrase scan: Walk the banned list above. Confirm zero hits in your draft.
+7. Word count: count the body. Confirm under ${hardWordCap}.
+8. Question count: confirm ≤ ${hardQuestionCap} question mark.
+${captainAngle ? '\n9. Captain angle compliance: confirm your draft follows the BINDING directive above.\n' : ''}
 ${channelFormat}
 
-Before returning, verify: word count under ${hardWordCap}? Question marks ≤ ${hardQuestionCap}? Every fact verifiable from lead context? If not, rewrite.
+Before returning, re-verify the 8-item self-check above. If any item fails, rewrite.
 
 Return JSON only:
-{"thinking":"Your 4-point analysis here","subject":${channel === 'email' ? '"..."' : 'null'},"body":"...","touch_number":${touchNumber}}`;
+{"thinking":"Your 8-item self-check here, each item on its own line","subject":${channel === 'email' ? '"..."' : 'null'},"body":"...","touch_number":${touchNumber}}`;
 
   return await callAgent('sales_beaver', prompt);
 }
