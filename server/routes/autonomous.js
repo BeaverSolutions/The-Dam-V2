@@ -2768,11 +2768,11 @@ router.post('/dry-run-followup-drafts', requireInternalKey, async (req, res) => 
        FROM followup_queue fq
        JOIN leads l ON l.id = fq.lead_id
        WHERE fq.client_id = $1
-         AND fq.status = 'pending'
+         AND fq.status IN ('pending','skipped')
          AND fq.scheduled_for::date <= CURRENT_DATE
          AND l.sequence_status = 'active'
          AND l.deleted_at IS NULL
-       ORDER BY fq.scheduled_for ASC
+       ORDER BY (fq.status = 'pending') DESC, fq.scheduled_for ASC
        LIMIT $2`,
       [client_id, n]
     );
