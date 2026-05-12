@@ -59,11 +59,22 @@ CREATE INDEX IF NOT EXISTS idx_feedback_events_lead
 CREATE INDEX IF NOT EXISTS idx_feedback_events_aggregation
   ON feedback_events (client_id, event_type, source_strategy, signal_strength_at_time, created_at DESC);
 
--- RLS — tenant isolation matches other tables
+-- RLS — tenant isolation matches other tables.
+-- Idempotency guard matches the established pattern in 002_rls_policies.sql.
+-- Postgres has no CREATE POLICY IF NOT EXISTS — so check pg_policies first.
+-- Required because the table+policy were applied out-of-band via Supabase MCP
+-- on 2026-05-12 before this migration file landed in the repo; without the
+-- guard the Railway per-deploy runner crashes here on its first re-run
+-- (which is what took the server offline at 22:47 on 2026-05-12).
 ALTER TABLE feedback_events ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY tenant_isolation ON feedback_events
-  USING (client_id::text = current_setting('app.current_client_id', true));
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'feedback_events' AND policyname = 'tenant_isolation') THEN
+    CREATE POLICY tenant_isolation ON feedback_events
+      USING (client_id::text = current_setting('app.current_client_id', true));
+  END IF;
+END $$;
 
 COMMENT ON TABLE feedback_events IS
   'Phase 4 of rebuild plan — outcome events flowing back to Research + Sales Beaver weekly self-sharpening crons. Write-only foundation; consumer ships next sprint.';
