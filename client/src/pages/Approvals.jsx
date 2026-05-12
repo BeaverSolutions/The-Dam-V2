@@ -343,7 +343,14 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
             </>
           ) : (
             <>
-              {isLinkedin ? (
+              {/* Follow-up tab + LinkedIn: inline "DM Sent" combines approve + mark-sent + schedule-next-touch.
+                  Avoids the "approve here, then navigate to Ready to Send, then click DM Sent" two-step.
+                  Shipped 2026-05-12 per MJ request. */}
+              {tab === 'followups' && isLinkedin ? (
+                <button className="btn btn-success btn-sm" onClick={handleConnectionAccepted} disabled={acting} title="Marks the follow-up as sent and schedules the next touch. Click only after you have manually sent the DM on LinkedIn.">
+                  <UserCheck size={13} /> {acting ? 'Confirming…' : 'DM Sent'}
+                </button>
+              ) : isLinkedin ? (
                 <button className="btn btn-primary btn-sm" onClick={handleConnectionSent} disabled={acting}>
                   <Send size={13} /> {acting ? 'Approving…' : 'Approve'}
                 </button>
@@ -477,9 +484,12 @@ export default function Approvals() {
     try {
       await request(`/approvals/${id}/dm-sent`, { method: 'POST' });
       setApprovals(prev => prev.filter(a => a.id !== id));
+      // 2026-05-12: decrement the active tab's counter, not always 'awaiting'.
+      // Follow-up tab uses this same button (added 2026-05-12) so we must
+      // handle followups + awaiting + pending decrements correctly.
       setCounts(prev => ({
         ...prev,
-        awaiting: Math.max(0, prev.awaiting - 1),
+        [tab]: Math.max(0, (prev[tab] || 0) - 1),
         approved: (prev.approved || 0) + 1,
       }));
     } catch (err) {

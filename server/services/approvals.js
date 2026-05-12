@@ -370,14 +370,20 @@ async function markConnectionAccepted(clientId, approvalId, { userId }) {
   if (rows.length === 0) throw new AppError('Approval not found', 404, 'NOT_FOUND');
   const approval = rows[0];
 
-  // Allow from linkedin_requested OR approved messages (approved = went through
-  // resolveApproval path but hasn't been manually sent yet)
+  // Allow from linkedin_requested OR approved OR pending_approval messages.
+  // - linkedin_requested: cold draft routed to Awaiting tab, MJ sent manually
+  // - approved: went through resolveApproval but not manually sent yet
+  // - pending_approval (2026-05-12): follow-up draft in Follow-ups tab,
+  //   MJ chose to approve+send-in-one-click via the inline DM Sent button.
+  //   The function below already handles all three: approval row gets resolved,
+  //   message marked sent, follow-ups scheduled.
   const { rows: msgRows } = await pool.query(
     `SELECT status FROM messages WHERE id = $1 AND client_id = $2`,
     [approval.message_id, clientId]
   );
-  if (msgRows[0]?.status !== 'linkedin_requested' && msgRows[0]?.status !== 'approved') {
-    throw new AppError(`Message not in linkedin_requested or approved status (currently: ${msgRows[0]?.status})`, 400, 'WRONG_STATUS');
+  const allowedStatuses = ['linkedin_requested', 'approved', 'pending_approval'];
+  if (!allowedStatuses.includes(msgRows[0]?.status)) {
+    throw new AppError(`Message not in linkedin_requested/approved/pending_approval status (currently: ${msgRows[0]?.status})`, 400, 'WRONG_STATUS');
   }
 
   // Resolve the approval
