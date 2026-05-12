@@ -705,12 +705,20 @@ async function executeApprovedFollowUp(clientId, followupId, captainAngle, angle
   let score = 0;
   let rejectReason = null;
   try {
+    // Build previous_messages_summary so Enforcer can verify "Sent you a note..."
+    // references aren't fabricated. v1.0 follow-up format calls for these references;
+    // without summary in lead_context, Enforcer gate #9 (FABRICATION) flagged every one.
+    const previousMessagesSummary = (prevMessages || []).map((m, i) =>
+      `[Touch ${i + 1} (${m.channel || 'email'}): ${(m.body || '').substring(0, 200).replace(/\n+/g, ' ')}]`
+    ).join(' ');
+
     const result = await rangerReview(clientId, {
       message_id: savedMsg.id,
       message_body: cleanBody,
       lead_context: {
         touch_number: fu.touch_number, is_followup: true, name: fu.name, channel: originalChannel, captain_angle: captainAngle,
         company: fu.company, title: fu.title, signal: fu.signal || fu.metadata?.signal, angle: fu.metadata?.angle, why_now: fu.metadata?.why_now,
+        previous_messages_summary: previousMessagesSummary,
       },
     });
     approved = !!result?.approved;

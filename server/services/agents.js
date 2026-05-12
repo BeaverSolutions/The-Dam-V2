@@ -1175,8 +1175,11 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
       const personaContext = buildPersonaContext(persona);
 
       // Inject lead context so Enforcer can validate personalization is real
+      const prevSummary = lead_context?.previous_messages_summary
+        ? `- Touch number: ${lead_context.touch_number ?? 'unknown'} (this is a follow-up)\n- Previous messages in this sequence (VERIFIED — any 'Sent you a note...' style reference to these is NOT fabrication): ${lead_context.previous_messages_summary}\n`
+        : '';
       const leadContextStr = lead_context?.name
-        ? `LEAD CONTEXT (validate message is accurate for this person):\n- Name: ${lead_context.name}\n- Company: ${lead_context.company || 'Unknown'}\n- Title: ${lead_context.title || 'Unknown'}\n- Signal (why now): ${lead_context.signal || lead_context.why_now || 'Not specified'}\n- Angle: ${lead_context.angle || 'Not specified'}\n- Friction: ${lead_context.friction || 'Not specified'}\n\n`
+        ? `LEAD CONTEXT (validate message is accurate for this person):\n- Name: ${lead_context.name}\n- Company: ${lead_context.company || 'Unknown'}\n- Title: ${lead_context.title || 'Unknown'}\n- Signal (why now): ${lead_context.signal || lead_context.why_now || 'Not specified'}\n- Angle: ${lead_context.angle || 'Not specified'}\n- Friction: ${lead_context.friction || 'Not specified'}\n${prevSummary}\n`
         : '';
 
       const result = await callAgent(
