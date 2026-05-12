@@ -2738,6 +2738,126 @@ router.post('/trigger-market-sensing', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── POST /api/autonomous/dry-run-followup-drafts ─────────────
+ * Pure validation endpoint. Pulls N pending followup_queue rows for the client,
+ * calls draftFollowUp() + rangerReview() for each, RETURNS the drafts as JSON.
+ * Does NOT insert into messages, does NOT touch send queue, does NOT mark
+ * followup_queue rows as executed. Safe to call repeatedly.
+ *
+ * Added 2026-05-12 to validate BEAVER_FOLLOWUP_FORMAT.md v1.0 prompt changes
+ * against real production leads without risk of sending real outreach.
+ *
+ * Body: { client_id, count: number (default 3, max 10) }
+ * Auth: x-internal-key
+ */
+router.post('/dry-run-followup-drafts', requireInternalKey, async (req, res) => {
+  const { client_id, count = 3 } = req.body || {};
+  if (!client_id || !UUID_RE.test(String(client_id))) {
+    return res.status(400).json({ error: 'client_id required (UUID)' });
+  }
+  const n = Math.max(1, Math.min(10, parseInt(count, 10) || 3));
+
+  try {
+    const { draftFollowUp } = require('../services/followupSequence');
+
+    // Pull N pending followups due today, oldest first
+    const { rows: fus } = await pool.query(
+      `SELECT fq.id AS fu_id, fq.touch_number, fq.scheduled_for,
+              l.id AS lead_id, l.name, l.title, l.company, l.email, l.linkedin_url,
+              l.metadata, l.metadata->>'industry' AS industry
+       FROM followup_queue fq
+       JOIN leads l ON l.id = fq.lead_id
+       WHERE fq.client_id = $1
+         AND fq.status = 'pending'
+         AND fq.scheduled_for::date <= CURRENT_DATE
+         AND l.sequence_status = 'active'
+         AND l.deleted_at IS NULL
+       ORDER BY fq.scheduled_for ASC
+       LIMIT $2`,
+      [client_id, n]
+    );
+
+    if (fus.length === 0) {
+      return res.json({ data: { count: 0, drafts: [], note: 'no pending followups due today' } });
+    }
+
+    const drafts = [];
+    for (const fu of fus) {
+      // Previous messages for context
+      const { rows: prev } = await pool.query(
+        `SELECT subject, body, channel, metadata
+         FROM messages
+         WHERE lead_id = $1 AND client_id = $2
+           AND status IN ('sent','pending_send','approved','delivered','linkedin_requested')
+         ORDER BY created_at ASC LIMIT 6`,
+        [fu.lead_id, client_id]
+      );
+      const channel = prev[0]?.channel || 'email';
+
+      let draft;
+      let drafterr = null;
+      try {
+        draft = await draftFollowUp(fu, fu.touch_number, prev, null);
+      } catch (e) { drafterr = e.message; }
+
+      const body = draft?.body || '';
+      const wordCount = body.split(/\s+/).filter(Boolean).length;
+      const qCount = (body.match(/\?/g) || []).length;
+
+      // Run Enforcer scoring (read-only)
+      let score = null, decision = null, notes = null, enforcerErr = null;
+      if (body) {
+        try {
+          const r = await rangerReview(client_id, {
+            message_id: null,
+            message_body: body,
+            lead_context: {
+              touch_number: fu.touch_number, is_followup: true,
+              name: fu.name, channel, captain_angle: null,
+              company: fu.company, title: fu.title,
+              signal: fu.metadata?.signal, angle: fu.metadata?.angle, why_now: fu.metadata?.why_now,
+            },
+          });
+          score = r?.score ?? null;
+          decision = r?.approved ? 'approved' : 'rejected';
+          notes = (r?.notes || '').substring(0, 400);
+        } catch (e) { enforcerErr = e.message; }
+      }
+
+      drafts.push({
+        lead_name: fu.name,
+        company: fu.company,
+        title: fu.title,
+        touch: fu.touch_number,
+        channel,
+        subject: draft?.subject || null,
+        body,
+        thinking_preview: (draft?.thinking || '').substring(0, 500),
+        word_count: wordCount,
+        q_count: qCount,
+        ranger_score: score,
+        ranger_decision: decision,
+        ranger_notes: notes,
+        draft_status: draft?.status || (drafterr ? 'threw' : 'ok'),
+        drafterr,
+        enforcerErr,
+      });
+    }
+
+    const summary = {
+      count: drafts.length,
+      passed_60: drafts.filter(d => (d.ranger_score ?? 0) >= 60).length,
+      empty_bodies: drafts.filter(d => !d.body).length,
+      avg_score: drafts.filter(d => d.ranger_score != null).reduce((a,d)=>a+d.ranger_score, 0) / Math.max(1, drafts.filter(d => d.ranger_score != null).length),
+    };
+
+    return res.json({ data: { summary, drafts } });
+  } catch (err) {
+    logger.error({ msg: 'dry-run-followup-drafts failed', err: err.message, stack: err.stack });
+    return res.status(500).json({ error: 'Failed to run dry-run', code: 'DRY_RUN_ERROR', message: err.message });
+  }
+});
+
 /* ─── POST /api/autonomous/vibe-prospecting/test ──────────────
  * Sentinel probe for the Vibe Prospecting (Explorium) integration.
  * Runs the full chain on a known business+prospect (Microsoft / Satya Nadella):
