@@ -1213,6 +1213,23 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
             channel: lead_context?.channel,
             leadIndustry: lead_context?.industry,
           }).catch(() => {});
+
+          // Phase 4 rebuild plan (2026-05-12): feedback_events enforcer_rejected
+          // capture. Fire-and-forget. Feeds the cross-agent learning loop so the
+          // weekly consumer cron can correlate rejection patterns with signals.
+          require('./learningEngine').postFeedbackEvent(clientId, {
+            leadId: lead_context?.lead_id || null,
+            messageId: message_id || null,
+            eventType: 'enforcer_rejected',
+            signalStrengthAtTime: lead_context?.buying_signal_strength || (lead_context?.signal ? 'rich' : 'lite'),
+            sourceStrategy: lead_context?.source_strategy || null,
+            segment: lead_context?.industry || null,
+            channel: lead_context?.channel,
+            touchNumber: lead_context?.touch_number ?? 0,
+            rangerScore: score,
+            scoreDelta: score < 60 ? -(60 - score) : 0,
+            notes: result.reject_reason || result.feedback,
+          }).catch(() => {});
         }
 
         return {

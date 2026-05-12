@@ -135,6 +135,21 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
     });
     upsertDealSummary(clientId, leadId, { first_reply_at: new Date().toISOString() });
 
+    // Phase 4 rebuild plan (2026-05-12): feedback_events 'replied' capture.
+    // Fire-and-forget. Sentiment becomes a payload field so the consumer cron
+    // can weight signals/segments by reply quality, not just reply rate.
+    require('./learningEngine').postFeedbackEvent(clientId, {
+      leadId,
+      messageId,
+      eventType: 'replied',
+      signalStrengthAtTime: lead.metadata?.buying_signal_strength || null,
+      sourceStrategy: lead.metadata?.source_strategy || null,
+      segment: lead.metadata?.industry || null,
+      channel: 'email',
+      notes: typeof replySnippet === 'string' ? replySnippet.slice(0, 300) : null,
+      payload: { sentiment, confidence: classification.confidence },
+    }).catch(() => {});
+
     // ── Step 2: Stop follow-up sequence on ANY reply ────────
     // A reply (any sentiment) means the lead is engaged — stop automated follow-ups immediately.
     await pool.query(

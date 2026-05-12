@@ -858,6 +858,78 @@ function getWeekStart() {
   return monday;
 }
 
+/**
+ * Phase 4 of rebuild plan (2026-05-12) — execution-to-sourcing feedback loop.
+ *
+ * postFeedbackEvent writes a row to feedback_events for any lifecycle event
+ * that should inform future sourcing + drafting. Write-only foundation; the
+ * consumer (weekly cron biasing Research + Sales Beaver) lands next sprint.
+ *
+ * Call sites:
+ *   - rangerReview (agents.js)           — event_type='enforcer_rejected'
+ *   - resolveApproval (approvals.js)     — event_type='manually_rejected' or 'sent'
+ *   - replyHandler (replyHandler.js)     — event_type='replied'
+ *   - sendQueueWorker (sendQueueWorker)  — event_type='sent' (email auto-send path)
+ *
+ * All writes are fire-and-forget — failures log a warning but never block the
+ * caller. The table is observable but not in the critical path.
+ */
+async function postFeedbackEvent(clientId, event) {
+  const {
+    leadId = null,
+    messageId = null,
+    eventType,
+    signalStrengthAtTime = null,
+    sourceStrategy = null,
+    segment = null,
+    channel = null,
+    touchNumber = null,
+    scoreDelta = null,
+    rangerScore = null,
+    notes = null,
+    payload = {},
+  } = event;
+
+  if (!eventType) {
+    logger.warn({ msg: 'postFeedbackEvent called without eventType — skipping' });
+    return;
+  }
+
+  // Enforce constraint allowlist client-side too — catches typos before SQL.
+  const validTypes = new Set(['enforcer_rejected', 'manually_rejected', 'sent', 'replied', 'meeting_booked']);
+  if (!validTypes.has(eventType)) {
+    logger.warn({ msg: `postFeedbackEvent: invalid eventType "${eventType}"` });
+    return;
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO feedback_events (
+         client_id, lead_id, message_id, event_type,
+         signal_strength_at_time, source_strategy, segment, channel, touch_number,
+         score_delta, ranger_score, notes, payload
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)`,
+      [
+        clientId,
+        leadId,
+        messageId,
+        eventType,
+        signalStrengthAtTime,
+        sourceStrategy,
+        segment,
+        channel,
+        touchNumber,
+        scoreDelta,
+        rangerScore,
+        typeof notes === 'string' ? notes.slice(0, 500) : null,
+        JSON.stringify(payload || {}),
+      ]
+    );
+  } catch (err) {
+    logger.warn({ msg: 'postFeedbackEvent write failed', eventType, err: err.message });
+  }
+}
+
 module.exports = {
   getTelegramHistory,
   saveTelegramHistory,
@@ -876,4 +948,6 @@ module.exports = {
   computeEnforcerCalibration,
   setMemory,
   getMemory,
+  // Phase 4 rebuild plan (2026-05-12): execution-to-sourcing feedback loop
+  postFeedbackEvent,
 };

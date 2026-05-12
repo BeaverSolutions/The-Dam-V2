@@ -181,6 +181,41 @@ async function resolveApproval(clientId, approvalId, { status, notes, userId, ed
     console.warn('[approvals] founder_feedback capture failed:', feedbackErr.message);
   }
 
+  // Phase 4 (2026-05-12): write to feedback_events for the cross-agent learning loop.
+  // Fires for both 'approved' (eventually leads to 'sent') and 'rejected' (manual reject).
+  // Approved drafts get a 'sent' event later from sendQueueWorker; this captures
+  // the rejection path which is otherwise invisible to the new feedback table.
+  if (status === 'rejected') {
+    try {
+      const { postFeedbackEvent } = require('./learningEngine');
+      const { rows: [msgF] } = await pool.query(
+        `SELECT m.lead_id, m.channel, m.ranger_score, m.metadata,
+                l.buying_signal_strength, l.metadata->>'industry' AS industry,
+                l.metadata->>'source_strategy' AS source_strategy
+         FROM messages m
+         LEFT JOIN leads l ON l.id = m.lead_id
+         WHERE m.id = $1 AND m.client_id = $2`,
+        [existing.rows[0].message_id, clientId]
+      );
+      if (msgF) {
+        await postFeedbackEvent(clientId, {
+          leadId: msgF.lead_id,
+          messageId: existing.rows[0].message_id,
+          eventType: 'manually_rejected',
+          signalStrengthAtTime: msgF.buying_signal_strength,
+          sourceStrategy: msgF.source_strategy,
+          segment: msgF.industry,
+          channel: msgF.channel,
+          touchNumber: msgF.metadata?.touch_number ?? 0,
+          rangerScore: msgF.ranger_score,
+          notes: notes || null,
+        });
+      }
+    } catch (eventErr) {
+      console.warn('[approvals] feedback_events capture failed:', eventErr.message);
+    }
+  }
+
   // Phase 4 (2026-05-11): record MJ's decision to followup_learnings for
   // Enforcer self-calibration. An "override" is when MJ disagrees with what
   // Enforcer decided. Since pending_approval messages all passed Enforcer,

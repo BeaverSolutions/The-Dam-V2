@@ -130,6 +130,20 @@ async function processJob(job) {
           touch_number: parseInt(touchRes.rows[0].cnt, 10),
           agent: 'system',
         });
+
+        // Phase 4 rebuild plan (2026-05-12): feedback_events 'sent' capture.
+        // Fire-and-forget. Writes to the cross-agent learning loop table so
+        // the weekly consumer cron can correlate signals/segments with what
+        // actually shipped.
+        require('./learningEngine').postFeedbackEvent(client_id, {
+          leadId: msg.lead_id,
+          messageId: message_id,
+          eventType: 'sent',
+          channel: msg.channel,
+          touchNumber: parseInt(touchRes.rows[0].cnt, 10),
+          signalStrengthAtTime: msg.metadata?.buying_signal_strength || null,
+          payload: { send_status: result?.status },
+        }).catch(() => {});
       }
     } catch (trackErr) {
       console.warn('[send_queue] Conversion tracking failed:', trackErr.message);
