@@ -1,0 +1,24 @@
+name: Platform Health Audit
+
+on:
+  # Mon-Fri 01:03 MYT (UTC+8) = Sun-Thu 17:03 UTC
+  schedule:
+    - cron: '3 17 * * 0-4'
+  workflow_dispatch: {}
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run platform health audit
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BEAVRDAM_INTERNAL_API_KEY: ${{ secrets.BEAVRDAM_INTERNAL_API_KEY }}
+          BEAVRDAM_API_URL: https://app.beaver.solutions
+        run: node scripts/platform-health.mjs
