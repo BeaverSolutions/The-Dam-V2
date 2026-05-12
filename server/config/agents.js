@@ -502,7 +502,7 @@ The system has already run word count, question-mark count, em dash detection, b
 
 JUDGMENT GATES (your job — any single failure = immediate reject, score = 0):
 1. PITCH DETECTION: A product or service is mentioned BY NAME as a thing being sold ("we built X which solves Y", "introducing our new Z"). REJECT. A passing reference to a category ("most lead-gen tools") is fine.
-2. QUALIFICATION QUESTION: The closing question asks the prospect to disclose facts about their operation as a way to qualify them — "do you run X?", "does your team do Y?", "are you currently using W?". Yes/no questions about whether they do a thing = qualification. REJECT. Note: under v1.0, quantitative questions ("how many hours", "what %", "how often weekly or rarely") are NOT qualification — they ARE the approved 1-3-word-answerable diagnostic format. Allow them.
+2. QUALIFICATION QUESTION (revised 2026-05-12 per BEAVER_FOLLOWUP_FORMAT.md v1.0): A qualification question is one where the prospect must commit to a vague position about themselves/their org with NO specific anchor. BAD examples: "does this make sense?", "is this a fit?", "are you currently looking for X?", "would this be useful for you?", "do you run outbound?". REJECT those.\n\n   Three forms ARE allowed (these are diagnostic, not qualification):\n   (a) SPLIT-DECISION Qs (1-3 word answer that picks between named options): "in-house or outsourced?", "you or the team?", "referrals or outbound?", "before or during?". These split a decision space — prospect answers with one of the offered options. ALLOW.\n   (b) QUANTITATIVE Qs: "how many hours?", "what %?", "how often, weekly or rarely?". ALLOW.\n   (c) SPECIFIC yes/no with a CONCRETE anchored object: "Is outbound paused while the VP role is open?", "Is the system in place before the BDRs start?". These are NOT vague qualification — they reference a specific named situation in the lead's context. ALLOW.\n\n   Default test: if the question can be answered with a single concrete word/phrase that names something specific (a path, a person, a time, a number, a yes/no on a concrete anchored event), it's diagnostic — ALLOW. If the question requires the prospect to commit to a vague self-assessment ("is X a fit", "does Y make sense"), it's qualification — REJECT.
 3. VENDOR DM TEST: Read the message as if you received it cold as a busy founder. Does it explicitly pitch a product, list features, or read like a brochure? REJECT. A question about a business challenge is NOT a vendor pitch — it's a conversation starter. Only reject if the message is clearly selling.
 4. FOLLOW-UP REPETITION: If this is a follow-up (touch_number > 0), does it mirror the structure or phrasing of the previous message in this thread? REJECT.
 5. V1.0 STRUCTURE: For Day 0 cold messages (touch_number == 0), confirm the 4-part structure is present — (a) line 1 anchored on the company with either a verifiable trigger OR a real observable fact about the company/role (both are valid openers; what matters is that line 1 is specific to THIS lead, not generic), (b) value hook tied to one of the 5 segment pains, (c) 1-3-word-answerable diagnostic question (max 14 words, ends in "?"), (d) varied opt-out closer. If any of the four parts is missing or malformed, REJECT with reject_reason "V1_STRUCTURE_<part>". A message that opens with "Running a [role] at [company]..." or "[Company] is [real observation from context]..." IS a valid line 1 even without a dated trigger. Only reject line 1 if it contains NO reference to the lead's company or role at all, or if it fabricates a trigger that isn't in the lead context. For follow-ups (touch_number > 0), the 4-part structure does NOT apply — but the message must have a distinct angle from prior messages AND must not fabricate any company details not present in the lead context.
@@ -615,9 +615,12 @@ Return JSON only: {"summary":"2-3 sentence brief","stats":{}}`,
       // 600 was insufficient — Sonnet was truncating the JSON envelope
       // mid-string (cap hit before closing brace), causing extractBriefText
       // to fail JSON.parse and leak the partial envelope to Telegram.
-      // 2000 covers a ~1500-char brief + JSON wrapper + decisions array
-      // with comfortable headroom. ~$0.03 per call at Sonnet 4.6 input cost.
-      maxTokens: 2000,
+      // 2000-bump: 2026-05-12 — 2000 was insufficient for planFollowUps which
+      // must output an angles array for 50-100 leads per cycle. Today's plan
+      // truncated mid-JSON on 59 leads, parse failed, ALL 59 fell back to
+      // default templates ("Captain LLM unavailable, fallback to safe default").
+      // 5000 covers ~70-char angle × 100 leads + JSON wrapper.
+      maxTokens: 5000,
       name: 'Captain Beaver',
       systemPrompt: `You are Captain Beaver — the team's operational GM. You orchestrate Research Beaver, Sales Beaver, and Enforcer Beaver day-to-day. You report to MJ.
 
