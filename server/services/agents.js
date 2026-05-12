@@ -1108,6 +1108,24 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
       channel: lead_context?.channel,
       leadIndustry: lead_context?.industry,
     }).catch(() => {});
+    // Phase 4 rebuild plan (2026-05-12): feedback_events enforcer_rejected
+    // capture on brand-safety reject path (was missed in f86a0f5 — only
+    // captured Sonnet-path rejects). Brand-safety is high-signal: name
+    // mismatches, hallucinated facts, prompt-injection attempts all land here.
+    require('./learningEngine').postFeedbackEvent(clientId, {
+      leadId: lead_context?.lead_id || null,
+      messageId: message_id || null,
+      eventType: 'enforcer_rejected',
+      signalStrengthAtTime: lead_context?.buying_signal_strength || null,
+      sourceStrategy: lead_context?.source_strategy || null,
+      segment: lead_context?.industry || null,
+      channel: lead_context?.channel,
+      touchNumber: lead_context?.touch_number ?? 0,
+      rangerScore: 0,
+      scoreDelta: -60,
+      notes: `brand_safety:${safety.reason}`,
+      payload: { failure_class: 'brand_safety', reason: safety.reason },
+    }).catch(() => {});
     return {
       message_id,
       approved: false,
@@ -1152,6 +1170,23 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
       score: 0,
       channel: lead_context?.channel,
       leadIndustry: lead_context?.industry,
+    }).catch(() => {});
+    // Phase 4 rebuild plan (2026-05-12): feedback_events enforcer_rejected
+    // capture on code-gate reject path (was missed in f86a0f5). Code gates
+    // catch word-count, em-dash, multi-?, etc. — useful pattern data.
+    require('./learningEngine').postFeedbackEvent(clientId, {
+      leadId: lead_context?.lead_id || null,
+      messageId: message_id || null,
+      eventType: 'enforcer_rejected',
+      signalStrengthAtTime: lead_context?.buying_signal_strength || null,
+      sourceStrategy: lead_context?.source_strategy || null,
+      segment: lead_context?.industry || null,
+      channel: lead_context?.channel,
+      touchNumber: lead_context?.touch_number ?? 0,
+      rangerScore: 0,
+      scoreDelta: -60,
+      notes: `code_gate:${gateCheck.reason}`,
+      payload: { failure_class: 'code_gate', reason: gateCheck.reason },
     }).catch(() => {});
     return {
       message_id,
