@@ -27,7 +27,9 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
   const [saving, setSaving]       = useState(false);
   const [acting, setActing]       = useState(false);
   const [copied, setCopied]       = useState(false);
-  const resolved = tab !== 'pending' && tab !== 'awaiting';
+  // Follow-ups tab needs action buttons too — the DM Sent button for LinkedIn followups
+  // is rendered from the !resolved branch below. Without followups here, the button never renders.
+  const resolved = tab !== 'pending' && tab !== 'awaiting' && tab !== 'followups';
 
   // A message is "auto-sendable" only if the channel is email AND we have an email.
   // LinkedIn / Instagram / any other channel is MANUAL SEND — user copies the message

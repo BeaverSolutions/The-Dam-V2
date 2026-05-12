@@ -55,11 +55,21 @@ function nextBusinessDay(date) {
 /**
  * Schedule follow-up touches 2-6 when a lead is first contacted.
  *
- * GUARD (2026-05-11): Refuses to schedule unless touch 1 has actual delivery proof.
+ * GUARD (2026-05-11, tightened 2026-05-13):
+ *   Refuses to schedule unless touch 1 has actual delivery proof.
  *   - Email: any prior message with gmail_message_id OR agentmail_message_id populated
- *   - LinkedIn: any prior message with status='sent' AND sent_at NOT NULL
- *               (status='linkedin_requested' is NOT sufficient — that's connection
- *                request only, the DM hasn't been delivered yet)
+ *   - LinkedIn / Instagram: any prior message with status='sent' AND sent_at NOT NULL
+ *                           AND NOT auto_sweep_graduated.
+ *
+ * Why the auto_sweep_graduated exclusion (2026-05-13):
+ *   The disabled sweepStaleLinkedInRequests cron used to flip linkedin_requested →
+ *   sent after 3 days *without proof of acceptance*. Even though that auto-graduate
+ *   is now disabled (server/index.js line 1259), ~84 historic phantom-graduated
+ *   rows survived in the DB and were triggering Day 2 follow-ups every night.
+ *   Today's 9 visible phantom follow-ups were the symptom. The DM Sent button
+ *   (markConnectionAccepted in approvals.js) is the only canonical proof: it
+ *   sets status='sent' without ever stamping auto_sweep_graduated. So filtering
+ *   that flag out lets real DM-sent messages pass while killing every phantom.
  *
  * Background: 33 leads were infected with phantom follow-ups (linkedin_requested,
  * simulated-sent email, ranger_rejected cold) because scheduleFollowUps was called
@@ -76,7 +86,8 @@ async function scheduleFollowUps(clientId, leadId, firstContactDate) {
          AS email_delivered,
        COUNT(*) FILTER (WHERE channel IN ('linkedin', 'instagram')
                           AND status = 'sent'
-                          AND sent_at IS NOT NULL)
+                          AND sent_at IS NOT NULL
+                          AND COALESCE((metadata->>'auto_sweep_graduated')::boolean, false) = false)
          AS manual_send_confirmed
      FROM messages
      WHERE lead_id = $1 AND client_id = $2`,
