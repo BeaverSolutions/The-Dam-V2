@@ -297,7 +297,10 @@ OUTPUT FORMAT — return JSON only, no markdown:
       // is ~$0.50/day on ~50 drafts; trivial vs the meeting-rate cost of 0%
       // pass. Threshold to revisit: 7 days of ≥60% first-pass on Sonnet.
       model: MODELS.SONNET,
-      maxTokens: 1024,
+      // 2026-05-12: bumped 1024 → 2048. v1.0 follow-up format requires an 8-item
+      // self-check in `thinking` field; with the body, 1024 hit ceiling on 3/5
+      // dry-run cases and returned empty bodies. 2048 gives ~1KB headroom.
+      maxTokens: 2048,
       name: 'Sales Beaver',
       systemPrompt: `You are Sales Beaver at Beaver Solutions. You write cold outreach messages, handle replies, and obsess over your numbers.
 
