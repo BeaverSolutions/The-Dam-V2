@@ -1229,6 +1229,19 @@ async function start() {
     // which silently killed active LinkedIn conversations. This inversion is
     // the Option D fix from memory `project_beavrdam_linkedin_blindspot.md`.
     async function sweepStaleLinkedInRequests() {
+      // 2026-05-12: DISABLED — auto-graduating linkedin_requested → sent after
+      // 3 days produced phantom follow-ups for prospects who never accepted
+      // the connection request. The DM Sent button (commit adaf250, 2026-05-12)
+      // is now the canonical delivery proof. MJ clicks it after manually
+      // sending the DM, which marks sent + sent_at + triggers scheduleFollowUps.
+      //
+      // Auto-sweep auto-graduate is removed. Stale linkedin_requested messages
+      // stay in their state and surface in the Awaiting Accept UI tab — MJ
+      // verifies real acceptance manually and clicks DM Sent.
+      //
+      // The function is preserved as observability only: count stale messages,
+      // log the count, no state mutation. If MJ wants alerts on large stale
+      // backlogs, route via Captain's stuck-state monitor.
       try {
         const { rows: staleMessages } = await pool.query(
           `SELECT m.id AS message_id, m.lead_id, m.client_id, l.name AS lead_name, l.company AS lead_company
@@ -1240,8 +1253,12 @@ async function start() {
         );
 
         if (staleMessages.length === 0) return;
-        logger.info({ msg: `LinkedIn sweep: auto-graduating ${staleMessages.length} connections past 3-day window`, count: staleMessages.length });
+        logger.info({ msg: `LinkedIn sweep: ${staleMessages.length} stale linkedin_requested (>3d). Auto-graduate DISABLED — MJ clicks DM Sent for canonical delivery proof.`, stale_count: staleMessages.length });
+        // Early return — no state mutation. The block below is preserved for
+        // historical reference but unreachable.
+        return;
 
+        // ─── BELOW THIS POINT: dead code (preserved for diff archaeology) ───
         const { scheduleFollowUps } = require('./services/followupSequence');
 
         for (const msg of staleMessages) {
