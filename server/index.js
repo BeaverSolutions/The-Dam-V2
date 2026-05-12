@@ -1028,9 +1028,13 @@ async function start() {
       // 01:00-09:59 UTC = 09:00-17:59 MYT (stop before 18:00 — no late kickoffs)
       if (utcHour < 1 || utcHour >= 10) return;
 
-      // Hourly cadence: fire at :00-:09 only
+      // 2026-05-12: relaxed minute window 0-9 → 0-29. With 10-min poll cadence,
+      // the old window only landed if poll happened to align with :00-:09 of an
+      // hour. Empirically today only 1 of 9 hourly slots fired. Wider window
+      // ensures every hourly poll has a chance to fire (still gated by hourly
+      // dedupe so we never fire more than once per hour).
       const m = now.getUTCMinutes();
-      if (m >= 10) return;
+      if (m >= 30) return;
 
       // Hourly dedupe
       const dedupeKey = `kpi_gap_kickoff_${now.toISOString().slice(0, 13)}`;
@@ -1038,10 +1042,16 @@ async function start() {
         `SELECT 1 FROM agent_memory WHERE agent = 'captain_orchestrator' AND key = $1 LIMIT 1`,
         [dedupeKey]
       );
-      if (already.length > 0) return;
+      if (already.length > 0) {
+        logger.debug({ msg: `[kpi-gap] hourly dedupe hit for ${dedupeKey}` });
+        return;
+      }
 
       const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
-      if (enabledSlugs.length === 0) return;
+      if (enabledSlugs.length === 0) {
+        logger.warn({ msg: '[kpi-gap] AUTONOMOUS_ENABLED_CLIENTS is empty — cron is no-op' });
+        return;
+      }
 
       const { rows: clients } = await pool.query(
         `SELECT id, slug FROM clients WHERE slug = ANY($1) AND is_active = true AND onboarding_completed = true`,
@@ -1059,7 +1069,10 @@ async function start() {
           );
           const target = kpiRow?.target || 50;
           const sent = kpiRow?.outreach_sent || 0;
-          if (sent >= target) continue; // KPI met, skip
+          if (sent >= target) {
+            logger.info({ msg: `[kpi-gap] ${client.slug}: KPI met (${sent}/${target}), skipping` });
+            continue;
+          }
 
           // Daily cap: max 6 kickoffs per day (count signal_pipeline_executing logs)
           const { rows: [{ cnt: kickoffsToday }] } = await pool.query(
