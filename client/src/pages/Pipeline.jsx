@@ -530,11 +530,12 @@ function SequenceSection({ leadId, clientId }) {
             {seq.sequence_status}
           </strong>
         </span>
+        {/* ✓ Replied always available — every back-and-forth reply needs to fire reply intelligence */}
+        <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', gap: '0.25rem', color: 'var(--blue)' }} onClick={handleMarkReplied} disabled={acting} title="Mark this lead as replied — fires reply intelligence (classify, stop sequence, draft response on same channel, log). Click again on each new reply in a back-and-forth.">
+          ✓ Replied
+        </button>
         {seq.sequence_status === 'active' && (
           <>
-            <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', gap: '0.25rem', color: 'var(--blue)' }} onClick={handleMarkReplied} disabled={acting} title="Mark this lead as replied — fires the canonical reply path (stops sequence, advances stage, captures snippet, notifies Telegram).">
-              ✓ Replied
-            </button>
             <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', gap: '0.25rem' }} onClick={() => handleAction('pause')} disabled={acting}>
               <PauseCircle size={11} /> Pause
             </button>

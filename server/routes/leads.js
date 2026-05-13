@@ -128,11 +128,14 @@ router.post('/:id/mark-replied',
     const replyText = (req.body.reply_text || '').slice(0, 500);
 
     try {
-      // 1. Find most recent sent unrepliedsent linkedin message (if any).
+      // 1. Find most recent sent linkedin message (regardless of reply_detected_at).
+      // 2026-05-13: back-and-forth support. Every new reply in a conversation should
+      // re-fire reply intelligence against the most recent sent message. The original
+      // first-reply timestamp is preserved by COALESCE in the update below.
       const { rows: msgRows } = await pool.query(
-        `SELECT id, sent_at FROM messages
+        `SELECT id, sent_at, reply_detected_at FROM messages
          WHERE client_id = $1 AND lead_id = $2 AND channel = 'linkedin'
-           AND status = 'sent' AND reply_detected_at IS NULL
+           AND status = 'sent'
          ORDER BY sent_at DESC LIMIT 1`,
         [clientId, leadId]
       );
@@ -162,14 +165,17 @@ router.post('/:id/mark-replied',
       }
       const lead = leadRows[0];
 
-      // 3. If we found a sent message, mark it replied.
+      // 3. If we found a sent message, record this reply.
+      // 2026-05-13: COALESCE preserves the original first-reply timestamp on
+      // repeat clicks (back-and-forth conversations). reply_snippet always
+      // updates to the latest text so we have the most recent reply on file.
       if (msg) {
         await pool.query(
           `UPDATE messages
-             SET reply_detected_at = NOW(),
+             SET reply_detected_at = COALESCE(reply_detected_at, NOW()),
                  reply_snippet = $2,
                  updated_at = NOW()
-           WHERE id = $1 AND reply_detected_at IS NULL`,
+           WHERE id = $1`,
           [msg.id, replyText]
         );
       }
