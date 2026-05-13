@@ -2097,11 +2097,65 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
             );
             const threshold = clientRow?.auto_approve_threshold;
             if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
-              autoApproved = true;
-              nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
-              approvalStatus = 'approved';
-              resolvedAt = new Date();
-              console.log(`[pipeline] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold} (channel=${msg.channel}, next=${nextMessageStatus})`);
+              // 2026-05-13: q2-plan.md auto-approve contract gates.
+              // Fail-safe — any gate that errors falls through to manual approval.
+              let gatesPass = true;
+              let gateFailReason = null;
+
+              // Gate 1: AUTO_APPROVE_ENABLED env (Railway kill-switch). Default OFF only if explicitly 'false'.
+              if (process.env.AUTO_APPROVE_ENABLED === 'false') {
+                gatesPass = false;
+                gateFailReason = 'AUTO_APPROVE_ENABLED=false (Railway kill-switch)';
+              }
+
+              // Gate 2: client onboarded >7 days ago (fresh tenants get MJ's eye only).
+              if (gatesPass) {
+                try {
+                  const { rows: [ageRow] } = await pool.query(
+                    `SELECT (NOW() - created_at) > INTERVAL '7 days' AS is_seasoned FROM clients WHERE id = $1`,
+                    [clientId]
+                  );
+                  if (!ageRow?.is_seasoned) {
+                    gatesPass = false;
+                    gateFailReason = 'client onboarded <7 days ago';
+                  }
+                } catch (err) {
+                  console.warn('[pipeline] auto-approve onboarding-gate query failed (defaulting to manual):', err.message);
+                  gatesPass = false;
+                  gateFailReason = 'onboarding-gate query error';
+                }
+              }
+
+              // Gate 3: no 'sent' message to this lead in last 30 days (prevents re-outreach overlap).
+              if (gatesPass) {
+                try {
+                  const { rows: [dupRow] } = await pool.query(
+                    `SELECT COUNT(*)::int AS recent FROM messages
+                      WHERE client_id = $1 AND lead_id = $2 AND id <> $3
+                        AND status = 'sent'
+                        AND sent_at IS NOT NULL AND sent_at > NOW() - INTERVAL '30 days'`,
+                    [clientId, lead.id, msg.id]
+                  );
+                  if (dupRow.recent > 0) {
+                    gatesPass = false;
+                    gateFailReason = `lead messaged within 30 days (${dupRow.recent} recent send(s))`;
+                  }
+                } catch (err) {
+                  console.warn('[pipeline] auto-approve 30-day dedup query failed (defaulting to manual):', err.message);
+                  gatesPass = false;
+                  gateFailReason = '30-day dedup query error';
+                }
+              }
+
+              if (gatesPass) {
+                autoApproved = true;
+                nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
+                approvalStatus = 'approved';
+                resolvedAt = new Date();
+                console.log(`[pipeline] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold} (channel=${msg.channel}, next=${nextMessageStatus})`);
+              } else {
+                console.log(`[pipeline] AUTO-APPROVE BLOCKED ${msg.id}: score ${rangerScore} >= threshold ${threshold} but gate failed — ${gateFailReason} — routing to pending_approval`);
+              }
             }
           } catch (err) {
             console.warn('[pipeline] Failed to read auto_approve_threshold, defaulting to manual:', err.message);
@@ -3748,10 +3802,61 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         const threshold = clientRow?.auto_approve_threshold;
 
         if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
-          autoApproved = true;
-          approvalStatus = 'approved';
-          nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
-          console.log(`[enforcer] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold} (channel=${msg.channel}, next=${nextMessageStatus})`);
+          // 2026-05-13: q2-plan.md auto-approve contract gates (mirror of signal_pipeline site).
+          // Fail-safe — any gate that errors falls through to manual approval.
+          let gatesPass = true;
+          let gateFailReason = null;
+
+          if (process.env.AUTO_APPROVE_ENABLED === 'false') {
+            gatesPass = false;
+            gateFailReason = 'AUTO_APPROVE_ENABLED=false (Railway kill-switch)';
+          }
+
+          if (gatesPass) {
+            try {
+              const { rows: [ageRow] } = await pool.query(
+                `SELECT (NOW() - created_at) > INTERVAL '7 days' AS is_seasoned FROM clients WHERE id = $1`,
+                [clientId]
+              );
+              if (!ageRow?.is_seasoned) {
+                gatesPass = false;
+                gateFailReason = 'client onboarded <7 days ago';
+              }
+            } catch (err) {
+              console.warn('[enforcer] auto-approve onboarding-gate query failed (defaulting to manual):', err.message);
+              gatesPass = false;
+              gateFailReason = 'onboarding-gate query error';
+            }
+          }
+
+          if (gatesPass) {
+            try {
+              const { rows: [dupRow] } = await pool.query(
+                `SELECT COUNT(*)::int AS recent FROM messages
+                  WHERE client_id = $1 AND lead_id = $2 AND id <> $3
+                    AND status = 'sent'
+                    AND sent_at IS NOT NULL AND sent_at > NOW() - INTERVAL '30 days'`,
+                [clientId, lead.id, msg.id]
+              );
+              if (dupRow.recent > 0) {
+                gatesPass = false;
+                gateFailReason = `lead messaged within 30 days (${dupRow.recent} recent send(s))`;
+              }
+            } catch (err) {
+              console.warn('[enforcer] auto-approve 30-day dedup query failed (defaulting to manual):', err.message);
+              gatesPass = false;
+              gateFailReason = '30-day dedup query error';
+            }
+          }
+
+          if (gatesPass) {
+            autoApproved = true;
+            approvalStatus = 'approved';
+            nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
+            console.log(`[enforcer] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold} (channel=${msg.channel}, next=${nextMessageStatus})`);
+          } else {
+            console.log(`[enforcer] AUTO-APPROVE BLOCKED ${msg.id}: score ${rangerScore} >= threshold ${threshold} but gate failed — ${gateFailReason} — routing to pending_approval`);
+          }
         }
       } catch (err) {
         console.warn('[enforcer] Failed to read auto_approve_threshold, defaulting to manual:', err.message);
