@@ -1031,12 +1031,27 @@ function brandSafetyCheck(body, leadContext = {}) {
  * regardless of Claude's score.
  */
 const BANNED_PHRASES = [
+  // Generic vendor-speak
   'cutting-edge', 'paradigm shift', 'seamless', 'leverage', 'synergy',
   'game-changer', 'innovative', 'revolutionary', 'transformative', 'delve',
   'i hope this email finds you well', 'i wanted to reach out', 'unlock',
   'unleash', 'empower', 'elevate', 'streamline', 'actionable insights',
   'thought leader', 'disruptive', 'data-driven', 'circle back', 'touch base',
   'move the needle', 'best-in-class',
+  // 2026-05-13: Beaver v1.0 cold-tells (sales-assets/BEAVER_LINKEDIN_OUTREACH_RULES.md)
+  // Flagged in Cowork-Emplifive 2026-05-13 EOD handoff: "at what point does" slipped past
+  // Enforcer on Kuben cold draft. v1.0 rule file lists these as instant-reject patterns.
+  'at what point does', 'how do you think about', "what's your approach to",
+  'most founders i talk to', 'most founders i speak to',
+  'we help teams like yours', 'agencies like yours', 'founders like you',
+  'worth a chat', '15 minutes this week', '15 mins this week',
+  'happy to jump on a call', 'happy to hop on a call',
+  'passionate about', 'results-driven',
+  'hope this finds you well', "hope you're doing well", 'hope all is well',
+  // Follow-up cold-tells (mirror followupSequence.js prompt banned list)
+  'just checking in', 'circling back', 'following up on',
+  'still thinking', 'just thinking', 'still wondering',
+  'quick favor', 'quick ask',
 ];
 
 function codeEnforcerGates(body, touchNumber = 0) {

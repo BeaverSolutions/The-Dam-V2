@@ -2251,7 +2251,7 @@ router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
       const { rows: [updated] } = await pool.query(
         `UPDATE messages SET status = 'sent', sent_at = NOW(), updated_at = NOW()
          WHERE id = $1 AND client_id = $2 AND channel = 'linkedin' AND status = 'approved'
-         RETURNING id, lead_id, sent_at`,
+         RETURNING id, lead_id, sent_at, body`,
         [message_id, client_id]
       );
       if (!updated) {
@@ -2265,10 +2265,27 @@ router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
         [updated.lead_id, client_id]
       );
 
+      // 2026-05-13: Phase 4 capture for manual Chrome sends. If Cowork passes the final sent
+      // body and it differs from the original draft, write a founder_feedback row so the
+      // weekly Sales few-shot rebuild sees MJ's manual edits. Backward-compatible:
+      // pre-existing Cowork calls without final_body still succeed, just no diff captured.
+      const { final_body } = req.body || {};
+      if (final_body && typeof final_body === 'string' && updated.body && updated.body.trim() !== final_body.trim()) {
+        try {
+          await pool.query(
+            `INSERT INTO founder_feedback (client_id, lead_id, message_id, original_body, edited_body, feedback_type, channel)
+             VALUES ($1, $2, $3, $4, $5, 'manual_chrome_send_edit', 'linkedin')`,
+            [client_id, updated.lead_id, message_id, updated.body, final_body]
+          );
+        } catch (err) {
+          logger.warn({ msg: '[linkedin-mark-sent] founder_feedback capture failed (non-fatal)', err: err.message, message_id });
+        }
+      }
+
       await pool.query(
         `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata)
          VALUES ($1, 'system', 'linkedin_sent_via_cowork', 'message', $2, $3)`,
-        [client_id, message_id, JSON.stringify({ notes: notes || null, lead_id: updated.lead_id })]
+        [client_id, message_id, JSON.stringify({ notes: notes || null, lead_id: updated.lead_id, body_edited: !!(final_body && updated.body && updated.body.trim() !== final_body.trim()) })]
       );
       // Phase 1 (2026-05-08): pipeline_traces sent (LinkedIn manual via Cowork — was the silent backbone)
       pipelineTrace.traceStage(client_id, {
