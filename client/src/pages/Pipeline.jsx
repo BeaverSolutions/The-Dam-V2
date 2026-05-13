@@ -433,6 +433,26 @@ function SequenceSection({ leadId, clientId }) {
 
   useEffect(() => { load(); }, [leadId]);
 
+  const handleMarkReplied = async () => {
+    const replyText = window.prompt(
+      'Optional: paste the reply text (helps Sales Beaver learn). Leave blank to just mark replied.',
+      ''
+    );
+    if (replyText === null) return; // user cancelled
+    setActing(true);
+    try {
+      await request(`/leads/${leadId}/mark-replied`, {
+        method: 'POST',
+        body: JSON.stringify({ reply_text: replyText || '' }),
+      });
+      await load();
+    } catch (err) {
+      window.alert('Mark replied failed: ' + (err?.message || 'unknown error'));
+    } finally {
+      setActing(false);
+    }
+  };
+
   const handleAction = async (action) => {
     setActing(true);
     try {
@@ -512,6 +532,9 @@ function SequenceSection({ leadId, clientId }) {
         </span>
         {seq.sequence_status === 'active' && (
           <>
+            <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', gap: '0.25rem', color: 'var(--blue)' }} onClick={handleMarkReplied} disabled={acting} title="Mark this lead as replied — fires the canonical reply path (stops sequence, advances stage, captures snippet, notifies Telegram).">
+              ✓ Replied
+            </button>
             <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', gap: '0.25rem' }} onClick={() => handleAction('pause')} disabled={acting}>
               <PauseCircle size={11} /> Pause
             </button>
