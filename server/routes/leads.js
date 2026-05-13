@@ -139,10 +139,18 @@ router.post('/:id/mark-replied',
       const msg = msgRows[0] || null;
 
       // 2. Update lead (canonical state) — always runs even if no message match.
+      // 2026-05-13: pipeline_stage advances to 'qualifying' ONLY when current stage
+      // is earlier in the funnel (prospecting/researched/contacted/outreach). Leads
+      // already past qualifying (qualifying / booked / closed*) keep their stage —
+      // marking a reply on a booked lead must not regress it to qualifying.
       const { rows: leadRows } = await pool.query(
         `UPDATE leads
            SET status = 'replied',
-               pipeline_stage = 'qualifying',
+               pipeline_stage = CASE
+                 WHEN pipeline_stage IN ('prospecting', 'researched', 'contacted', 'outreach')
+                   THEN 'qualifying'
+                 ELSE pipeline_stage
+               END,
                last_reply_at = NOW(),
                updated_at = NOW()
          WHERE id = $1 AND client_id = $2
