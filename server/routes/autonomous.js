@@ -1770,22 +1770,12 @@ async function verifyKickoffOutput(clientId, target) {
     if (totalOutput === 0) {
       console.warn(`[Autonomous] ZERO OUTPUT for client ${clientId} — kickoff produced nothing`);
 
-      // Get client name for alert
-      const { rows: clientRows } = await pool.query(`SELECT name FROM clients WHERE id = $1`, [clientId]);
-      const clientName = clientRows[0]?.name || clientId;
-
-      const chatId = process.env.TELEGRAM_CHAT_ID;
-      if (chatId) {
-        const { sendMessage } = require('../services/telegram');
-        await sendMessage(chatId,
-          `<b>Pipeline Alert: Zero Output</b>\n\n` +
-          `Client: ${clientName}\n` +
-          `Target: ${target}\n` +
-          `Sent: ${sent} | Pending: ${pending} | Rejected: ${rejected}\n\n` +
-          `Kickoff completed but produced nothing. Check Railway logs.`
-        ).catch(err => console.warn('[telegram] Alert failed:', err.message));
-      }
-
+      // Telegram alert REMOVED 2026-05-13 per project_next_session_priority.md
+      // point 3a (locked 2026-05-03). Hardcoded sentinel duplicates Captain's
+      // own stuck-state detection (email_behind_drafted with per-day dedupe).
+      // Captain owns notification policy per 2026-05-03 lock: morning brief /
+      // EOD brief / impromptu only. No per-kickoff pings. Log only — analytics
+      // record preserved for retrospective.
       await pool.query(
         `INSERT INTO logs (client_id, agent, action, target_type, metadata, created_at)
          VALUES ($1, 'system', 'kickoff_zero_output', 'system', $2, NOW())`,

@@ -670,6 +670,28 @@ async function executeApprovedFollowUp(clientId, followupId, captainAngle, angle
      ORDER BY created_at ASC`,
     [fu.lead_id, clientId]
   );
+
+  // Orphan guard (2026-05-13). If prevMessages is empty, the follow-up has no
+  // real touch 1 to anchor against. Sales Beaver will fabricate a prior touch
+  // and Enforcer will correctly reject as fabrication — 100% wasted Sonnet
+  // spend, 100% reject rate. Cancel the row and log. The trust boundary at
+  // scheduleFollowUps (lines 99-106) catches this at schedule time; this guard
+  // catches rows that bypassed scheduleFollowUps (direct INSERT, captain
+  // directives, migrations, prior-bug fallout).
+  if (!prevMessages || prevMessages.length === 0) {
+    console.warn(`[FollowUp] ORPHAN: lead ${fu.lead_id} has no prior touches — cancelling follow-up ${followupId}`);
+    await pool.query(
+      `UPDATE followup_queue SET status='cancelled' WHERE id=$1 AND client_id=$2`,
+      [followupId, clientId]
+    );
+    await pool.query(
+      `INSERT INTO logs (client_id, agent, action, target_type, metadata, created_at)
+       VALUES ($1, 'system', 'followup_cancelled_orphan', 'followup_queue', $2, NOW())`,
+      [clientId, JSON.stringify({ followup_id: followupId, lead_id: fu.lead_id, touch_number: fu.touch_number, reason: 'no_prior_touches' })]
+    );
+    return { status: 'cancelled', reason: 'orphan_no_prior_touches' };
+  }
+
   const originalChannel = prevMessages[0]?.channel || 'email';
 
   // 2. Draft with Captain's angle directive
