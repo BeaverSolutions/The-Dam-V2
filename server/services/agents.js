@@ -1284,19 +1284,20 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
       }
     } catch (err) {
       console.warn('[agents] Ranger failed:', err.message);
-      await logMistake(clientId, 'ranger', 'Claude call failed during QA review', err.message, 'Ranger fell back to auto-fix only — investigate Claude API');
-      // ── Phase A Step 5: Enforcer fail-OPEN when auto-fix already ran ──
-      // If auto-fix made changes, the message is mechanically clean.
-      // Push to approval queue with a note instead of blocking.
+      await logMistake(clientId, 'ranger', 'Claude call failed during QA review', err.message, 'Ranger fail-CLOSED 2026-05-13 — message rejected pending manual review');
+      // ── Fail-CLOSED 2026-05-13 (was fail-OPEN):
+      // Enforcer cannot validate when Claude is unavailable. Reject the draft and surface
+      // to MJ rather than auto-approving an unscored message at threshold-passing score.
+      // Body still returned so MJ can inspect and manually approve if appropriate.
       return {
         message_id,
-        approved: true,
-        decision: 'approve_with_edits',
-        score: 60,
+        approved: false,
+        decision: 'reject',
+        score: 0,
         body: fixedBody,
         fixes_applied: fixesApplied,
-        notes: `Enforcer unavailable — auto-fix applied (${fixesApplied.join(',') || 'no changes'}), manual review recommended`,
-        issues: [],
+        notes: `Enforcer unavailable (Claude API failed) — rejected pending manual review. Auto-fix applied: ${fixesApplied.join(',') || 'none'}`,
+        issues: ['enforcer_unavailable'],
         suggestions: [],
       };
     }
@@ -1824,7 +1825,20 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       });
 
       // ── Channel selection ── single source of truth in selectChannel()
-      const channelChoice_sp = selectChannel(lead);
+      // 2026-05-13: compute linkedinAlreadyTried like kickoff_pipeline (agents.js:3253-3271)
+      // so signal_pipeline doesn't redundantly attempt LinkedIn when a prior attempt exists.
+      let linkedinAlreadyTried_sp = false;
+      if (!lead.email && lead.linkedin_url) {
+        const prevLinkedinRes_sp = await pool.query(
+          `SELECT id FROM messages
+            WHERE client_id = $1 AND lead_id = $2 AND channel = 'linkedin'
+              AND status NOT IN ('deleted')
+            LIMIT 1`,
+          [clientId, lead.id]
+        );
+        linkedinAlreadyTried_sp = prevLinkedinRes_sp.rows.length > 0;
+      }
+      const channelChoice_sp = selectChannel(lead, { linkedinAlreadyTried: linkedinAlreadyTried_sp });
       const channel = channelChoice_sp.channel;
       let kickoffMessageStatus = channelChoice_sp.status;
       if (channelChoice_sp.status === 'blocked_no_email') {
@@ -2010,7 +2024,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       }
 
       let rangerResult;
-      let rangerFailedOpen = false;
+      let rangerFailedClosed = false;
       try {
         rangerResult = await rangerReview(clientId, {
           message_id: msg.id,
@@ -2021,23 +2035,23 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           },
         });
       } catch (err) {
-        // Fail-open: auto-fix was applied, let it through
-        rangerResult = { approved: true, score: 55, notes: 'Enforcer unavailable — auto-fix applied', body: fixed.body };
-        rangerFailedOpen = true;
+        // Fail-CLOSED 2026-05-13: cannot validate when Enforcer is down. Reject and surface to MJ.
+        rangerResult = { approved: false, score: 0, notes: 'Enforcer unavailable — manual review required', body: fixed.body };
+        rangerFailedClosed = true;
       }
 
-      // Phase 1 (2026-05-08): pipeline_traces reviewed (Enforcer ran or failed-open)
+      // Phase 1 (2026-05-08): pipeline_traces reviewed (Enforcer ran or failed-closed)
       pipelineTrace.traceStage(clientId, {
         lead_id: lead.id,
         message_id: msg.id,
         kickoff_id: plan_id,
         stage: 'reviewed',
-        status: rangerFailedOpen ? 'fail_open' : (rangerResult?.approved ? 'approved' : 'rejected'),
+        status: rangerFailedClosed ? 'fail_closed_enforcer_unavailable' : (rangerResult?.approved ? 'approved' : 'rejected'),
         agent: 'enforcer_beaver',
         score: rangerResult?.score ?? null,
         reason: rangerResult?.notes || null,
         pipeline_path: 'signal_pipeline',
-        metadata: { channel, fail_open: rangerFailedOpen },
+        metadata: { channel, fail_closed: rangerFailedClosed },
       }).catch(() => {});
 
       const finalBody = rangerResult?.body || fixed.body;
@@ -3153,6 +3167,14 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   async function processLeadPipeline(lead) {
     if (!lead.id || !lead.name || lead.name === 'Unknown Contact') {
       console.warn('[pipeline] Skipping lead with no identity:', lead.id, lead.name);
+      // 2026-05-13: emit pipeline_traces so identity-skip is visible in funnel
+      pipelineTrace.traceStage(clientId, {
+        lead_id: lead.id || null, kickoff_id: plan_id,
+        stage: 'icp_rejected', status: 'identity_skip',
+        agent: 'director', pipeline_path: 'kickoff_pipeline',
+        reason: 'missing_name_or_unknown_contact',
+        metadata: { lead_name: lead.name || null },
+      }).catch(() => {});
       diagnostics.messages_failed++;
       execStatus.progress.complete++;
       await updateExecStatus(clientId, plan_id, execStatus);
@@ -3466,7 +3488,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       return;
     }
 
-    // ── AI Enforcer review (fail-OPEN — auto-fix already cleaned mechanics) ──
+    // ── AI Enforcer review (fail-CLOSED 2026-05-13 — was fail-OPEN) ──
     let rangerResult;
     try {
       rangerResult = await rangerReview(clientId, {
@@ -3486,16 +3508,18 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       // Enforcer may have further polished the body — use its returned version
       if (rangerResult?.body) currentBody = rangerResult.body;
     } catch (err) {
-      console.warn('[pipeline] AI Enforcer unavailable, approving auto-fixed version (fail-open):', err.message);
-      // Auto-fix already cleaned mechanics. Ship it to approval queue with low trust score.
+      console.warn('[pipeline] AI Enforcer unavailable, REJECTING for manual review (fail-closed):', err.message);
+      // Fail-CLOSED 2026-05-13: cannot validate without Enforcer. Triggers existing
+      // rejection flow (Sales redraft up to 2x, then Enforcer-drafted fallback,
+      // then ranger_rejected status if all attempts fail).
       rangerResult = {
-        approved: true,
-        decision: 'approve_with_edits',
-        score: 55,
-        notes: `Enforcer unavailable — auto-fix applied (${preFixResult.fixes.join(',') || 'none'})`,
+        approved: false,
+        decision: 'reject',
+        score: 0,
+        notes: `Enforcer unavailable (Claude API failed) — manual review required. Auto-fix applied: ${preFixResult.fixes.join(',') || 'none'}`,
         breakdown: null,
       };
-      await logMistake(clientId, 'enforcer_beaver', 'Claude call failed during Enforcer review', err.message, 'Enforcer fell back to auto-fix + manual review');
+      await logMistake(clientId, 'enforcer_beaver', 'Claude call failed during Enforcer review', err.message, 'Enforcer fail-CLOSED — manual review required');
     }
 
     if (!rangerResult?.approved) {
