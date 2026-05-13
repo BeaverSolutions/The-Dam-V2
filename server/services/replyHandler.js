@@ -35,11 +35,24 @@ async function handleReply(clientId, { messageId, leadId, replySnippet }) {
   try {
     // Fetch lead details
     const leadRes = await pool.query(
-      `SELECT name, company, title, pipeline_stage, metadata FROM leads WHERE id = $1 AND client_id = $2 LIMIT 1`,
+      `SELECT name, company, title, pipeline_stage, email, metadata FROM leads WHERE id = $1 AND client_id = $2 LIMIT 1`,
       [leadId, clientId]
     );
     const lead = leadRes.rows[0];
     if (!lead) return;
+
+    // 2026-05-13: Channel discipline. The reply draft + every downstream
+    // trackEvent / feedback_events / message INSERT must use the SOURCE
+    // message's channel — not hardcoded email. A LinkedIn reply on a lead
+    // with no email previously caused (a) drafts on email channel that the
+    // Approvals page blocked with "no email address" and (b) fabricated
+    // email addresses invented by the model to fill the gap. See
+    // corrections.md 2026-05-13 23:10 MYT.
+    const sourceMsgRes = await pool.query(
+      `SELECT channel FROM messages WHERE id = $1 AND client_id = $2 LIMIT 1`,
+      [messageId, clientId]
+    );
+    const sourceChannel = sourceMsgRes.rows[0]?.channel || 'email';
 
     // Fetch conversation history (last 5 sent messages to this lead)
     const historyRes = await pool.query(
@@ -129,7 +142,7 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       lead_id: leadId,
       message_id: messageId,
       event_type: sentimentEventMap[sentiment] || 'message_replied',
-      channel: 'email',
+      channel: sourceChannel,
       reply_sentiment: sentiment,
       agent: 'director',
     });
@@ -145,7 +158,7 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       signalStrengthAtTime: lead.metadata?.buying_signal_strength || null,
       sourceStrategy: lead.metadata?.source_strategy || null,
       segment: lead.metadata?.industry || null,
-      channel: 'email',
+      channel: sourceChannel,
       notes: typeof replySnippet === 'string' ? replySnippet.slice(0, 300) : null,
       payload: { sentiment, confidence: classification.confidence },
     }).catch(() => {});
@@ -191,7 +204,7 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
         metadata: { reason: classification.reason, auto_disqualified: true },
       });
       trackEvent(clientId, {
-        lead_id: leadId, event_type: 'deal_lost', channel: 'email',
+        lead_id: leadId, event_type: 'deal_lost', channel: sourceChannel,
         reply_sentiment: 'no_fit', agent: 'director',
         metadata: { reason: classification.reason },
       });
@@ -247,9 +260,12 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
       whatsappContext,
     ].filter(Boolean).join('\n');
 
+    // 2026-05-13: draft on the source channel — NOT hardcoded email.
+    // If sourceChannel is linkedin and lead has no email, drafting on email
+    // is invalid (Approvals page blocks; model fabricates email addresses).
     const draft = await salesGenerate(clientId, {
       lead_id: leadId,
-      channel: 'email',
+      channel: sourceChannel,
       context: draftContext,
     });
 
@@ -271,19 +287,26 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
     const gateNotes = gateFailures.length > 0 ? gateFailures.join('; ') : null;
 
     // ── Step 5: Save draft message ─────────────────────────
+    // 2026-05-13: persist on the source channel. Subject only meaningful for
+    // email; LinkedIn DMs ignore it at send time but we keep a placeholder
+    // for thread continuity in the UI.
+    const draftSubject = sourceChannel === 'email'
+      ? (draft.subject || `Re: ${history[history.length - 1]?.subject || 'Following up'}`)
+      : (draft.subject || null);
     const msgRes = await pool.query(
       `INSERT INTO messages (client_id, lead_id, channel, subject, body, status, ranger_score, ranger_notes, metadata)
-       VALUES ($1, $2, 'email', $3, $4, $5, $6, $7, $8)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id`,
       [
         clientId,
         leadId,
-        draft.subject || `Re: ${history[history.length - 1]?.subject || 'Following up'}`,
+        sourceChannel,
+        draftSubject,
         draft.body,
         gatesPassed ? 'pending_approval' : 'ranger_rejected',
         gatesPassed ? 90 : 0,
         gateNotes,
-        JSON.stringify({ is_reply: true, reply_to_message_id: messageId, reply_sentiment: sentiment, auto_drafted: true }),
+        JSON.stringify({ is_reply: true, reply_to_message_id: messageId, reply_sentiment: sentiment, auto_drafted: true, source_channel: sourceChannel }),
       ]
     );
 
