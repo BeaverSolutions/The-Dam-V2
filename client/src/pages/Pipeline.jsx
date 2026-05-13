@@ -6,23 +6,32 @@ import FilterTabs from '../components/FilterTabs';
 
 /* ─── Constants ─────────────────────────────────────────── */
 
+// 2026-05-13: pipeline_stage vocabulary aligned with downstream queries.
+// Dashboard counts pipeline_stage='meeting_booked' (routes/dashboard.js:46)
+// and canonical meeting-date endpoint writes 'meeting_booked'
+// (routes/agents.js:276). The legacy UI value 'booked' didn't match either,
+// so meetings never showed in dashboard. Label kept "Booked" for brevity.
+// 'contacted' added so the 87 contacted leads aren't invisible from filtered views.
 const STAGE_TABS = [
-  { value: '',            label: 'All' },
-  { value: 'prospecting', label: 'Prospecting' },
-  { value: 'outreach',    label: 'Outreach' },
-  { value: 'qualifying',  label: 'Qualifying' },
-  { value: 'booked',      label: 'Booked' },
-  { value: 'closed',      label: 'Closed' },
+  { value: '',               label: 'All' },
+  { value: 'prospecting',    label: 'Prospecting' },
+  { value: 'contacted',      label: 'Contacted' },
+  { value: 'outreach',       label: 'Outreach' },
+  { value: 'qualifying',     label: 'Qualifying' },
+  { value: 'meeting_booked', label: 'Booked' },
+  { value: 'closed',         label: 'Closed' },
 ];
 
 const STAGE_COLORS = {
-  prospecting: 'var(--blue)',
-  outreach:    'var(--lime)',
-  qualifying:  'var(--orange)',
-  booked:      'var(--purple)',
-  closed:      'var(--muted)',
-  closed_won:  'var(--success)',
-  closed_lost: 'var(--muted)',
+  prospecting:    'var(--blue)',
+  contacted:      'var(--orange)',
+  outreach:       'var(--lime)',
+  qualifying:     'var(--orange)',
+  meeting_booked: 'var(--purple)',
+  booked:         'var(--purple)', // legacy value retained for any in-flight rows
+  closed:         'var(--muted)',
+  closed_won:     'var(--success)',
+  closed_lost:    'var(--muted)',
 };
 
 const STAGE_OPTIONS = STAGE_TABS.filter(s => s.value !== '');
