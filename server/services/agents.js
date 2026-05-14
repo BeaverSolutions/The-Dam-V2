@@ -227,10 +227,18 @@ function selectChannel(lead, options = {}) {
   if (isLinkedinOnlyLead && !linkedinAlreadyTried) {
     return { channel: 'linkedin', status: 'pending_ranger', reason: 'Tier B linkedin-only lead' };
   }
+  // 2026-05-14 (Mismatch 3 fix): graceful LinkedIn fallback for any lead with a
+  // valid linkedin_url but no verified email AND not yet tagged tier B.
+  // Previously these fell through to blocked_no_email — capping today's autonomous
+  // pipeline at 1 of 8 leads producing a draft (7/8 blocked). The hero-film
+  // contract (BEAVER-FLOWCHARTS.md) says no-email + has-linkedin → LinkedIn drafting.
+  if (lead.linkedin_url && !linkedinAlreadyTried) {
+    return { channel: 'linkedin', status: 'pending_ranger', reason: 'No verified email — LinkedIn fallback (lead has linkedin_url)' };
+  }
   return {
     channel: 'email',
     status: 'blocked_no_email',
-    reason: 'No verified email and no linkedin_url — holding for enrichment',
+    reason: 'No verified email and no usable linkedin_url — holding for enrichment',
   };
 }
 
