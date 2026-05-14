@@ -15,15 +15,18 @@ import FilterTabs from '../components/FilterTabs';
 const STAGE_TABS = [
   { value: '',               label: 'All' },
   { value: 'prospecting',    label: 'Prospecting' },
+  { value: 'researched',     label: 'Researched' },
   { value: 'contacted',      label: 'Contacted' },
   { value: 'outreach',       label: 'Outreach' },
   { value: 'qualifying',     label: 'Qualifying' },
   { value: 'meeting_booked', label: 'Booked' },
   { value: 'closed',         label: 'Closed' },
+  { value: 'rejected',       label: 'Rejected' },
 ];
 
 const STAGE_COLORS = {
   prospecting:    'var(--blue)',
+  researched:     'var(--blue)',
   contacted:      'var(--orange)',
   outreach:       'var(--lime)',
   qualifying:     'var(--orange)',
@@ -32,6 +35,7 @@ const STAGE_COLORS = {
   closed:         'var(--muted)',
   closed_won:     'var(--success)',
   closed_lost:    'var(--muted)',
+  rejected:       'var(--danger)',
 };
 
 const STAGE_OPTIONS = STAGE_TABS.filter(s => s.value !== '');
