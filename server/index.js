@@ -1074,11 +1074,16 @@ async function start() {
             continue;
           }
 
-          // Daily cap: max 6 kickoffs per day (count signal_pipeline_executing logs)
+          // Daily cap: max 6 kpi_gap kickoffs per day. Count this function's OWN
+          // dedupe-key writes (1 per Captain decision to fire) — NOT signal_pipeline_executing
+          // logs which are emitted PER LEAD inside each kickoff (~15 leads/fire).
+          // The old query saw 30 logs after 2 kickoffs (2 fires × 15 leads), false-blocked
+          // every subsequent attempt for the rest of the day. Captain never actually fired
+          // hourly — bug existed since the gate was written.
           const { rows: [{ cnt: kickoffsToday }] } = await pool.query(
-            `SELECT COUNT(*)::int AS cnt FROM logs
-             WHERE client_id = $1 AND action = 'signal_pipeline_executing'
-             AND created_at >= $2::date AND created_at < ($2::date + INTERVAL '1 day')`,
+            `SELECT COUNT(*)::int AS cnt FROM agent_memory
+             WHERE client_id = $1 AND agent = 'captain_orchestrator'
+               AND key LIKE 'kpi_gap_kickoff_' || $2 || 'T%'`,
             [client.id, today]
           );
           if (kickoffsToday >= 6) {
