@@ -58,7 +58,12 @@ const ICP_SENIOR_QUALIFIER = /\b(senior|head|chief|principal|lead\s+(of|the)|man
 // 2026-05-06 update: expanded MNC blocklist after pool audit found dentsu Malaysia,
 // IPG Mediabrands, Leo Burnett, GroupM, AirAsia subsidiaries leaking through. Added
 // the WPP / IPG / Publicis / Dentsu / Omnicom network sub-brands and MY-listed MNCs.
-const ICP_LARGE_GLOBAL_AGENCIES = /\b(wpp|publicis|omnicom|interpublic|\bipg\b|ipg\s+mediabrands|mediabrands|\bbbdo\b|ogilvy|mccann|\bvml\b|dentsu|dentsu\s+creative|carat|iprospect|isobar|havas|grey\s+group|leo\s+burnett|saatchi|\bddb\b|tbwa|\bjwt\b|wunderman|edelman|\bweber\b|burson|fleishman|hill\+knowlton|groupm|mindshare|wavemaker|mediacom|essence|\bmsl\b|spark\s+foundry|zenith|starcom|digitas|\bmrm\b|\binitiative\b|\bub\b|ipg\s+health|huge|r\/ga|akqa|\bsid\s+lee\b)\b/i;
+// 2026-05-14: added phd (Omnicom-owned media agency, "PHD Malaysia" leak),
+// vistage (CEO peer-group franchise), manning gottlieb omd, mediavest, possible
+// other Omnicom/IPG/Publicis subsidiaries seen in pool. Geographic suffix
+// stripping in hunter.domainsFromCompany now means "PHD Malaysia" → "phd" stem,
+// and this regex matches \bphd\b in the raw company string too.
+const ICP_LARGE_GLOBAL_AGENCIES = /\b(wpp|publicis|omnicom|interpublic|\bipg\b|ipg\s+mediabrands|mediabrands|\bbbdo\b|ogilvy|mccann|\bvml\b|dentsu|dentsu\s+creative|carat|iprospect|isobar|havas|grey\s+group|leo\s+burnett|saatchi|\bddb\b|tbwa|\bjwt\b|wunderman|edelman|\bweber\b|burson|fleishman|hill\+knowlton|groupm|mindshare|wavemaker|mediacom|essence|\bmsl\b|spark\s+foundry|zenith|starcom|digitas|\bmrm\b|\binitiative\b|\bub\b|ipg\s+health|huge|r\/ga|akqa|\bsid\s+lee\b|phd\s+media|phd\s+malaysia|phd\s+singapore|manning\s+gottlieb|mediavest|vistage)\b/i;
 const ICP_ENTERPRISE_BRANDS = /\b(deloitte|mckinsey|\bpwc\b|\bkpmg\b|\bey\b|accenture|boston\s+consulting|\bbain\b|shell|petronas|tenaga|maybank|\bcimb\b|\brhb\b|public\s+bank|hong\s+leong|sime\s+darby|axiata|celcomdigi|celcom|\bdigi\b|\bmaxis\b|\bastro\b|airasia|air\s+asia|grab|sea\s+limited|shopee|lazada|capitaland|ihh\s+healthcare|\biskandar\b|unilever|nestle|nestlé|procter|p&g|samsung|\blg\b|sony|panasonic|google|\bmeta\b|amazon|microsoft|apple|\bibm\b|huawei|xiaomi|canon|honda|toyota|mastercard|visa\b)\b/i;
 const ICP_INDUSTRY_BODIES = /\b(women\s+in\s+pr|female\s+founders|chamber\s+of|chambers\s+of|association|trade\s+union|alliance|federation|society\s+of|members?'?\s*(network|club|association)|institute\s+of|board\s+of|council\s+of)\b/i;
 // 2026-05-06: removed `training\s+(institute|provider|academy)` from this regex.

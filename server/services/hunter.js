@@ -20,25 +20,66 @@ async function getApiKey(clientId) {
 
 /* ─── Domain guesser (fallback) ─────────────────────────── */
 
-// Returns [primaryDomain, ...fallbacks] to try in order.
-// Covers MY (Sdn Bhd), SG (Pte Ltd), AU (Pty Ltd) + standard US/UK suffixes.
+// Returns array of candidate domains to try in order. Multi-candidate inference
+// handles compound names ("X - Y - Z"), slash-separated ("A / B"), and
+// descriptor-laden names ("X Digital Marketing Agency"). Geographic suffixes
+// stripped so "PHD Malaysia" → "phd" stem (which the MNC blacklist can match).
+// 2026-05-14: expanded from 2-domain to multi-candidate per MJ direction —
+// hit rate on the May 5 backfill was 9% because of poor domain inference.
 function domainsFromCompany(company) {
   if (!company) return [];
-  const cleaned = company
+
+  const stem = (s) => (s || '')
     .toLowerCase()
-    // Multi-word suffixes first (order matters)
+    // Geographic suffixes (added 2026-05-14)
+    .replace(/\b(malaysia|singapore|indonesia|philippines|thailand|vietnam|klang\s+valley|kuala\s+lumpur|\bkl\b|asean)\b/gi, '')
+    // Multi-word legal suffixes
     .replace(/\bsdn\.?\s*bhd\.?\b/gi, '')
     .replace(/\bpte\.?\s*ltd\.?\b/gi, '')
     .replace(/\bpty\.?\s*ltd\.?\b/gi, '')
     // Single-word suffixes
     .replace(/\b(inc|ltd|llc|corp|co|group|holdings|technologies|technology|solutions|services|global|berhad|bhd|sdn|pte|pty|plc|gmbh|ag|bv|nv|sa)\b/gi, '')
-    .replace(/[^a-z0-9\s]/g, '')
+    // Descriptor phrases (added 2026-05-14)
+    .replace(/\b(digital\s+marketing\s+agency|marketing\s+agency|advertising\s+agency|creative\s+agency|pr\s+agency|communications\s+agency|consulting\s+firm|law\s+firm|ai\s+company|tech\s+company|software\s+company|software\s+house|design\s+studio|design\s+agency)\b/gi, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
     .trim()
     .replace(/\s+/g, '');
 
-  if (!cleaned) return [];
-  // Try .com first, then .com.my (Malaysian companies often use both)
-  return [`${cleaned}.com`, `${cleaned}.com.my`];
+  const candidates = new Set();
+  // Candidate 1: full cleaned
+  const full = stem(company);
+  if (full) candidates.add(full);
+  // Candidate 2: slash split ("A / B" → both halves are candidates)
+  if (company.includes('/')) {
+    for (const part of company.split('/')) {
+      const s = stem(part);
+      if (s) candidates.add(s);
+    }
+  }
+  // Candidate 3: dash split ("X - Descriptor" → take first half, usually the brand)
+  const dashParts = company.split(/\s+[-–]\s+/);
+  if (dashParts.length > 1) {
+    const s = stem(dashParts[0]);
+    if (s) candidates.add(s);
+  }
+  // Candidate 4: first 2 words (heuristic for compound brand + descriptor)
+  const words = company.split(/\s+/).filter(Boolean);
+  if (words.length > 2) {
+    const s = stem(words.slice(0, 2).join(' '));
+    if (s) candidates.add(s);
+  }
+
+  if (candidates.size === 0) return [];
+  // TLDs in priority order: .com (US-default), .com.my (MY SMBs), .my, .io (tech), .ai (tech)
+  // Keep small — each is an API call. 4 TLDs × 4 candidates max = 16 attempts/lead worst case.
+  const tlds = ['com', 'com.my', 'my', 'io'];
+  const domains = [];
+  for (const c of candidates) {
+    for (const tld of tlds) {
+      domains.push(`${c}.${tld}`);
+    }
+  }
+  return domains;
 }
 
 // Keep legacy single-return for domainSearch callers
