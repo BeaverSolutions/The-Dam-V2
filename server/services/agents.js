@@ -1019,6 +1019,24 @@ function brandSafetyCheck(body, leadContext = {}) {
     }
   }
 
+  // 6. Fabricated email address in body (2026-05-14: Hari Kishan h@tamsaglobal.com class).
+  // Sales Beaver sometimes invents a contact email — short slug @ company-shaped-domain.
+  // Sending to a fabricated address bounces / hits spam traps / wastes the warm signal.
+  // Any email in the body must match the lead's known email OR be a recognised sender
+  // domain (the user's own org). Otherwise hard reject.
+  const emailRe = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+  const foundEmails = (body.match(emailRe) || []).map(e => e.toLowerCase());
+  if (foundEmails.length > 0) {
+    const leadEmail = String(leadContext.email || '').toLowerCase();
+    const senderAllowed = /@(beaver\.solutions|emplifive\.com|emplifive\.ai)$/i;
+    const fabricated = foundEmails.filter(e =>
+      e !== leadEmail && !senderAllowed.test(e)
+    );
+    if (fabricated.length > 0) {
+      return { safe: false, reason: `fabricated_email:${fabricated[0]}` };
+    }
+  }
+
   return { safe: true };
 }
 
@@ -2046,6 +2064,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           message_body: fixed.body,
           lead_context: {
             name: lead.name, company: lead.company, title: lead.title,
+            email: lead.email, lead_id: lead.id,
             signal: meta.signal, angle: meta.angle, why_now: meta.why_now,
           },
         });
@@ -3567,6 +3586,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           name: lead.name,
           company: lead.company,
           title: lead.title,
+          email: lead.email,
+          lead_id: lead.id,
           signal: lead.metadata?.signal,
           angle: lead.metadata?.angle,
           friction: lead.metadata?.friction,
@@ -3651,6 +3672,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
                 name: lead.name,
                 company: lead.company,
                 title: lead.title,
+                email: lead.email,
+                lead_id: lead.id,
                 signal: lead.metadata?.signal,
                 angle: lead.metadata?.angle,
                 friction: lead.metadata?.friction,
