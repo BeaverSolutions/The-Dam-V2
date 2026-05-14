@@ -2649,6 +2649,152 @@ router.post('/linkedin-sync-replies', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── POST /api/autonomous/linkedin-sync-connections ───────────
+ * Closes the LinkedIn-connections blindspot. Every prospect MJ accepts/sends
+ * on LinkedIn is invisible to BeavrDam unless manually added. This endpoint
+ * accepts a batch from the local Chrome-CDP scraper
+ * (scripts/sync-linkedin-connections-to-beavrdam.mjs in MJxClaude) and:
+ *   1. Normalizes linkedin slug, dedupes against existing leads.linkedin_url
+ *   2. Enriches email via emailEnrichment (Brave primary, Hunter fallback)
+ *   3. Creates lead with source='linkedin_connection_sync', signal_tier='P3',
+ *      pipeline_stage='prospecting', buying_signal_strength='lite'
+ *
+ * Body: {
+ *   client_id,
+ *   connections: [
+ *     { profile_url, name, title, company, connected_time (ISO, optional) }
+ *   ]
+ * }
+ *
+ * Auth: x-internal-key
+ */
+router.post('/linkedin-sync-connections', requireInternalKey, async (req, res) => {
+  const { client_id, connections } = req.body || {};
+  if (!client_id) return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+  if (!Array.isArray(connections)) return res.status(400).json({ error: 'connections must be an array', code: 'INVALID_CONNECTIONS' });
+  if (connections.length === 0) return res.json({ data: { client_id, received: 0, created: 0, skipped_dup: 0, details: [] } });
+  if (connections.length > 500) return res.status(400).json({ error: 'connections batch too large (max 500)', code: 'BATCH_TOO_LARGE' });
+
+  // Normalize incoming connections
+  const candidates = [];
+  let skippedInvalid = 0;
+  for (const c of connections) {
+    if (!c || typeof c !== 'object') { skippedInvalid++; continue; }
+    const slug = linkedinSlug(c.profile_url);
+    if (!slug) { skippedInvalid++; continue; }
+    const name = String(c.name || '').trim();
+    if (!name) { skippedInvalid++; continue; }
+    candidates.push({
+      slug,
+      profile_url: c.profile_url,
+      name,
+      title: String(c.title || '').trim().slice(0, 200) || null,
+      company: String(c.company || '').trim().slice(0, 200) || null,
+      connected_time: c.connected_time || null,
+    });
+  }
+
+  if (candidates.length === 0) {
+    return res.json({
+      data: { client_id, received: connections.length, created: 0, skipped_dup: 0, skipped_invalid: skippedInvalid, details: [] },
+    });
+  }
+
+  try {
+    const leadsService = require('../services/leads');
+    const { enrichEmail } = require('../services/emailEnrichment');
+
+    // Dedup pass — fetch every linkedin_url for this tenant, normalize via linkedinSlug,
+    // build an in-memory Set. Tenant pool is bounded (low thousands) so this is cheap
+    // and avoids SQL regex complexity.
+    const { rows: existingRows } = await pool.query(
+      `SELECT linkedin_url FROM leads
+       WHERE client_id = $1 AND deleted_at IS NULL AND linkedin_url IS NOT NULL`,
+      [client_id]
+    );
+    const existingSlugs = new Set();
+    for (const row of existingRows) {
+      const s = linkedinSlug(row.linkedin_url);
+      if (s) existingSlugs.add(s);
+    }
+
+    const details = [];
+    let created = 0;
+    let skippedDup = 0;
+    let enrichedBrave = 0;
+    let enrichedHunter = 0;
+    let noEmail = 0;
+
+    for (const c of candidates) {
+      if (existingSlugs.has(c.slug)) {
+        skippedDup++;
+        details.push({ slug: c.slug, status: 'skipped_dup' });
+        continue;
+      }
+
+      // Enrich (fire-and-forget catch — never block lead creation on enrichment errors)
+      let enrich = null;
+      try {
+        enrich = await enrichEmail(client_id, { name: c.name, company: c.company });
+      } catch (err) {
+        logger.warn({ msg: '[linkedin-sync-connections] enrichEmail failed', slug: c.slug, err: err.message });
+      }
+      if (enrich?.source === 'brave') enrichedBrave++;
+      else if (enrich?.source === 'hunter') enrichedHunter++;
+      else noEmail++;
+
+      try {
+        const lead = await leadsService.createLead(client_id, {
+          name: c.name,
+          email: enrich?.email || null,
+          company: c.company,
+          title: c.title,
+          linkedin_url: c.profile_url,
+          source: 'linkedin_connection_sync',
+          signal_tier: 'P3',
+          status: 'new',
+          pipeline_stage: 'prospecting',
+          buying_signal_strength: 'lite',
+          metadata: {
+            connected_time: c.connected_time,
+            enrichment_source: enrich?.source || null,
+            enrichment_confidence: enrich?.confidence || null,
+          },
+        });
+        created++;
+        // Mark slug as seen so a duplicate within the same batch doesn't re-create.
+        existingSlugs.add(c.slug);
+        details.push({
+          slug: c.slug,
+          status: 'created',
+          lead_id: lead.id,
+          enriched: enrich ? enrich.source : 'none',
+        });
+      } catch (err) {
+        logger.warn({ msg: '[linkedin-sync-connections] createLead failed', slug: c.slug, err: err.message });
+        details.push({ slug: c.slug, status: 'create_failed', error: err.message });
+      }
+    }
+
+    return res.json({
+      data: {
+        client_id,
+        received: connections.length,
+        created,
+        skipped_dup: skippedDup,
+        skipped_invalid: skippedInvalid,
+        enriched_brave: enrichedBrave,
+        enriched_hunter: enrichedHunter,
+        no_email: noEmail,
+        details,
+      },
+    });
+  } catch (err) {
+    logger.error({ msg: 'linkedin-sync-connections failed', err: err.message });
+    res.status(500).json({ error: 'Failed to sync LinkedIn connections', code: 'DB_ERROR' });
+  }
+});
+
 /* ─── POST /api/autonomous/trigger-morning-brief ───────────────
  * Manual trigger for the Captain morning brief. Bypasses the cron
  * time-gate (01:00-01:10 UTC) so we can validate format/content
