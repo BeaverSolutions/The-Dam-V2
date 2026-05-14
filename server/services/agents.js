@@ -17,19 +17,32 @@ const { evaluateLeadQuality } = require('../utils/leadQuality');
 const { recordOutcome, attributionFromLead } = require('./outcomeTracker');
 
 // ICP+channel patches per MJ direction 2026-04-29
-// ─── ICP v2: SEA-only country, persona, vertical hard gates ─────────────────
+// ─── ICP v2: Beaver Solutions tenant — MY+SG, sales/BD/revenue persona ──────
+// 2026-05-14: narrowed scope per MJ direction.
+// - Geo: MY+SG only (Phase 1). ID/PH/TH/VN re-enable when Phase 2 expansion runs.
+// - Persona: sales/BD/revenue/commercial only. Marketing/growth/brand/comms/
+//   partnerships/operations REMOVED — BeavrDam's buyer is the head of OUTBOUND
+//   (CRO / Head of Sales / VP BD / Founder doing outbound at SMB level), not
+//   the marketing team. Marketing-leaning ICP is Emplifive's territory, not ours.
+// - CMO removed from standalone — was a Beaver-irrelevant exception slipping leads.
+// When Emplifive onboards as a BeavrDam tenant, these constants split per-tenant.
 const ICP_ALLOWED_COUNTRIES = new Set([
-  'malaysia','singapore','indonesia','philippines','thailand','vietnam',
-  'my','sg','id','ph','th','vn',
+  'malaysia','singapore',
+  'my','sg',
 ]);
 
-// Senior decision-maker titles. If any matches, lead passes title gate.
-// Founder/Co-founder/CEO/MD/COO/CMO/CFO/CTO/President/Owner/Principal/Managing Partner
-// stand alone. Director/Head/VP/GM/Chief must combine with a sales/growth/marketing function
+// Senior decision-maker titles. If any matches standalone, lead passes title gate.
+// Founder/Co-founder/CEO/MD/CRO/COO/CFO/CTO/President/Owner/Principal/Managing Partner
+// stand alone. Director/Head/VP/GM/Chief must combine with a sales/BD/revenue function
 // (handled in applyIcpV2Filter — these regexes are component-level).
-const ICP_SENIOR_STANDALONE = /\b(founder|co-?founder|ceo|chief executive|cmo|coo|cfo|cto|managing director|managing partner|president|owner|principal|proprietor|\bmd\b|chairman|chairwoman)\b/i;
+//
+// 2026-05-14: REMOVED 'cmo' from standalone (marketing is not Beaver's buyer).
+//   Added 'cro' explicitly (Chief Revenue Officer — primary Beaver buyer).
+const ICP_SENIOR_STANDALONE = /\b(founder|co-?founder|ceo|chief executive|\bcro\b|chief revenue|coo|cfo|cto|managing director|managing partner|president|owner|principal|proprietor|\bmd\b|chairman|chairwoman)\b/i;
 const ICP_SENIOR_LEADER = /\b(director|head\s+of|vp|vice\s+president|general\s+manager|\bgm\b|chief)\b/i;
-const ICP_SENIOR_FUNCTION = /\b(sales|business\s+development|\bbd\b|growth|marketing|revenue|commercial|operations|brand|partnerships|comms|communications|client\s+services)\b/i;
+// 2026-05-14: function narrowed to sales/BD/revenue/commercial.
+// REMOVED: growth, marketing, brand, partnerships, operations, comms, communications, client services.
+const ICP_SENIOR_FUNCTION = /\b(sales|business\s+development|\bbd\b|revenue|commercial|outbound)\b/i;
 
 // Junior IC / sub-decision-maker titles. If any matches AND no senior-standalone, reject.
 const ICP_JUNIOR_TITLE = /\b(intern|trainee|junior|associate|assistant|coordinator|specialist|analyst|officer|admin|receptionist|clerk|engineer|developer|designer|writer|editor|representative|agent\b|strategist)\b/i;
