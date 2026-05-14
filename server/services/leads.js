@@ -71,6 +71,24 @@ async function createLead(clientId, data) {
   } = data;
   const pipeline_stage = data.pipeline_stage || STATUS_TO_PIPELINE[status] || 'prospecting';
 
+  // 2026-05-14: ICP v2 gate at the generic createLead helper. Used by Captain's
+  // create_lead tool + manual /api/leads POST + import routes. Without this gate,
+  // marketing-titled or off-ICP leads enter via these paths even though dbBuilder
+  // (the bulk producer) catches them via Path B (commit 9f736ac). Belt + suspenders.
+  // Caller can opt out for legitimate manual imports via data.skip_icp_filter = true.
+  if (data.skip_icp_filter !== true) {
+    const { applyIcpV2Filter } = require('./agents');
+    const v2 = applyIcpV2Filter({ name, company, title, country: data.country, score, metadata });
+    if (!v2.pass) {
+      const { AppError } = require('../utils/errors');
+      throw new AppError(
+        `Lead rejected by ICP v2 filter: ${v2.reason}`,
+        400,
+        v2.status || 'rejected_icp_v2'
+      );
+    }
+  }
+
   // Phase 2 V2 Step 6 (2026-05-08): generic createLead helper. Used by import
   // routes + miscellaneous internal callers. Default to 'lite' + NOW() because
   // we don't know the upstream context. Caller can override via data.* fields.
