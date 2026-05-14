@@ -1379,12 +1379,22 @@ Return JSON: {"subject":"...","body":"..."}`
       }
     }
 
-    // Run every 6 hours (delayed 5 min after startup)
-    setTimeout(() => {
-      sweepStaleLinkedInRequests().then(() => jobHealth.markRun('linkedin_sweep')).catch(err => jobHealth.markError('linkedin_sweep', err.message));
-      setInterval(() => sweepStaleLinkedInRequests().then(() => jobHealth.markRun('linkedin_sweep')).catch(err => jobHealth.markError('linkedin_sweep', err.message)), 6 * 60 * 60 * 1000);
-    }, 5 * 60 * 1000);
-    logger.info({ msg: `LinkedIn stale sweep registered (every 6h, ${LINKEDIN_STALE_DAYS}-day threshold, batch ${LINKEDIN_SWEEP_BATCH})` });
+    // Run once daily at 07:00 MYT (before Research Beaver 08:30 run — stale leads
+    // cleared first so fresh research doesn't duplicate them)
+    function scheduleLinkedInSweep() {
+      const now = new Date();
+      const myt = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur' }));
+      const target = new Date(myt);
+      target.setHours(7, 0, 0, 0);
+      if (myt >= target) target.setDate(target.getDate() + 1);
+      const msUntil = target.getTime() - myt.getTime();
+      setTimeout(() => {
+        sweepStaleLinkedInRequests().then(() => jobHealth.markRun('linkedin_sweep')).catch(err => jobHealth.markError('linkedin_sweep', err.message));
+        setInterval(() => sweepStaleLinkedInRequests().then(() => jobHealth.markRun('linkedin_sweep')).catch(err => jobHealth.markError('linkedin_sweep', err.message)), 24 * 60 * 60 * 1000);
+      }, msUntil);
+      logger.info({ msg: `LinkedIn stale sweep scheduled: first run in ${Math.round(msUntil / 60000)}min (07:00 MYT daily, ${LINKEDIN_STALE_DAYS}-day threshold, batch ${LINKEDIN_SWEEP_BATCH})` });
+    }
+    scheduleLinkedInSweep();
 
   } catch (err) {
     logger.error({ msg: 'Failed to start server', err: err.message, stack: err.stack });
