@@ -460,7 +460,16 @@ async function runDbBuilder() {
     const enabledSlugs = (process.env.DB_BUILDER_ENABLED_CLIENTS || '')
       .split(',').map(s => s.trim()).filter(Boolean);
 
-    if (enabledSlugs.length === 0) return;
+    if (enabledSlugs.length === 0) {
+      // 2026-05-14: was silent `return` — masked the fact that DB Builder
+      // has been disabled (env empty) since 2026-05-05 Brave-quota burn,
+      // even after MJ raised the Brave cap 2026-05-12. Without this log
+      // MJ can't tell from the runtime that the pool isn't being
+      // replenished. To re-enable: set DB_BUILDER_ENABLED_CLIENTS in
+      // Railway env to a comma-separated list of slugs (e.g. 'beaver-solutions').
+      console.warn('[db-builder] SKIPPED — DB_BUILDER_ENABLED_CLIENTS env is empty. No leads will be sourced. Set the env var in Railway to enable.');
+      return;
+    }
 
     const { rows: clients } = await pool.query(
       `SELECT id, slug FROM clients WHERE slug = ANY($1)`,
