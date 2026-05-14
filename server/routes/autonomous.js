@@ -328,6 +328,105 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
   }
 });
 
+/* ─── POST /api/autonomous/pool-audit-batch ─────────────────
+ * One-shot batch audit of the entire active lead pool against current
+ * applyIcpV2Filter. Same logic as the per-kickoff pool audit at L1606+
+ * but runs against ALL active leads in one pass instead of the 20-at-a-time
+ * sample that each kickoff sees.
+ *
+ * Use case: clean up historical pool pollution (e.g. Apr 17 → May 5
+ * Google CSE fallback dumped 619 leads, many off-persona/off-ICP).
+ * Without this, every kickoff audits + soft-deletes the same 12/20 leads
+ * repeatedly, wasting tokens and slowing the pipeline. Run once, future
+ * kickoffs see only the survivors.
+ *
+ * Body: { client_id, dry_run? (default true) }
+ * Auth: x-internal-key
+ *
+ * dry_run=true → returns count + sample of rejects, no DB writes.
+ * dry_run=false → executes the soft-delete (status='rejected_legacy_audit',
+ *                  deleted_at=NOW()), returns count + sample of what was deleted.
+ */
+router.post('/pool-audit-batch', requireInternalKey, async (req, res) => {
+  const { client_id, dry_run } = req.body || {};
+  if (!client_id) return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+  const isDryRun = dry_run !== false; // default true — must opt-in to delete
+
+  try {
+    const { applyIcpV2Filter } = require('../services/agents');
+
+    // Pull every active lead for the tenant. Bounded by 5000 — large enough for
+    // any reasonable tenant pool, small enough to fit in one Postgres response.
+    const { rows: leads } = await pool.query(
+      `SELECT id, name, company, title, country, score, source, metadata
+       FROM leads
+       WHERE client_id = $1
+         AND deleted_at IS NULL
+         AND status NOT IN ('rejected_legacy_audit', 'closed_won', 'closed_lost', 'replied', 'meeting_booked')
+       LIMIT 5000`,
+      [client_id]
+    );
+
+    const rejects = [];
+    const passes = [];
+    for (const lead of leads) {
+      const v2 = applyIcpV2Filter(lead);
+      if (v2.pass) {
+        passes.push(lead.id);
+      } else {
+        rejects.push({
+          id: lead.id, name: lead.name, company: lead.company,
+          title: lead.title, source: lead.source,
+          status: v2.status, reason: v2.reason,
+        });
+      }
+    }
+
+    const summary = {
+      client_id,
+      dry_run: isDryRun,
+      total_audited: leads.length,
+      passes: passes.length,
+      rejects: rejects.length,
+      reject_sample: rejects.slice(0, 10),
+      reject_by_source: rejects.reduce((acc, r) => {
+        acc[r.source || 'null'] = (acc[r.source || 'null'] || 0) + 1;
+        return acc;
+      }, {}),
+      reject_by_status: rejects.reduce((acc, r) => {
+        acc[r.status || 'null'] = (acc[r.status || 'null'] || 0) + 1;
+        return acc;
+      }, {}),
+    };
+
+    if (isDryRun || rejects.length === 0) {
+      return res.json({ data: summary });
+    }
+
+    // Execute soft-delete. Same shape as per-kickoff audit at L1628.
+    const rejectIds = rejects.map(r => r.id);
+    await pool.query(
+      `UPDATE leads SET status = 'rejected_legacy_audit', deleted_at = NOW(),
+                        metadata = COALESCE(metadata, '{}'::jsonb)
+                                || jsonb_build_object('legacy_audit_reason', $2::text,
+                                                      'batch_audit_run_at', NOW()::text)
+       WHERE id = ANY($1::uuid[]) AND client_id = $3 AND deleted_at IS NULL`,
+      [rejectIds, 'batch_pool_audit_2026_05_14', client_id]
+    );
+
+    await logAction(client_id, 'director', 'pool_audit_batch_executed', 'system', null, {
+      total_audited: leads.length,
+      rejects: rejects.length,
+      passes: passes.length,
+    });
+
+    return res.json({ data: { ...summary, executed: true } });
+  } catch (err) {
+    logger.error({ msg: 'pool-audit-batch failed', err: err.message });
+    res.status(500).json({ error: 'Pool audit batch failed', code: 'DB_ERROR' });
+  }
+});
+
 /* ─── POST /api/autonomous/kickoff ───────────────────────── */
 
 router.post('/kickoff', requireInternalKey, async (req, res) => {
