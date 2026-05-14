@@ -1252,124 +1252,130 @@ async function start() {
     // Prior behaviour auto-REJECTED after 7 days and routed to email fallback,
     // which silently killed active LinkedIn conversations. This inversion is
     // the Option D fix from memory `project_beavrdam_linkedin_blindspot.md`.
+    const LINKEDIN_STALE_DAYS = parseInt(process.env.LINKEDIN_STALE_DAYS || '14', 10);
+    const LINKEDIN_SWEEP_BATCH = 10;
+
     async function sweepStaleLinkedInRequests() {
-      // 2026-05-12: DISABLED — auto-graduating linkedin_requested → sent after
-      // 3 days produced phantom follow-ups for prospects who never accepted
-      // the connection request. The DM Sent button (commit adaf250, 2026-05-12)
-      // is now the canonical delivery proof. MJ clicks it after manually
-      // sending the DM, which marks sent + sent_at + triggers scheduleFollowUps.
-      //
-      // Auto-sweep auto-graduate is removed. Stale linkedin_requested messages
-      // stay in their state and surface in the Awaiting Accept UI tab — MJ
-      // verifies real acceptance manually and clicks DM Sent.
-      //
-      // The function is preserved as observability only: count stale messages,
-      // log the count, no state mutation. If MJ wants alerts on large stale
-      // backlogs, route via Captain's stuck-state monitor.
       try {
         const { rows: staleMessages } = await pool.query(
-          `SELECT m.id AS message_id, m.lead_id, m.client_id, l.name AS lead_name, l.company AS lead_company
+          `SELECT m.id AS message_id, m.lead_id, m.client_id,
+                  l.name AS lead_name, l.company AS lead_company, l.email AS lead_email,
+                  l.linkedin_url AS lead_linkedin, l.title AS lead_title
            FROM messages m
-           JOIN leads l ON l.id = m.lead_id
+           JOIN leads l ON l.id = m.lead_id AND l.deleted_at IS NULL
            WHERE m.status = 'linkedin_requested'
-             AND m.updated_at < NOW() - INTERVAL '3 days'
-           LIMIT 50`
+             AND m.updated_at < NOW() - make_interval(days => $1)
+           ORDER BY m.updated_at ASC
+           LIMIT $2`,
+          [LINKEDIN_STALE_DAYS, LINKEDIN_SWEEP_BATCH]
         );
 
         if (staleMessages.length === 0) return;
-        logger.info({ msg: `LinkedIn sweep: ${staleMessages.length} stale linkedin_requested (>3d). Auto-graduate DISABLED — MJ clicks DM Sent for canonical delivery proof.`, stale_count: staleMessages.length });
-        // Early return — no state mutation. The block below is preserved for
-        // historical reference but unreachable.
-        return;
+        logger.info({ msg: `[linkedin-sweep] ${staleMessages.length} stale linkedin_requested (>${LINKEDIN_STALE_DAYS}d) — attempting email escalation` });
 
-        // ─── BELOW THIS POINT: dead code (preserved for diff archaeology) ───
-        const { scheduleFollowUps } = require('./services/followupSequence');
+        let escalated = 0;
+        let removed = 0;
 
         for (const msg of staleMessages) {
           try {
-            // Mark message as sent (Day 0) — presume acceptance.
-            // 2026-05-06: also stamp auto_sweep_graduated metadata so UI / audits
-            // can distinguish auto-sweep'd messages from real sends. The 'sent'
-            // status is required for the Day 2/5/10/18/30 follow-up sequence to
-            // schedule downstream — that piece must not change.
+            let foundEmail = msg.lead_email;
+
+            if (!foundEmail) {
+              try {
+                const emailEnrichment = require('./services/emailEnrichment');
+                const result = await emailEnrichment.enrichEmail(msg.client_id, {
+                  name: msg.lead_name,
+                  company: msg.lead_company,
+                });
+                if (result?.email) {
+                  foundEmail = result.email;
+                  await pool.query(
+                    `UPDATE leads SET email = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
+                    [foundEmail, msg.lead_id, msg.client_id]
+                  );
+                  logger.info({ msg: `[linkedin-sweep] Found email for ${msg.lead_name}: ${foundEmail}` });
+                }
+              } catch (err) {
+                logger.warn({ msg: `[linkedin-sweep] Email enrichment failed for ${msg.lead_name}`, err: err.message });
+              }
+            }
+
             await pool.query(
-              `UPDATE messages
-                 SET status = 'sent',
-                     sent_at = NOW(),
-                     ranger_notes = 'auto-sweep: LinkedIn auto-graduated to sent after 3 days (acceptance presumed)',
-                     metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('auto_sweep_graduated', true, 'auto_sweep_at', NOW()::text),
-                     updated_at = NOW()
-               WHERE id = $1 AND client_id = $2`,
-              [msg.message_id, msg.client_id]
+              `UPDATE messages SET status = 'stale_unsent',
+                 ranger_notes = $1, updated_at = NOW()
+               WHERE id = $2 AND client_id = $3`,
+              [foundEmail
+                ? `Expired after ${LINKEDIN_STALE_DAYS}d no accept — escalated to email`
+                : `Expired after ${LINKEDIN_STALE_DAYS}d no accept — no email found, lead removed`,
+               msg.message_id, msg.client_id]
             );
 
-            // 2026-05-06 FIX: do NOT auto-resolve the linked approval.
-            // Previously this flipped approvals.status='pending' → 'approved' which
-            // removed the lead from the UI's "Awaiting Accept" tab (filter:
-            // approvals.status='pending' AND notes='linkedin_requested'). MJ then
-            // lost visibility of 51 leads in the last 14 days that were marked sent
-            // server-side but never actually accepted on LinkedIn (Chrome MCP couldn't
-            // operate the React UI on 2nd-degree leads, so invitations sat pending).
-            //
-            // New behaviour: auto-sweep still flips the message + schedules follow-ups,
-            // but the approval stays 'pending'. Real acceptance comes from either:
-            //   (a) MJ manually verifies via the Awaiting Accept UI button → approvals → 'approved'
-            //   (b) /linkedin-sync-replies detects a real reply on this lead → flips approval
-            //   (c) Eventual expiry cron (separate, not in this commit) for >14d stragglers
-            // The previous approvals.status='approved' UPDATE is removed intentionally.
+            if (foundEmail) {
+              try {
+                const { callAgent } = require('./services/claude');
+                const draft = await callAgent('sales_beaver',
+                  `You are Sales Beaver writing a COLD EMAIL. This is the FIRST email to this person — a prior LinkedIn connection request went unanswered.
 
-            // 2026-05-06: pipeline_stage stays 'outreach' (intermediate state) so the
-            // lead remains discoverable in awaiting-accept-style filters. Real
-            // verification (manual or reply-driven) advances pipeline_stage='contacted'.
-            // Keep first_contacted_at populated so historical analytics still work.
-            if (msg.lead_id) {
+LEAD: ${msg.lead_name} - ${msg.lead_title || 'Unknown'} at ${msg.lead_company}
+
+FORMAT (email): Hi ${(msg.lead_name || '').split(' ')[0]}, {body — max 60 words}. Regards, {sender}.
+Do NOT mention the LinkedIn request. Treat this as a fresh cold email. One specific observation about their company + one pointed question.
+
+HARD RULES: No em dashes. Max 1 question mark. No bullets. No fabricated details. No "I hope this finds you well."
+
+Return JSON: {"subject":"...","body":"..."}`
+                );
+
+                if (draft?.body && typeof draft.body === 'string') {
+                  const cleanBody = draft.body.replace(/\s*—\s*/g, ', ').replace(/—/g, ' ');
+                  const { rows: [savedMsg] } = await pool.query(
+                    `INSERT INTO messages (client_id, lead_id, subject, body, status, channel, metadata)
+                     VALUES ($1, $2, $3, $4, 'pending_approval', 'email', $5)
+                     RETURNING id`,
+                    [msg.client_id, msg.lead_id, draft.subject || msg.lead_company,
+                     cleanBody, JSON.stringify({ linkedin_stale_escalation: true, original_message_id: msg.message_id })]
+                  );
+
+                  await pool.query(
+                    `INSERT INTO approvals (client_id, message_id, requested_by, status)
+                     VALUES ($1, $2, 'linkedin_stale_escalation', 'pending')`,
+                    [msg.client_id, savedMsg.id]
+                  );
+
+                  const logsService = require('./services/logs');
+                  await logsService.createLog(msg.client_id, {
+                    agent: 'system', action: 'linkedin_stale_escalated',
+                    target_type: 'lead', target_id: msg.lead_id,
+                    metadata: { lead_name: msg.lead_name, email: foundEmail, stale_days: LINKEDIN_STALE_DAYS },
+                  });
+                  escalated++;
+                }
+              } catch (err) {
+                logger.warn({ msg: `[linkedin-sweep] Email draft failed for ${msg.lead_name}`, err: err.message });
+              }
+            } else {
               await pool.query(
-                `UPDATE leads
-                   SET first_contacted_at = COALESCE(first_contacted_at, NOW()),
-                       updated_at = NOW()
+                `UPDATE leads SET deleted_at = NOW(), updated_at = NOW()
                  WHERE id = $1 AND client_id = $2`,
                 [msg.lead_id, msg.client_id]
               );
-            }
 
-            // Schedule the Day 2/5/10/18/30 follow-up sequence
-            // Guard: only if no prior sent messages exist (same guard as markConnectionAccepted)
-            const { rows: prevSent } = await pool.query(
-              `SELECT COUNT(*) AS cnt FROM messages
-               WHERE lead_id = $1 AND client_id = $2 AND status = 'sent'`,
-              [msg.lead_id, msg.client_id]
-            );
-            if (parseInt(prevSent[0].cnt) <= 1) {
-              await scheduleFollowUps(msg.client_id, msg.lead_id, new Date());
-              logger.info({ msg: `[linkedin-sweep] Scheduled follow-ups for auto-graduated lead ${msg.lead_id}` });
-            }
-
-            // Phase D piece 2 — outcome attribution: sent event (auto-graduate)
-            try {
-              const { rows: [leadRow] } = await pool.query(
-                `SELECT id, source, signal_tier, quality_score, metadata FROM leads WHERE id = $1 AND client_id = $2`,
-                [msg.lead_id, msg.client_id]
-              );
-              const { recordOutcome, attributionFromLead } = require('./services/outcomeTracker');
-              recordOutcome(msg.client_id, {
-                outcome: 'sent',
-                leadId: msg.lead_id,
-                messageId: msg.message_id,
-                channel: 'linkedin',
-                ...attributionFromLead(leadRow),
-                eventData: { source_path: 'auto_sweep', presumed_accepted_after_days: 3 },
+              const logsService = require('./services/logs');
+              await logsService.createLog(msg.client_id, {
+                agent: 'system', action: 'linkedin_stale_removed',
+                target_type: 'lead', target_id: msg.lead_id,
+                metadata: { lead_name: msg.lead_name, company: msg.lead_company, stale_days: LINKEDIN_STALE_DAYS },
               });
-            } catch (err) {
-              logger.warn({ msg: '[linkedin-sweep] outcome tracker failed', err: err.message });
+              removed++;
             }
           } catch (err) {
             logger.warn({ msg: '[linkedin-sweep] Per-message error', message_id: msg.message_id, err: err.message });
           }
         }
 
-        logger.info({ msg: 'LinkedIn sweep processed', processed: staleMessages.length });
+        logger.info({ msg: `[linkedin-sweep] Done: ${escalated} escalated to email, ${removed} removed`, total: staleMessages.length });
       } catch (err) {
-        logger.warn({ msg: 'LinkedIn sweep error', err: err.message });
+        logger.warn({ msg: '[linkedin-sweep] Sweep error', err: err.message });
       }
     }
 
@@ -1378,7 +1384,7 @@ async function start() {
       sweepStaleLinkedInRequests().then(() => jobHealth.markRun('linkedin_sweep')).catch(err => jobHealth.markError('linkedin_sweep', err.message));
       setInterval(() => sweepStaleLinkedInRequests().then(() => jobHealth.markRun('linkedin_sweep')).catch(err => jobHealth.markError('linkedin_sweep', err.message)), 6 * 60 * 60 * 1000);
     }, 5 * 60 * 1000);
-    logger.info({ msg: 'LinkedIn stale connection sweep registered (every 6h, 7-day threshold)' });
+    logger.info({ msg: `LinkedIn stale sweep registered (every 6h, ${LINKEDIN_STALE_DAYS}-day threshold, batch ${LINKEDIN_SWEEP_BATCH})` });
 
   } catch (err) {
     logger.error({ msg: 'Failed to start server', err: err.message, stack: err.stack });
