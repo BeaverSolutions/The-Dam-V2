@@ -3314,16 +3314,54 @@ router.post('/backfill-hunter-emails', requireInternalKey, async (req, res) => {
           continue;
         }
 
-        const result = await hunter.findEmail(client_id, { firstName, lastName, company: lead.company });
-        if (!result?.email) {
-          counts.skipped++;
-          reasons.no_email_found = (reasons.no_email_found || 0) + 1;
-          continue;
+        // Step 1: Hunter findEmail (verified email — Tier A path)
+        let email = null;
+        let isVerified = false;
+        let emailSource = null;
+        let confidence = 0;
+
+        const hunterResult = await hunter.findEmail(client_id, { firstName, lastName, company: lead.company });
+        if (hunterResult?.email && (hunterResult.confidence || 0) >= minConfidence) {
+          email = hunterResult.email;
+          isVerified = !!hunterResult.verified;
+          emailSource = 'hunter_backfill';
+          confidence = hunterResult.confidence || 0;
         }
-        if ((result.confidence || 0) < minConfidence) {
+
+        // Step 2: Brave fallback (2026-05-14) — when Hunter misses or returns
+        // low-confidence, search Brave for @<domain> emails on the company's
+        // inferred domain. Pattern-inferred — NOT verified. Lands as Tier B
+        // with email_source='brave_pattern' so downstream knows quality bar.
+        if (!email) {
+          try {
+            const { searchEmailDomain } = require('../services/searchService');
+            const { domainsFromCompany, scoreEmailNameMatch } = require('../services/emailEnrichment');
+            const domains = domainsFromCompany(lead.company);
+            for (const domain of domains) {
+              const emails = await searchEmailDomain(domain).catch(() => []);
+              if (!emails?.length) continue;
+              // Pick the email whose local-part best matches firstName/lastName
+              let best = null;
+              for (const e of emails) {
+                const score = scoreEmailNameMatch(e, firstName, lastName);
+                if (!best || score > best.score) best = { email: e, score };
+              }
+              if (best && best.score >= 50) {
+                email = best.email;
+                isVerified = false; // Brave pattern — NOT verified
+                emailSource = 'brave_pattern';
+                confidence = best.score;
+                break; // first matching domain wins
+              }
+            }
+          } catch (err) {
+            logger.warn({ msg: '[backfill-hunter] brave fallback failed', leadId: lead.id, err: err.message });
+          }
+        }
+
+        if (!email) {
           counts.skipped++;
-          const k = `low_confidence_${result.confidence}`;
-          reasons[k] = (reasons[k] || 0) + 1;
+          reasons.no_email_found_in_hunter_or_brave = (reasons.no_email_found_in_hunter_or_brave || 0) + 1;
           continue;
         }
 
@@ -3331,14 +3369,15 @@ router.post('/backfill-hunter-emails', requireInternalKey, async (req, res) => {
           `UPDATE leads
               SET email          = $1,
                   email_verified = $2,
-                  email_source   = 'hunter_backfill',
+                  email_source   = $5,
                   updated_at     = NOW()
             WHERE id = $3 AND client_id = $4
               AND (email IS NULL OR email = '')`,
-          [result.email, !!result.verified, lead.id, client_id]
+          [email, isVerified, lead.id, client_id, emailSource]
         );
         counts.enriched++;
-        if (result.verified) counts.verified++;
+        if (isVerified) counts.verified++;
+        reasons[`source_${emailSource}`] = (reasons[`source_${emailSource}`] || 0) + 1;
       } catch (err) {
         counts.errors++;
         logger.warn({ msg: '[backfill-hunter] lead error', leadId: lead.id, err: err.message });
