@@ -714,4 +714,59 @@ async function runDbBuilder() {
   }
 }
 
-module.exports = { runDbBuilder, checkDbHealth };
+// ── On-Demand Sourcing (called by autonomous kickoff when pool is dry) ───────
+
+async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSize = 20 } = {}) {
+  const researchModule = require('./research');
+
+  const { rows: icpRows } = await pool.query(
+    `SELECT content FROM agent_memory
+     WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
+    [clientId]
+  );
+  const icpMemory = icpRows[0]?.content || null;
+  if (!icpMemory) {
+    logger.warn({ msg: '[db-builder] on-demand: no ICP memory, cannot source' });
+    return { saved: 0, reason: 'no_icp_memory' };
+  }
+
+  const budget = await checkBudget(clientId);
+  if (!budget.allowed) {
+    logger.info({ msg: '[db-builder] on-demand: budget exhausted' });
+    return { saved: 0, reason: 'budget_exhausted' };
+  }
+
+  const patterns = await loadEmailPatterns(clientId);
+
+  let result;
+  try {
+    result = await researchModule.researchLeads(clientId, {
+      icpMemory,
+      targetCount: batchSize,
+      batchIndex: Date.now(),
+    });
+  } catch (err) {
+    logger.warn({ msg: '[db-builder] on-demand research failed', err: err.message });
+    return { saved: 0, reason: 'research_error' };
+  }
+
+  const leads = result.leads || [];
+  let saved = 0;
+  for (const lead of leads) {
+    const savedId = await saveLead(clientId, lead, result.queriesUsed?.join(' | ') || '', { patterns });
+    if (savedId) saved++;
+  }
+
+  await logsService.createLog(clientId, {
+    agent: 'research_beaver',
+    action: 'on_demand_sourcing_complete',
+    target_type: 'system',
+    metadata: { trigger: 'pool_dry_kickoff', neededChannel, found: leads.length, saved },
+  });
+
+  const health = await checkDbHealth(clientId);
+  logger.info({ msg: '[db-builder] on-demand complete', found: leads.length, saved, pool_email: health.withEmail });
+  return { saved, health, reason: saved > 0 ? 'sourced' : 'no_results' };
+}
+
+module.exports = { runDbBuilder, checkDbHealth, sourceLeadsOnDemand };

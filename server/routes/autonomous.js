@@ -1560,6 +1560,9 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
   // is genuinely dry. Captain's directive sets this; default true.
   const LINKEDIN_OVERRUN_OK  = channelFocus?.payload?.linkedin_overrun_allowed_if_email_pool_dry ?? true;
 
+  let poolDryResearchAttempts = 0;
+  const MAX_POOL_DRY_RESEARCH = 2;
+
   for (let batch = 1; batch <= HARD_CEILING; batch++) {
     // Recalculate live counts — now per-channel so we can honour the 30/20 split
     const { rows: liveCount } = await pool.query(
@@ -1669,12 +1672,54 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
       });
       break;
     } else {
-      // Pool dry on the channel we needed and overrun not allowed → escalate
+      // Pool dry — trigger Research Beaver on-demand instead of giving up
       console.warn(`[Autonomous] Client ${clientId} batch ${batch}: pool dry on needed channel (email_gap=${emailGap}, linkedin_gap=${linkedinGap}, pool_email=${poolEmailReady}, pool_linkedin=${poolLinkedinOnly})`);
       await logAction(clientId, 'director', 'pool_dry_for_channel_target', 'system', null, {
         batch, emailGap, linkedinGap, poolEmailReady, poolLinkedinOnly,
       });
-      break;
+
+      if (poolDryResearchAttempts >= MAX_POOL_DRY_RESEARCH) {
+        console.warn(`[Autonomous] Already attempted ${MAX_POOL_DRY_RESEARCH} on-demand research runs this kickoff. Stopping.`);
+        await logAction(clientId, 'director', 'on_demand_research_exhausted', 'system', null, {
+          batch, attempts: poolDryResearchAttempts,
+        });
+        break;
+      }
+
+      poolDryResearchAttempts++;
+      const neededChannel = emailGap > 0 ? 'email' : 'linkedin';
+      console.log(`[Autonomous] Triggering on-demand Research Beaver (attempt ${poolDryResearchAttempts}/${MAX_POOL_DRY_RESEARCH}, channel=${neededChannel})`);
+      await logAction(clientId, 'director', 'pool_dry_triggering_research', 'system', null, {
+        batch, neededChannel, attempt: poolDryResearchAttempts,
+      });
+
+      try {
+        const { sourceLeadsOnDemand } = require('../services/dbBuilder');
+        const result = await sourceLeadsOnDemand(clientId, { neededChannel, batchSize: BATCH_SIZE });
+
+        if (result.saved === 0) {
+          console.warn(`[Autonomous] On-demand research yielded 0 usable leads (reason: ${result.reason}). Stopping.`);
+          await logAction(clientId, 'director', 'on_demand_research_empty', 'system', null, {
+            batch, reason: result.reason, attempt: poolDryResearchAttempts,
+          });
+          break;
+        }
+
+        console.log(`[Autonomous] On-demand research added ${result.saved} leads (pool email=${result.health?.withEmail}). Retrying batch.`);
+        await logAction(clientId, 'director', 'on_demand_research_success', 'system', null, {
+          batch, saved: result.saved,
+          pool_email: result.health?.withEmail,
+          pool_linkedin: result.health?.noEmail,
+          attempt: poolDryResearchAttempts,
+        });
+        continue;
+      } catch (err) {
+        console.error(`[Autonomous] On-demand research failed:`, err.message);
+        await logAction(clientId, 'director', 'on_demand_research_error', 'system', null, {
+          batch, error: err.message, attempt: poolDryResearchAttempts,
+        });
+        break;
+      }
     }
 
     // ── DB-first: pull uncontacted leads from pool before cold research ──
