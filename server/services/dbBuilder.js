@@ -283,6 +283,38 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
   }
   const leadTier = gateResult.tier;
 
+  // 2026-05-14 (Path B / Mismatch 6 source-side fix): ICP v2 gate at sourcing time.
+  // contactGate only checks tier (email-verified / linkedin+score). It does NOT
+  // catch off-persona ("Account Director"), wrong size (MNC like Shopee), wrong
+  // vertical (freelance), or data-integrity (name == company placeholder). Per
+  // PLAN.md Phase 2 V2: "ICP gate enforced AT SOURCE only" — re-running this gate
+  // at every kickoff (autonomous.js:1606) wastes tokens AND was silently broken
+  // (rejected_legacy_audit isn't in leads_status_check). Run it here once instead.
+  const { applyIcpV2Filter } = require('./agents');
+  const v2 = applyIcpV2Filter(lead);
+  if (!v2.pass) {
+    console.warn(`[db_builder] ICP v2 reject at sourcing: ${lead.name} (${lead.company}) — ${v2.reason}`);
+    await pool.query(
+      `INSERT INTO research_misses
+         (client_id, candidate_name, candidate_company, candidate_title,
+          candidate_linkedin, candidate_email, miss_reason, source_strategy, query_used, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
+      [
+        clientId,
+        lead.name || null,
+        lead.company || null,
+        lead.title || null,
+        lead.linkedin_url || null,
+        lead.email || null,
+        `icp_v2_${v2.status || 'rejected'}: ${v2.reason}`,
+        'db_builder_icp_v2_gate',
+        searchQuery,
+        JSON.stringify({ ...(lead.metadata || {}), icp_v2_status: v2.status, icp_v2_reason: v2.reason }),
+      ]
+    ).catch(err => console.warn('[db_builder] icp_v2 miss insert failed:', err.message));
+    return null;
+  }
+
   try {
     // Phase 2 V2 Step 6 (2026-05-08): buying_signal_strength + signal_dated_at
     // contract enforcement at write time. Producer should emit these from the
