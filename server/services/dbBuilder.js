@@ -666,6 +666,44 @@ async function runDbBuilder() {
             email_pool: newHealth.withEmail,
             email_target: emailPoolTarget,
           });
+
+          // 2026-05-14: Daily brief for Captain. Captain reads this at the
+          // 09:00 MYT morning brief to surface miss-to-target + ICP source-side
+          // reject patterns. Per PER-BEAVER-KPI-ARCHITECTURE.md.
+          // Upsert: morning fire writes initial, midday fire updates with
+          // top-up numbers under the same key.
+          try {
+            const todayUtc = new Date().toISOString().slice(0, 10);
+            const { rows: [missRow] } = await pool.query(
+              `SELECT COUNT(*)::int AS n FROM research_misses
+               WHERE client_id = $1 AND created_at >= CURRENT_DATE
+                 AND source_strategy = 'db_builder_icp_v2_gate'`,
+              [client.id]
+            );
+            await pool.query(
+              `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+               VALUES ($1, 'research_beaver', $2, $3::jsonb, 'config')
+               ON CONFLICT (client_id, agent, key) DO UPDATE
+                 SET content = EXCLUDED.content, updated_at = NOW()`,
+              [
+                client.id,
+                `daily_brief_${todayUtc}`,
+                JSON.stringify({
+                  date: todayUtc,
+                  target: 40,
+                  saved_today: totalSaved,
+                  email_pool_now: newHealth.withEmail,
+                  email_target: emailPoolTarget,
+                  email_deficit: Math.max(0, emailPoolTarget - newHealth.withEmail),
+                  icp_v2_source_rejects: missRow?.n || 0,
+                  captured_at: new Date().toISOString(),
+                  hit_target: totalSaved >= 40,
+                }),
+              ]
+            );
+          } catch (err) {
+            logger.warn({ msg: '[db-builder] daily_brief write failed', err: err.message });
+          }
         });
       } catch (err) {
         logger.warn({ msg: '[db-builder] Client error', slug: client.slug, err: err.message });
