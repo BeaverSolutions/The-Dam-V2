@@ -327,7 +327,7 @@ async function start() {
                 // Get previous messages for context
                 const { rows: prevMessages } = await pool.query(
                   `SELECT subject, body, metadata, channel FROM messages
-                   WHERE lead_id = $1 AND client_id = $2 AND status IN ('sent', 'pending_send', 'approved')
+                   WHERE lead_id = $1 AND client_id = $2 AND status IN ('sent', 'pending_send', 'approved', 'delivered', 'linkedin_requested', 'awaiting_accept')
                    ORDER BY created_at ASC`,
                   [fu.lead_id, client_id]
                 );

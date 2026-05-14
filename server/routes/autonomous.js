@@ -1098,7 +1098,7 @@ async function _runAutonomousKickoffInner(clientId) {
         // Get previous messages for this lead (so follow-up uses different angle)
         const { rows: prevMessages } = await pool.query(
           `SELECT subject, body, metadata, channel FROM messages
-           WHERE lead_id = $1 AND client_id = $2 AND status IN ('sent', 'pending_send', 'approved')
+           WHERE lead_id = $1 AND client_id = $2 AND status IN ('sent', 'pending_send', 'approved', 'delivered', 'linkedin_requested', 'awaiting_accept')
            ORDER BY created_at ASC`,
           [followUp.lead_id, clientId]
         );
@@ -1300,7 +1300,7 @@ async function _runAutonomousKickoffInner(clientId) {
           // Draft message on new channel via Sales Beaver
           const { rows: prevMessages } = await pool.query(
             `SELECT subject, body, metadata, channel FROM messages
-             WHERE lead_id = $1 AND client_id = $2 AND status IN ('sent', 'pending_send', 'approved')
+             WHERE lead_id = $1 AND client_id = $2 AND status IN ('sent', 'pending_send', 'approved', 'delivered', 'linkedin_requested', 'awaiting_accept')
              ORDER BY created_at ASC`,
             [lead_id, clientId]
           );
