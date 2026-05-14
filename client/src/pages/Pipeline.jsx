@@ -568,6 +568,7 @@ function LeadDetail({ lead, onUpdate }) {
   const [notes, setNotes] = useState(lead.metadata?.notes || '');
   const [savingNotes, setSavingNotes] = useState(false);
   const [savingStage, setSavingStage] = useState(false);
+  const [stageError, setStageError] = useState(null);
   const [messages, setMessages] = useState([]);
   const [msgsLoading, setMsgsLoading] = useState(true);
   const [activity, setActivity] = useState([]);
@@ -602,11 +603,18 @@ function LeadDetail({ lead, onUpdate }) {
 
   const handleStageChange = async (e) => {
     const pipeline_stage = e.target.value;
+    const label = STAGE_OPTIONS.find(s => s.value === pipeline_stage)?.label || pipeline_stage;
     setSavingStage(true);
+    setStageError(null);
     try {
-      const res = await request(`/leads/${lead.id}`, { method: 'PUT', body: JSON.stringify({ pipeline_stage }) });
+      const res = await request(`/leads/${lead.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ pipeline_stage, next_action: `Stage set to ${label}` }),
+      });
       if (res?.data) onUpdate(res.data);
-    } catch {}
+    } catch (err) {
+      setStageError('Stage update failed');
+    }
     setSavingStage(false);
   };
 
@@ -693,6 +701,9 @@ function LeadDetail({ lead, onUpdate }) {
             >
               {STAGE_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
             </select>
+            {stageError && (
+              <span style={{ fontSize: '0.7rem', color: 'var(--danger)' }}>{stageError}</span>
+            )}
             {/* Score badge */}
             {lead.score > 0 && (
               <span style={{ fontSize: '0.75rem', fontWeight: 700, color: scoreColor(lead.score), background: `${scoreColor(lead.score)}20`, padding: '0.2rem 0.6rem', borderRadius: 100 }}>
