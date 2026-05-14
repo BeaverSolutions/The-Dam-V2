@@ -461,18 +461,37 @@ async function start() {
     logger.info({ msg: 'Follow-up scheduler DISABLED — Captain-led daily planning replaces 30-min cron' });
 
     // DB Builder — Research Beaver maintains lead pool health
+    // 2026-05-14: changed from every-15-min to 2x daily (08:30 + 13:00 MYT).
+    // Per MJ direction + PER-BEAVER-KPI-ARCHITECTURE.md: Research Beaver fires
+    // BEFORE Captain's 09:00 MYT morning brief so the brief reflects fresh
+    // sourcing, then 13:00 top-up if morning didn't hit 40-leads target.
+    // Quality > volume — burning Brave on every 15-min tick was wasteful.
     const { runDbBuilder } = require('./services/dbBuilder');
     let _dbBuilderRunning = false;
+    let _dbBuilderLastFiredKey = null;
     setTimeout(() => {
       setInterval(() => {
-        // Skip if previous run hasn't finished — prevents overlap under slow search APIs
-        // or large client loops. dbBuilder.js also has its own internal _running guard;
-        // this is defence in depth at the scheduler level.
+        const now = new Date();
+        const utcHour = now.getUTCHours();
+        const utcMin = now.getUTCMinutes();
+        // Window 1: 00:30-00:39 UTC = 08:30-08:39 MYT (morning fire, pre-Captain brief)
+        // Window 2: 05:00-05:09 UTC = 13:00-13:09 MYT (mid-day top-up)
+        const isMorningWindow = (utcHour === 0 && utcMin >= 30 && utcMin < 40);
+        const isMidDayWindow = (utcHour === 5 && utcMin >= 0 && utcMin < 10);
+        if (!isMorningWindow && !isMidDayWindow) return;
+
+        const windowKey = isMorningWindow
+          ? `morning_${now.toISOString().slice(0, 10)}`
+          : `midday_${now.toISOString().slice(0, 10)}`;
+        if (_dbBuilderLastFiredKey === windowKey) return; // already fired this window
         if (_dbBuilderRunning) {
-          logger.warn({ msg: 'DB Builder previous run still in flight, skipping tick' });
+          logger.warn({ msg: 'DB Builder previous run still in flight, skipping window' });
           return;
         }
         _dbBuilderRunning = true;
+        _dbBuilderLastFiredKey = windowKey;
+
+        logger.info({ msg: `DB Builder firing (window=${windowKey})` });
         runDbBuilder()
           .then(() => { jobHealth.markRun('db_builder'); })
           .catch(err => {
@@ -480,8 +499,8 @@ async function start() {
             jobHealth.markError('db_builder', err.message);
           })
           .finally(() => { _dbBuilderRunning = false; });
-      }, 15 * 60 * 1000);
-      logger.info({ msg: 'DB Builder started (15 min interval)' });
+      }, 5 * 60 * 1000); // 5-min poll cadence — catches both windows reliably
+      logger.info({ msg: 'DB Builder started (2x daily: 08:30 + 13:00 MYT)' });
     }, 3 * 60 * 1000); // 3min delay after startup
 
     // ── Captain Beaver cron jobs ─────────────────────────────────────────────
