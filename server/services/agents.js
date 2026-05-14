@@ -2740,6 +2740,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   let dbLeadsCount = 0;
 
   try {
+    // 2026-05-14: NOT EXISTS narrowed to ACTIVE-state messages only.
+    // Was: any prior message excluded the lead (even rejected drafts), creating
+    // a permanent dead-state where leads with old filter/prompt rejections could
+    // never be re-attempted. After the 2026-05-14 filter narrow + Research Beaver
+    // prompt rewrite, those rejected drafts no longer reflect current ICP — leads
+    // should be retryable. Now only ACTIVE messages (sent / approved / queued /
+    // pending) block re-drafting. Rejected drafts no longer permanently kill a lead.
     const { rows: uncontactedLeads } = await pool.query(
       `SELECT l.* FROM leads l
        WHERE l.client_id = $1
@@ -2747,7 +2754,10 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
          AND l.status = 'new'
          AND (l.email IS NOT NULL OR l.linkedin_url IS NOT NULL)
          AND NOT EXISTS (
-           SELECT 1 FROM messages m WHERE m.lead_id = l.id AND m.client_id = $1
+           SELECT 1 FROM messages m
+           WHERE m.lead_id = l.id AND m.client_id = $1
+             AND m.status IN ('sent', 'approved', 'linkedin_requested',
+                              'pending_send', 'pending_approval', 'pending_ranger')
          )
        ORDER BY
          CASE l.signal_tier WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
