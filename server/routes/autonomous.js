@@ -2532,11 +2532,18 @@ router.post('/linkedin-sync-replies', requireInternalKey, async (req, res) => {
           [candidate.message_id, r.last_msg_text]
         );
 
-        // 2. Advance lead
+        // 2. Advance lead. CASE guard mirrors commit 3bb476c (mark-replied):
+        // advance to 'qualifying' ONLY when current stage is earlier in the funnel.
+        // Leads already past qualifying (booked / closed*) keep their stage so a
+        // batch sync-replies pass cannot regress a booked deal.
         await pool.query(
           `UPDATE leads
              SET last_reply_at = NOW(),
-                 pipeline_stage = 'qualifying',
+                 pipeline_stage = CASE
+                   WHEN pipeline_stage IN ('prospecting', 'researched', 'contacted', 'outreach')
+                     THEN 'qualifying'
+                   ELSE pipeline_stage
+                 END,
                  updated_at = NOW()
            WHERE id = $1 AND client_id = $2`,
           [candidate.lead_id, client_id]
