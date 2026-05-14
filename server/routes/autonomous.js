@@ -403,16 +403,27 @@ router.post('/pool-audit-batch', requireInternalKey, async (req, res) => {
       return res.json({ data: summary });
     }
 
-    // Execute soft-delete. Same shape as per-kickoff audit at L1628.
-    const rejectIds = rejects.map(r => r.id);
-    await pool.query(
-      `UPDATE leads SET status = 'rejected_legacy_audit', deleted_at = NOW(),
-                        metadata = COALESCE(metadata, '{}'::jsonb)
-                                || jsonb_build_object('legacy_audit_reason', $2::text,
-                                                      'batch_audit_run_at', NOW()::text)
-       WHERE id = ANY($1::uuid[]) AND client_id = $3 AND deleted_at IS NULL`,
-      [rejectIds, 'batch_pool_audit_2026_05_14', client_id]
-    );
+    // Execute soft-delete. Group rejects by their per-lead v2.status so each
+    // UPDATE uses a status value the leads_status_check CHECK allows.
+    // (Allowed: rejected_persona, rejected_vertical, rejected_size,
+    //  rejected_data_integrity, rejected_country, rejected_low_score, etc.)
+    // Per-kickoff audit at L1628 used hardcoded 'rejected_legacy_audit' which
+    // FAILS this CHECK silently via .catch() — soft-delete never persisted.
+    const byStatus = {};
+    for (const r of rejects) {
+      const s = r.status || 'rejected_data_integrity';
+      (byStatus[s] = byStatus[s] || []).push(r.id);
+    }
+    for (const [statusValue, ids] of Object.entries(byStatus)) {
+      await pool.query(
+        `UPDATE leads SET status = $1, deleted_at = NOW(),
+                          metadata = COALESCE(metadata, '{}'::jsonb)
+                                  || jsonb_build_object('legacy_audit_reason', $3::text,
+                                                        'batch_audit_run_at', NOW()::text)
+         WHERE id = ANY($2::uuid[]) AND client_id = $4 AND deleted_at IS NULL`,
+        [statusValue, ids, 'batch_pool_audit_2026_05_14', client_id]
+      );
+    }
 
     await logAction(client_id, 'director', 'pool_audit_batch_executed', 'system', null, {
       total_audited: leads.length,
@@ -1723,13 +1734,25 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
           await logAction(clientId, 'director', 'pool_audit_rejected', 'system', null, {
             batch, rejected: auditRejects.length, total: poolLeadFull.length, sample: auditRejects.slice(0, 5),
           });
-          // Soft-delete so they exit the pool. Status carries the gate's reason for audit queries.
-          await pool.query(
-            `UPDATE leads SET status = 'rejected_legacy_audit', deleted_at = NOW(),
-                              metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('legacy_audit_reason', $2::text)
-             WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
-            [auditRejects.map(r => r.id), 'pool_audit_2026_05_06']
-          ).catch(err => console.warn(`[Autonomous] Soft-delete of audit rejects failed:`, err.message));
+          // Soft-delete so they exit the pool. Group by per-lead v2.status so each
+          // UPDATE uses a status value the leads_status_check CHECK allows.
+          // 2026-05-14: was hardcoded 'rejected_legacy_audit' which FAILED the CHECK
+          // silently via .catch — soft-delete never persisted, audit rejected the
+          // same leads kickoff after kickoff. Now matches batch endpoint behavior.
+          const auditByStatus = {};
+          for (const r of auditRejects) {
+            const s = r.status || 'rejected_data_integrity';
+            (auditByStatus[s] = auditByStatus[s] || []).push(r.id);
+          }
+          for (const [statusValue, ids] of Object.entries(auditByStatus)) {
+            await pool.query(
+              `UPDATE leads SET status = $1, deleted_at = NOW(),
+                                metadata = COALESCE(metadata, '{}'::jsonb)
+                                        || jsonb_build_object('legacy_audit_reason', $3::text)
+               WHERE id = ANY($2::uuid[]) AND deleted_at IS NULL`,
+              [statusValue, ids, 'pool_audit_per_kickoff_2026_05_14']
+            ).catch(err => console.warn(`[Autonomous] Soft-delete of audit rejects (status=${statusValue}) failed:`, err.message));
+          }
         }
 
         if (passingIds.length >= Math.min(draftSize, 5)) {
