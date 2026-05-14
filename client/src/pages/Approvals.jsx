@@ -396,13 +396,29 @@ export default function Approvals() {
   }, []);
 
   // Split all pending approvals client-side into three buckets:
-  // 1. Regular pending (Day 0 outreach needing review)
-  // 2. Follow-ups (is_followup=true, surfaced on their scheduled day)
+  // 1. Regular pending (Day 0 outreach needing review) — INCLUDES borderline drafts
+  //    regardless of follow-up status. Borderline (score 60-79) is the higher-priority
+  //    signal — MJ collaborates via Apply / Edit / Skip per TWO-THOUGHTS-SPEC.md.
+  // 2. Follow-ups (is_followup=true AND NOT borderline) — routine follow-ups due today
   // 3. Awaiting Accept (LinkedIn connection requests sent, waiting for accept)
+  //
+  // 2026-05-14: previously the score-74 borderline follow-up landed in Follow-ups tab
+  // and never surfaced for two-thoughts review. Borderline detection also falls back to
+  // ranger_score band 60-79 to cover messages re-scored between Fix 5b and Fix 5c deploys
+  // that lost the metadata.borderline flag.
+  const isBorderline = (a) => a.message_metadata?.borderline === true
+    || (typeof a.ranger_score === 'number' && a.ranger_score >= 60 && a.ranger_score < 80);
   const splitPending = (allPending) => {
     const awaiting = allPending.filter(a => a.notes === 'linkedin_requested');
-    const followups = allPending.filter(a => a.notes !== 'linkedin_requested' && a.message_metadata?.is_followup);
-    const realPending = allPending.filter(a => a.notes !== 'linkedin_requested' && !a.message_metadata?.is_followup);
+    const followups = allPending.filter(a =>
+      a.notes !== 'linkedin_requested'
+      && a.message_metadata?.is_followup
+      && !isBorderline(a)
+    );
+    const realPending = allPending.filter(a =>
+      a.notes !== 'linkedin_requested'
+      && (!a.message_metadata?.is_followup || isBorderline(a))
+    );
     return { awaiting, followups, realPending };
   };
 
