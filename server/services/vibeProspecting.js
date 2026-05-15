@@ -183,13 +183,13 @@ async function listTools(clientId) {
  * credits. Every filter value is wrapped { values: [...] } per the MCP schema.
  * Returns { ok, businesses: [{business_id, name, domain, website, ...}], credits }.
  */
-async function fetchBusinesses(clientId, { filters, size = 100, pageSize = 50 }) {
+async function fetchBusinesses(clientId, { filters, size = 100, pageSize = 50, toolReasoning }) {
   const result = await callTool(clientId, 'fetch-businesses', {
     filters,
     size,
     page_size: pageSize,
     page: 1,
-    tool_reasoning: 'BeavrDam Research Beaver: ICP-matched lead discovery',
+    tool_reasoning: toolReasoning || 'BeavrDam Research Beaver: ICP-matched lead discovery',
   });
   if (!result.ok) {
     return { ok: false, error: result.error, businesses: [], credits: result.credits || 0 };
@@ -207,13 +207,13 @@ async function fetchBusinesses(clientId, { filters, size = 100, pageSize = 50 })
  * Returns { ok, prospects: [{prospect_id, full_name, job_title, company_name,
  * business_id, linkedin, ...}], credits }.
  */
-async function fetchProspects(clientId, { filters, size = 100, pageSize = 50 }) {
+async function fetchProspects(clientId, { filters, size = 100, pageSize = 50, toolReasoning }) {
   const result = await callTool(clientId, 'fetch-prospects', {
     filters,
     size,
     page_size: pageSize,
     page: 1,
-    tool_reasoning: 'BeavrDam Research Beaver: ICP-matched lead discovery',
+    tool_reasoning: toolReasoning || 'BeavrDam Research Beaver: ICP-matched lead discovery',
   });
   if (!result.ok) {
     return { ok: false, error: result.error, prospects: [], credits: result.credits || 0 };
@@ -360,6 +360,14 @@ async function findVerifiedEmail(clientId, { firstName, lastName, fullName, comp
   };
 }
 
+/** Autocomplete — required for linkedin_category, naics_category, job_title, business_intent_topics. FREE. */
+async function autocomplete(clientId, field, query) {
+  const result = await callTool(clientId, 'autocomplete', { field, query });
+  if (!result.ok) return { ok: false, error: result.error, values: [] };
+  const values = result.payload?.suggestions || result.payload?.values || result.payload?.data || [];
+  return { ok: true, values };
+}
+
 /** Connectivity sanity check: cheap match-business call (FREE). */
 async function testConnection(clientId) {
   const apiKey = await getApiKey(clientId);
@@ -384,5 +392,6 @@ module.exports = {
   enrichProspectProfile,
   enrichBusinessFirmographics,
   findVerifiedEmail,
+  autocomplete,
   testConnection,
 };

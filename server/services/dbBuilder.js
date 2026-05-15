@@ -777,26 +777,52 @@ async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
   const icp = icpRows[0]?.content || null;
   if (!icp) return { saved: 0, credits: 0, reason: 'no_icp_memory' };
 
-  // Derive short website keywords from the ICP industries array.
+  // Build ICP-precise filters using autocomplete for linkedin_category.
   const industries = Array.isArray(icp.industries)
     ? icp.industries
     : (typeof icp.industries === 'string' ? icp.industries.split(',') : []);
-  const stop = new Set(['b2b', 'professional', 'providers', 'firms', 'and']);
-  const kw = new Set();
+
+  // Resolve linkedin_category values via autocomplete (FREE).
+  // Each ICP industry phrase becomes an autocomplete query; we collect
+  // the top match from each to build a precise category filter.
+  const linkedinCats = new Set();
   for (const ind of industries) {
-    for (const w of String(ind).toLowerCase().split(/\s+/)) {
-      if (w.length >= 4 && !stop.has(w)) kw.add(w);
-    }
+    const trimmed = String(ind).trim();
+    if (!trimmed) continue;
+    try {
+      const ac = await vp.autocomplete(clientId, 'linkedin_category', trimmed);
+      if (ac.ok && ac.values.length > 0) {
+        const val = typeof ac.values[0] === 'string' ? ac.values[0] : ac.values[0]?.value;
+        if (val) linkedinCats.add(val);
+      }
+    } catch (_) { /* autocomplete is best-effort */ }
   }
+  logger.info({ msg: '[db-builder] VP linkedin_category resolved', categories: [...linkedinCats] });
+
+  // Derive geography from ICP (default MY).
+  const geoRaw = icp.geographies || '';
+  const geoCodes = [];
+  if (/malaysia|MY/i.test(geoRaw)) geoCodes.push('MY');
+  if (/singapore|SG/i.test(geoRaw)) geoCodes.push('SG');
+  if (/indonesia|ID/i.test(geoRaw)) geoCodes.push('ID');
+  if (/philippines|PH/i.test(geoRaw)) geoCodes.push('PH');
+  if (geoCodes.length === 0) geoCodes.push('MY');
+
+  // Compose tool_reasoning as a human-readable ICP description.
+  const valueProp = icp.value_prop || 'AI-powered sales outreach for founder-led B2B companies';
+  const toolReasoning = `Find founder-led ${industries.slice(0, 3).join(', ')} companies in ${geoCodes.join('+')} with 2-200 employees that would benefit from: ${valueProp}`;
 
   // 1. fetch-businesses — FREE. ICP-filtered company discovery.
   const bizFilters = {
-    country_code: { values: ['MY'] },
+    country_code: { values: geoCodes },
     company_size: { values: ['1-10', '11-50', '51-200'] },
+    company_revenue: { values: ['0-500K', '500K-1M', '1M-5M', '5M-10M'] },
+    is_public_company: false,
+    has_website: true,
   };
-  if (kw.size > 0) bizFilters.website_keywords = { values: [...kw] };
+  if (linkedinCats.size > 0) bizFilters.linkedin_category = { values: [...linkedinCats] };
 
-  const bizResult = await vp.fetchBusinesses(clientId, { filters: bizFilters, size: 200, pageSize: 50 });
+  const bizResult = await vp.fetchBusinesses(clientId, { filters: bizFilters, size: 200, pageSize: 50, toolReasoning });
   if (!bizResult.ok || bizResult.businesses.length === 0) {
     return { saved: 0, credits: 0, reason: bizResult.error || 'no_businesses' };
   }
@@ -806,14 +832,17 @@ async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
   }
 
   // 2. fetch-prospects — FREE. Decision-makers with an email available.
+  // Keep size tight: only fetch 2x batchSize to avoid pulling too many
+  // prospects that we'd then waste credits enriching.
   const prResult = await vp.fetchProspects(clientId, {
     filters: {
       business_id: { values: Object.keys(bizMap).slice(0, 100) },
       job_level: { values: ['founder', 'owner', 'c-suite', 'president'] },
       has_email: true,
     },
-    size: Math.max(batchSize * 3, 60),
+    size: Math.min(batchSize * 2, 40),
     pageSize: 50,
+    toolReasoning,
   });
   if (!prResult.ok || prResult.prospects.length === 0) {
     return { saved: 0, credits: 0, reason: prResult.error || 'no_prospects' };
