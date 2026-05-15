@@ -143,27 +143,10 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
       const hasNumber = /\b\d+\b/.test(message);
       const effectiveLimit = hasNumber ? undefined : 20;
 
-      // Build an ICP-rich brief (same as autonomous kickoff) so Research Beaver
-      // gets real context instead of the bare word "KICKOFF".
+      // Phase 2 V2 Step 9 (2026-05-15): no brief is built here. Research is
+      // ICP-driven from agent_memory; passing a paragraph as `command` used to
+      // pollute Brave's query string. directorExecute reads ICP directly.
       let effectiveCommand = message;
-      const isBareKickoff = /^(kickoff|kick\s*off|start|execute|fire|begin)[\s!.]*$/i.test(message.trim());
-      if (isBareKickoff) {
-        try {
-          const icp = await agentsService.directorGetICP(client_id);
-          const gap = effectiveLimit || 20;
-          effectiveCommand = buildAutonomousBrief({
-            gap,
-            icp,
-            lastLearnings: null,
-            rejectionPatterns: null,
-            sent: 0,
-            target: gap,
-          });
-          console.log(`[chat] Bare kickoff → built ICP brief (${effectiveCommand.length} chars)`);
-        } catch (err) {
-          console.warn('[chat] Failed to build ICP brief, using raw command:', err.message);
-        }
-      }
 
       response.data = { plan_id: planId };
 
@@ -1822,13 +1805,11 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
       console.warn(`[Autonomous] DB pool query failed, falling back to cold research:`, err.message);
     }
 
-    // ── Fallback: cold research via directorExecute (original path) ──
+    // ── Fallback: cold research via directorExecute (ICP-driven) ──
+    // Phase 2 V2 Step 9 (2026-05-15): no brief is built. directorExecute reads
+    // the ICP from agent_memory and runs Research Beaver's ICP-only query path.
+    // The old buildAutonomousBrief paragraph was fed into Brave's q= and returned 0.
     if (!usedDbPool) {
-      const batchBrief = buildAutonomousBrief({
-        gap: draftSize, icp, lastLearnings, rejectionPatterns,
-        sent: liveSent, target,
-      });
-
       const beforeSaved = (await pool.query(
         `SELECT COUNT(*) AS c FROM leads WHERE client_id=$1 AND DATE(created_at)=$2`,
         [clientId, today]
@@ -1836,7 +1817,7 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
 
       await directorExecute(clientId, {
         plan_id: uuidv4(),
-        command: batchBrief,
+        command: '',
         batchIndex: batch - 1,
         limit: draftSize,
       });

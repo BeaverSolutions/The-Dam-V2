@@ -2824,9 +2824,14 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   let allSearchQueries = [];
 
   for (let round = 0; round < MAX_RESEARCH_ROUNDS; round++) {
-    const researchResult = command
-      ? await researchSearch(clientId, { query: command, filters: { batchIndex: currentBatchIndex, limit: targetLimit } })
-      : { data: { leads: [] } };
+    // Phase 2 V2 Step 9 (2026-05-15): research is ICP-driven only. `command` is
+    // retained for observability (logged at L2485 in plan_executing metadata) but
+    // is NOT passed to researchSearch as a query — that path used to feed the
+    // Captain daily-brief paragraph into Brave's q= parameter and returned 0.
+    const researchResult = await researchSearch(clientId, {
+      query: '',
+      filters: { batchIndex: currentBatchIndex, limit: targetLimit },
+    });
 
     const roundLeads = researchResult?.data?.leads || [];
     if (researchResult?.data?.query) allSearchQueries.push(researchResult.data.query);

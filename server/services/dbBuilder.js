@@ -412,6 +412,13 @@ async function sourceLeads(clientId, deficit, config) {
 
   let totalSaved = 0;
 
+  // 2026-05-15: enrichContext was referenced by saveLead() below but never
+  // defined in this scope — every cron batch threw ReferenceError, caught
+  // silently by the per-batch try/catch and logged as "saved: 0". The 08:30
+  // and 13:00 cron has sourced 0 leads for days because of this. sourceLeadsOnDemand
+  // already passes { patterns } correctly; mirror that here.
+  const enrichContext = { patterns: await loadEmailPatterns(clientId) };
+
   for (let i = 0; i < batchCount; i++) {
     // Re-check budget before each batch
     const budget = await checkBudget(clientId);

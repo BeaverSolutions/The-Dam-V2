@@ -744,46 +744,15 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     // 1. Load used queries
     const usedSet = await loadUsedQueries(clientId);
 
-    // 2. Build query pool — if user gave a specific command, extract keywords and override ICP
-    let effectiveIcp = icpMemory;
-    if (commandOverride) {
-      // Extract industry/role keywords from the command to override ICP defaults
-      const cmd = commandOverride.toLowerCase();
-      const extractedIndustries = [];
-      const extractedTitles = [];
-
-      // Common industry keywords
-      const industryKeywords = [
-        'marketing', 'agency', 'digital', 'property', 'proptech', 'fintech', 'saas',
-        'ecommerce', 'e-commerce', 'edtech', 'healthtech', 'logistics', 'f&b', 'food',
-        'consulting', 'recruitment', 'hr', 'legal', 'accounting', 'insurance',
-        'media', 'creative', 'design', 'tech', 'software', 'it', 'seo', 'advertising',
-      ];
-      for (const kw of industryKeywords) {
-        if (cmd.includes(kw)) extractedIndustries.push(kw);
-      }
-
-      // Common title keywords
-      const titleKeywords = [
-        'founder', 'ceo', 'coo', 'cmo', 'cto', 'director', 'md', 'managing director',
-        'co-founder', 'owner', 'partner', 'head of', 'vp', 'president',
-      ];
-      for (const kw of titleKeywords) {
-        if (cmd.includes(kw)) extractedTitles.push(kw);
-      }
-
-      // Override ICP with extracted keywords (command takes priority)
-      if (extractedIndustries.length > 0 || extractedTitles.length > 0) {
-        effectiveIcp = {
-          ...icpMemory,
-          ...(extractedIndustries.length > 0 ? { industries: extractedIndustries } : {}),
-          ...(extractedTitles.length > 0 ? { job_titles: extractedTitles } : {}),
-        };
-        console.log(`[research] Command override: industries=${extractedIndustries.join(',')}, titles=${extractedTitles.join(',')}`);
-      }
-    }
-
-    const queryPool = buildQueryPool(effectiveIcp);
+    // 2. Build query pool — ICP-only (Phase 2 V2 Step 9, 2026-05-15)
+    // The legacy commandOverride keyword-extraction branch was deleted: it accepted
+    // a freeform string and substring-matched against a small industry/title keyword
+    // list, then overwrote the ICP. In practice the autonomous kickoff passed a
+    // 500-word paragraph (buildAutonomousBrief), every keyword matched, and the
+    // resulting Brave queries returned 0. ICP memory is now the single source of
+    // truth for query construction. Short user commands route via Captain's
+    // create_lead tool / /inject, not through this path.
+    const queryPool = buildQueryPool(icpMemory);
 
     // 3. Pick next N unused queries (N = targetCount * 2, min 6)
     const pickCount = Math.max(targetCount * 2, 6);
