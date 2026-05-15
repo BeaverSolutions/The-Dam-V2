@@ -176,6 +176,56 @@ async function listTools(clientId) {
   return { ok: false, error: 'session_retry_exhausted' };
 }
 
+/* ─── Discovery (FREE — 0 credits per Explorium, confirmed 2026-05-15) ─── */
+
+/**
+ * Discover businesses matching ICP filters. FREE — fetch-businesses costs 0
+ * credits. Every filter value is wrapped { values: [...] } per the MCP schema.
+ * Returns { ok, businesses: [{business_id, name, domain, website, ...}], credits }.
+ */
+async function fetchBusinesses(clientId, { filters, size = 100, pageSize = 50 }) {
+  const result = await callTool(clientId, 'fetch-businesses', {
+    filters,
+    size,
+    page_size: pageSize,
+    page: 1,
+    tool_reasoning: 'BeavrDam Research Beaver: ICP-matched lead discovery',
+  });
+  if (!result.ok) {
+    return { ok: false, error: result.error, businesses: [], credits: result.credits || 0 };
+  }
+  return {
+    ok: true,
+    businesses: result.payload?.data || [],
+    total: result.payload?.total_results || 0,
+    credits: result.credits || 0,
+  };
+}
+
+/**
+ * Discover prospects (decision-makers) within given businesses. FREE.
+ * Returns { ok, prospects: [{prospect_id, full_name, job_title, company_name,
+ * business_id, linkedin, ...}], credits }.
+ */
+async function fetchProspects(clientId, { filters, size = 100, pageSize = 50 }) {
+  const result = await callTool(clientId, 'fetch-prospects', {
+    filters,
+    size,
+    page_size: pageSize,
+    page: 1,
+    tool_reasoning: 'BeavrDam Research Beaver: ICP-matched lead discovery',
+  });
+  if (!result.ok) {
+    return { ok: false, error: result.error, prospects: [], credits: result.credits || 0 };
+  }
+  return {
+    ok: true,
+    prospects: result.payload?.data || [],
+    total: result.payload?.total_results || 0,
+    credits: result.credits || 0,
+  };
+}
+
 /* ─── Public API ────────────────────────────────────────────────────── */
 
 /** Match a company (FREE) → returns business_id or null */
@@ -326,6 +376,8 @@ module.exports = {
   getApiKey,
   listTools,
   callTool,
+  fetchBusinesses,
+  fetchProspects,
   matchBusiness,
   matchProspect,
   enrichProspectContacts,

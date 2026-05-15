@@ -48,52 +48,6 @@ async function requireInternalKey(req, res, next) {
 // Defense-in-depth: apply auth at router level so no future route skips it.
 router.use(requireInternalKey);
 
-/* ─── GET /api/autonomous/_vp-probe ─── TEMPORARY DIAGNOSTIC ───
- * 2026-05-15: dumps the fetch-businesses / fetch-prospects input schemas and
- * runs one live fetch-businesses test call so the VP sourcing path can be
- * built against the confirmed shape. REMOVE after wiring. */
-router.get('/_vp-probe', async (req, res) => {
-  try {
-    const vp = require('../services/vibeProspecting');
-    const clientId = req.query.client_id || 'ce2fc8e5-617e-42d5-91fe-4275ceaa0030';
-    // Correct filter shape: every filter is { values: [...] }.
-    const biz = await vp.callTool(clientId, 'fetch-businesses', {
-      filters: {
-        country_code: { values: ['MY'] },
-        company_size: { values: ['1-10', '11-50'] },
-      },
-      size: 10, page_size: 10, page: 1,
-      tool_reasoning: 'BeavrDam VP sourcing wiring — response-shape probe',
-    });
-
-    // Prospects probe — query Malaysia decision-makers directly so we get a
-    // populated record sample (last probe filtered to one empty business).
-    const pr = await vp.callTool(clientId, 'fetch-prospects', {
-      filters: {
-        country_code: { values: ['MY'] },
-        job_level: { values: ['founder', 'owner', 'c-suite'] },
-      },
-      size: 5, page_size: 5, page: 1,
-      tool_reasoning: 'BeavrDam VP sourcing wiring — response-shape probe',
-    });
-    const prospects = {
-      ok: pr.ok, error: pr.error || null, credits: pr.credits,
-      keys: pr.payload ? Object.keys(pr.payload) : null,
-      sample: JSON.stringify(pr.payload || pr.raw || {}).slice(0, 900),
-    };
-
-    res.json({
-      businesses: {
-        ok: biz.ok, error: biz.error || null, credits: biz.credits,
-        keys: biz.payload ? Object.keys(biz.payload) : null,
-        sample: JSON.stringify(biz.payload || biz.raw || {}).slice(0, 900),
-      },
-      prospects,
-    });
-  } catch (e) {
-    res.json({ error: e.message });
-  }
-});
 
 /* ─── POST /api/autonomous/chat ───────────────────────────
  * Claw ↔ Dam conversational bot endpoint.

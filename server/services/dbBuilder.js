@@ -721,9 +721,188 @@ async function runDbBuilder() {
   }
 }
 
+// ── VP Sourcing (Vibe Prospecting / Explorium — Brave-free) ──────────────────
+//
+// 2026-05-15: the structural fix for the recurring Brave quota burn. Sources
+// ICP-matched leads with VERIFIED EMAIL from Explorium instead of Brave search.
+//
+// Credit discipline (memory/preferences.md 2026-05-15):
+//   - fetch-businesses + fetch-prospects are FREE (0 credits, confirmed).
+//   - fetch-prospects uses has_email:true so we never enrich a prospect with
+//     no email to retrieve.
+//   - applyIcpV2Filter runs on every prospect BEFORE enrichment — credits are
+//     never spent on a lead that would be rejected.
+//   - enrich-prospects requests CONTACTS ONLY (~3cr) — never the full report.
+//   - Hard daily cap: 60 credits/day (20 leads at 3cr each). Checked from logs.
+//
+// EMAIL CHANNEL ONLY. VP exists to get verified emails. LinkedIn sourcing
+// continues via Brave (resumes June 1 when quota resets).
+
+const VP_DAILY_CREDIT_CAP = 60;
+
+async function getVpCreditsSpentToday(clientId) {
+  const { rows } = await pool.query(
+    `SELECT COALESCE(SUM((metadata->>'credits_spent')::int), 0) AS spent
+     FROM logs
+     WHERE client_id = $1
+       AND agent = 'research_beaver'
+       AND action = 'vp_sourcing_complete'
+       AND created_at >= CURRENT_DATE`,
+    [clientId]
+  );
+  return rows[0]?.spent || 0;
+}
+
+async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
+  const vp = require('./vibeProspecting');
+  const { applyIcpV2Filter } = require('./agents');
+
+  // Hard daily credit cap — refuse to source if we've already spent enough today
+  const spentToday = await getVpCreditsSpentToday(clientId);
+  if (spentToday >= VP_DAILY_CREDIT_CAP) {
+    logger.info({ msg: '[db-builder] VP daily credit cap reached', spentToday, cap: VP_DAILY_CREDIT_CAP });
+    return { saved: 0, credits: 0, reason: 'daily_credit_cap', spentToday };
+  }
+  const remainingBudget = VP_DAILY_CREDIT_CAP - spentToday;
+  const maxEnrichments = Math.min(batchSize, Math.floor(remainingBudget / 3));
+  if (maxEnrichments <= 0) {
+    return { saved: 0, credits: 0, reason: 'daily_credit_cap', spentToday };
+  }
+
+  const { rows: icpRows } = await pool.query(
+    `SELECT content FROM agent_memory
+     WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
+    [clientId]
+  );
+  const icp = icpRows[0]?.content || null;
+  if (!icp) return { saved: 0, credits: 0, reason: 'no_icp_memory' };
+
+  // Derive short website keywords from the ICP industries array.
+  const industries = Array.isArray(icp.industries)
+    ? icp.industries
+    : (typeof icp.industries === 'string' ? icp.industries.split(',') : []);
+  const stop = new Set(['b2b', 'professional', 'providers', 'firms', 'and']);
+  const kw = new Set();
+  for (const ind of industries) {
+    for (const w of String(ind).toLowerCase().split(/\s+/)) {
+      if (w.length >= 4 && !stop.has(w)) kw.add(w);
+    }
+  }
+
+  // 1. fetch-businesses — FREE. ICP-filtered company discovery.
+  const bizFilters = {
+    country_code: { values: ['MY'] },
+    company_size: { values: ['1-10', '11-50', '51-200'] },
+  };
+  if (kw.size > 0) bizFilters.website_keywords = { values: [...kw] };
+
+  const bizResult = await vp.fetchBusinesses(clientId, { filters: bizFilters, size: 200, pageSize: 50 });
+  if (!bizResult.ok || bizResult.businesses.length === 0) {
+    return { saved: 0, credits: 0, reason: bizResult.error || 'no_businesses' };
+  }
+  const bizMap = {};
+  for (const b of bizResult.businesses) {
+    if (b.business_id) bizMap[b.business_id] = { name: b.name, domain: b.domain || b.website || null };
+  }
+
+  // 2. fetch-prospects — FREE. Decision-makers with an email available.
+  const prResult = await vp.fetchProspects(clientId, {
+    filters: {
+      business_id: { values: Object.keys(bizMap).slice(0, 100) },
+      job_level: { values: ['founder', 'owner', 'c-suite', 'president'] },
+      has_email: true,
+    },
+    size: Math.max(batchSize * 3, 60),
+    pageSize: 50,
+  });
+  if (!prResult.ok || prResult.prospects.length === 0) {
+    return { saved: 0, credits: 0, reason: prResult.error || 'no_prospects' };
+  }
+
+  // 3. ICP-gate every prospect (FREE) before spending a credit.
+  const candidates = [];
+  for (const p of prResult.prospects) {
+    const biz = bizMap[p.business_id] || {};
+    const name = p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ');
+    const company = p.company_name || biz.name || '';
+    if (!name || !company) continue;
+    const v2 = applyIcpV2Filter({
+      name, company, title: p.job_title || '',
+      country: p.country_name || 'malaysia', score: 0, metadata: {},
+    });
+    if (!v2.pass) continue;
+    candidates.push({ p, biz, name, company });
+    if (candidates.length >= maxEnrichments) break;
+  }
+  if (candidates.length === 0) {
+    return { saved: 0, credits: 0, reason: 'all_filtered_by_icp', businesses: bizResult.businesses.length };
+  }
+
+  // 4. enrich-prospects CONTACTS ONLY (~3cr each) → verified email. Save as Tier A.
+  const patterns = await loadEmailPatterns(clientId);
+  let saved = 0;
+  let creditsSpent = 0;
+  for (const c of candidates) {
+    const contacts = await vp.enrichProspectContacts(clientId, c.p.prospect_id);
+    creditsSpent += contacts.credits || 0;
+    if (!contacts.ok || !contacts.email) continue;
+
+    const savedId = await saveLead(clientId, {
+      name: c.name,
+      company: c.company,
+      title: c.p.job_title || '',
+      email: contacts.email,
+      email_verified: !!contacts.email_verified,
+      email_source: 'vibe_prospecting',
+      linkedin_url: c.p.linkedin || '',
+      country: c.p.country_name || 'malaysia',
+      data_source: 'vibe_prospecting',
+      metadata: {
+        vp_prospect_id: c.p.prospect_id,
+        vp_business_id: c.p.business_id,
+        vp_email_status: contacts.email_status || null,
+      },
+    }, 'vibe_prospecting', { patterns });
+    if (savedId) saved++;
+  }
+
+  await logsService.createLog(clientId, {
+    agent: 'research_beaver',
+    action: 'vp_sourcing_complete',
+    target_type: 'system',
+    metadata: {
+      businesses: bizResult.businesses.length,
+      prospects: prResult.prospects.length,
+      icp_passed: candidates.length,
+      saved,
+      credits_spent: creditsSpent,
+    },
+  });
+  logger.info({ msg: '[db-builder] VP sourcing complete', saved, credits: creditsSpent, icp_passed: candidates.length });
+  return { saved, credits: creditsSpent, reason: saved > 0 ? 'sourced_vp' : 'no_email_retrieved' };
+}
+
 // ── On-Demand Sourcing (called by autonomous kickoff when pool is dry) ───────
 
 async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSize = 20 } = {}) {
+  // VP is primary for email leads (verified email, ~3cr each).
+  // When VP daily cap is hit or credits are exhausted, Brave takes over for
+  // BOTH channels. LinkedIn leads always go through Brave.
+  if (neededChannel === 'email') {
+    try {
+      const vpResult = await sourceLeadsViaVP(clientId, { batchSize });
+      if (vpResult.saved > 0) {
+        const health = await checkDbHealth(clientId);
+        logger.info({ msg: '[db-builder] on-demand email sourced via VP', saved: vpResult.saved, credits: vpResult.credits });
+        return { saved: vpResult.saved, health, reason: 'sourced_vp', credits: vpResult.credits };
+      }
+      logger.warn({ msg: '[db-builder] VP yielded 0 — falling through to Brave', reason: vpResult.reason });
+    } catch (err) {
+      logger.warn({ msg: '[db-builder] VP threw — falling through to Brave', err: err.message });
+    }
+  }
+
+  // Brave path — handles LinkedIn always + email when VP is capped/exhausted
   const researchModule = require('./research');
 
   const { rows: icpRows } = await pool.query(
@@ -776,4 +955,4 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
   return { saved, health, reason: saved > 0 ? 'sourced' : 'no_results' };
 }
 
-module.exports = { runDbBuilder, checkDbHealth, sourceLeadsOnDemand };
+module.exports = { runDbBuilder, checkDbHealth, sourceLeadsOnDemand, sourceLeadsViaVP };
