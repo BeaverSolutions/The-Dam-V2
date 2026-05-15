@@ -51,14 +51,30 @@ const BANNED_TITLE_KEYWORDS = [
 /* ─── Helpers ────────────────────────────────────────────── */
 
 /**
+ * Strip human-prose annotations from an ICP token so it can be used as a
+ * clean search keyword. The ICP is operator-edited and sometimes contains
+ * prose like "skills development — PRIMARY. Founder-led agencies" or
+ * "Sales Director (only if company size <50)". Feeding those verbatim into
+ * Brave as quoted phrases returns 0 results. (2026-05-15)
+ */
+function cleanIcpToken(s) {
+  return String(s || '')
+    // drop "— PRIMARY ...", "— SECONDARY ...", "- TERTIARY ..." annotation tails
+    .replace(/\s*[—–-]\s*(PRIMARY|SECONDARY|TERTIARY)\b.*$/i, '')
+    // drop parentheticals e.g. "(only if company size <50)"
+    .replace(/\([^)]*\)/g, '')
+    .trim();
+}
+
+/**
  * Parse a comma-separated string OR an array into a trimmed array, ignoring empties.
+ * Every token is run through cleanIcpToken so prose annotations never reach a query.
  */
 function parseCsvField(value) {
   if (!value) return [];
-  // Already an array (from commandOverride injection)
-  if (Array.isArray(value)) return value.map(v => String(v).trim()).filter(Boolean);
+  if (Array.isArray(value)) return value.map(v => cleanIcpToken(v)).filter(Boolean);
   if (typeof value !== 'string') return [];
-  return value.split(',').map(v => v.trim()).filter(Boolean);
+  return value.split(',').map(v => cleanIcpToken(v)).filter(Boolean);
 }
 
 /**
