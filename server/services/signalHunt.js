@@ -96,7 +96,9 @@ async function extractSignalsFromResults(results, signal_type) {
 
   try {
     const resp = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      // 2026-05-15: was a hardcoded literal that bypassed the MODEL_HAIKU env
+      // override every other agent respects. Now env-driven, same default.
+      model: process.env.MODEL_HAIKU || 'claude-haiku-4-5-20251001',
       max_tokens: 1024,
       messages: [{
         role: 'user',

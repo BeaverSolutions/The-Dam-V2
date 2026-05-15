@@ -631,7 +631,7 @@ async function searchPersonalisationSignals(lead) {
  * metadata. Enables `reply_rate by variant` rollups once we A/B-test prompts.
  * Bump this constant when materially changing the salesGenerate prompt.
  */
-const SALES_PROMPT_VARIANT = 'sales_v2_2026_05_05_sonnet';
+const SALES_PROMPT_VARIANT = 'sales_v2_2026_05_15_sonnet';
 
 async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
   await logsService.createLog(clientId, {
@@ -909,14 +909,11 @@ function autoFixMessage(body, { touchNumber = 0, maxWords = 80 } = {}) {
   }
 
   // 6. Strip banned phrases (case-insensitive)
-  const bannedLowerList = [
-    'cutting-edge', 'paradigm shift', 'seamless', 'leverage', 'synergy',
-    'game-changer', 'innovative', 'revolutionary', 'transformative', 'delve',
-    'i hope this email finds you well', 'i wanted to reach out', 'unlock',
-    'unleash', 'empower', 'elevate', 'streamline', 'actionable insights',
-    'thought leader', 'disruptive', 'data-driven', 'circle back', 'touch base',
-    'move the needle', 'best-in-class',
-  ];
+  // 2026-05-15: was a stale hand-copied 26-item list that never picked up the
+  // 2026-05-13 v1.0 additions. Now references VENDOR_SPEAK_PHRASES directly —
+  // the strippable subset. Structural cold-tells (COLD_TELL_PHRASES) are NOT
+  // autofixed; codeEnforcerGates hard-rejects those so they regenerate.
+  const bannedLowerList = VENDOR_SPEAK_PHRASES;
   let bannedHit = false;
   for (const phrase of bannedLowerList) {
     const re = new RegExp(`\\b${phrase.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}\\b`, 'gi');
@@ -1074,17 +1071,25 @@ function brandSafetyCheck(body, leadContext = {}) {
  * These catch anything Claude missed. If any gate fails, the message is force-rejected
  * regardless of Claude's score.
  */
-const BANNED_PHRASES = [
-  // Generic vendor-speak
+// 2026-05-15: split into two named lists so autoFixMessage and codeEnforcerGates
+// can never drift apart again (they did — autofix carried a stale 26-item subset).
+//
+// VENDOR_SPEAK_PHRASES — adjectives/fillers safe to STRIP mid-sentence without
+// breaking grammar. autoFixMessage strips these to rescue a borderline draft.
+const VENDOR_SPEAK_PHRASES = [
   'cutting-edge', 'paradigm shift', 'seamless', 'leverage', 'synergy',
   'game-changer', 'innovative', 'revolutionary', 'transformative', 'delve',
   'i hope this email finds you well', 'i wanted to reach out', 'unlock',
   'unleash', 'empower', 'elevate', 'streamline', 'actionable insights',
   'thought leader', 'disruptive', 'data-driven', 'circle back', 'touch base',
   'move the needle', 'best-in-class',
-  // 2026-05-13: Beaver v1.0 cold-tells (sales-assets/BEAVER_LINKEDIN_OUTREACH_RULES.md)
-  // Flagged in Cowork-Emplifive 2026-05-13 EOD handoff: "at what point does" slipped past
-  // Enforcer on Kuben cold draft. v1.0 rule file lists these as instant-reject patterns.
+];
+
+// COLD_TELL_PHRASES — structural template tells. A message containing one of
+// these is fundamentally a template; stripping the phrase leaves broken grammar.
+// codeEnforcerGates hard-rejects and forces a full regenerate. Do NOT autofix these.
+// 2026-05-13: Beaver v1.0 cold-tells (sales-assets/BEAVER_LINKEDIN_OUTREACH_RULES.md).
+const COLD_TELL_PHRASES = [
   'at what point does', 'how do you think about', "what's your approach to",
   'most founders i talk to', 'most founders i speak to',
   'we help teams like yours', 'agencies like yours', 'founders like you',
@@ -1097,6 +1102,10 @@ const BANNED_PHRASES = [
   'still thinking', 'just thinking', 'still wondering',
   'quick favor', 'quick ask',
 ];
+
+// Full hard-reject set. codeEnforcerGates checks this. Derived from the two
+// lists above — single source of truth, no manual duplication.
+const BANNED_PHRASES = [...VENDOR_SPEAK_PHRASES, ...COLD_TELL_PHRASES];
 
 function codeEnforcerGates(body, touchNumber = 0) {
   if (!body) return { passed: false, reason: 'Empty message body' };
