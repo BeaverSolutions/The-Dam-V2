@@ -1832,7 +1832,35 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         zeroStreak++;
         console.warn(`[Autonomous] Batch ${batch} added 0 leads (zero streak: ${zeroStreak}/3)`);
         if (zeroStreak >= 3) {
-          console.warn(`[Autonomous] 3 consecutive zero-lead batches — stopping. Pool exhausted.`);
+          console.warn(`[Autonomous] 3 consecutive zero-lead batches — trying VP sourcing before giving up.`);
+
+          try {
+            const { sourceLeadsOnDemand } = require('../services/dbBuilder');
+            const neededChannel = emailGap > 0 ? 'email' : 'linkedin';
+            const vpResult = await sourceLeadsOnDemand(clientId, { neededChannel, batchSize: BATCH_SIZE });
+
+            if (vpResult.saved > 0) {
+              console.log(`[Autonomous] VP sourcing rescued batch — ${vpResult.saved} leads added (pool email=${vpResult.health?.withEmail}). Continuing.`);
+              await logAction(clientId, 'director', 'vp_rescue_success', 'system', null, {
+                batch, saved: vpResult.saved,
+                pool_email: vpResult.health?.withEmail,
+                pool_linkedin: vpResult.health?.noEmail,
+              });
+              zeroStreak = 0;
+              continue;
+            }
+
+            console.warn(`[Autonomous] VP sourcing also returned 0 (reason: ${vpResult.reason}). Pool truly exhausted.`);
+            await logAction(clientId, 'director', 'vp_rescue_empty', 'system', null, {
+              batch, reason: vpResult.reason,
+            });
+          } catch (vpErr) {
+            console.error(`[Autonomous] VP rescue failed:`, vpErr.message);
+            await logAction(clientId, 'director', 'vp_rescue_error', 'system', null, {
+              batch, error: vpErr.message,
+            });
+          }
+
           await logAction(clientId, 'director', 'research_pool_exhausted', 'system', null, { batch, liveSent, target });
           break;
         }
