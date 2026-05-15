@@ -149,6 +149,32 @@ async function callTool(clientId, toolName, args) {
   return { ok: false, error: 'session_retry_exhausted', credits: 0 };
 }
 
+/* ─── Tool catalog probe ────────────────────────────────────────────── */
+
+/** List every tool the Explorium MCP exposes, with input schemas. FREE. */
+async function listTools(clientId) {
+  const apiKey = await getApiKey(clientId);
+  if (!apiKey) return { ok: false, error: 'no_api_key' };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const sessionId = await getSession(clientId, apiKey);
+    const result = await rpc(apiKey, 'tools/list', {}, sessionId);
+    if (result.status === 401 || result.status === 404) {
+      dropSession(clientId);
+      if (attempt === 0) continue;
+    }
+    if (result.status !== 200 || result.body?.error) {
+      return { ok: false, error: `mcp_error_${result.status}`, raw: result.body };
+    }
+    const tools = (result.body?.result?.tools || []).map(t => ({
+      name: t.name,
+      description: (t.description || '').slice(0, 120),
+      input_keys: Object.keys(t.inputSchema?.properties || {}),
+    }));
+    return { ok: true, tools };
+  }
+  return { ok: false, error: 'session_retry_exhausted' };
+}
+
 /* ─── Public API ────────────────────────────────────────────────────── */
 
 /** Match a company (FREE) → returns business_id or null */
@@ -297,6 +323,8 @@ async function testConnection(clientId) {
 
 module.exports = {
   getApiKey,
+  listTools,
+  callTool,
   matchBusiness,
   matchProspect,
   enrichProspectContacts,

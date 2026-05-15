@@ -48,6 +48,21 @@ async function requireInternalKey(req, res, next) {
 // Defense-in-depth: apply auth at router level so no future route skips it.
 router.use(requireInternalKey);
 
+/* ─── GET /api/autonomous/_vp-probe ─── TEMPORARY DIAGNOSTIC ───
+ * 2026-05-15: probe the Explorium MCP tool catalog to confirm the discovery
+ * tool names + input schemas before wiring VP as a Brave-free sourcing path.
+ * tools/list is a free protocol call — no credits. REMOVE after wiring. */
+router.get('/_vp-probe', async (req, res) => {
+  try {
+    const vp = require('../services/vibeProspecting');
+    const clientId = req.query.client_id || 'ce2fc8e5-617e-42d5-91fe-4275ceaa0030';
+    const result = await vp.listTools(clientId);
+    res.json(result);
+  } catch (e) {
+    res.json({ error: e.message });
+  }
+});
+
 /* ─── POST /api/autonomous/chat ───────────────────────────
  * Claw ↔ Dam conversational bot endpoint.
  * Mounted here (not under /api/myclaw) so Claw's existing DAM_INTERNAL_KEY
