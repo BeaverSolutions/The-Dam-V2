@@ -1090,7 +1090,7 @@ const VENDOR_SPEAK_PHRASES = [
 // codeEnforcerGates hard-rejects and forces a full regenerate. Do NOT autofix these.
 // 2026-05-13: Beaver v1.0 cold-tells (sales-assets/BEAVER_LINKEDIN_OUTREACH_RULES.md).
 const COLD_TELL_PHRASES = [
-  'at what point does', 'how do you think about', "what's your approach to",
+  'at what point does', 'at what point do you', 'how do you think about', "what's your approach to",
   'most founders i talk to', 'most founders i speak to',
   'we help teams like yours', 'agencies like yours', 'founders like you',
   'worth a chat', '15 minutes this week', '15 mins this week',
