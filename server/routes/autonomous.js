@@ -66,26 +66,21 @@ router.get('/_vp-probe', async (req, res) => {
       tool_reasoning: 'BeavrDam VP sourcing wiring — response-shape probe',
     });
 
-    let prospects = null;
-    if (biz.ok) {
-      const list = biz.payload?.businesses || biz.payload?.data || biz.payload?.results || [];
-      const firstId = list[0]?.business_id || list[0]?.id || null;
-      if (firstId) {
-        const pr = await vp.callTool(clientId, 'fetch-prospects', {
-          filters: {
-            business_id: { values: [firstId] },
-            job_level: { values: ['c-suite', 'owner', 'founder', 'president'] },
-          },
-          size: 5, page_size: 5, page: 1,
-          tool_reasoning: 'BeavrDam VP sourcing wiring — response-shape probe',
-        });
-        prospects = {
-          ok: pr.ok, error: pr.error || null, credits: pr.credits,
-          keys: pr.payload ? Object.keys(pr.payload) : null,
-          sample: JSON.stringify(pr.payload || pr.raw || {}).slice(0, 700),
-        };
-      }
-    }
+    // Prospects probe — query Malaysia decision-makers directly so we get a
+    // populated record sample (last probe filtered to one empty business).
+    const pr = await vp.callTool(clientId, 'fetch-prospects', {
+      filters: {
+        country_code: { values: ['MY'] },
+        job_level: { values: ['founder', 'owner', 'c-suite'] },
+      },
+      size: 5, page_size: 5, page: 1,
+      tool_reasoning: 'BeavrDam VP sourcing wiring — response-shape probe',
+    });
+    const prospects = {
+      ok: pr.ok, error: pr.error || null, credits: pr.credits,
+      keys: pr.payload ? Object.keys(pr.payload) : null,
+      sample: JSON.stringify(pr.payload || pr.raw || {}).slice(0, 900),
+    };
 
     res.json({
       businesses: {
