@@ -48,6 +48,33 @@ async function requireInternalKey(req, res, next) {
 // Defense-in-depth: apply auth at router level so no future route skips it.
 router.use(requireInternalKey);
 
+/* ─── GET /api/autonomous/_brave-diag ─── TEMPORARY DIAGNOSTIC ───
+ * 2026-05-15: one-off probe to determine why Research Beaver returns 0 raw
+ * results. Fires a single Brave call from the server (which holds the real
+ * key) and returns the raw HTTP status. Distinguishes quota-burn (429) vs
+ * bad-key (401/422) vs our-code (200+empty). REMOVE after diagnosis. */
+router.get('/_brave-diag', async (req, res) => {
+  const axios = require('axios');
+  const key = process.env.BRAVE_API_KEY || '';
+  try {
+    const r = await axios.get('https://api.search.brave.com/res/v1/web/search', {
+      params: { q: 'B2B corporate training Malaysia', count: 5, country: 'MY' },
+      headers: { 'X-Subscription-Token': key, Accept: 'application/json' },
+      timeout: 10000,
+      validateStatus: () => true,
+    });
+    res.json({
+      brave_http: r.status,
+      result_count: r.data?.web?.results?.length ?? null,
+      key_set: !!key,
+      key_len: key.length,
+      body_sample: JSON.stringify(r.data).slice(0, 400),
+    });
+  } catch (e) {
+    res.json({ error: e.message, key_set: !!key, key_len: key.length });
+  }
+});
+
 /* ─── POST /api/autonomous/chat ───────────────────────────
  * Claw ↔ Dam conversational bot endpoint.
  * Mounted here (not under /api/myclaw) so Claw's existing DAM_INTERNAL_KEY
