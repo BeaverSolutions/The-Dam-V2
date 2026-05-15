@@ -2130,6 +2130,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         const rangerScore = rangerResult.score || 70;
         let autoApproved = false;
         let isBorderline = false;
+        let gateFailReason = null;
         let nextMessageStatus = 'pending_approval';
         let approvalStatus = 'pending';
         let resolvedAt = null;
@@ -2154,7 +2155,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
               // 2026-05-13: q2-plan.md auto-approve contract gates.
               // Fail-safe — any gate that errors falls through to manual approval.
               let gatesPass = true;
-              let gateFailReason = null;
+              gateFailReason = null;
 
               // Gate 1: AUTO_APPROVE_ENABLED env (Railway kill-switch). Default OFF only if explicitly 'false'.
               if (process.env.AUTO_APPROVE_ENABLED === 'false') {
@@ -2257,6 +2258,17 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
            approvalStatus,
            resolvedAt]
         );
+
+        pool.query(
+          `INSERT INTO approval_audit (client_id, message_id, lead_id, decision, score, reasons, model, channel)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [clientId, msg.id, lead.id,
+           isBorderline ? 'borderline_surfaced' : (autoApproved ? 'auto_approved' : 'manual_pending'),
+           rangerScore,
+           JSON.stringify({ method: autoApproved ? 'auto_threshold' : 'signal_hunt', borderline: isBorderline, gate_fail: gateFailReason || null }),
+           process.env.MODEL_SONNET || 'claude-sonnet-4-20250514',
+           msg.channel]
+        ).catch(err => console.warn('[pipeline] approval_audit write failed:', err.message));
 
         if (autoApproved) {
           try {
@@ -3853,6 +3865,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     const rangerScore = rangerResult?.score || 80;
     let autoApproved = false;
     let isBorderline = false;
+    let gateFailReason = null;
     let approvalStatus = 'pending_approval';
     let nextMessageStatus = 'pending_approval';
 
@@ -3878,7 +3891,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           // 2026-05-13: q2-plan.md auto-approve contract gates (mirror of signal_pipeline site).
           // Fail-safe — any gate that errors falls through to manual approval.
           let gatesPass = true;
-          let gateFailReason = null;
+          gateFailReason = null;
 
           if (process.env.AUTO_APPROVE_ENABLED === 'false') {
             gatesPass = false;
@@ -3985,6 +3998,17 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
        autoApproved ? 'approved' : 'pending',
        autoApproved ? new Date() : null]
     );
+
+    pool.query(
+      `INSERT INTO approval_audit (client_id, message_id, lead_id, decision, score, reasons, model, channel)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [clientId, msg.id, lead.id,
+       isBorderline ? 'borderline_surfaced' : (autoApproved ? 'auto_approved' : 'manual_pending'),
+       rangerScore,
+       JSON.stringify({ method: autoApproved ? 'auto_threshold' : 'enforcer', borderline: isBorderline, gate_fail: gateFailReason || null }),
+       process.env.MODEL_SONNET || 'claude-sonnet-4-20250514',
+       msg.channel]
+    ).catch(err => console.warn('[enforcer] approval_audit write failed:', err.message));
 
     // If auto-approved AND email channel, push to send queue. Channel guard
     // inside enqueueMessage skips LinkedIn / Instagram automatically.
