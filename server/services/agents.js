@@ -4009,7 +4009,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         agent: 'enforcer_beaver',
         score: rangerScore,
         pipeline_path: msg.metadata?.pipeline_path || 'unknown',
-        metadata: { channel: msg.channel, thoughts_count: twoThoughts.length },
+        metadata: { channel: msg.channel, thoughts_count: twoThoughts?.length || 0 },
       }).catch(() => {});
     }
 

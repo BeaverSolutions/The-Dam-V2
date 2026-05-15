@@ -99,7 +99,7 @@ async function callAgent(agentKey, userMessage, context = {}) {
     if (!allowed) {
       console.warn(`[claude:budget] BLOCKED client=${clientId} agent=${agentKey} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);
       // Fire-and-forget Telegram alert (deduped to once-per-day-per-client)
-      notifyBudgetExceeded({ clientId, spend, budget }).catch(() => {});
+      notifyBudgetExceeded({ clientId, spend, budget }).catch(err => console.error('[claude:budget] Telegram budget alert FAILED:', err.message));
       throw new BudgetExceededError({ clientId, spend, budget });
     }
     if (pct >= 0.8) {
@@ -208,7 +208,7 @@ async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, con
     const { allowed, spend, budget, pct } = await checkBudget(clientId);
     if (!allowed) {
       console.warn(`[claude:budget] BLOCKED client=${clientId} agent=${agentKey} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);
-      notifyBudgetExceeded({ clientId, spend, budget }).catch(() => {});
+      notifyBudgetExceeded({ clientId, spend, budget }).catch(err => console.error('[claude:budget] Telegram budget alert FAILED:', err.message));
       throw new BudgetExceededError({ clientId, spend, budget });
     }
     if (pct >= 0.8) {

@@ -18,8 +18,8 @@ const { trackEvent, upsertDealSummary } = require('./conversionTracker');
 let callAgent;
 try {
   callAgent = require('./claude').callAgent;
-} catch {
-  // Claude not available — handler will skip drafting
+} catch (err) {
+  console.error('[replyHandler] CRITICAL: Claude module failed to load — reply drafting disabled:', err.message);
 }
 
 /**
@@ -187,7 +187,9 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
         reply_outcome: sentiment,
         reply_at: new Date().toISOString(),
       });
-    } catch (e) { /* non-critical */ }
+    } catch (e) {
+      console.warn('[replyHandler] followup outcome write failed:', e.message);
+    }
 
     if (sentiment === 'no_fit') {
       await pool.query(

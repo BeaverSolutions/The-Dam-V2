@@ -704,7 +704,13 @@ async function executeApprovedFollowUp(clientId, followupId, captainAngle, angle
   }
 
   if (draft?.status === 'needs_more_research') {
-    await pool.query(`UPDATE followup_queue SET status = 'skipped' WHERE id = $1`, [fu.id]);
+    console.warn(`[followup-exec] needs_more_research for ${fu.id} (lead ${fu.lead_id}) — missing: ${(draft.missing_fields || []).join(', ')}. Lead dropped from sequence.`);
+    await pool.query(`UPDATE followup_queue SET status = 'skipped', updated_at = NOW() WHERE id = $1`, [fu.id]);
+    await pool.query(
+      `INSERT INTO logs (client_id, agent, action, target_type, target_id, metadata, created_at)
+       VALUES ($1, 'followup_scheduler', 'needs_more_research', 'lead', $2, $3::jsonb, NOW())`,
+      [fu.client_id, fu.lead_id, JSON.stringify({ followup_id: fu.id, missing: draft.missing_fields || [], touch: fu.touch_number })]
+    ).catch(err => console.warn('[followup-exec] failed to log needs_more_research:', err.message));
     return { status: 'skipped', reason: 'needs_more_research' };
   }
   if (!draft?.body) {

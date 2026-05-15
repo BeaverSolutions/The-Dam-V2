@@ -403,7 +403,10 @@ async function saveUsedQueries(clientId, usedSet) {
 let callAgent;
 try {
   callAgent = require('./claude').callAgent;
-} catch { callAgent = null; }
+} catch (err) {
+  console.error('[research] CRITICAL: Claude module failed to load — all verification calls will be skipped:', err.message);
+  callAgent = null;
+}
 
 /**
  * Verify a single candidate against the ICP using Hunter + Haiku.
