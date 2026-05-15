@@ -1015,6 +1015,19 @@ router.get('/running', requireInternalKey, (req, res) => {
   return res.json({ data: { running: _runningKickoffs.has(client_id), client_id } });
 });
 
+/* ─── GET /api/autonomous/vp-schema — Explorium tool catalog (diagnostic) ── */
+router.get('/vp-schema', requireInternalKey, async (req, res) => {
+  const { client_id } = req.query;
+  if (!client_id) return res.status(400).json({ error: 'client_id required' });
+  try {
+    const vp = require('../services/vibeProspecting');
+    const result = await vp.listTools(client_id);
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 /* ─── Core: Autonomous kickoff logic ─────────────────────── */
 
 async function runAutonomousKickoff(clientId) {
