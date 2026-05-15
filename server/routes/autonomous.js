@@ -56,28 +56,44 @@ router.get('/_vp-probe', async (req, res) => {
   try {
     const vp = require('../services/vibeProspecting');
     const clientId = req.query.client_id || 'ce2fc8e5-617e-42d5-91fe-4275ceaa0030';
-    const cat = await vp.listTools(clientId);
-    const pick = (cat.tools || []).filter(t =>
-      t.name === 'fetch-businesses' || t.name === 'fetch-prospects');
-
-    // Live test: minimal Malaysia filter, tiny size — confirms the call shape.
-    const test = await vp.callTool(clientId, 'fetch-businesses', {
-      filters: { country_code: ['MY'] },
-      size: 5,
-      page_size: 5,
-      page: 1,
-      tool_reasoning: 'BeavrDam VP sourcing wiring — schema probe',
+    // Correct filter shape: every filter is { values: [...] }.
+    const biz = await vp.callTool(clientId, 'fetch-businesses', {
+      filters: {
+        country_code: { values: ['MY'] },
+        company_size: { values: ['1-10', '11-50'] },
+      },
+      size: 10, page_size: 10, page: 1,
+      tool_reasoning: 'BeavrDam VP sourcing wiring — response-shape probe',
     });
 
+    let prospects = null;
+    if (biz.ok) {
+      const list = biz.payload?.businesses || biz.payload?.data || biz.payload?.results || [];
+      const firstId = list[0]?.business_id || list[0]?.id || null;
+      if (firstId) {
+        const pr = await vp.callTool(clientId, 'fetch-prospects', {
+          filters: {
+            business_id: { values: [firstId] },
+            job_level: { values: ['c-suite', 'owner', 'founder', 'president'] },
+          },
+          size: 5, page_size: 5, page: 1,
+          tool_reasoning: 'BeavrDam VP sourcing wiring — response-shape probe',
+        });
+        prospects = {
+          ok: pr.ok, error: pr.error || null, credits: pr.credits,
+          keys: pr.payload ? Object.keys(pr.payload) : null,
+          sample: JSON.stringify(pr.payload || pr.raw || {}).slice(0, 700),
+        };
+      }
+    }
+
     res.json({
-      schemas: pick,
-      test_call: {
-        ok: test.ok,
-        error: test.error || null,
-        credits: test.credits,
-        result_keys: test.payload ? Object.keys(test.payload) : null,
-        sample: JSON.stringify(test.payload || test.raw || {}).slice(0, 600),
+      businesses: {
+        ok: biz.ok, error: biz.error || null, credits: biz.credits,
+        keys: biz.payload ? Object.keys(biz.payload) : null,
+        sample: JSON.stringify(biz.payload || biz.raw || {}).slice(0, 900),
       },
+      prospects,
     });
   } catch (e) {
     res.json({ error: e.message });
