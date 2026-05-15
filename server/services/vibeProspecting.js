@@ -169,6 +169,7 @@ async function listTools(clientId) {
       name: t.name,
       description: (t.description || '').slice(0, 120),
       input_keys: Object.keys(t.inputSchema?.properties || {}),
+      input_schema: t.inputSchema || null,
     }));
     return { ok: true, tools };
   }

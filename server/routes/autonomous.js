@@ -49,15 +49,36 @@ async function requireInternalKey(req, res, next) {
 router.use(requireInternalKey);
 
 /* ─── GET /api/autonomous/_vp-probe ─── TEMPORARY DIAGNOSTIC ───
- * 2026-05-15: probe the Explorium MCP tool catalog to confirm the discovery
- * tool names + input schemas before wiring VP as a Brave-free sourcing path.
- * tools/list is a free protocol call — no credits. REMOVE after wiring. */
+ * 2026-05-15: dumps the fetch-businesses / fetch-prospects input schemas and
+ * runs one live fetch-businesses test call so the VP sourcing path can be
+ * built against the confirmed shape. REMOVE after wiring. */
 router.get('/_vp-probe', async (req, res) => {
   try {
     const vp = require('../services/vibeProspecting');
     const clientId = req.query.client_id || 'ce2fc8e5-617e-42d5-91fe-4275ceaa0030';
-    const result = await vp.listTools(clientId);
-    res.json(result);
+    const cat = await vp.listTools(clientId);
+    const pick = (cat.tools || []).filter(t =>
+      t.name === 'fetch-businesses' || t.name === 'fetch-prospects');
+
+    // Live test: minimal Malaysia filter, tiny size — confirms the call shape.
+    const test = await vp.callTool(clientId, 'fetch-businesses', {
+      filters: { country_code: ['MY'] },
+      size: 5,
+      page_size: 5,
+      page: 1,
+      tool_reasoning: 'BeavrDam VP sourcing wiring — schema probe',
+    });
+
+    res.json({
+      schemas: pick,
+      test_call: {
+        ok: test.ok,
+        error: test.error || null,
+        credits: test.credits,
+        result_keys: test.payload ? Object.keys(test.payload) : null,
+        sample: JSON.stringify(test.payload || test.raw || {}).slice(0, 600),
+      },
+    });
   } catch (e) {
     res.json({ error: e.message });
   }
