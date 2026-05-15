@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS research_misses (
   --   duplicate          — already in leads table
   --   icp_reject         — fails ICP gate
   --   verification_fail  — Layer 2 AI verification rejected
-  miss_reason     VARCHAR(32) NOT NULL,
+  miss_reason     VARCHAR(64) NOT NULL,
 
   -- Which sourcing strategy / query produced this candidate. Lets us
   -- compute "email_yield_rate by query strategy" later.
