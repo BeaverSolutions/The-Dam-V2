@@ -622,6 +622,231 @@ function leadReadinessGate(lead) {
   return { ready: true };
 }
 
+/**
+ * applyEnforcerDecision — Phase 2 Step 6 (Jules F-11, 2026-05-16).
+ *
+ * Single source of truth for the post-Enforcer-approval decision: auto-approve
+ * vs borderline-surface vs manual-queue, plus all persistence (messages UPDATE,
+ * approvals INSERT, approval_audit INSERT, send-queue enqueue, trace, log).
+ *
+ * Previously this ~180-line block was duplicated in processExistingLeadsPipeline
+ * (signal) and processLeadPipeline (kickoff). The two copies had DRIFTED in ~7
+ * ways — signal didn't persist subject/ranger_breakdown, kickoff didn't emit an
+ * 'approved' trace, provenance labels diverged. The DECISION logic (3 contract
+ * gates, threshold, the 60-79 borderline band) was byte-identical; only the
+ * peripherals drifted. This unifies them — reconciled toward the more-complete
+ * behaviour (always persist subject + breakdown, always trace, client-scoped
+ * WHERE). Provenance labels are preserved per `source` so analytics don't shift.
+ *
+ * @param {string} clientId
+ * @param {object} p
+ * @param {object} p.msg            — message row (needs id, channel)
+ * @param {object} p.lead           — lead row (needs id)
+ * @param {object} p.rangerResult   — Enforcer output (score, two_thoughts, notes, feedback, breakdown)
+ * @param {string} p.finalBody      — the body to persist
+ * @param {string|null} p.subject   — the subject to persist (LinkedIn = null)
+ * @param {string|null} p.kickoffId — kickoff/plan id for the trace (nullable)
+ * @param {string} p.pipelinePath   — 'signal_pipeline' | 'kickoff_pipeline'
+ * @param {string} p.source         — 'signal_pipeline' | 'kickoff_pipeline' (drives provenance labels)
+ * @returns {Promise<{autoApproved:boolean, isBorderline:boolean, rangerScore:number, nextMessageStatus:string}>}
+ */
+async function applyEnforcerDecision(clientId, { msg, lead, rangerResult, finalBody, subject, kickoffId, pipelinePath, source }) {
+  const rangerScore = rangerResult?.score || 70;
+  let autoApproved = false;
+  let isBorderline = false;
+  let gateFailReason = null;
+  let nextMessageStatus = 'pending_approval';
+  let approvalStatus = 'pending';
+  let resolvedAt = null;
+
+  const twoThoughts = rangerResult?.two_thoughts;
+  const hasTwoThoughts = twoThoughts && Array.isArray(twoThoughts) && twoThoughts.length > 0;
+
+  // Fix 5c: score 60-79 = borderline, surfaced to the founder, never auto-approved.
+  if (rangerScore >= 60 && rangerScore < 80) {
+    isBorderline = true;
+    nextMessageStatus = 'pending_approval';
+    console.log(`[pipeline.approve] BORDERLINE ${msg.id}: score ${rangerScore}, surfacing ${hasTwoThoughts ? `with ${twoThoughts.length} suggestions` : 'with feedback (no structured thoughts)'}`);
+  } else {
+    try {
+      const { rows: [clientRow] } = await pool.query(
+        `SELECT auto_approve_threshold FROM clients WHERE id = $1 LIMIT 1`,
+        [clientId]
+      );
+      const threshold = clientRow?.auto_approve_threshold;
+      if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
+        // 2026-05-13: q2-plan.md auto-approve contract gates. Fail-safe — any
+        // gate that errors falls through to manual approval.
+        let gatesPass = true;
+        gateFailReason = null;
+
+        // Gate 1: AUTO_APPROVE_ENABLED env (Railway kill-switch).
+        if (process.env.AUTO_APPROVE_ENABLED === 'false') {
+          gatesPass = false;
+          gateFailReason = 'AUTO_APPROVE_ENABLED=false (Railway kill-switch)';
+        }
+
+        // Gate 2: client onboarded >7 days ago (fresh tenants get MJ's eye only).
+        if (gatesPass) {
+          try {
+            const { rows: [ageRow] } = await pool.query(
+              `SELECT (NOW() - created_at) > INTERVAL '7 days' AS is_seasoned FROM clients WHERE id = $1`,
+              [clientId]
+            );
+            if (!ageRow?.is_seasoned) {
+              gatesPass = false;
+              gateFailReason = 'client onboarded <7 days ago';
+            }
+          } catch (err) {
+            console.warn('[pipeline.approve] onboarding-gate query failed (defaulting to manual):', err.message);
+            gatesPass = false;
+            gateFailReason = 'onboarding-gate query error';
+          }
+        }
+
+        // Gate 3: no 'sent' message to this lead in last 30 days.
+        if (gatesPass) {
+          try {
+            const { rows: [dupRow] } = await pool.query(
+              `SELECT COUNT(*)::int AS recent FROM messages
+                WHERE client_id = $1 AND lead_id = $2 AND id <> $3
+                  AND status = 'sent'
+                  AND sent_at IS NOT NULL AND sent_at > NOW() - INTERVAL '30 days'`,
+              [clientId, lead.id, msg.id]
+            );
+            if (dupRow.recent > 0) {
+              gatesPass = false;
+              gateFailReason = `lead messaged within 30 days (${dupRow.recent} recent send(s))`;
+            }
+          } catch (err) {
+            console.warn('[pipeline.approve] 30-day dedup query failed (defaulting to manual):', err.message);
+            gatesPass = false;
+            gateFailReason = '30-day dedup query error';
+          }
+        }
+
+        if (gatesPass) {
+          autoApproved = true;
+          nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
+          approvalStatus = 'approved';
+          resolvedAt = new Date();
+          console.log(`[pipeline.approve] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold} (channel=${msg.channel}, next=${nextMessageStatus})`);
+        } else {
+          console.log(`[pipeline.approve] AUTO-APPROVE BLOCKED ${msg.id}: score ${rangerScore} >= threshold ${threshold} but gate failed — ${gateFailReason} — routing to pending_approval`);
+        }
+      }
+    } catch (err) {
+      console.warn('[pipeline.approve] Failed to read auto_approve_threshold, defaulting to manual:', err.message);
+    }
+  }
+
+  // ranger_notes — two thoughts visible for borderline drafts
+  let rangerNotes;
+  if (isBorderline && hasTwoThoughts) {
+    const thoughtLines = twoThoughts.map((t, i) =>
+      `${i + 1}. ${t.thought}: "${t.current_phrase}" → "${t.suggested_phrase}"`
+    ).join('\n');
+    rangerNotes = `Borderline (${rangerScore}/100) — two suggestions:\n${thoughtLines}`;
+  } else if (isBorderline) {
+    rangerNotes = `Borderline (${rangerScore}/100) — ${rangerResult?.notes || rangerResult?.feedback || 'Review recommended'}`;
+  } else if (autoApproved) {
+    rangerNotes = `Auto-approved (score ${rangerScore})`;
+  } else {
+    rangerNotes = rangerResult?.notes || 'Enforcer approved';
+  }
+
+  const rangerBreakdown = rangerResult?.breakdown || null;
+  const suggestionsPayload = isBorderline
+    ? (hasTwoThoughts
+        ? twoThoughts
+        : [{ thought: rangerResult?.notes || rangerResult?.feedback || 'Review recommended', current_phrase: '', suggested_phrase: '' }])
+    : null;
+
+  // Persist — always writes subject + ranger_breakdown, client-scoped WHERE.
+  if (isBorderline) {
+    await pool.query(
+      `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
+       ranger_breakdown = $5, status = $6,
+       metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'), '{borderline}', 'true'), '{enforcer_suggestions}', $7::jsonb),
+       updated_at = NOW() WHERE id = $8 AND client_id = $9`,
+      [finalBody, subject ?? null, rangerScore, rangerNotes,
+       JSON.stringify(rangerBreakdown), nextMessageStatus,
+       JSON.stringify(suggestionsPayload), msg.id, clientId]
+    );
+  } else {
+    await pool.query(
+      `UPDATE messages SET body = $1, subject = $2, ranger_score = $3, ranger_notes = $4,
+       ranger_breakdown = $5, status = $6, updated_at = NOW() WHERE id = $7 AND client_id = $8`,
+      [finalBody, subject ?? null, rangerScore, rangerNotes,
+       JSON.stringify(rangerBreakdown), nextMessageStatus, msg.id, clientId]
+    );
+  }
+
+  // Provenance labels preserved per source so existing analytics don't shift.
+  const requestedBy = isBorderline
+    ? 'enforcer_borderline'
+    : (autoApproved ? 'auto_approval' : (source === 'signal_pipeline' ? 'signal_hunt' : 'system'));
+  await pool.query(
+    `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [clientId, msg.id, requestedBy, approvalStatus, resolvedAt]
+  );
+
+  const auditMethod = autoApproved ? 'auto_threshold' : (source === 'signal_pipeline' ? 'signal_hunt' : 'enforcer');
+  pool.query(
+    `INSERT INTO approval_audit (client_id, message_id, lead_id, decision, score, reasons, model, channel)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [clientId, msg.id, lead.id,
+     isBorderline ? 'borderline_surfaced' : (autoApproved ? 'auto_approved' : 'manual_pending'),
+     rangerScore,
+     JSON.stringify({ method: auditMethod, borderline: isBorderline, gate_fail: gateFailReason || null }),
+     process.env.MODEL_SONNET || 'claude-sonnet-4-20250514',
+     msg.channel]
+  ).catch(err => console.warn('[pipeline.approve] approval_audit write failed:', err.message));
+
+  // If auto-approved, push to send queue. enqueueMessage's channel guard skips
+  // LinkedIn / Instagram automatically (those need a manual founder send).
+  if (autoApproved) {
+    try {
+      const { enqueueMessage } = require('./sendQueueWorker');
+      const enqResult = await enqueueMessage(clientId, msg.id);
+      if (enqResult?.enqueued) {
+        console.log(`[pipeline.approve] Auto-approved ${msg.id} → enqueued for send`);
+      }
+    } catch (err) {
+      console.warn(`[pipeline.approve] enqueueMessage failed for ${msg.id}:`, err.message);
+    }
+  }
+
+  // pipeline_traces — always emit (the kickoff copy previously traced borderline only).
+  pipelineTrace.traceStage(clientId, {
+    lead_id: lead.id,
+    message_id: msg.id,
+    kickoff_id: kickoffId || null,
+    stage: isBorderline ? 'reviewed' : 'approved',
+    status: isBorderline ? 'borderline_surfaced' : (autoApproved ? 'auto_threshold' : 'pipeline_approved'),
+    agent: 'enforcer_beaver',
+    score: rangerScore,
+    pipeline_path: pipelinePath,
+    metadata: { channel: msg.channel, next_status: nextMessageStatus, borderline: isBorderline },
+  }).catch(() => {});
+
+  await logsService.createLog(clientId, {
+    agent: 'enforcer_beaver',
+    action: isBorderline ? 'message_borderline_surfaced' : (autoApproved ? 'message_auto_approved' : 'message_approved'),
+    target_type: 'message',
+    target_id: msg.id,
+    metadata: {
+      channel: msg.channel, score: rangerScore,
+      method: isBorderline ? 'borderline_two_thoughts' : (autoApproved ? 'auto_threshold' : 'pipeline_approved'),
+      borderline: isBorderline,
+      thoughts: isBorderline ? twoThoughts : undefined,
+    },
+  }).catch(() => {});
+
+  return { autoApproved, isBorderline, rangerScore, nextMessageStatus };
+}
+
 module.exports = {
   isV2Enabled,
   processLead,           // Step 7 — currently throws
@@ -631,6 +856,7 @@ module.exports = {
   draftWithFallback,     // Step 3 — concrete (Sales Beaver + optional Enforcer fallback)
   icpGateSoftDelete,     // Step 4 — concrete (applyIcpV2Filter + soft-delete + audit + trace)
   leadReadinessGate,     // Phase 3 pivot — concrete (pre-draft data-integrity check)
+  applyEnforcerDecision, // Step 6 — concrete (auto-approve / borderline / manual + persistence)
 
   // Constants for callers (e.g. acceptance tests)
   PIPELINE_V2_ENABLED,
