@@ -175,13 +175,11 @@ app.get('/health', async (req, res) => {
     timestamp: new Date().toISOString(),
     uptime_seconds: Math.floor(process.uptime()),
     memory_mb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    // /health is unauthenticated — do not expose per-provider key status
+    // (environment fingerprinting). Provider config is checked via Railway env.
     env: {
       database: dbOk ? 'ok' : 'unreachable',
       encryption_key: encKeyOk ? 'valid' : 'INVALID',
-      brave: process.env.BRAVE_API_KEY ? 'set' : 'missing',
-      anthropic: process.env.ANTHROPIC_API_KEY ? 'set' : 'missing',
-      gmail_oauth: process.env.GMAIL_CLIENT_ID ? 'set' : 'missing',
-      vibe_prospecting: process.env.VIBE_PROSPECTING_API_KEY ? 'set' : 'missing',
     },
     jobs,
     stale_jobs: staleJobs,
