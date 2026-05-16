@@ -360,9 +360,9 @@ async function markConnectionSent(clientId, approvalId, { userId }) {
  * Mark a LinkedIn connection as "accepted" — the prospect accepted the connection
  * request, and the user has sent the Day 0 DM. Marks as sent + schedules follow-ups.
  */
-async function markConnectionAccepted(clientId, approvalId, { userId }) {
+async function markConnectionAccepted(clientId, approvalId, { userId, finalBody = null }) {
   const { rows } = await pool.query(
-    `SELECT a.*, m.channel, m.id AS message_id, m.lead_id FROM approvals a
+    `SELECT a.*, m.channel, m.id AS message_id, m.lead_id, m.body AS draft_body FROM approvals a
      JOIN messages m ON m.id = a.message_id
      WHERE a.id = $1 AND a.client_id = $2`,
     [approvalId, clientId]
@@ -399,6 +399,26 @@ async function markConnectionAccepted(clientId, approvalId, { userId }) {
      WHERE id = $1 AND client_id = $2`,
     [approval.message_id, clientId]
   );
+
+  // F-02 (2026-05-16): capture founder edits on manual UI LinkedIn sends.
+  // If the founder pasted back the text actually sent and it differs from the
+  // draft, write a founder_feedback row so the Sales few-shot rebuild learns
+  // from real edits. This was the gap that left founder_feedback at 0 rows —
+  // only the Cowork /linkedin-mark-sent path captured edits, not the UI button.
+  // Non-fatal: never block the mark-sent on a feedback write failure.
+  if (finalBody && typeof finalBody === 'string' && approval.draft_body
+      && approval.draft_body.trim() !== finalBody.trim()) {
+    try {
+      await pool.query(
+        `INSERT INTO founder_feedback (client_id, lead_id, message_id, original_body, edited_body, feedback_type, channel)
+         VALUES ($1, $2, $3, $4, $5, 'manual_ui_send_edit', $6)`,
+        [clientId, approval.lead_id, approval.message_id, approval.draft_body, finalBody, approval.channel || 'linkedin']
+      );
+      console.log(`[approvals] founder_feedback captured (manual UI send edit) for message ${approval.message_id}`);
+    } catch (err) {
+      console.warn('[approvals] founder_feedback capture failed (non-fatal):', err.message);
+    }
+  }
 
   // Update lead to contacted
   if (approval.lead_id) {

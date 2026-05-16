@@ -63,13 +63,16 @@ router.post('/:id/connection-sent',
   }
 );
 
-// Mark DM as sent (linkedin_requested → sent) — triggers follow-up scheduling
+// Mark DM as sent (linkedin_requested → sent) — triggers follow-up scheduling.
+// final_body (optional): the text the founder actually sent. If it differs
+// from the draft, markConnectionAccepted writes a founder_feedback row (F-02).
 router.post('/:id/dm-sent',
   [param('id').isUUID(), validate],
   async (req, res, next) => {
     try {
       const result = await approvalsService.markConnectionAccepted(req.clientId, req.params.id, {
         userId: req.user.userId,
+        finalBody: req.body?.final_body || null,
       });
       res.json({ data: result });
     } catch (err) { next(err); }

@@ -27,6 +27,8 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
   const [saving, setSaving]       = useState(false);
   const [acting, setActing]       = useState(false);
   const [copied, setCopied]       = useState(false);
+  const [confirmingSent, setConfirmingSent] = useState(false);
+  const [sentBody, setSentBody]   = useState(approval.body || '');
   // Follow-ups tab needs action buttons too — the DM Sent button for LinkedIn followups
   // is rendered from the !resolved branch below. Without followups here, the button never renders.
   const resolved = tab !== 'pending' && tab !== 'awaiting' && tab !== 'followups';
@@ -104,9 +106,10 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
     if (acting) return;
     setActing(true);
     try {
-      await onConnectionAccepted(approval.id);
+      await onConnectionAccepted(approval.id, sentBody);
     } finally {
       setActing(false);
+      setConfirmingSent(false);
     }
   };
 
@@ -321,18 +324,44 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
         </div>
       )}
 
+      {/* DM Sent confirm — capture the text the founder actually sent (F-02).
+          Pre-filled with the draft: no edit = one extra click; edited = the
+          diff feeds founder_feedback so Sales Beaver learns. */}
+      {confirmingSent && (
+        <div className="approval-actions" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
+          <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+            Paste the message you actually sent — edit here if you changed anything on LinkedIn. This teaches Sales Beaver.
+          </span>
+          <textarea
+            className="form-input approval-body"
+            rows={6}
+            value={sentBody}
+            onChange={e => setSentBody(e.target.value)}
+            style={{ resize: 'vertical', fontFamily: 'inherit', fontSize: '0.875rem', lineHeight: 1.6 }}
+          />
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button className="btn btn-success btn-sm" onClick={handleConnectionAccepted} disabled={acting}>
+              <UserCheck size={13} /> {acting ? 'Confirming…' : 'Confirm Sent'}
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => { setConfirmingSent(false); setSentBody(approval.body || ''); }} disabled={acting}>
+              <X size={13} /> Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Actions */}
-      {isAwaiting && (
+      {isAwaiting && !confirmingSent && (
         <div className="approval-actions">
-          <button className="btn btn-success btn-sm" onClick={handleConnectionAccepted} disabled={acting}>
-            <UserCheck size={13} /> {acting ? 'Confirming…' : 'DM Sent'}
+          <button className="btn btn-success btn-sm" onClick={() => setConfirmingSent(true)} disabled={acting}>
+            <UserCheck size={13} /> DM Sent
           </button>
           <button className="btn btn-danger btn-sm" onClick={handleReject} disabled={acting}>
             <XCircle size={13} /> No Response
           </button>
         </div>
       )}
-      {!resolved && !isAwaiting && (
+      {!resolved && !isAwaiting && !confirmingSent && (
         <div className="approval-actions">
           {editing ? (
             <>
@@ -349,8 +378,8 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
                   Avoids the "approve here, then navigate to Ready to Send, then click DM Sent" two-step.
                   Shipped 2026-05-12 per MJ request. */}
               {tab === 'followups' && isLinkedin ? (
-                <button className="btn btn-success btn-sm" onClick={handleConnectionAccepted} disabled={acting} title="Marks the follow-up as sent and schedules the next touch. Click only after you have manually sent the DM on LinkedIn.">
-                  <UserCheck size={13} /> {acting ? 'Confirming…' : 'DM Sent'}
+                <button className="btn btn-success btn-sm" onClick={() => setConfirmingSent(true)} disabled={acting} title="Marks the follow-up as sent and schedules the next touch. Click only after you have manually sent the DM on LinkedIn.">
+                  <UserCheck size={13} /> DM Sent
                 </button>
               ) : isLinkedin ? (
                 <button className="btn btn-primary btn-sm" onClick={handleConnectionSent} disabled={acting}>
@@ -497,10 +526,13 @@ export default function Approvals() {
     }
   };
 
-  const handleConnectionAccepted = async (id) => {
+  const handleConnectionAccepted = async (id, finalBody) => {
     setActionError(null);
     try {
-      await request(`/approvals/${id}/dm-sent`, { method: 'POST' });
+      await request(`/approvals/${id}/dm-sent`, {
+        method: 'POST',
+        body: JSON.stringify({ final_body: finalBody || null }),
+      });
       setApprovals(prev => prev.filter(a => a.id !== id));
       // 2026-05-12: decrement the active tab's counter, not always 'awaiting'.
       // Follow-up tab uses this same button (added 2026-05-12) so we must
