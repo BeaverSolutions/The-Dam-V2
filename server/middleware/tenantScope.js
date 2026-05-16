@@ -25,10 +25,12 @@ async function tenantScope(req, res, next) {
   // Acquire a dedicated connection and set tenant context for RLS
   let client;
   let released = false;
+  let safetyTimer = null;
 
   function releaseClient(mode) {
     if (released) return;
     released = true;
+    if (safetyTimer) clearTimeout(safetyTimer);
     const op = mode === 'rollback' ? 'ROLLBACK' : 'COMMIT';
     client.query(op)
       .catch(err => logger.warn({ msg: `tenantScope ${op} failed`, err: err.message }))
@@ -48,6 +50,15 @@ async function tenantScope(req, res, next) {
     // Release on response completion
     res.on('finish', () => releaseClient('commit'));
     res.on('close', () => releaseClient('rollback'));
+
+    // Safety net (Jules F-09): if a downstream middleware throws before next()
+    // resolves, or a handler hangs and the response never finishes/closes, the
+    // pooled connection would leak. Force-release after 120s — longer than any
+    // sane request, so normal traffic clears the timer and pays zero cost.
+    safetyTimer = setTimeout(() => {
+      logger.warn({ msg: 'tenantScope safety release — no finish/close event fired', path: req.path });
+      releaseClient('rollback');
+    }, 120000);
 
     next();
   } catch (err) {
