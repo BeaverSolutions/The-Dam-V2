@@ -867,6 +867,21 @@ async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
     return { saved: 0, credits: 0, reason: 'all_filtered_by_icp', businesses: bizResult.businesses.length };
   }
 
+  // ── spendGuard (2026-05-16): hard, in-code brake on VP credit spend ──────
+  // The brake no longer depends on anyone remembering to check the quota.
+  // Trim the enrichment batch to what today's remaining VP budget affords;
+  // refuse entirely if the daily cap is already spent.
+  const spendGuard = require('./spendGuard');
+  const vpBudget = await spendGuard.checkVP(0);
+  if (vpBudget.affordableLeads <= 0) {
+    console.warn(`[db-builder] spendGuard: VP daily cap reached (${vpBudget.spentToday}/${vpBudget.cap}) — enrichment skipped`);
+    return { saved: 0, credits: 0, reason: 'vp_daily_cap_reached', cap: vpBudget.cap, spent_today: vpBudget.spentToday };
+  }
+  if (candidates.length > vpBudget.affordableLeads) {
+    console.warn(`[db-builder] spendGuard: trimming ${candidates.length} candidates to ${vpBudget.affordableLeads} (VP daily budget: ${vpBudget.remaining}/${vpBudget.cap} credits left)`);
+    candidates.length = vpBudget.affordableLeads;
+  }
+
   // 4. enrich-prospects CONTACTS ONLY (~3cr each) → verified email. Save as Tier A.
   const patterns = await loadEmailPatterns(clientId);
   let saved = 0;

@@ -466,6 +466,46 @@ function SequenceSection({ leadId, clientId }) {
     }
   };
 
+  const handleBookMeeting = async () => {
+    const notes = window.prompt('Meeting booked. Optional notes (or leave blank):', '');
+    if (notes === null) return; // cancelled
+    setActing(true);
+    try {
+      await request(`/leads/${leadId}/book-meeting`, {
+        method: 'POST',
+        body: JSON.stringify({ notes: notes || '' }),
+      });
+      await load();
+    } catch (err) {
+      window.alert('Book meeting failed: ' + (err?.message || 'unknown error'));
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const handleCloseDeal = async (result) => {
+    let dealValue = null;
+    if (result === 'won') {
+      const v = window.prompt('Deal WON. Optional deal value (number, or leave blank):', '');
+      if (v === null) return; // cancelled
+      if (v.trim()) dealValue = Number(v.trim());
+    } else if (!window.confirm('Mark this deal as LOST?')) {
+      return;
+    }
+    setActing(true);
+    try {
+      await request(`/leads/${leadId}/close-deal`, {
+        method: 'POST',
+        body: JSON.stringify({ result, deal_value: dealValue, notes: '' }),
+      });
+      await load();
+    } catch (err) {
+      window.alert('Close deal failed: ' + (err?.message || 'unknown error'));
+    } finally {
+      setActing(false);
+    }
+  };
+
   const handleAction = async (action) => {
     setActing(true);
     try {
@@ -546,6 +586,16 @@ function SequenceSection({ leadId, clientId }) {
         {/* ✓ Replied always available — every back-and-forth reply needs to fire reply intelligence */}
         <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', gap: '0.25rem', color: 'var(--blue)' }} onClick={handleMarkReplied} disabled={acting} title="Mark this lead as replied — fires reply intelligence (classify, stop sequence, draft response on same channel, log). Click again on each new reply in a back-and-forth.">
           ✓ Replied
+        </button>
+        {/* F-08: canonical lead-state transitions — stop the sequence + record the conversion */}
+        <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', gap: '0.25rem', color: 'var(--purple)' }} onClick={handleBookMeeting} disabled={acting} title="Mark this lead as meeting booked — stops follow-ups and records the conversion.">
+          ✓ Meeting
+        </button>
+        <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', gap: '0.25rem', color: 'var(--lime)' }} onClick={() => handleCloseDeal('won')} disabled={acting} title="Mark this deal closed-won.">
+          ✓ Won
+        </button>
+        <button className="btn btn-ghost" style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', gap: '0.25rem', color: 'var(--danger)' }} onClick={() => handleCloseDeal('lost')} disabled={acting} title="Mark this deal closed-lost.">
+          ✗ Lost
         </button>
         {seq.sequence_status === 'active' && (
           <>
