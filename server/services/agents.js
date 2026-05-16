@@ -16,6 +16,17 @@ const { getClientConfig, buildClientContext } = require('./clientConfig');
 const { evaluateLeadQuality } = require('../utils/leadQuality');
 const { recordOutcome, attributionFromLead } = require('./outcomeTracker');
 
+// Channel-specific drafting instructions injected into the Sales Beaver prompt.
+// Module scope (2026-05-16, Jules F-03): was a local const inside
+// processLeadPipeline only — so the signal pipeline drafted with no channel
+// instructions and produced lower-quality drafts for the best leads. Both
+// pipeline paths now reference this single definition.
+const CHANNEL_HINTS = {
+  email: 'Write a cold email following the MANDATORY DAY 0 TEMPLATE exactly. Must have: subject line "{company_name} x {lead_company}", "Hi {first_name}," greeting, congratulation/hook paragraph, pain bridge paragraph, one question, "Regards," sign-off. Under 80 words body.',
+  linkedin: 'Write a SHORT LinkedIn DM (NOT an email). 2-3 sentences max, under 50 words total. No subject line. No greeting like "Hi Name,". No sign-off (no "Regards,", no name at end). Just a casual peer-to-peer message ending with one question.',
+  instagram: 'Write a casual Instagram DM. 1-2 sentences, under 30 words. No greeting, no sign-off. Reference something about their company. End with a casual question. Most informal channel.',
+};
+
 // ICP+channel patches per MJ direction 2026-04-29
 // ─── ICP v2: Beaver Solutions tenant — MY+SG, sales/BD/revenue persona ──────
 // 2026-05-14: narrowed scope per MJ direction.
@@ -1886,10 +1897,16 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       // to LinkedIn. MJ's rule: email is the primary channel; LinkedIn is only
       // used when no email is available, and for follow-up escalation after FU2.
       // Phase 2 Step 3 (2026-05-08): Hunter enrichment via pipeline.enrichEmail.
-      // signal_pipeline does NOT use VP (kickoff path only) — enableVp omitted.
+      // 2026-05-16 (Jules F-03): signal-rich leads are the most valuable, so
+      // they now get the SAME VP email enrichment the kickoff path uses. The
+      // daily VP credit cap inside enrichEmail bounds total spend regardless
+      // of how many pipeline paths call it.
       await pipeline.enrichEmail(clientId, lead, {
         pipeline_path: 'signal-pipeline',
         hunterService,
+        enableVp: true,
+        vpService: require('./vibeProspecting'),
+        tenantConfigService: require('./tenantConfig'),
       });
 
       // ── Channel selection ── single source of truth in selectChannel()
@@ -1986,7 +2003,9 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       const draft = await pipeline.draftWithFallback(clientId, {
         lead_id: lead.id,
         channel,
-        context: contextParts.join('\n'),
+        // Jules F-03: append channel instructions like the kickoff path does,
+        // so signal-pipeline drafts get the same channel-shaping the best leads deserve.
+        context: contextParts.join('\n') + (CHANNEL_HINTS[channel] ? `\n\nCHANNEL INSTRUCTIONS: ${CHANNEL_HINTS[channel]}` : ''),
         salesGenerate,
         rangerDraft,
         enableEnforcerFallback: true,
@@ -3394,11 +3413,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     // ── Single-channel selection: pick the BEST channel for this prospect ──
     // Rule: Day 0 goes on ONE channel only. Follow-ups stay on same channel.
     // After FU2 with no reply → escalate to next channel (handled in follow-up phase).
-    const CHANNEL_HINTS = {
-      email: 'Write a cold email following the MANDATORY DAY 0 TEMPLATE exactly. Must have: subject line "{company_name} x {lead_company}", "Hi {first_name}," greeting, congratulation/hook paragraph, pain bridge paragraph, one question, "Regards," sign-off. Under 80 words body.',
-      linkedin: 'Write a SHORT LinkedIn DM (NOT an email). 2-3 sentences max, under 50 words total. No subject line. No greeting like "Hi Name,". No sign-off (no "Regards,", no name at end). Just a casual peer-to-peer message ending with one question.',
-      instagram: 'Write a casual Instagram DM. 1-2 sentences, under 30 words. No greeting, no sign-off. Reference something about their company. End with a casual question. Most informal channel.',
-    };
+    // CHANNEL_HINTS moved to module scope (Jules F-03) so the signal pipeline shares it.
 
     // ── Email-priority + VP enrichment via pipeline.enrichEmail ──────────
     // Phase 2 Step 3 (2026-05-08): Hunter + VP enrichment consolidated into
