@@ -270,4 +270,189 @@ router.post('/:id/mark-replied',
   }
 );
 
+// POST /api/leads/:id/book-meeting — canonical meeting-booked transition.
+// Jules F-08: generic PUT /:id bypasses follow-up cancellation + outcome/
+// conversion tracking. This endpoint does all side effects atomically.
+// Side effects (all best-effort except the lead update):
+//   1. UPDATE lead: status + pipeline_stage = 'meeting_booked', metadata merge
+//   2. stopSequence — a booked meeting means stop chasing
+//   3. Audit log  4. recordOutcome('meeting_booked')  5. trackEvent
+//   6. Telegram notify
+router.post('/:id/book-meeting',
+  [
+    param('id').isUUID(),
+    body('notes').optional().isString().isLength({ max: 500 }),
+    body('meeting_at').optional().isString().isLength({ max: 64 }),
+    validate,
+  ],
+  async (req, res, next) => {
+    const clientId = req.clientId;
+    const leadId = req.params.id;
+    const notes = (req.body.notes || '').slice(0, 500);
+    const meetingAt = req.body.meeting_at || null;
+
+    try {
+      const { rows: leadRows } = await pool.query(
+        `UPDATE leads
+           SET status = 'meeting_booked',
+               pipeline_stage = 'meeting_booked',
+               metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+               updated_at = NOW()
+         WHERE id = $1 AND client_id = $2
+         RETURNING id, name, company, status, pipeline_stage`,
+        [leadId, clientId, JSON.stringify({
+          meeting: { booked_at: new Date().toISOString(), meeting_at: meetingAt, notes: notes || null },
+        })]
+      );
+      if (leadRows.length === 0) {
+        return res.status(404).json({ error: 'Lead not found', code: 'NOT_FOUND' });
+      }
+      const lead = leadRows[0];
+
+      try {
+        await stopSequence(leadId, 'meeting_booked_manual_ui', clientId);
+      } catch (err) {
+        logger.warn({ msg: '[book-meeting] stopSequence failed', lead_id: leadId, err: err.message });
+      }
+
+      try {
+        await logsService.createLog(clientId, {
+          agent: 'system', action: 'meeting_booked', target_type: 'lead', target_id: leadId,
+          metadata: { source: 'manual_ui', meeting_at: meetingAt, notes: notes || null },
+        });
+      } catch (err) {
+        logger.warn({ msg: '[book-meeting] audit log failed', err: err.message });
+      }
+
+      try {
+        const { rows: [leadFull] } = await pool.query(
+          `SELECT id, source, signal_tier, quality_score, metadata FROM leads WHERE id = $1 AND client_id = $2`,
+          [leadId, clientId]
+        );
+        const { recordOutcome, attributionFromLead } = require('../services/outcomeTracker');
+        recordOutcome(clientId, {
+          outcome: 'meeting_booked', leadId, messageId: null, channel: 'linkedin',
+          ...attributionFromLead(leadFull),
+          eventData: { source_path: 'manual_ui', meeting_at: meetingAt },
+        });
+        const { trackEvent } = require('../services/conversionTracker');
+        trackEvent(clientId, { lead_id: leadId, event_type: 'meeting_booked', channel: 'linkedin', agent: 'system' });
+      } catch (err) {
+        logger.warn({ msg: '[book-meeting] tracking failed', err: err.message });
+      }
+
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (chatId) {
+        try {
+          const telegramService = require('../services/telegram');
+          const appUrl = process.env.FRONTEND_URL || 'https://app.beaver.solutions';
+          telegramService.sendMessage(chatId,
+            `<b>Meeting booked</b>\n\n• ${lead.name} (${lead.company})${meetingAt ? `\n• ${meetingAt}` : ''}\n\n<a href="${appUrl}/pipeline">View →</a>`
+          ).catch(err => logger.warn({ msg: '[book-meeting] Telegram error', err: err.message }));
+        } catch (err) {
+          logger.warn({ msg: '[book-meeting] Telegram setup error', err: err.message });
+        }
+      }
+
+      res.json({ data: { lead_id: lead.id, status: lead.status, pipeline_stage: lead.pipeline_stage, source: 'manual_ui' } });
+    } catch (err) {
+      logger.error({ msg: '/leads/:id/book-meeting failed', lead_id: leadId, err: err.message });
+      next(err);
+    }
+  }
+);
+
+// POST /api/leads/:id/close-deal — canonical closed_won / closed_lost transition.
+// Jules F-08. Body: result ('won'|'lost') required; deal_value + notes optional.
+router.post('/:id/close-deal',
+  [
+    param('id').isUUID(),
+    body('result').isIn(['won', 'lost']),
+    body('deal_value').optional().isNumeric(),
+    body('notes').optional().isString().isLength({ max: 500 }),
+    validate,
+  ],
+  async (req, res, next) => {
+    const clientId = req.clientId;
+    const leadId = req.params.id;
+    const won = req.body.result === 'won';
+    const status = won ? 'closed_won' : 'closed_lost';
+    const dealValue = won && req.body.deal_value != null ? Number(req.body.deal_value) : null;
+    const notes = (req.body.notes || '').slice(0, 500);
+
+    try {
+      const { rows: leadRows } = await pool.query(
+        `UPDATE leads
+           SET status = $4,
+               pipeline_stage = $4,
+               metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+               updated_at = NOW()
+         WHERE id = $1 AND client_id = $2
+         RETURNING id, name, company, status, pipeline_stage`,
+        [leadId, clientId, JSON.stringify({
+          deal: { result: req.body.result, value: dealValue, closed_at: new Date().toISOString(), notes: notes || null },
+        }), status]
+      );
+      if (leadRows.length === 0) {
+        return res.status(404).json({ error: 'Lead not found', code: 'NOT_FOUND' });
+      }
+      const lead = leadRows[0];
+
+      try {
+        await stopSequence(leadId, `${status}_manual_ui`, clientId);
+      } catch (err) {
+        logger.warn({ msg: '[close-deal] stopSequence failed', lead_id: leadId, err: err.message });
+      }
+
+      try {
+        await logsService.createLog(clientId, {
+          agent: 'system', action: 'deal_closed', target_type: 'lead', target_id: leadId,
+          metadata: { source: 'manual_ui', result: req.body.result, deal_value: dealValue, notes: notes || null },
+        });
+      } catch (err) {
+        logger.warn({ msg: '[close-deal] audit log failed', err: err.message });
+      }
+
+      try {
+        const { rows: [leadFull] } = await pool.query(
+          `SELECT id, source, signal_tier, quality_score, metadata FROM leads WHERE id = $1 AND client_id = $2`,
+          [leadId, clientId]
+        );
+        const { recordOutcome, attributionFromLead } = require('../services/outcomeTracker');
+        recordOutcome(clientId, {
+          outcome: status, leadId, messageId: null, channel: 'linkedin',
+          ...attributionFromLead(leadFull),
+          eventData: { source_path: 'manual_ui', deal_value: dealValue },
+        });
+        const { trackEvent } = require('../services/conversionTracker');
+        trackEvent(clientId, {
+          lead_id: leadId, event_type: won ? 'deal_won' : 'deal_lost',
+          channel: 'linkedin', agent: 'system', deal_value: dealValue,
+        });
+      } catch (err) {
+        logger.warn({ msg: '[close-deal] tracking failed', err: err.message });
+      }
+
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (chatId) {
+        try {
+          const telegramService = require('../services/telegram');
+          const appUrl = process.env.FRONTEND_URL || 'https://app.beaver.solutions';
+          const head = won ? 'Deal WON' : 'Deal lost';
+          telegramService.sendMessage(chatId,
+            `<b>${head}</b>\n\n• ${lead.name} (${lead.company})${dealValue ? `\n• Value: ${dealValue}` : ''}\n\n<a href="${appUrl}/pipeline">View →</a>`
+          ).catch(err => logger.warn({ msg: '[close-deal] Telegram error', err: err.message }));
+        } catch (err) {
+          logger.warn({ msg: '[close-deal] Telegram setup error', err: err.message });
+        }
+      }
+
+      res.json({ data: { lead_id: lead.id, status: lead.status, pipeline_stage: lead.pipeline_stage, source: 'manual_ui' } });
+    } catch (err) {
+      logger.error({ msg: '/leads/:id/close-deal failed', lead_id: leadId, err: err.message });
+      next(err);
+    }
+  }
+);
+
 module.exports = router;
