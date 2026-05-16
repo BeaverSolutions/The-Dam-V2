@@ -1144,6 +1144,35 @@ async function detectStuckStates(clientId) {
     issues.push(issue);
   }
 
+  // Issue 9 (Jules F-07): sourcing flatlined. The system used to "flatline
+  // silently" — Brave 402 / pool starvation / VP failure produced zero leads
+  // for days with no alert. Fire ONLY when the system is actively trying and
+  // failing (>=3 dry-run signals in 4h) AND no leads landed in 6h — so a quiet
+  // night or a fresh tenant never trips it. Per-day dedupe handled by the cron.
+  if (utcHour >= 1 && utcHour <= 11) {
+    try {
+      const { rows: src } = await pool.query(
+        `SELECT
+           (SELECT COUNT(*) FROM leads WHERE client_id = $1 AND created_at > NOW() - INTERVAL '6 hours') AS leads_6h,
+           (SELECT COUNT(*) FROM logs  WHERE client_id = $1 AND created_at > NOW() - INTERVAL '4 hours'
+              AND action IN ('research_no_results','kickoff_zero_output','vp_rescue_empty','research_pool_exhausted')) AS dry_4h`,
+        [clientId]
+      );
+      const leads6h = parseInt(src[0]?.leads_6h || 0, 10);
+      const dry4h = parseInt(src[0]?.dry_4h || 0, 10);
+      if (leads6h === 0 && dry4h >= 3) {
+        issues.push({
+          severity: 'critical',
+          type: 'sourcing_flatlined',
+          detail: `0 leads sourced in 6h with ${dry4h} dry-run signals in 4h — Research Beaver is producing nothing. Check Brave quota (HTTP 402) and VP/Explorium credit balance.`,
+          recommended_action: 'escalateToMJ',
+        });
+      }
+    } catch (err) {
+      console.warn('[captain] sourcing-flatline check failed:', err.message);
+    }
+  }
+
   return { issues, kpis_snapshot: kpis };
 }
 
