@@ -74,6 +74,12 @@ IMPORTANT RULES:
  * @returns parsed JSON object or `{ raw: string }` on parse failure
  */
 async function callAgent(agentKey, userMessage, context = {}) {
+  // LLM provider switch (2026-05-16): LLM_PROVIDER=openai routes to the OpenAI
+  // adapter. Default/unset → the Anthropic path below runs unchanged. Lazy
+  // require so the OpenAI SDK only loads when the provider is actually OpenAI.
+  if ((process.env.LLM_PROVIDER || 'anthropic').toLowerCase() === 'openai') {
+    return require('./llm/openai').callAgentOpenAI(agentKey, userMessage, context);
+  }
   if (!client) throw new Error('Anthropic client not initialised');
 
   const agent = AGENTS[agentKey];
@@ -186,6 +192,11 @@ async function callAgent(agentKey, userMessage, context = {}) {
  * @returns {Promise<{ text: string, toolCalls: Array, iterations: number }>}
  */
 async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, context = {}) {
+  // LLM provider switch (2026-05-16): see callAgent. OpenAI adapter owns its
+  // own tool loop; Anthropic path below is unchanged.
+  if ((process.env.LLM_PROVIDER || 'anthropic').toLowerCase() === 'openai') {
+    return require('./llm/openai').callAgentWithToolsOpenAI(agentKey, userMessage, tools, toolHandler, context);
+  }
   if (!client) throw new Error('Anthropic client not initialised');
   if (!Array.isArray(tools) || tools.length === 0) throw new Error('callAgentWithTools requires a non-empty tools array');
   if (typeof toolHandler !== 'function') throw new Error('callAgentWithTools requires a toolHandler function');
