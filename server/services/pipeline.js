@@ -85,13 +85,310 @@ function isV2Enabled() {
  *     trace_count: number,  // assertion target for consolidation acceptance test
  *   }
  */
-async function processLead(clientId, lead, context = {}) {
-  // STEP 7 (final composition): wires icpGate → channel → draft → review → approve.
-  // Until then, this throws so any premature caller is loud, not silent.
-  throw new Error(
-    'pipeline.processLead not yet composed (Phase 2 step 7). ' +
-    'Use individual stages (persistDraft, etc) until composition lands.'
-  );
+async function processLead(clientId, lead, ctx = {}) {
+  // STEP 7 (final composition, 2026-05-16, Jules F-03): the unified per-lead
+  // pipeline. processExistingLeadsPipeline (signal) and processLeadPipeline
+  // (kickoff) both call this when PIPELINE_V2_ENABLED is true; with the flag
+  // OFF (default) their existing inline loops run unchanged — so shipping this
+  // changes nothing in production until the flag is flipped + validated.
+  //
+  // Rejection strategy: unified on the kickoff path's 2-attempt Sales-redraft
+  // loop (the "sharpen the clone" coaching loop) — strictly better than the
+  // signal path's single Enforcer-fallback. The signal path is upgraded.
+  //
+  // Returns { outcome, messageId?, channel?, reason? }. The caller maps the
+  // outcome onto its own counters / execStatus — processLead never touches
+  // execStatus or diagnostics (those are kickoff-caller-local).
+  //
+  // agents.js functions are injected via ctx.deps to avoid a circular require.
+  const {
+    pipelinePath = 'kickoff_pipeline',
+    kickoffId = null,
+    command = null,
+    deps = {},
+  } = ctx;
+  const {
+    salesGenerate, rangerReview, rangerDraft, selectChannel,
+    autoFixMessage, brandSafetyCheck, searchPersonalisationSignals,
+    recordOutcome, attributionFromLead, stripEmDashes, applyIcpV2Filter,
+    hunterService, vpService, tenantConfigService, channelHints = {},
+    beaverState,
+  } = deps;
+
+  const trace = (stage, status, extra = {}) => pipelineTrace.traceStage(clientId, {
+    lead_id: lead.id || null, kickoff_id: kickoffId, stage, status,
+    pipeline_path: pipelinePath, ...extra,
+  }).catch(() => {});
+
+  // ── 1. Identity guard ──
+  if (!lead.id || !lead.name || lead.name === 'Unknown Contact') {
+    await trace('icp_rejected', 'identity_skip', { agent: 'director', reason: 'missing_name_or_unknown_contact', metadata: { lead_name: lead.name || null } });
+    return { outcome: 'identity_skip' };
+  }
+
+  // ── 2. Per-lead draft-failure circuit breaker ──
+  const { rows: failRows } = await pool.query(
+    `SELECT COUNT(*)::int AS fails FROM pipeline_traces
+     WHERE client_id = $1 AND lead_id = $2 AND stage = 'draft_failed'
+       AND created_at > NOW() - INTERVAL '24 hours'`,
+    [clientId, lead.id]
+  ).catch(() => ({ rows: [{ fails: 0 }] }));
+  if (failRows[0].fails >= 3) {
+    await trace('draft_failed', 'circuit_breaker_skip', { agent: 'director', metadata: { recent_failures: failRows[0].fails } });
+    return { outcome: 'circuit_breaker_skip' };
+  }
+
+  try {
+    // ── 3. Context build (superset of both paths' fields) ──
+    const meta = lead.metadata || {};
+    const contextParts = [
+      `Name: ${lead.name}`, `Company: ${lead.company}`, `Title: ${lead.title || 'N/A'}`,
+    ];
+    if (lead.linkedin_url) contextParts.push(`LinkedIn: ${lead.linkedin_url}`);
+    const about = lead.short_description || meta.short_description;
+    if (about) contextParts.push(`About: ${about}`);
+    if (meta.signal) contextParts.push(`Signal (why reaching out now): ${meta.signal}`);
+    if (meta.angle) contextParts.push(`Angle to lead with: ${meta.angle}`);
+    if (meta.why_now) contextParts.push(`Why now: ${meta.why_now}`);
+    if (meta.friction) contextParts.push(`Friction point: ${meta.friction}`);
+    if (meta.signal_type) contextParts.push(`Signal type: ${meta.signal_type}`);
+    if (meta.notes) contextParts.push(`Personalisation hook: ${meta.notes}`);
+    if (!meta.signal && meta.snippet) contextParts.push(`LinkedIn profile snippet: ${meta.snippet}`);
+    if (meta.search_query) contextParts.push(`Search context: ${meta.search_query}`);
+    if (command) contextParts.push(`Campaign intent: "${command}"`);
+
+    if (typeof searchPersonalisationSignals === 'function') {
+      try {
+        const signals = await searchPersonalisationSignals(lead);
+        if (signals.length > 0) {
+          contextParts.push('', 'RECENT SIGNALS (from web search — reference these if relevant):');
+          for (const s of signals) {
+            contextParts.push(`- ${s.text}${s.date ? ` (${s.date})` : ''} [source: ${s.source}]`);
+          }
+        }
+      } catch (err) {
+        console.warn(`[pipeline.processLead] personalisation search skipped for ${lead.name}:`, err.message);
+      }
+    }
+
+    // ── 4. Email enrichment (Hunter + VP) ──
+    await enrichEmail(clientId, lead, {
+      pipeline_path: pipelinePath, hunterService,
+      enableVp: true, vpService, tenantConfigService,
+    });
+
+    // ── 5. Channel selection ──
+    let linkedinAlreadyTried = false;
+    if (!lead.email && lead.linkedin_url) {
+      const prev = await pool.query(
+        `SELECT id FROM messages WHERE client_id = $1 AND lead_id = $2 AND channel = 'linkedin' AND status NOT IN ('deleted') LIMIT 1`,
+        [clientId, lead.id]
+      );
+      linkedinAlreadyTried = prev.rows.length > 0;
+    }
+    const channelChoice = selectChannel(lead, { linkedinAlreadyTried });
+    const channel = channelChoice.channel;
+    const messageStatus = channelChoice.status;
+    if (messageStatus === 'blocked_no_email') {
+      await trace('channel_blocked', 'blocked_no_email', { agent: 'director', reason: channelChoice.reason, metadata: { lead_name: lead.name } });
+    }
+    if (channel === 'linkedin' && linkedinAlreadyTried) {
+      await trace('channel_exhausted', 'linkedin_already_tried', { agent: 'director', metadata: { lead_name: lead.name, channel } });
+      return { outcome: 'channel_exhausted' };
+    }
+
+    // ── 6. Pre-draft readiness gate ──
+    const readiness = leadReadinessGate(lead);
+    if (!readiness.ready) {
+      await logsService.createLog(clientId, {
+        agent: 'director', action: 'lead_not_ready', target_type: 'lead', target_id: lead.id,
+        metadata: { reason: readiness.reason, channel, path: pipelinePath },
+      }).catch(() => {});
+      await trace('icp_rejected', 'lead_not_ready', { agent: 'director', reason: readiness.reason, metadata: { lead_name: lead.name, lead_company: lead.company } });
+      return { outcome: 'lead_not_ready', reason: readiness.reason };
+    }
+
+    // ── 7. Dedup guard (before burning Sonnet tokens) ──
+    const existingActive = await checkActiveMessage(clientId, lead.id);
+    if (existingActive) {
+      await trace('draft_skipped', 'dedup_guard', { agent: 'director', reason: 'dedup_guard', metadata: { channel, existing_message_id: existingActive.id || null } });
+      return { outcome: 'dedup_skip' };
+    }
+
+    // ── 8. Draft (Sales Beaver + Enforcer fallback) ──
+    const hint = channelHints[channel];
+    const draft = await draftWithFallback(clientId, {
+      lead_id: lead.id, channel,
+      context: contextParts.join('\n') + (hint ? `\n\nCHANNEL INSTRUCTIONS: ${hint}` : ''),
+      salesGenerate, rangerDraft, enableEnforcerFallback: true, lead,
+      leadAngle: meta.angle, leadFriction: meta.friction,
+      pipeline_path: pipelinePath, defaultDraftSource: 'sales_beaver',
+    });
+    if (!draft || !draft.body) {
+      await trace('draft_failed', 'no_body', { agent: 'sales_beaver', reason: 'no_body', metadata: { channel, enrichment_eligible: !!(lead.company && lead.title) } });
+      return { outcome: 'draft_failed' };
+    }
+
+    // ── 9. Persist draft ──
+    const msg = await persistDraft(clientId, {
+      lead_id: lead.id, channel, subject: draft.subject, body: draft.body,
+      status: messageStatus, draft_source: draft.draftSource || 'sales_beaver',
+      prompt_variant: draft.prompt_variant, signal: meta.signal,
+      kickoff_id: kickoffId, pipeline_path: pipelinePath,
+    });
+    recordOutcome(clientId, {
+      outcome: 'drafted', leadId: lead.id, messageId: msg.id, channel,
+      ...attributionFromLead(lead),
+      eventData: { source_path: pipelinePath, status: messageStatus, draft_source: draft.draftSource },
+    });
+    if (messageStatus === 'blocked_no_email') {
+      return { outcome: 'blocked_no_email', messageId: msg.id, channel };
+    }
+
+    // ── 10. Auto-fix + brand safety ──
+    const touchNumber = msg.touch_number || 0;
+    const preFix = autoFixMessage(msg.body || '', { touchNumber, maxWords: 80 });
+    let currentBody = preFix.body;
+    let currentSubject = typeof stripEmDashes === 'function' ? stripEmDashes(msg.subject) : msg.subject;
+    if (preFix.fixes.length > 0) {
+      await pool.query(
+        `UPDATE messages SET body = $1, metadata = jsonb_set(COALESCE(metadata, '{}'), '{autofix}', $2::jsonb) WHERE id = $3 AND client_id = $4`,
+        [currentBody, JSON.stringify(preFix.fixes), msg.id, clientId]
+      );
+    }
+    const safety = brandSafetyCheck(currentBody, {
+      name: lead.name, company: lead.company, title: lead.title,
+      signal: meta.signal, why_now: meta.why_now,
+    });
+    if (!safety.safe) {
+      await pool.query(
+        `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
+        [`Brand safety: ${safety.reason}`, msg.id, clientId]
+      );
+      await trace('rejected', 'brand_safety', { message_id: msg.id, agent: 'sales_beaver', reason: safety.reason, metadata: { company: lead.company, channel } });
+      return { outcome: 'brand_safety_rejected', messageId: msg.id, channel };
+    }
+
+    // ── 11. Enforcer review ──
+    let rangerResult;
+    try {
+      rangerResult = await rangerReview(clientId, {
+        message_id: msg.id, message_body: currentBody,
+        lead_context: {
+          name: lead.name, company: lead.company, title: lead.title, email: lead.email,
+          lead_id: lead.id, signal: meta.signal, angle: meta.angle, friction: meta.friction,
+          why_now: meta.why_now, touch_number: touchNumber,
+        },
+      });
+      if (rangerResult?.body) currentBody = rangerResult.body;
+    } catch (err) {
+      rangerResult = { approved: false, decision: 'reject', score: 0, notes: 'Enforcer unavailable (Claude API failed) — manual review required', breakdown: null };
+    }
+    await trace('reviewed', rangerResult?.approved ? 'approved' : 'rejected', {
+      message_id: msg.id, agent: 'enforcer_beaver', score: rangerResult?.score ?? null,
+      reason: rangerResult?.notes || null, metadata: { channel },
+    });
+
+    // ── 12. Rejection → 2-attempt Sales redraft loop, then Enforcer fallback ──
+    if (!rangerResult?.approved) {
+      const attemptRow = await pool.query(
+        `SELECT ranger_attempt_count FROM messages WHERE id = $1 AND client_id = $2`, [msg.id, clientId]
+      );
+      const attemptCount = attemptRow.rows[0]?.ranger_attempt_count || 0;
+
+      if (attemptCount < 2) {
+        const rejectionFeedback = rangerResult?.reject_reason || rangerResult?.notes || 'Message did not pass quality gates';
+        const feedbackContext = [
+          `Name: ${lead.name}`, `Company: ${lead.company}`, `Title: ${lead.title || 'N/A'}`,
+          meta.signal ? `Signal: ${meta.signal}` : '', meta.angle ? `Angle: ${meta.angle}` : '',
+          meta.friction ? `Friction: ${meta.friction}` : '',
+          `\nPREVIOUS ATTEMPT REJECTED: ${rejectionFeedback}`,
+          `Previous message that was rejected:\n${currentBody}`,
+          `\nRewrite the message fixing the issue above. Do NOT repeat the same structure.`,
+          `\nCRITICAL: Day 0 email body 50-60 words MAX (hard reject 81+). One sentence per section.`,
+        ].filter(Boolean).join('\n');
+        try {
+          const redraft = await salesGenerate(clientId, { lead_id: lead.id, channel, context: feedbackContext });
+          if (redraft?.body) {
+            currentBody = typeof stripEmDashes === 'function' ? stripEmDashes(redraft.body) : redraft.body;
+            currentSubject = redraft.subject || currentSubject;
+            await pool.query(
+              `UPDATE messages SET body = $1, subject = $2, ranger_attempt_count = $3, ranger_notes = $4, status = 'pending_ranger', updated_at = NOW() WHERE id = $5 AND client_id = $6`,
+              [currentBody, currentSubject, attemptCount + 1, `Redraft ${attemptCount + 1}: fixing — ${rejectionFeedback}`, msg.id, clientId]
+            );
+            rangerResult = await rangerReview(clientId, {
+              message_id: msg.id, message_body: currentBody,
+              lead_context: { name: lead.name, company: lead.company, title: lead.title, email: lead.email, lead_id: lead.id, signal: meta.signal, angle: meta.angle, friction: meta.friction, why_now: meta.why_now },
+            });
+            if (beaverState && typeof beaverState.recordImprovementAfterFeedback === 'function') {
+              beaverState.recordImprovementAfterFeedback(clientId, {
+                lead_id: lead.id, original_message_id: msg.id, retry_message_id: msg.id,
+                original_reject_reason: rejectionFeedback, retry_passed: rangerResult?.approved === true,
+              }).catch(() => {});
+            }
+          }
+        } catch (redraftErr) {
+          console.warn('[pipeline.processLead] Sales redraft failed:', redraftErr.message);
+          rangerResult = rangerResult || { approved: false };
+          rangerResult.approved = false;
+        }
+      }
+
+      // Still rejected → Enforcer drafts its own version
+      if (!rangerResult?.approved) {
+        let enforcerDraft = null;
+        try {
+          enforcerDraft = await rangerDraft(clientId, {
+            lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
+            lead_angle: meta.angle, lead_friction: meta.friction, rejected_body: currentBody,
+            rejection_notes: rangerResult?.notes,
+          });
+        } catch (err) {
+          console.warn('[pipeline.processLead] rangerDraft fallback failed:', err.message);
+        }
+        if (enforcerDraft?.body && typeof enforcerDraft.body === 'string') {
+          currentBody = enforcerDraft.body;
+          currentSubject = enforcerDraft.subject || currentSubject || `${lead.company}`;
+          await pool.query(
+            `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval', ranger_score = 70, ranger_notes = $3, updated_at = NOW() WHERE id = $4 AND client_id = $5`,
+            [currentBody, currentSubject, 'Enforcer-drafted fallback — Sales Beaver failed quality gates. Review before sending.', msg.id, clientId]
+          );
+          await pool.query(
+            `INSERT INTO approvals (client_id, message_id, requested_by, status) VALUES ($1, $2, 'enforcer_fallback', 'pending')`,
+            [clientId, msg.id]
+          ).catch(() => {});
+          await logsService.createLog(clientId, {
+            agent: 'enforcer_beaver', action: 'enforcer_fallback_draft', target_type: 'message', target_id: msg.id,
+            metadata: { channel, lead_name: lead.name },
+          }).catch(() => {});
+          await trace('reviewed', 'enforcer_fallback', { message_id: msg.id, agent: 'enforcer_beaver', score: 70, metadata: { channel } });
+          return { outcome: 'approved', messageId: msg.id, channel, viaEnforcerFallback: true };
+        }
+        // Last resort — both Sales and Enforcer failed
+        await pool.query(
+          `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
+          ['Sales and Enforcer both failed to produce a passing draft. Manual message required.', msg.id, clientId]
+        );
+        await trace('rejected', 'enforcer_no_fallback', { message_id: msg.id, agent: 'enforcer_beaver', score: rangerResult?.score ?? null, reason: rangerResult?.notes || null, metadata: { channel } });
+        return { outcome: 'rejected', messageId: msg.id, channel };
+      }
+    }
+
+    // ── 13. Final pre-save auto-fix safety net ──
+    const finalFix = autoFixMessage(currentBody, { touchNumber, maxWords: 80 });
+    if (finalFix.fixes.length > 0) currentBody = finalFix.body;
+
+    // ── 14. Enforcer approved → shared auto-approve / borderline / manual decision ──
+    await applyEnforcerDecision(clientId, {
+      msg, lead, rangerResult, finalBody: currentBody, subject: currentSubject,
+      kickoffId, pipelinePath, source: pipelinePath,
+    });
+    return { outcome: 'approved', messageId: msg.id, channel };
+  } catch (err) {
+    console.error(`[pipeline.processLead] Error processing ${lead.name}:`, err.message);
+    await trace('draft_failed', 'unexpected_error', { agent: 'director', metadata: { lead_name: lead.name, error: err.message } });
+    return { outcome: 'draft_failed', reason: err.message };
+  }
 }
 
 // ─── STEP 1 (this commit): persistence helpers ─────────────────────────────

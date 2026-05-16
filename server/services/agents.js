@@ -1843,6 +1843,27 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
   let messagesDrafted = 0;
 
   for (const lead of leads) {
+    // ── Phase 2 Step 7 (Jules F-03): unified path behind PIPELINE_V2_ENABLED.
+    // Flag OFF (default) → the inline loop below runs unchanged.
+    if (pipeline.isV2Enabled()) {
+      const r = await pipeline.processLead(clientId, lead, {
+        pipelinePath: 'signal_pipeline',
+        kickoffId: plan_id,
+        deps: {
+          salesGenerate, rangerReview, rangerDraft, selectChannel, autoFixMessage,
+          brandSafetyCheck, searchPersonalisationSignals, recordOutcome, attributionFromLead,
+          stripEmDashes, applyIcpV2Filter, hunterService,
+          vpService: require('./vibeProspecting'),
+          tenantConfigService: require('./tenantConfig'),
+          channelHints: CHANNEL_HINTS,
+          beaverState: require('./beaverState'),
+        },
+      });
+      if (r.outcome === 'approved') { approvedCount++; messagesDrafted++; }
+      else if (r.outcome === 'rejected' || r.outcome === 'brand_safety_rejected') { rejectedCount++; messagesDrafted++; }
+      else if (r.outcome === 'blocked_no_email') { messagesDrafted++; }
+      continue;
+    }
     try {
       // ── P0-D (2026-05-10): per-lead draft-failure circuit breaker ──────
       // If this lead has failed drafting 3+ times in the last 24h, skip it.
@@ -3166,6 +3187,41 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
   // ── Per-lead pipeline function (Sales draft + multi-channel + Ranger + Captain) ──
   async function processLeadPipeline(lead) {
+    // ── Phase 2 Step 7 (Jules F-03): unified path behind PIPELINE_V2_ENABLED.
+    // Flag OFF (default) → the inline body below runs unchanged.
+    if (pipeline.isV2Enabled()) {
+      const r = await pipeline.processLead(clientId, lead, {
+        pipelinePath: 'kickoff_pipeline',
+        kickoffId: plan_id,
+        command,
+        deps: {
+          salesGenerate, rangerReview, rangerDraft, selectChannel, autoFixMessage,
+          brandSafetyCheck, searchPersonalisationSignals, recordOutcome, attributionFromLead,
+          stripEmDashes, applyIcpV2Filter, hunterService,
+          vpService: require('./vibeProspecting'),
+          tenantConfigService: require('./tenantConfig'),
+          channelHints: CHANNEL_HINTS,
+          beaverState: require('./beaverState'),
+        },
+      });
+      if (r.outcome === 'approved') {
+        approvedCount++;
+        diagnostics.messages_drafted++;
+        execStatus.beavers.sales.approved++;
+        execStatus.beavers.captain.approved++;
+      } else if (r.outcome === 'rejected' || r.outcome === 'brand_safety_rejected') {
+        rejectedCount++;
+        diagnostics.messages_drafted++;
+        execStatus.beavers.enforcer.rejected++;
+      } else if (r.outcome === 'blocked_no_email') {
+        diagnostics.messages_drafted++;
+      } else {
+        diagnostics.messages_failed++;
+      }
+      execStatus.progress.complete++;
+      await updateExecStatus(clientId, plan_id, execStatus);
+      return;
+    }
     if (!lead.id || !lead.name || lead.name === 'Unknown Contact') {
       console.warn('[pipeline] Skipping lead with no identity:', lead.id, lead.name);
       // 2026-05-13: emit pipeline_traces so identity-skip is visible in funnel
