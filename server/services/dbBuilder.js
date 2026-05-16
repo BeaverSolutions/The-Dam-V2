@@ -832,15 +832,15 @@ async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
   }
 
   // 2. fetch-prospects — FREE. Decision-makers with an email available.
-  // Keep size tight: only fetch 2x batchSize to avoid pulling too many
-  // prospects that we'd then waste credits enriching.
+  // size MUST be >= pageSize or Explorium 422s the whole call. fetch-prospects
+  // is free; credit burn is controlled downstream at the enrich step (maxEnrichments).
   const prResult = await vp.fetchProspects(clientId, {
     filters: {
       business_id: { values: Object.keys(bizMap).slice(0, 100) },
       job_level: { values: ['founder', 'owner', 'c-suite', 'president'] },
       has_email: true,
     },
-    size: Math.min(batchSize * 2, 40),
+    size: Math.max(batchSize * 3, 60),
     pageSize: 50,
     toolReasoning,
   });
