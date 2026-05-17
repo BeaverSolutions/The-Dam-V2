@@ -101,15 +101,15 @@ async function callAgent(agentKey, userMessage, context = {}) {
   // If we know who's paying, enforce their daily cap BEFORE burning tokens.
   // Unattributed calls (no clientId) pass straight through.
   if (clientId) {
-    const { allowed, spend, budget, pct } = await checkBudget(clientId);
+    const { allowed, spend, budget, pct, period } = await checkBudget(clientId);
     if (!allowed) {
-      console.warn(`[claude:budget] BLOCKED client=${clientId} agent=${agentKey} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);
-      // Fire-and-forget Telegram alert (deduped to once-per-day-per-client)
-      notifyBudgetExceeded({ clientId, spend, budget }).catch(err => console.error('[claude:budget] Telegram budget alert FAILED:', err.message));
-      throw new BudgetExceededError({ clientId, spend, budget });
+      console.warn(`[claude:budget] BLOCKED client=${clientId} agent=${agentKey} ${period} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);
+      // Fire-and-forget Telegram alert (deduped once-per-day-per-period)
+      notifyBudgetExceeded({ clientId, spend, budget, period }).catch(err => console.error('[claude:budget] Telegram budget alert FAILED:', err.message));
+      throw new BudgetExceededError({ clientId, spend, budget, period });
     }
     if (pct >= 0.8) {
-      console.warn(`[claude:budget] WARN client=${clientId} agent=${agentKey} at ${Math.round(pct * 100)}% of daily cap ($${spend.toFixed(4)} / $${budget.toFixed(2)})`);
+      console.warn(`[claude:budget] WARN client=${clientId} agent=${agentKey} at ${Math.round(pct * 100)}% of ${period} cap ($${spend.toFixed(4)} / $${budget.toFixed(2)})`);
     }
   }
 
@@ -216,14 +216,14 @@ async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, con
 
   // Budget gate (reuse single-shot logic)
   if (clientId) {
-    const { allowed, spend, budget, pct } = await checkBudget(clientId);
+    const { allowed, spend, budget, pct, period } = await checkBudget(clientId);
     if (!allowed) {
-      console.warn(`[claude:budget] BLOCKED client=${clientId} agent=${agentKey} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);
-      notifyBudgetExceeded({ clientId, spend, budget }).catch(err => console.error('[claude:budget] Telegram budget alert FAILED:', err.message));
-      throw new BudgetExceededError({ clientId, spend, budget });
+      console.warn(`[claude:budget] BLOCKED client=${clientId} agent=${agentKey} ${period} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);
+      notifyBudgetExceeded({ clientId, spend, budget, period }).catch(err => console.error('[claude:budget] Telegram budget alert FAILED:', err.message));
+      throw new BudgetExceededError({ clientId, spend, budget, period });
     }
     if (pct >= 0.8) {
-      console.warn(`[claude:budget] WARN client=${clientId} agent=${agentKey} at ${Math.round(pct * 100)}% of daily cap`);
+      console.warn(`[claude:budget] WARN client=${clientId} agent=${agentKey} at ${Math.round(pct * 100)}% of ${period} cap`);
     }
   }
 

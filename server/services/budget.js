@@ -34,6 +34,17 @@ const PRICING = {
   'claude-haiku-4-5':           HAIKU_PRICING,
 };
 
+// ─── Monthly LLM spend cap ──────────────────────────────────────
+// MJ's budget is a MONTHLY figure. The per-client `daily_budget_usd` only
+// caps a single day — 30 normal days still blow past a tight monthly target,
+// and a runaway day (e.g. 2026-05-14: 2,202 research_beaver calls, $12.86)
+// sits under a $20/day cap while torching a month's budget. This is the
+// month-horizon ceiling, env-overridable. Default $60 reflects the realistic
+// autonomous run rate (~$2-4/day); set LLM_MONTHLY_BUDGET_USD in Railway to
+// tune. NOTE: a $20 value will halt the pipeline ~10 days into a month.
+const LLM_MONTHLY_BUDGET_USD = Number(process.env.LLM_MONTHLY_BUDGET_USD) || 60;
+function getMonthlyBudget() { return LLM_MONTHLY_BUDGET_USD; }
+
 /**
  * Calculate the USD cost of a single Claude call from its usage block.
  * Returns 0 for unknown models (so we don't crash the pipeline on a rename).
@@ -72,6 +83,22 @@ async function getTodaySpend(clientId) {
 }
 
 /**
+ * Month-to-date spend for a client in USD. Month boundary is UTC midnight on
+ * the 1st. Uses the same idx_llm_usage_client_date index as getTodaySpend.
+ */
+async function getMonthSpend(clientId) {
+  if (!clientId) return 0;
+  const res = await pool.query(
+    `SELECT COALESCE(SUM(cost_usd), 0)::float AS spend
+       FROM llm_usage
+      WHERE client_id = $1
+        AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'UTC')`,
+    [clientId]
+  );
+  return res.rows[0]?.spend || 0;
+}
+
+/**
  * Client's daily budget in USD. Defaults to $10 if the client row is missing
  * (shouldn't happen, but don't crash the pipeline on a race).
  */
@@ -85,23 +112,58 @@ async function getClientBudget(clientId) {
 }
 
 /**
- * Check if a client can make another Claude call today.
- * Returns { allowed, spend, budget, remaining, pct }.
+ * Check if a client can make another Claude call. Enforces BOTH caps:
+ *   - daily   — clients.daily_budget_usd
+ *   - monthly — LLM_MONTHLY_BUDGET_USD (the budget MJ actually set)
+ *
+ * Returns { allowed, spend, budget, remaining, pct, period, ... }. The
+ * spend/budget/pct/period fields describe the BINDING window — the blocked
+ * one, or whichever is closest to its cap — so a caller's error message and
+ * Telegram alert name the right window and reset time. Per-window raw values
+ * (daySpend/dayBudget/monthSpend/monthBudget) are also returned.
  *
  * Absence of clientId is a no-op that returns allowed=true — used for
  * internal / cron / test calls where attribution doesn't apply.
  */
 async function checkBudget(clientId) {
   if (!clientId) {
-    return { allowed: true, spend: 0, budget: Number.POSITIVE_INFINITY, remaining: Number.POSITIVE_INFINITY, pct: 0 };
+    return {
+      allowed: true, spend: 0, budget: Number.POSITIVE_INFINITY,
+      remaining: Number.POSITIVE_INFINITY, pct: 0, period: 'day',
+      daySpend: 0, dayBudget: Number.POSITIVE_INFINITY,
+      monthSpend: 0, monthBudget: Number.POSITIVE_INFINITY,
+    };
   }
-  const [spend, budget] = await Promise.all([
+  const [daySpend, dayBudget, monthSpend] = await Promise.all([
     getTodaySpend(clientId),
     getClientBudget(clientId),
+    getMonthSpend(clientId),
   ]);
+  const monthBudget = LLM_MONTHLY_BUDGET_USD;
+
+  const dayOk = daySpend < dayBudget;
+  const monthOk = monthSpend < monthBudget;
+  const allowed = dayOk && monthOk;
+
+  const dayPct = dayBudget > 0 ? daySpend / dayBudget : 0;
+  const monthPct = monthBudget > 0 ? monthSpend / monthBudget : 0;
+
+  // Binding window: the blocked one; if both or neither, whichever sits
+  // closer to its cap. Month wins ties — it's the longer-horizon ceiling.
+  let period;
+  if (!dayOk && monthOk) period = 'day';
+  else if (!monthOk && dayOk) period = 'month';
+  else period = monthPct >= dayPct ? 'month' : 'day';
+
+  const spend  = period === 'month' ? monthSpend  : daySpend;
+  const budget = period === 'month' ? monthBudget : dayBudget;
+  const pct    = period === 'month' ? monthPct    : dayPct;
   const remaining = Math.max(0, budget - spend);
-  const pct = budget > 0 ? (spend / budget) : 0;
-  return { allowed: spend < budget, spend, budget, remaining, pct };
+
+  return {
+    allowed, spend, budget, remaining, pct, period,
+    daySpend, dayBudget, monthSpend, monthBudget,
+  };
 }
 
 /**
@@ -142,17 +204,19 @@ async function logUsage({ clientId, agent, model, usage = {}, elapsedMs = null }
  */
 const alertedToday = new Set();
 
-function todayKey(clientId) {
+function todayKey(clientId, period = 'day') {
   const d = new Date();
-  return `${clientId}:${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  return `${clientId}:${period}:${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
 /**
- * Fire a one-per-day Telegram alert when a client hits their budget cap.
+ * Fire a one-per-day Telegram alert when a client hits a budget cap. The
+ * `period` ('day' | 'month') names which cap and its reset window. Deduped
+ * once-per-day-per-period so the daily and monthly alerts can both fire.
  * Never throws — logging and messaging failures are swallowed.
  */
-async function notifyBudgetExceeded({ clientId, spend, budget }) {
-  const key = todayKey(clientId);
+async function notifyBudgetExceeded({ clientId, spend, budget, period = 'day' }) {
+  const key = todayKey(clientId, period);
   if (alertedToday.has(key)) return;
   alertedToday.add(key);
 
@@ -168,13 +232,19 @@ async function notifyBudgetExceeded({ clientId, spend, budget }) {
     const slug = rows[0]?.slug || clientId;
     const name = rows[0]?.name || slug;
 
+    const window = period === 'month' ? 'Monthly' : 'Daily';
+    const reset = period === 'month' ? 'the 1st of next month (UTC)' : 'UTC midnight';
+    const knob = period === 'month'
+      ? `<code>LLM_MONTHLY_BUDGET_USD</code> in Railway`
+      : `<code>daily_budget_usd</code> for client <code>${name}</code> in Railway DB or admin panel`;
+
     const { sendMessage } = require('./telegram');
     await sendMessage(
       chatId,
-      `🛑 <b>Budget cap hit — ${name}</b>\n\n` +
-      `Spent: <b>$${spend.toFixed(4)}</b> / $${budget.toFixed(2)} USD today.\n` +
-      `All Claude calls for <code>${slug}</code> are blocked until UTC midnight.\n\n` +
-      `To unblock: raise <code>daily_budget_usd</code> for client <code>${name}</code> in Railway DB or admin panel.`
+      `🛑 <b>${window} budget cap hit — ${name}</b>\n\n` +
+      `Spent: <b>$${spend.toFixed(4)}</b> / $${budget.toFixed(2)} USD.\n` +
+      `All Claude calls for <code>${slug}</code> are blocked until ${reset}.\n\n` +
+      `To unblock: raise ${knob}.`
     );
   } catch (err) {
     logger.warn({ msg: 'budget.notifyBudgetExceeded failed', err: err.message, clientId });
@@ -186,14 +256,20 @@ async function notifyBudgetExceeded({ clientId, spend, budget }) {
  * Claude failures and surface it clearly to the UI / Telegram.
  */
 class BudgetExceededError extends Error {
-  constructor({ clientId, spend, budget }) {
-    super(`Daily Claude budget reached: $${spend.toFixed(4)} / $${budget.toFixed(2)} USD. New calls blocked until UTC midnight. Raise daily_budget_usd on the clients row to unblock.`);
+  constructor({ clientId, spend, budget, period = 'day' }) {
+    const window = period === 'month' ? 'monthly' : 'daily';
+    const reset = period === 'month' ? 'the 1st of next month (UTC)' : 'UTC midnight';
+    const knob = period === 'month'
+      ? 'LLM_MONTHLY_BUDGET_USD env var'
+      : 'daily_budget_usd on the clients row';
+    super(`Claude ${window} budget reached: $${spend.toFixed(4)} / $${budget.toFixed(2)} USD. New calls blocked until ${reset}. Raise ${knob} to unblock.`);
     this.name = 'BudgetExceededError';
     this.code = 'BUDGET_EXCEEDED';
     this.status = 429;
     this.clientId = clientId;
     this.spend = spend;
     this.budget = budget;
+    this.period = period;
   }
 }
 
@@ -202,7 +278,9 @@ module.exports = {
   logUsage,
   costForUsage,
   getTodaySpend,
+  getMonthSpend,
   getClientBudget,
+  getMonthlyBudget,
   notifyBudgetExceeded,
   BudgetExceededError,
   PRICING,

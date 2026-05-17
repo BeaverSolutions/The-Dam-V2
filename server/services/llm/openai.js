@@ -98,14 +98,14 @@ function normaliseUsage(u) {
 
 async function enforceBudget(clientId, agentKey) {
   if (!clientId) return;
-  const { allowed, spend, budget, pct } = await checkBudget(clientId);
+  const { allowed, spend, budget, pct, period } = await checkBudget(clientId);
   if (!allowed) {
-    console.warn(`[openai:budget] BLOCKED client=${clientId} agent=${agentKey} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);
-    notifyBudgetExceeded({ clientId, spend, budget }).catch(err => console.error('[openai:budget] Telegram alert FAILED:', err.message));
-    throw new BudgetExceededError({ clientId, spend, budget });
+    console.warn(`[openai:budget] BLOCKED client=${clientId} agent=${agentKey} ${period} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);
+    notifyBudgetExceeded({ clientId, spend, budget, period }).catch(err => console.error('[openai:budget] Telegram alert FAILED:', err.message));
+    throw new BudgetExceededError({ clientId, spend, budget, period });
   }
   if (pct >= 0.8) {
-    console.warn(`[openai:budget] WARN client=${clientId} agent=${agentKey} at ${Math.round(pct * 100)}% of daily cap`);
+    console.warn(`[openai:budget] WARN client=${clientId} agent=${agentKey} at ${Math.round(pct * 100)}% of ${period} cap`);
   }
 }
 

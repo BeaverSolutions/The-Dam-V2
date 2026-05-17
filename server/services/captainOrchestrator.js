@@ -24,6 +24,7 @@
 
 const pool = require('../db/pool');
 const { callAgent } = require('./claude');
+const { getMonthlyBudget } = require('./budget');
 const tenantConfig = require('./tenantConfig');
 const jobHealth = require('./jobHealth');
 const pipelineTrace = require('./pipelineTrace');
@@ -140,6 +141,18 @@ async function collectTeamKPIs(clientId) {
      WHERE client_id = $1 AND created_at > date_trunc('month', NOW() AT TIME ZONE 'UTC')`,
     [clientId]
   );
+  // Worst single-day spend this month — surfaces a runaway day (e.g. the
+  // 2026-05-14 research_beaver loop, 2,202 calls / $12.86) in the brief.
+  const spendMaxDayPromise = pool.query(
+    `SELECT COALESCE(MAX(day_spend), 0)::numeric(10,4) AS max_day
+       FROM (
+         SELECT SUM(cost_usd) AS day_spend
+           FROM llm_usage
+          WHERE client_id = $1 AND created_at > date_trunc('month', NOW() AT TIME ZONE 'UTC')
+          GROUP BY (created_at AT TIME ZONE 'UTC')::date
+       ) d`,
+    [clientId]
+  );
 
   // ─── Meetings — the metric MJ cares about ──
   const meetingsThisWeekPromise = pool.query(
@@ -221,11 +234,11 @@ async function collectTeamKPIs(clientId) {
   const [research, sales, enforcer, rejectReasons, pipeline,
          dbOk, cronHealth,
          spendToday, spendMtd, meetingsWeek, meetingsMtd,
-         channelMix, targets] = await Promise.all([
+         channelMix, targets, spendMaxDay] = await Promise.all([
     researchPromise, salesPromise, enforcerPromise, rejectReasonsPromise, pipelinePromise,
     dbCheckPromise, cronHealthPromise,
     spendTodayPromise, spendMtdPromise, meetingsThisWeekPromise, meetingsMtdPromise,
-    channelMixPromise, targetsPromise,
+    channelMixPromise, targetsPromise, spendMaxDayPromise,
   ]);
 
   // Stale jobs derived from cronHealth — jobs in 'stale' state
@@ -302,6 +315,8 @@ async function collectTeamKPIs(clientId) {
     cost: {
       llm_spend_today_usd: Number(spendToday.rows[0].spend) || 0,
       llm_spend_mtd_usd: Number(spendMtd.rows[0].spend) || 0,
+      llm_max_day_usd: Number(spendMaxDay.rows[0].max_day) || 0,
+      llm_monthly_budget_usd: getMonthlyBudget(),
       vp_credits_used_today: cfg.vp_credits_used_today,
       vp_credits_budget_today: cfg.vp_daily_budget_credits,
       daily_budget_usd: cfg.daily_budget_usd,
@@ -513,7 +528,7 @@ PRE-INTERPRETED STATUS (use these labels — do NOT re-interpret raw numbers bel
 DB: ${kpis.dam_health.db_ok ? 'connected' : 'UNREACHABLE'} · Encryption: ${kpis.dam_health.encryption_key_ok ? 'valid' : 'MISSING'}
 API keys: anthropic ${kpis.dam_health.anthropic_set ? 'set' : 'MISSING'}, brave ${kpis.dam_health.brave_set ? 'set' : 'MISSING'}, vp ${kpis.dam_health.vp_set ? 'set' : 'MISSING'}, gmail-oauth ${kpis.dam_health.gmail_oauth_set ? 'set' : 'MISSING'}
 Stale crons: ${kpis.dam_health.stale_jobs.length === 0 ? 'none — all firing' : kpis.dam_health.stale_jobs.join(', ')}
-LLM spend: $${kpis.cost.llm_spend_today_usd.toFixed(4)} today · $${kpis.cost.llm_spend_mtd_usd.toFixed(2)} mtd · budget $${kpis.cost.daily_budget_usd.toFixed(2)}/day
+LLM spend: $${kpis.cost.llm_spend_today_usd.toFixed(4)} today · $${kpis.cost.llm_spend_mtd_usd.toFixed(2)} mtd / $${kpis.cost.llm_monthly_budget_usd.toFixed(2)} monthly cap${kpis.cost.llm_spend_mtd_usd >= kpis.cost.llm_monthly_budget_usd ? ' — OVER BUDGET' : kpis.cost.llm_spend_mtd_usd >= kpis.cost.llm_monthly_budget_usd * 0.8 ? ' — 80%+ of cap' : ''}${kpis.cost.llm_max_day_usd >= kpis.cost.llm_monthly_budget_usd * 0.2 ? ` · worst day $${kpis.cost.llm_max_day_usd.toFixed(2)} (SPIKE)` : ''}
 VP: ${vpStatus}
 
 <b>SITUATION REPORT</b> (last 24h)
@@ -661,7 +676,7 @@ function renderPlainBrief(k) {
     ``,
     `<b>SYSTEM HEALTH</b>`,
     `db ${k.dam_health.db_ok ? 'ok' : 'UNREACHABLE'} · enc-key ${k.dam_health.encryption_key_ok ? 'valid' : 'MISSING'} · crons ${k.dam_health.stale_jobs.length === 0 ? 'all firing' : 'STALE: ' + k.dam_health.stale_jobs.join(', ')}`,
-    `spend $${k.cost.llm_spend_today_usd.toFixed(4)} today · $${k.cost.llm_spend_mtd_usd.toFixed(2)} mtd · vp credits ${k.cost.vp_credits_used_today}/${k.cost.vp_credits_budget_today}`,
+    `spend $${k.cost.llm_spend_today_usd.toFixed(4)} today · $${k.cost.llm_spend_mtd_usd.toFixed(2)}/$${k.cost.llm_monthly_budget_usd.toFixed(2)} mtd${k.cost.llm_spend_mtd_usd >= k.cost.llm_monthly_budget_usd ? ' OVER BUDGET' : k.cost.llm_spend_mtd_usd >= k.cost.llm_monthly_budget_usd * 0.8 ? ' (80%+)' : ''} · vp credits ${k.cost.vp_credits_used_today}/${k.cost.vp_credits_budget_today}`,
     ``,
     `<b>SITUATION REPORT</b>`,
     `research beaver: ${k.research_beaver.sourced_24h}/${k.research_beaver.sourced_floor} sourced ${k.research_beaver.meeting_floor ? '(on target)' : '(BELOW FLOOR)'}, avg quality ${k.research_beaver.scored_avg ?? '—'}, pool ${k.research_beaver.pool_size}`,
