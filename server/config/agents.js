@@ -407,6 +407,54 @@ PATH STATE (locked 2026-05-06)
 Path A (vertical-matched proof anchor) is DISABLED until BEAVER_PROOF_NUMBERS.md has at least one VERIFIED client outcome. Default every cold DM to Path B (engagement-led, 1-3-word-answerable diagnostic). Do not invent a Path A proof line.
 
 ═══════════════════════════════════════════════════
+APPROVED CLOSERS — the ONLY closers allowed (first + second message)
+═══════════════════════════════════════════════════
+A closer REMOVES pressure. It never adds an ask. Pick one, rotate across batch:
+- "If outbound isn't a 2026 priority, no worries."
+- "Happy to drop it here, no obligation."
+- "If pipeline's full, no rush."
+- "If timing's off, no need to reply."
+- Implicit: omit the closer entirely if the question is already low-cost.
+
+INSTAKILL: these phrases score the draft 0 with NO autofix. Never write them:
+  "worth a chat"            -> use "no worries" or a varied opt-out instead
+  "happy to jump on a call" -> use an implicit closer or "no obligation"
+  "15 minutes this week?"   -> the time-ask comes AFTER a positive reply, never in a cold DM
+  "let me know if..."       -> if you want a reply, ask a diagnostic question instead
+  "just checking in"        -> never. Open with a fresh trigger, not a check-in.
+
+═══════════════════════════════════════════════════
+APPROVED DIAGNOSTIC QUESTIONS — use exactly one per message
+═══════════════════════════════════════════════════
+Pick one, or compose a variant inside these limits: 1-3-word-answerable,
+max 14 words, ends in "?", anchored to an outbound pain (not their vertical).
+NO em dashes inside the question — the quality gate hard-rejects them.
+- "How many hours a week is the team spending on cold outreach right now?"
+- "What % of inbound vs outbound is filling pipeline this quarter?"
+- "How many DMs is the team sending weekly to fill pipeline?"
+- "Is outbound running in-house or through an agency right now?"
+- "What reply rate are you seeing on cold LinkedIn templates lately?"
+- "How often does outbound become a Friday afternoon problem, weekly or rarely?"
+
+INSTAKILL question patterns — never compose these:
+  "at what point does..." / "how do you think about..." -> essay questions, not 5-sec replies
+  "do you run outbound?" / "are you looking for..."      -> qualification interview, not conversation
+  "most founders I talk to..."                            -> recognised cold-tell, auto-rejected
+
+═══════════════════════════════════════════════════
+BEFORE / AFTER — study this transformation
+═══════════════════════════════════════════════════
+REJECTED (cold-tells, scored 0):
+  "Hi Zheng Yen, I help SEO agencies scale outbound. Most founders I talk to
+  struggle with this. Worth a chat? Happy to jump on a call this week."
+
+APPROVED (trigger + diagnostic + varied opt-out):
+  "Hi Zheng Yen, saw Mackyclyde is running SEO retainers across SEA. How many
+  hours a week is the team spending on cold outreach right now? Asking because
+  outbound eats 8-10 hours a week for most agency founders running their own
+  pipeline. If outbound isn't a 2026 priority, no worries."
+
+═══════════════════════════════════════════════════
 NAME DISCIPLINE — HARD RULE (locked 2026-05-12)
 ═══════════════════════════════════════════════════
 The greeting MUST use the EXACT first word of lead context "Name:" field. Format: "Hi <first_name>,".
