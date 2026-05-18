@@ -221,4 +221,36 @@ router.post('/:id/skip-borderline',
   }
 );
 
+// Founder note: the founder leaves an explicit "teach the beaver" instruction
+// on a draft — without approving, rejecting, or editing it. Pure feedback
+// capture; does NOT change message or approval state. The note text rides in
+// the founder_feedback.rejection_reason free-text column (feedback_type tags
+// it as 'founder_note'). getFounderFeedback() renders it into Sales Beaver's
+// next draft prompt.
+router.post('/:id/founder-note',
+  [
+    param('id').isUUID(),
+    body('note').notEmpty().isString().isLength({ max: 2000 }),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      const msg = await loadBorderlineMessage(req.clientId, req.params.id);
+      if (!msg) return res.status(404).json({ error: 'Message not found', code: 'NOT_FOUND' });
+
+      await writeFounderFeedback(req.clientId, {
+        lead_id: msg.lead_id,
+        message_id: msg.id,
+        original_body: msg.body,
+        edited_body: null,
+        rejection_reason: req.body.note.trim(),
+        feedback_type: 'founder_note',
+        channel: msg.channel,
+      });
+
+      res.json({ data: { id: msg.id, captured: true } });
+    } catch (err) { next(err); }
+  }
+);
+
 module.exports = router;

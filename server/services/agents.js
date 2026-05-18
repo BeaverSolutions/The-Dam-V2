@@ -388,8 +388,12 @@ async function getFounderFeedback(clientId) {
 
     const examples = [];
 
-    // Edit examples — show what the founder changed
-    const edits = res.rows.filter(r => r.feedback_type === 'edit' && r.edited_body);
+    // Edit-class feedback — the founder rewrote the draft. Covers plain edits,
+    // borderline apply/edit actions, and edits made at manual-send time. All of
+    // these carry an edited_body, so show the before/after diff.
+    const EDIT_TYPES = ['edit', 'borderline_edit_apply', 'borderline_apply_suggestion',
+                        'manual_ui_send_edit', 'manual_chrome_send_edit'];
+    const edits = res.rows.filter(r => EDIT_TYPES.includes(r.feedback_type) && r.edited_body);
     for (const edit of edits.slice(0, 5)) {
       const ctx = edit.lead_context || {};
       examples.push(
@@ -399,14 +403,28 @@ async function getFounderFeedback(clientId) {
       );
     }
 
-    // Rejection examples — show what patterns the founder kills
-    const rejections = res.rows.filter(r => r.feedback_type === 'rejection' && r.rejection_reason);
+    // Rejection-class feedback — the founder killed the draft. Covers plain
+    // rejections and borderline skips.
+    const REJECT_TYPES = ['rejection', 'borderline_skip'];
+    const rejections = res.rows.filter(r => REJECT_TYPES.includes(r.feedback_type) && r.rejection_reason);
     for (const rej of rejections.slice(0, 5)) {
       const ctx = rej.lead_context || {};
       examples.push(
         `[REJECTED — ${rej.channel}] Lead: ${ctx.name || 'Unknown'} at ${ctx.company || 'Unknown'}` +
         `\nRejected draft:\n${rej.original_body}` +
         `\nReason: ${rej.rejection_reason}`
+      );
+    }
+
+    // Founder notes — an explicit "teach the beaver" instruction left on a draft
+    // via the founder-note affordance. The note text rides in rejection_reason.
+    const notes = res.rows.filter(r => r.feedback_type === 'founder_note' && r.rejection_reason);
+    for (const note of notes.slice(0, 5)) {
+      const ctx = note.lead_context || {};
+      examples.push(
+        `[FOUNDER NOTE — ${note.channel}] Lead: ${ctx.name || 'Unknown'} at ${ctx.company || 'Unknown'}` +
+        `\nDraft the note refers to:\n${note.original_body}` +
+        `\nFounder's instruction — follow this: ${note.rejection_reason}`
       );
     }
 

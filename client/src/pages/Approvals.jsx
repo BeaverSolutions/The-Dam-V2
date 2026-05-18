@@ -21,7 +21,7 @@ function scoreColor(score) {
   return 'var(--orange)';
 }
 
-function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnectionSent, onConnectionAccepted, tab, gmailConnected }) {
+function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnectionSent, onConnectionAccepted, onFounderNote, tab, gmailConnected }) {
   const [editing, setEditing]     = useState(false);
   const [editBody, setEditBody]   = useState(approval.body || '');
   const [saving, setSaving]       = useState(false);
@@ -29,6 +29,9 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
   const [copied, setCopied]       = useState(false);
   const [confirmingSent, setConfirmingSent] = useState(false);
   const [sentBody, setSentBody]   = useState(approval.body || '');
+  const [noteText, setNoteText]     = useState('');
+  const [noteSaving, setNoteSaving] = useState(false);
+  const [noteSaved, setNoteSaved]   = useState(false);
   // Follow-ups tab needs action buttons too — the DM Sent button for LinkedIn followups
   // is rendered from the !resolved branch below. Without followups here, the button never renders.
   const resolved = tab !== 'pending' && tab !== 'awaiting' && tab !== 'followups';
@@ -90,6 +93,21 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
     await onEdit(approval.message_id, editBody);
     setSaving(false);
     setEditing(false);
+  };
+
+  const handleFounderNote = async () => {
+    if (noteSaving || !noteText.trim()) return;
+    setNoteSaving(true);
+    try {
+      await onFounderNote(approval.message_id, noteText.trim());
+      setNoteSaved(true);
+      setNoteText('');
+      setTimeout(() => setNoteSaved(false), 2500);
+    } catch {
+      onError('Could not save your note — try again.');
+    } finally {
+      setNoteSaving(false);
+    }
   };
 
   const handleConnectionSent = async () => {
@@ -400,6 +418,39 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
           )}
         </div>
       )}
+
+      {/* Teach the beaver — explicit founder feedback. Writes to founder_feedback
+          (feedback_type='founder_note') so Sales Beaver learns the founder's
+          preference on its next draft, without him having to edit or reject. */}
+      {!resolved && !editing && !confirmingSent && (
+        <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid rgba(255,255,255,0.07)' }}>
+          <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--lime)', marginBottom: '0.4rem' }}>
+            Teach the beaver
+            <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}> — tell Sales Beaver what to change. It learns from this on the next draft.</span>
+          </div>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="e.g. opener's too long — lead with the trigger"
+              value={noteText}
+              onChange={e => setNoteText(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleFounderNote(); }}
+              disabled={noteSaving}
+              style={{ flex: 1, fontSize: '0.8rem' }}
+            />
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={handleFounderNote}
+              disabled={noteSaving || !noteText.trim()}
+              style={{ flexShrink: 0, color: 'var(--lime)', border: '1px solid rgba(200,255,0,0.25)' }}
+            >
+              {noteSaving ? 'Saving…' : noteSaved ? '✓ Noted' : 'Teach'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -547,6 +598,14 @@ export default function Approvals() {
     }
   };
 
+  const handleFounderNote = async (message_id, note) => {
+    setActionError(null);
+    await request(`/messages/${message_id}/founder-note`, {
+      method: 'POST',
+      body: JSON.stringify({ note }),
+    });
+  };
+
   const tabs = TABS.map(t => ({ ...t, count: counts[t.value] || 0 }));
   const pending = counts.pending + (counts.followups || 0) + (counts.awaiting || 0);
 
@@ -632,6 +691,7 @@ export default function Approvals() {
             onError={setActionError}
             onConnectionSent={handleConnectionSent}
             onConnectionAccepted={handleConnectionAccepted}
+            onFounderNote={handleFounderNote}
           />
         ))
       )}
