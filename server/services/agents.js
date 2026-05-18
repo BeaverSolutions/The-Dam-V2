@@ -1444,6 +1444,47 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
 }
 
 /**
+ * NEVER BURN A SOURCED LEAD (rule restored 2026-05-18, per MJ).
+ *
+ * When Sales Beaver's draft is rejected AND the Enforcer's own rewrite
+ * (rangerDraft) also fails, the lead must NOT be discarded — real money was
+ * spent sourcing it. The three fallback sites used to set the message to
+ * 'ranger_rejected' with no approval row, which silently burned the lead.
+ *
+ * Instead: surface the best available draft to MJ's approval queue. He can
+ * edit or approve it himself. Worst case is "needs your eyes", never "lost".
+ * Returns true if the lead was surfaced.
+ */
+async function surfaceUnrewrittenDraft(clientId, { messageId, body, subject, reason }) {
+  if (!messageId || !body || typeof body !== 'string') return false;
+  try {
+    await pool.query(
+      `UPDATE messages SET body = $1, subject = COALESCE($2, subject),
+         status = 'pending_approval', ranger_score = COALESCE(ranger_score, 0),
+         ranger_notes = $3, updated_at = NOW()
+       WHERE id = $4 AND client_id = $5`,
+      [body, subject ?? null,
+       `Needs your review — Sales Beaver was rejected by the Enforcer and the auto-rewrite could not complete (${reason || 'quality gate'}). Edit or approve; the lead is preserved, not discarded.`,
+       messageId, clientId]
+    );
+    await pool.query(
+      `INSERT INTO approvals (client_id, message_id, requested_by, status)
+       VALUES ($1, $2, 'enforcer_rewrite_failed', 'pending')`,
+      [clientId, messageId]
+    );
+    await logsService.createLog(clientId, {
+      agent: 'enforcer_beaver', action: 'lead_surfaced_unrewritten',
+      target_type: 'message', target_id: messageId,
+      metadata: { reason: reason || null },
+    }).catch(() => {});
+    return true;
+  } catch (err) {
+    console.warn('[never-burn] surfaceUnrewrittenDraft failed:', err.message);
+    return false;
+  }
+}
+
+/**
  * =========================
  * RANGER DRAFT (last resort)
  * =========================
@@ -2301,36 +2342,45 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
             approvedCount++;
             console.log(`[signal-pipeline] Enforcer fallback draft for ${lead.name} → pending_approval`);
           } else {
-            // Phase 1 (2026-05-08): pipeline_traces rejected (Enforcer hard-reject, no fallback body)
+            // NEVER BURN A LEAD: Enforcer rewrite produced no body. Surface the
+            // Sales Beaver draft to MJ's approval queue instead of discarding.
+            const surfaced = await surfaceUnrewrittenDraft(clientId, {
+              messageId: msg.id, body: finalBody, subject: draftSubject,
+              reason: rangerResult?.notes || 'enforcer produced no fallback body',
+            });
             pipelineTrace.traceStage(clientId, {
               lead_id: lead.id,
               message_id: msg.id,
               kickoff_id: plan_id,
-              stage: 'rejected',
-              status: 'enforcer_no_fallback',
+              stage: surfaced ? 'reviewed' : 'rejected',
+              status: surfaced ? 'surfaced_unrewritten' : 'enforcer_no_fallback',
               agent: 'enforcer_beaver',
               score: rangerResult?.score ?? null,
               reason: rangerResult?.notes || null,
               pipeline_path: 'signal_pipeline',
               metadata: { channel },
             }).catch(() => {});
-            rejectedCount++;
+            if (surfaced) approvedCount++; else rejectedCount++;
           }
         } catch (fallbackErr) {
           console.warn(`[signal-pipeline] Enforcer fallback failed for ${lead.name}:`, fallbackErr.message);
-          // Phase 1 (2026-05-08): pipeline_traces rejected (Enforcer fallback exception)
+          // NEVER BURN A LEAD: the rewrite threw. Surface the draft to MJ.
+          const surfaced = await surfaceUnrewrittenDraft(clientId, {
+            messageId: msg.id, body: finalBody, subject: draftSubject,
+            reason: `enforcer rewrite error: ${fallbackErr.message}`,
+          });
           pipelineTrace.traceStage(clientId, {
             lead_id: lead.id,
             message_id: msg.id,
             kickoff_id: plan_id,
-            stage: 'rejected',
-            status: 'enforcer_fallback_error',
+            stage: surfaced ? 'reviewed' : 'rejected',
+            status: surfaced ? 'surfaced_unrewritten' : 'enforcer_fallback_error',
             agent: 'enforcer_beaver',
             reason: fallbackErr.message,
             pipeline_path: 'signal_pipeline',
             metadata: { channel },
           }).catch(() => {});
-          rejectedCount++;
+          if (surfaced) approvedCount++; else rejectedCount++;
         }
       }
     } catch (err) {
@@ -3747,13 +3797,22 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
                 execStatus.beavers.enforcer.status = 'done';
                 rangerResult = { approved: true, score: 70 }; // continue to approval block
               } else {
-                // rangerDraft itself failed — last resort, mark rejected
-                await pool.query(
-                  `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
-                  [`Sales Beaver failed ${attemptCount + 1} attempts; Enforcer draft also failed.`, msg.id]
-                );
-                rejectedCount++;
-                execStatus.beavers.enforcer.rejected++;
+                // NEVER BURN A LEAD: Enforcer rewrite failed. Surface the Sales
+                // Beaver draft to MJ's approval queue instead of discarding it.
+                const surfaced = await surfaceUnrewrittenDraft(clientId, {
+                  messageId: msg.id, body: currentBody, subject: currentSubject,
+                  reason: `Sales Beaver failed ${attemptCount + 1} attempts; Enforcer rewrite also failed`,
+                });
+                if (surfaced) {
+                  approvedCount++;
+                } else {
+                  await pool.query(
+                    `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
+                    [`Sales Beaver failed ${attemptCount + 1} attempts; Enforcer draft also failed.`, msg.id]
+                  );
+                  rejectedCount++;
+                  execStatus.beavers.enforcer.rejected++;
+                }
                 execStatus.beavers.enforcer.status = 'done';
                 return;
               }
@@ -3797,13 +3856,23 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           approvedCount++;
           execStatus.beavers.enforcer.status = 'done';
         } else {
-          // Last resort — both Sales and Enforcer failed
-          await pool.query(
-            `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
-            ['Sales and Enforcer both failed to draft. Manual message required.', msg.id]
-          );
-          rejectedCount++;
-          execStatus.beavers.enforcer.rejected++;
+          // NEVER BURN A LEAD: both Sales and Enforcer failed to produce a clean
+          // draft. Surface the last draft to MJ's approval queue rather than
+          // discarding a lead we paid to source.
+          const surfaced = await surfaceUnrewrittenDraft(clientId, {
+            messageId: msg.id, body: currentBody, subject: currentSubject,
+            reason: 'Sales Beaver and Enforcer both failed to produce a clean draft',
+          });
+          if (surfaced) {
+            approvedCount++;
+          } else {
+            await pool.query(
+              `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
+              ['Sales and Enforcer both failed to draft. Manual message required.', msg.id]
+            );
+            rejectedCount++;
+            execStatus.beavers.enforcer.rejected++;
+          }
           execStatus.beavers.enforcer.status = 'done';
           return;
         }

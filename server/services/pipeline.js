@@ -1024,9 +1024,21 @@ async function applyEnforcerDecision(clientId, { msg, lead, rangerResult, finalB
 
         if (gatesPass) {
           autoApproved = true;
-          nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
-          approvalStatus = 'approved';
-          resolvedAt = new Date();
+          if (msg.channel === 'email') {
+            nextMessageStatus = 'pending_send';
+            approvalStatus = 'approved';
+            resolvedAt = new Date();
+          } else {
+            // LinkedIn auto-approved → route to the Awaiting-Accept queue for
+            // manual send. Previously landed at status='approved' with no
+            // 'linkedin_requested' marker, so it was invisible in the LinkedIn
+            // send tab (the approvals surfacing query needs notes + status to
+            // both be 'linkedin_requested'). Mirrors the auto_approval LinkedIn
+            // pattern in index.js / autonomous.js / followupSequence.js.
+            nextMessageStatus = 'linkedin_requested';
+            approvalStatus = 'pending';
+            resolvedAt = null;
+          }
           console.log(`[pipeline.approve] AUTO-APPROVED ${msg.id}: score ${rangerScore} >= threshold ${threshold} (channel=${msg.channel}, next=${nextMessageStatus})`);
         } else {
           console.log(`[pipeline.approve] AUTO-APPROVE BLOCKED ${msg.id}: score ${rangerScore} >= threshold ${threshold} but gate failed — ${gateFailReason} — routing to pending_approval`);
@@ -1083,10 +1095,13 @@ async function applyEnforcerDecision(clientId, { msg, lead, rangerResult, finalB
   const requestedBy = isBorderline
     ? 'enforcer_borderline'
     : (autoApproved ? 'auto_approval' : (source === 'signal_pipeline' ? 'signal_hunt' : 'system'));
+  // LinkedIn auto-approvals carry the 'linkedin_requested' note so the
+  // Awaiting-Accept tab surfaces them (query matches notes + message status).
+  const approvalNotes = (autoApproved && msg.channel !== 'email') ? 'linkedin_requested' : null;
   await pool.query(
-    `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [clientId, msg.id, requestedBy, approvalStatus, resolvedAt]
+    `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at, notes)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [clientId, msg.id, requestedBy, approvalStatus, resolvedAt, approvalNotes]
   );
 
   const auditMethod = autoApproved ? 'auto_threshold' : (source === 'signal_pipeline' ? 'signal_hunt' : 'enforcer');
