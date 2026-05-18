@@ -3072,7 +3072,14 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     const gateResult = await contactGate.tryPersistSourcedLead(clientId, lead, {
       sourceStrategy: 'research_beaver',
       queryUsed: diagnostics.search_query,
-      allowLinkedinOnly: !!lead.linkedin_only_override,
+      // A lead that passed Layer-2 verification (verifyCandidate: Haiku-confirmed
+      // location + industry + role, no banned title) HAS already cleared the
+      // ICP-quality bar. Per MJ's channel spec (2026-05-18) LinkedIn is a valid
+      // channel for every lead and no-email leads route to the LinkedIn KPI
+      // queue — so a verified lead with a linkedin_url must enter Tier B, not be
+      // rejected as Tier C. Without this, every verified no-email lead is
+      // dropped after Brave + Haiku credits were already spent on it.
+      allowLinkedinOnly: !!lead.linkedin_only_override || lead.verified === true,
     });
     if (!gateResult.passed) {
       console.warn(`[save] Tier C ${lead.name} at ${lead.company} — reason: ${gateResult.missReason}`);
@@ -3136,7 +3143,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           lead.company || 'Unknown Company',
           lead.title || null,
           resolveSignalTier(lead) || lead.signal_tier || null,
-          lead.score || 0,
+          lead.score || lead.quality_score || 0,
           lead.email_verified || false,
           lead.email_source || null,
           !!(lead.metadata?.apollo_person_id),

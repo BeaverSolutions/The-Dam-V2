@@ -63,7 +63,10 @@ async function tryPersistSourcedLead(clientId, candidate, options = {}) {
   const emailVerified = candidate.email_verified === true;
 
   const hasLinkedin = !!(candidate.linkedin_url && String(candidate.linkedin_url).trim());
-  const score = Number(candidate.score) || 0;
+  // Research Beaver leads carry `quality_score` (qualityScorer output), never
+  // `score` — normaliseLead does not set `score`. Accept either, or a fully
+  // quality-scored lead is silently treated as score 0 and fails the Tier B gate.
+  const score = Number(candidate.score) || Number(candidate.quality_score) || 0;
 
   // Tier A — SMTP-verified email at sourcing.
   if (hasUsableEmail && emailVerified) {

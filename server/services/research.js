@@ -556,13 +556,24 @@ Return JSON:
   if (/sdn\s*bhd|berhad/i.test(allText)) verification.score += 5;
 
   // ── Final decision ──
-  // Minimum 50 to pass. No more 30-point backdoor — every lead must have
-  // Haiku-confirmed location + industry + role to reach 50.
-  if (verification.score >= 50) {
+  // BUG FIX 2026-05-18: threshold was 50, but the MAX achievable score for a
+  // perfect Malaysian-SME lead WITHOUT Hunter data is only 45 (location 15 +
+  // industry 15 + role 10 + "Sdn Bhd" regex 5). Hunter has no data for most
+  // SEA SMBs (see hunterContext, ~line 473), so the entire founder-led-SME
+  // ICP was mathematically unable to pass verification — Brave + Haiku credits
+  // burned every run, 0 leads produced.
+  //
+  // Threshold = 40: a lead with Haiku-confirmed location (15) + industry (15)
+  // + role (10) now clears WITHOUT Hunter. The hard rejects above (location/
+  // industry/role = "unlikely", banned title) still gate quality; the score
+  // only grades confirmed-vs-likely strength. Hunter (+20) and the "Sdn Bhd"
+  // regex (+5) are bonuses, not requirements.
+  const PASS_THRESHOLD = 40;
+  if (verification.score >= PASS_THRESHOLD) {
     verification.pass = true;
   } else {
     verification.pass = false;
-    verification.rejectReason = verification.rejectReason || `Score too low (${verification.score}/50)`;
+    verification.rejectReason = verification.rejectReason || `Score too low (${verification.score}/${PASS_THRESHOLD})`;
   }
 
   return { ...candidate, verification };
