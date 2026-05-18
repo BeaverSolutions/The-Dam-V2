@@ -949,6 +949,18 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     //
     // Levels: 0 (strict) → 1 (+titles) → 2 (+industries) → 3 (+geo) → 4 (generic B2B)
     const MAX_RETRIES = 5;
+    // ── Spend circuit breaker (2026-05-18) ─────────────────────────────
+    // MAX_SEARCH_ROUNDS hard-caps the retry rounds that actually hit the
+    // paid search provider. It is NEVER decremented — unlike retryCount,
+    // which the expansion ladder rolls back, making MAX_RETRIES not a real
+    // ceiling. consecutiveZeroYield stops the ladder once a round produces
+    // nothing twice running. Without these, a high-rejection ICP drains
+    // Brave across 5+ rounds and still returns 0 leads — the documented
+    // "burn without producing" failure.
+    const MAX_SEARCH_ROUNDS = 4;
+    let searchRounds = 0;
+    let consecutiveZeroYield = 0;
+    let circuitBreakerTripped = null;
     let retryCount = 0;
     let expansionLevel = 0;
     const allVerifiedUrls = new Set(verified.map(l => l.linkedin_url).filter(Boolean));
@@ -980,6 +992,14 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         q.strategy === 'signal' || q.strategy === 'signal_jobs' || q.strategy === 'signal_news' || q.strategy === 'signal_growth'
       );
 
+      // CIRCUIT BREAKER: stop before spending if the paid-search round cap is hit
+      if (searchRounds >= MAX_SEARCH_ROUNDS) {
+        circuitBreakerTripped = `search-round cap (${MAX_SEARCH_ROUNDS}) reached`;
+        console.warn(`[research] CIRCUIT BREAKER: ${circuitBreakerTripped} — stopping paid search to prevent burn`);
+        break;
+      }
+      searchRounds++;
+
       const retryResults = await Promise.all([
         ...retryDirectQueries.map(q => strategyDirectPeople(q.query, perQueryLimit).catch(() => [])),
         ...retrySignalQueries.map(q => strategySignalBased(q.query, perQueryLimit).catch(() => [])),
@@ -992,7 +1012,13 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       for (const q of actualPicked) usedSet.add(q.query);
 
       if (retryCandidates.length === 0) {
-        console.log(`[research] Retry ${retryCount}: zero new candidates at level ${expansionLevel}`);
+        consecutiveZeroYield++;
+        console.log(`[research] Retry ${retryCount}: zero new candidates at level ${expansionLevel} (zero-yield streak: ${consecutiveZeroYield})`);
+        if (consecutiveZeroYield >= 2) {
+          circuitBreakerTripped = 'two consecutive zero-yield rounds';
+          console.warn(`[research] CIRCUIT BREAKER: ${circuitBreakerTripped} — stopping paid search`);
+          break;
+        }
         // Escalate expansion level, but don't count this as a failed retry
         if (expansionLevel < 4) {
           expansionLevel++;
@@ -1011,10 +1037,22 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       rejected.push(...retryVerification.rejected);
       retryVerification.verified.forEach(l => { if (l.linkedin_url) allVerifiedUrls.add(l.linkedin_url); });
 
-      // If this retry still couldn't produce verified leads → escalate
-      if (retryVerification.verified.length === 0 && expansionLevel < 4) {
-        expansionLevel++;
-        console.log(`[research] Zero verified this batch — escalating expansion to level ${expansionLevel}`);
+      // CIRCUIT BREAKER: a round where verification rejects every candidate
+      // is a paid round that produced nothing. Two in a row → stop. No point
+      // paying for more searches that verification keeps throwing away.
+      if (retryVerification.verified.length === 0) {
+        consecutiveZeroYield++;
+        if (consecutiveZeroYield >= 2) {
+          circuitBreakerTripped = 'two consecutive rounds with zero verified leads';
+          console.warn(`[research] CIRCUIT BREAKER: ${circuitBreakerTripped} — stopping paid search`);
+          break;
+        }
+        if (expansionLevel < 4) {
+          expansionLevel++;
+          console.log(`[research] Zero verified this batch — escalating expansion to level ${expansionLevel}`);
+        }
+      } else {
+        consecutiveZeroYield = 0; // a productive round resets the breaker
       }
     }
 
@@ -1098,6 +1136,8 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         rejected: rejected.length,
         rejection_reasons: rejected.map(r => `${r.name}: ${r.verification?.rejectReason || 'unknown'}`),
         retries: retryCount,
+        search_rounds: searchRounds,
+        circuit_breaker: circuitBreakerTripped,
       },
       scoring_stats: scoringStats,
     };
