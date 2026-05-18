@@ -489,31 +489,33 @@ async function researchSearch(clientId, { query, filters = {} }) {
   // Load ICP memory upfront — used by both search query builder and Claude fallback
   const icpMemory = await getMemory(clientId, 'director', 'icp');
 
-  let leads = [];
+  let researchResult = null;   // hoisted so the no-results diagnostic log can read its stats
+  let multiError = null;       // captured so the no-results log records WHY, not just THAT
 
   // Primary: Multi-source research — Brave (people, signal, company) + Hunter domain search
   // Rotates through 300+ query variations so dedup never exhausts the pool
   try {
     console.log(`[research_beaver] Running multi-source research (batch ${batchIndex})`);
-    const result = await researchModule.researchLeads(clientId, {
+    researchResult = await researchModule.researchLeads(clientId, {
       icpMemory,
       targetCount: filters.limit || 5,
       batchIndex,
       commandOverride: query, // user's actual command — takes priority over ICP for query building
     });
 
-    const leads = result.leads || [];
-    console.log(`[research_beaver] Multi-source returned ${leads.length} leads via ${result.queriesUsed?.length || 0} queries`);
+    const multiLeads = researchResult.leads || [];
+    console.log(`[research_beaver] Multi-source returned ${multiLeads.length} leads via ${researchResult.queriesUsed?.length || 0} queries`);
 
-    if (leads.length > 0) {
+    if (multiLeads.length > 0) {
       return {
         success: true,
-        data: { leads, query: result.queriesUsed?.join(' | ') || query, filters, source: 'multi' },
+        data: { leads: multiLeads, query: researchResult.queriesUsed?.join(' | ') || query, filters, source: 'multi' },
       };
     }
 
     console.warn('[research_beaver] Multi-source returned 0 leads — trying Apollo fallback');
   } catch (err) {
+    multiError = err.message;
     console.warn('[research_beaver] Multi-source research failed, trying Apollo:', err.message);
   }
 
@@ -531,15 +533,42 @@ async function researchSearch(clientId, { query, filters = {} }) {
     console.warn('[research_beaver] Apollo fallback also unavailable:', err.message);
   }
 
+  // Provider config snapshot — turns a silent "0 results" into a one-query diagnosis.
+  // Self-sourcing needs ONE working search provider: Brave (primary), Google CSE
+  // (fallback), or Apollo. DuckDuckGo is a crash-guard, not a real source.
+  const providers = {
+    brave:      !!process.env.BRAVE_API_KEY,
+    google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX),
+    apollo:     !!process.env.APOLLO_API_KEY,
+  };
+  const missingKeys = [];
+  if (!providers.brave) missingKeys.push('BRAVE_API_KEY');
+  if (!providers.google_cse) missingKeys.push('GOOGLE_CSE_API_KEY/CX');
+  const noProviderConfigured = !providers.brave && !providers.google_cse && !providers.apollo;
+
   await logsService.createLog(clientId, {
     agent: 'research_beaver',
     action: 'research_no_results',
     target_type: 'system',
-    metadata: { query: query?.substring?.(0, 200), source: 'multi', note: 'All sources returned 0 results' },
+    metadata: {
+      query: query?.substring?.(0, 200),
+      source: 'multi',
+      note: 'All sources returned 0 results',
+      // diagnostics — read these first when self-sourcing yields 0
+      providers_configured: providers,
+      multi_error: multiError || null,
+      layer1_candidates: researchResult?.verification_stats?.candidates ?? null,
+      layer2_verified: researchResult?.verification_stats?.verified ?? null,
+      layer2_rejected: researchResult?.verification_stats?.rejected ?? null,
+      queries_run: researchResult?.queriesUsed?.length ?? null,
+      pool_exhaustion_pct: researchResult?.pool_stats?.exhaustion_pct ?? null,
+      likely_cause: noProviderConfigured
+        ? 'NO_SEARCH_PROVIDER — Brave, Google CSE, and Apollo all unconfigured'
+        : (researchResult?.verification_stats?.candidates > 0
+            ? 'VERIFICATION_REJECTED_ALL — providers returned candidates but Layer 2 rejected every one'
+            : 'PROVIDERS_RETURNED_ZERO — configured providers reachable but yielded no candidates (quota exhausted or query too narrow)'),
+    },
   });
-  const braveConfigured = !!process.env.BRAVE_API_KEY;
-  const missingKeys = [];
-  if (!braveConfigured) missingKeys.push('BRAVE_API_KEY');
   const keyDiagnostic = missingKeys.length > 0
     ? ` Missing API keys: ${missingKeys.join(', ')}.`
     : ' API keys present — try different ICP keywords or a broader location.';
