@@ -39,10 +39,10 @@ const PRICING = {
 // caps a single day — 30 normal days still blow past a tight monthly target,
 // and a runaway day (e.g. 2026-05-14: 2,202 research_beaver calls, $12.86)
 // sits under a $20/day cap while torching a month's budget. This is the
-// month-horizon ceiling, env-overridable. Default $60 reflects the realistic
-// autonomous run rate (~$2-4/day); set LLM_MONTHLY_BUDGET_USD in Railway to
-// tune. NOTE: a $20 value will halt the pipeline ~10 days into a month.
-const LLM_MONTHLY_BUDGET_USD = Number(process.env.LLM_MONTHLY_BUDGET_USD) || 60;
+// month-horizon ceiling, env-overridable. Default $80 covers the real
+// autonomous run rate (~$60-75/mo) with headroom so the loop does not
+// fail-closed mid-month; set LLM_MONTHLY_BUDGET_USD in Railway to tune.
+const LLM_MONTHLY_BUDGET_USD = Number(process.env.LLM_MONTHLY_BUDGET_USD) || 80;
 function getMonthlyBudget() { return LLM_MONTHLY_BUDGET_USD; }
 
 /**
