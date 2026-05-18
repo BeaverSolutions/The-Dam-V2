@@ -3451,6 +3451,10 @@ router.post('/backfill-hunter-emails', requireInternalKey, async (req, res) => {
               SET email          = $1,
                   email_verified = $2,
                   email_source   = $5,
+                  -- promote B->A when a VERIFIED email is found, so the kickoff's
+                  -- channelFilter routes the lead to the email channel. Without
+                  -- this the lead stays tier B and the B->A path is dead-ended.
+                  lead_tier      = CASE WHEN $2 = true THEN 'A' ELSE lead_tier END,
                   updated_at     = NOW()
             WHERE id = $3 AND client_id = $4
               AND (email IS NULL OR email = '')`,

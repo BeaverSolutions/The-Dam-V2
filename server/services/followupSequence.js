@@ -582,7 +582,7 @@ async function getStaleLeads(clientId) {
 async function escalateChannel(clientId, leadId) {
   // 1. Check lead has active sequence, no reply, and FU2 is done (touch >= 3)
   const { rows: [lead] } = await pool.query(
-    `SELECT id, name, company, email, sequence_status, sequence_touch, last_reply_at, metadata
+    `SELECT id, name, company, email, linkedin_url, sequence_status, sequence_touch, last_reply_at, metadata
      FROM leads
      WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL`,
     [leadId, clientId]
@@ -607,7 +607,10 @@ async function escalateChannel(clientId, leadId) {
   // 3. Pick next channel
   const hasEmail = !!(lead.email && lead.email.trim());
   const meta = typeof lead.metadata === 'string' ? JSON.parse(lead.metadata || '{}') : (lead.metadata || {});
-  const hasLinkedin = !!(meta.linkedin_url || meta.linkedin);
+  // linkedin_url lives in the leads COLUMN (VP/Research Beaver write it there);
+  // metadata is a legacy fallback. Reading metadata only silently killed touch-3
+  // escalation for every lead whose linkedin_url is column-only (e.g. all VP imports).
+  const hasLinkedin = !!(lead.linkedin_url || meta.linkedin_url || meta.linkedin);
   const hasInstagram = !!(meta.instagram_url || meta.instagram);
 
   let newChannel = null;
