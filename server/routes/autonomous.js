@@ -1737,6 +1737,19 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
            AND pipeline_stage = 'prospecting'
            AND status = 'new'
            AND deleted_at IS NULL
+           -- 2026-05-18: never re-draw a lead that already has a message.
+           -- processExistingLeadsPipeline does not advance lead state after a
+           -- draft, so a drafted lead stays pipeline_stage='prospecting'/
+           -- status='new' and was re-drawn every batch + kickoff, then skipped
+           -- by the same-day enrolled dedup — a deadlock that produced 15 empty
+           -- batches and 0 drafts. A message of ANY non-deleted status means the
+           -- lead has been processed; message-existence is the reliable
+           -- pool-exit signal (the kickoff's first-touch draw, not follow-ups).
+           AND NOT EXISTS (
+             SELECT 1 FROM messages m
+             WHERE m.lead_id = leads.id AND m.client_id = leads.client_id
+               AND m.status <> 'deleted'
+           )
            ${channelFilter}
          ORDER BY
            CASE WHEN signal_tier = 'P1' THEN 1
