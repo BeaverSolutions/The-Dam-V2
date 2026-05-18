@@ -790,7 +790,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       // Reset used_queries so next run starts fresh with rotated angles
       await saveUsedQueries(clientId, new Set());
       // Rebuild pool with widened ICP (level 2 = sibling industries + synonym titles)
-      const widenedIcp = widenIcp(effectiveIcp, 2);
+      const widenedIcp = widenIcp(icpMemory, 2);
       const widenedPool = buildQueryPool(widenedIcp);
       finalUnused = widenedPool; // all queries fresh after reset
       finalUsed = [];
@@ -938,7 +938,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     const queriesUsed = picked.map(q => q.query);
     console.log(`[research] Layer 1 complete: ${preFiltered.length} candidates (from ${deduped.length} raw). Starting Layer 2 verification...`);
 
-    const icp = effectiveIcp || {};
+    const icp = icpMemory || {};
     let { verified, rejected } = await verifyBatch(preFiltered, icp, clientId);
 
     console.log(`[research] Layer 2 complete: ${verified.length} verified, ${rejected.length} rejected`);
@@ -959,7 +959,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       console.log(`[research] Retry ${retryCount}/${MAX_RETRIES}: need ${shortfall} more verified leads (expansion level ${expansionLevel})`);
 
       // Use widened ICP if we've escalated
-      const currentIcp = expansionLevel > 0 ? widenIcp(effectiveIcp, expansionLevel) : effectiveIcp;
+      const currentIcp = expansionLevel > 0 ? widenIcp(icpMemory, expansionLevel) : icpMemory;
       const freshPool = buildQueryPool(currentIcp);
       const freshSeen = new Set(usedSet);
       const freshUnused = freshPool.filter(q => !freshSeen.has(q.query));
