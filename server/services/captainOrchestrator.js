@@ -418,14 +418,20 @@ async function generateMorningBrief(clientId) {
       ? `${kpis.sales_beaver.drafts_24h} drafts written, 0 sent — pipeline waiting on approval/send`
       : `${kpis.sales_beaver.drafts_24h} drafts, ${kpis.sales_beaver.sent_24h} sent, ${kpis.sales_beaver.replies_24h} replies (${kpis.sales_beaver.first_attempt_pass_rate_pct ?? '—'}% first-pass)`;
 
-  // Enforcer: low approve rate is the calibration signal.
+  // Enforcer status. A low approve rate is NOT automatically "calibration".
+  // If rejections are hard-gate failures (fabrication, sign-off, banned phrase)
+  // the copy is bad and lowering the threshold will not help — read the reasons.
+  const topReject = kpis.enforcer.top_reject_reasons?.[0]?.reason || '';
+  const hardGateReject = /hard gate|fabricat|sign-?off|banned|wrong company|not (present|in).{0,24}lead context|no verifiable/i.test(topReject);
   const enforcerStatus = kpis.enforcer.reviews_24h === 0
     ? `idle (no reviews in 24h)`
     : kpis.enforcer.approve_rate_pct < 30
-      ? `OVER-RESTRICTIVE — ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews. Likely calibration issue, not bad copy.`
+      ? (hardGateReject
+          ? `DRAFT QUALITY FAILURE: ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews. Rejections are hard-gate failures (top: "${topReject}"). This is a COPY problem, NOT Enforcer calibration. Lowering the auto-approve threshold will NOT help — fix the Sales Beaver draft.`
+          : `OVER-RESTRICTIVE: ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews. Rejections cluster just below threshold (top: "${topReject || 'mixed'}") — likely a calibration issue.`)
       : kpis.enforcer.approve_rate_pct < 60
-        ? `tight — ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews. Top reject: ${kpis.enforcer.top_reject_reasons[0]?.reason || 'mixed'}.`
-        : `healthy — ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews.`;
+        ? `tight: ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews. Top reject: ${topReject || 'mixed'}.`
+        : `healthy: ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews.`;
 
   const overallHealth = (kpis.dam_health.db_ok && kpis.dam_health.encryption_key_ok && kpis.dam_health.stale_jobs.length === 0)
     ? 'green'
@@ -477,7 +483,7 @@ async function generateMorningBrief(clientId) {
         anomalies.push(`SILENT-DROP ${silentDrop} of ${enrolled} (${Math.round((silentDrop / enrolled) * 100)}%) — uninstrumented exit path`);
       }
       if (approveRate !== null && approveRate < 30 && reviewed >= 5) {
-        anomalies.push(`Enforcer approve ${approveRate}% on ${reviewed} reviews — calibration drift`);
+        anomalies.push(`Enforcer approve ${approveRate}% on ${reviewed} reviews — ${hardGateReject ? 'hard-gate draft-quality failures (fix the copy, not the threshold)' : 'calibration drift'}`);
       }
       if (sendRate !== null && sendRate < 50 && approved >= 5) {
         anomalies.push(`send rate ${sendRate}% — approved-not-sent backlog growing`);

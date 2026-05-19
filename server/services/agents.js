@@ -2004,6 +2004,13 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       if (meta.why_now)  contextParts.push(`Why now: ${meta.why_now}`);
       if (meta.angle)    contextParts.push(`Angle to lead with: ${meta.angle}`);
       if (meta.signal_type) contextParts.push(`Signal type: ${meta.signal_type}`);
+      // A1-18: signal pipeline now passes the same context fields the kickoff pipeline does.
+      if (lead.linkedin_url) contextParts.push(`LinkedIn: ${lead.linkedin_url}`);
+      if (lead.short_description || meta.short_description) contextParts.push(`About: ${lead.short_description || meta.short_description}`);
+      if (meta.friction) contextParts.push(`Friction point: ${meta.friction}`);
+      if (meta.notes) contextParts.push(`Personalisation hook: ${meta.notes}`);
+      if (!meta.signal && meta.snippet) contextParts.push(`LinkedIn profile snippet: ${meta.snippet}`);
+      if (meta.search_query) contextParts.push(`Search context: ${meta.search_query}`);
 
       // Search for personalisation signals before drafting
       try {

@@ -190,10 +190,10 @@ async function processLead(clientId, lead, ctx = {}) {
     const channel = channelChoice.channel;
     const messageStatus = channelChoice.status;
     if (messageStatus === 'blocked_no_email') {
-      await trace('channel_blocked', 'blocked_no_email', { agent: 'director', reason: channelChoice.reason, metadata: { lead_name: lead.name } });
+      await trace('skipped', 'blocked_no_email', { agent: 'director', reason: channelChoice.reason, metadata: { lead_name: lead.name, drop: 'channel_blocked' } });
     }
     if (channel === 'linkedin' && linkedinAlreadyTried) {
-      await trace('channel_exhausted', 'linkedin_already_tried', { agent: 'director', metadata: { lead_name: lead.name, channel } });
+      await trace('skipped', 'linkedin_already_tried', { agent: 'director', reason: 'channel_exhausted', metadata: { lead_name: lead.name, channel, drop: 'channel_exhausted' } });
       return { outcome: 'channel_exhausted' };
     }
 
@@ -211,7 +211,7 @@ async function processLead(clientId, lead, ctx = {}) {
     // ── 7. Dedup guard (before burning Sonnet tokens) ──
     const existingActive = await checkActiveMessage(clientId, lead.id);
     if (existingActive) {
-      await trace('draft_skipped', 'dedup_guard', { agent: 'director', reason: 'dedup_guard', metadata: { channel, existing_message_id: existingActive.id || null } });
+      await trace('skipped', 'dedup_guard', { agent: 'director', reason: 'dedup_guard', metadata: { channel, existing_message_id: existingActive.id || null, drop: 'draft_skipped' } });
       return { outcome: 'dedup_skip' };
     }
 
