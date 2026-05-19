@@ -29,8 +29,11 @@ try {
   process.exit(1);
 }
 
-const OUTPUT_DIR = path.join(__dirname, '../../output');
-const OUTPUT_FILE = path.join(OUTPUT_DIR, 'master-database.xlsx');
+// Output dir is overridable via MASTER_EXPORT_DIR so the weekly scheduled
+// export can land straight in the Beaver Solutions folder. Filename is
+// date-stamped so weekly runs accumulate instead of overwriting.
+const OUTPUT_DIR = process.env.MASTER_EXPORT_DIR || path.join(__dirname, '../../output');
+const OUTPUT_FILE = path.join(OUTPUT_DIR, `master-database-${new Date().toISOString().slice(0, 10)}.xlsx`);
 
 // Theme colours
 const BG     = 'FF060A0F';
@@ -118,8 +121,7 @@ async function exportMaster() {
       m.channel, m.subject, LEFT(m.body, 120) AS body_preview,
       m.ranger_score, m.status, m.ranger_notes,
       m.sent_at, m.gmail_thread_id,
-      CASE WHEN m.reply_detected_at IS NOT NULL THEN 'Yes' ELSE 'No' END AS reply_detected,
-      m.touch_number
+      CASE WHEN m.reply_detected_at IS NOT NULL THEN 'Yes' ELSE 'No' END AS reply_detected
     FROM messages m
     JOIN leads l ON l.id = m.lead_id
     ORDER BY m.created_at DESC
@@ -242,7 +244,6 @@ async function exportMaster() {
     { header: 'Sent At', key: 'sent_at', width: 16 },
     { header: 'Thread ID', key: 'gmail_thread_id', width: 18 },
     { header: 'Reply?', key: 'reply_detected', width: 8 },
-    { header: 'Touch #', key: 'touch_number', width: 8 },
   ];
   styleHeader(msgsSheet);
 
@@ -256,7 +257,6 @@ async function exportMaster() {
       msg.channel, msg.subject, msg.body_preview,
       msg.ranger_score, msg.status, msg.ranger_notes,
       fmt(msg.sent_at), msg.gmail_thread_id, msg.reply_detected,
-      msg.touch_number || 0,
     ];
 
     const statusCell = row.getCell(9);
@@ -269,7 +269,7 @@ async function exportMaster() {
     row.commit();
   });
 
-  msgsSheet.autoFilter = { from: 'A1', to: `N1` };
+  msgsSheet.autoFilter = { from: 'A1', to: `M1` };
 
   // ── Sheet 3: Pipeline Summary ────────────────────────────────
   const summarySheet = workbook.addWorksheet('Pipeline Summary', {
