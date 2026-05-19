@@ -1491,7 +1491,7 @@ async function surfaceUnrewrittenDraft(clientId, { messageId, body, subject, rea
  * Called when Sales Beaver fails all 3 Ranger attempts.
  * The Ranger writes the message itself using its own rules — guaranteed compliant.
  */
-async function rangerDraft(clientId, { lead_name, lead_company, lead_title, lead_angle, lead_friction, rejected_body }) {
+async function rangerDraft(clientId, { lead_name, lead_company, lead_title, lead_angle, lead_friction, rejected_body, channel = 'email' }) {
   if (!callAgent) return null;
 
   try {
@@ -1503,6 +1503,36 @@ async function rangerDraft(clientId, { lead_name, lead_company, lead_title, lead
     const fileContext = buildClientContext(fileConfig);
 
     const rangerSenderName = resolveSenderName(clientId, persona) || 'there';
+    const isEmail = channel === 'email';
+
+    const channelInstructions = isEmail
+      ? `Write a Day 0 cold EMAIL that passes ALL your own gates:
+- Open with: Hi [first name only],
+- Under 80 words (body only — do NOT count the "Hi [name]," line or the sign-off in word count)
+- No em dashes (—) anywhere
+- No bullet points
+- Exactly 1 question
+- No product or service name in opener
+- No soft CTAs (no "worth a quick chat", "happy to jump on")
+- Specific reference to a real signal about this company
+- Reads like a human, not a vendor
+- No banned phrases
+- Close the email with "Regards," on one line, then "${rangerSenderName}" on the next line.`
+      : `Write a SHORT ${channel} DM (this is a ${channel} message, NOT an email) that passes ALL your own gates:
+- 2-3 sentences, under 50 words total
+- NO subject line. NO "Hi [name]," greeting.
+- NO sign-off — no "Regards,", no name at the end. End the message on the question.
+- No em dashes (—), no bullet points
+- Exactly 1 question
+- No product or service name in the opener
+- No soft CTAs, no banned phrases
+- Specific reference to a real signal about this company
+- Casual peer-to-peer voice, not a vendor`;
+
+    const jsonShape = isEmail
+      ? `Return JSON only: {"subject":"Subject line (max 6 words, no em dashes)","body":"Full email: Hi [name] greeting, body, one question, then close with Regards, then ${rangerSenderName}"}`
+      : `Return JSON only: {"subject":null,"body":"The ${channel} DM text — 2-3 sentences, no greeting, no sign-off, ending on the question"}`;
+
     const result = await callAgent(
       'ranger',
       `Sales Beaver has failed your QA gate 3 times for this lead. You must now write the message yourself.
@@ -1517,20 +1547,9 @@ LEAD:
 Last rejected message (do NOT copy — write from scratch):
 ${rejected_body || '(none)'}
 
-Write a Day 0 cold email that passes ALL your own gates:
-- Open with: Hi [first name only],
-- Under 80 words (body only — do NOT count the "Hi [name]," line or the sign-off in word count)
-- No em dashes (—) anywhere
-- No bullet points
-- Exactly 1 question
-- No product or service name in opener
-- No soft CTAs (no "worth a quick chat", "happy to jump on")
-- Specific reference to a real signal about this company
-- Reads like a human, not a vendor
-- No banned phrases
-- Close the email with "Regards," on one line, then "${rangerSenderName}" on the next line.${personaContext}${fileContext}
+${channelInstructions}${personaContext}${fileContext}
 
-Return JSON only: {"subject":"Subject line (max 6 words, no em dashes)","body":"Full email: Hi [name] greeting, body, one question, then close with Regards, then ${rangerSenderName}"}`,
+${jsonShape}`,
       { mode: 'ranger_draft', lead_name, lead_company }
     );
 
@@ -2297,7 +2316,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           const enforcerDraft = await rangerDraft(clientId, {
             lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
             lead_angle: meta.angle, lead_friction: meta.friction,
-            rejected_body: finalBody, rejection_notes: rangerResult?.notes,
+            rejected_body: finalBody, rejection_notes: rangerResult?.notes, channel,
           });
           // rangerDraft returns {subject, body} — pass the STRING body to SQL, never the whole object
           if (enforcerDraft?.body && typeof enforcerDraft.body === 'string') {
@@ -3771,7 +3790,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
               const enforcerDraft = await rangerDraft(clientId, {
                 lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
                 lead_angle: lead.metadata?.angle, lead_friction: lead.metadata?.friction,
-                rejected_body: currentBody,
+                rejected_body: currentBody, channel: msg.channel,
               });
               // rangerDraft returns {subject, body} — extract the STRING body
               if (enforcerDraft?.body && typeof enforcerDraft.body === 'string') {
@@ -3831,7 +3850,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         const enforcerDraft = await rangerDraft(clientId, {
           lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
           lead_angle: lead.metadata?.angle, lead_friction: lead.metadata?.friction,
-          rejected_body: currentBody,
+          rejected_body: currentBody, channel: msg.channel,
         });
         // rangerDraft returns {subject, body} — extract the STRING body
         if (enforcerDraft?.body && typeof enforcerDraft.body === 'string') {
