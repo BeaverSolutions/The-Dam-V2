@@ -283,28 +283,50 @@ const COLD_SIGNAL_TYPES = [
 ];
 
 /**
- * Haiku: extract ONE verifiable cold-outreach buying signal from search hits.
- * Returns { found:true, signal, why_now, angle, signal_type, strength } or { found:false }.
+ * Haiku: produce ONE verifiable personalisation angle for a cold prospect.
+ *
+ * Direction (MJ, 2026-05-19): a lead we paid to source is NEVER discarded for
+ * lack of a dated buying event. Sales Beaver's job is to find SOMETHING real
+ * and specific about every prospect before he drafts. So this never returns
+ * "nothing found" — it returns the strongest VERIFIABLE angle available:
+ *   - RICH: a dated, recent (<3mo) trigger event from the search snippets.
+ *   - LITE: a true, specific observation about the company / the prospect's
+ *           role — drawn from the snippets OR the prospect's own record.
+ * The only hard floor: the angle must be TRUE. Found, never invented.
+ *
+ * Returns { found:true, signal, why_now, angle, signal_type, strength, source }.
+ * Returns { found:false, transient:true } ONLY on a transient API error (retry).
  */
 async function synthesizeColdSignal(clientId, lead, hits) {
-  if (!hits || hits.length === 0) return { found: false };
+  const company = (lead.company || '').trim();
+  const role = (lead.title || '').trim();
+  const hitsBlock = (hits && hits.length)
+    ? hits.map((h, i) => `${i + 1}. ${h.title}\n   ${h.snippet || ''}\n   ${h.link || ''}`).join('\n\n')
+    : '(no web results found for this prospect)';
 
-  const prompt = `Beaver Solutions sells an AI outbound-sales tool to B2B SMBs that run cold outreach manually. We are about to cold-contact ${lead.name || 'a decision-maker'} (${lead.title || 'role unknown'}) at ${lead.company}. Find ONE specific, recent, VERIFIABLE buying signal — a concrete reason to reach out NOW.
+  const prompt = `Beaver Solutions sells an AI outbound-sales tool to B2B SMBs that run cold outreach manually. We are about to cold-contact ${lead.name || 'a decision-maker'} — ${role || 'role unknown'} at ${company}.
+
+Produce ONE specific, VERIFIABLE personalisation angle for the opening line. Every prospect has one. You never give up and you never invent.
 
 SEARCH RESULTS:
-${hits.map((h, i) => `${i + 1}. ${h.title}\n   ${h.snippet || ''}\n   ${h.link || ''}`).join('\n\n')}
+${hitsBlock}
 
-Strong signals, priority order: hiring_sales / hiring_bdr (hiring SDR/BDR/sales/BD roles), expansion (new market, new office, scaling the sales team), funding (raised a round), product_launch (launched something with a sales motion), scaling_pain (public outbound/pipeline pain), agency_expansion (agency scaling client load).
+PROSPECT FACTS (always true — usable even with zero search results):
+- Name: ${lead.name || 'unknown'}
+- Role: ${role || 'unknown'}
+- Company: ${company}
+
+Pick the STRONGEST angle, in this priority order:
+1. RICH — a dated, recent (within ~3 months) trigger event verifiable in the snippets: hiring sales/BDR, funding round, expansion / new office / new market, product launch, public pipeline pain.
+2. LITE — a specific, verifiable observation: what the company actually does, the market it serves, or what the prospect's role implies about how they run outbound. Drawn from the snippets OR the prospect facts above.
 
 RULES:
-- Use ONLY facts verifiable in the snippets above. Do NOT invent or infer a signal.
-- If the snippets are stale, generic, or unrelated, return {"found": false}.
-- "strength": "rich" only if it is a dated/recent trigger event; "lite" if it is a softer but real, specific observation.
+- Use ONLY facts verifiable in the snippets or the prospect facts above. NEVER invent an event, a metric, a relationship, or a milestone.
+- A real recent event is best. If there is none, a true company/role observation is still a valid, specific angle — USE IT. Never return "nothing found".
+- "strength": "rich" ONLY for a dated recent (<3mo) trigger event; otherwise "lite".
 
 Return JSON ONLY:
-{"found": true, "signal": "<one specific verifiable fact incl. detail>", "why_now": "<one sentence>", "angle": "<one-line angle tying the signal to an AI outbound-sales tool>", "signal_type": "<one of: ${COLD_SIGNAL_TYPES.join(', ')}>", "strength": "rich|lite"}
-or
-{"found": false}`;
+{"signal": "<one specific verifiable fact about this prospect/company>", "why_now": "<one sentence>", "angle": "<one-line angle tying it to an AI outbound-sales tool>", "signal_type": "<one of: ${COLD_SIGNAL_TYPES.join(', ')}>", "strength": "rich|lite"}`;
 
   try {
     const result = await callAgent('research_beaver', prompt, { clientId });
@@ -313,19 +335,38 @@ or
       : (result?.brief || result?.summary || JSON.stringify(result));
     const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
     const parsed = JSON.parse(cleaned);
-    if (!parsed || parsed.found !== true || !parsed.signal) return { found: false };
-    // Normalise: keep signal_type within the known set, strength within rich|lite.
-    if (!COLD_SIGNAL_TYPES.includes(parsed.signal_type)) parsed.signal_type = 'scaling_pain';
-    if (parsed.strength !== 'rich') parsed.strength = 'lite';
-    return parsed;
+    if (parsed && parsed.signal && String(parsed.signal).trim().length > 3) {
+      if (!COLD_SIGNAL_TYPES.includes(parsed.signal_type)) parsed.signal_type = 'scaling_pain';
+      if (parsed.strength !== 'rich') parsed.strength = 'lite';
+      parsed.found = true;
+      parsed.source = (hits && hits.length) ? 'research_beaver_web_enrichment' : 'research_beaver_role_inference';
+      return parsed;
+    }
+    // LLM returned nothing usable — fall through to the deterministic floor.
   } catch (err) {
     const emsg = String(err.message || '');
-    // A transient API failure (overload / rate-limit / timeout / 5xx) is NOT
-    // "no signal" — flag it so the caller leaves the lead for a later retry.
+    // A transient API failure (overload / rate-limit / timeout / 5xx) is NOT a
+    // "no angle" result — flag it so the caller leaves the lead for a retry.
     const transient = /\b(429|529|503|502|500)\b|overload|rate.?limit|timeout|ETIMEDOUT|ECONNRESET|ESOCKETTIMEDOUT|socket hang up/i.test(emsg);
-    logger.warn({ msg: `[cold-signal] Haiku synthesis ${transient ? 'hit a TRANSIENT error — lead left for retry' : 'failed'}`, leadId: lead.id, err: emsg });
-    return { found: false, transient };
+    if (transient) {
+      logger.warn({ msg: '[cold-signal] synthesis hit a TRANSIENT error — lead left for retry', leadId: lead.id, err: emsg });
+      return { found: false, transient: true };
+    }
+    logger.warn({ msg: '[cold-signal] synthesis failed — using deterministic role/company angle', leadId: lead.id, err: emsg });
   }
+
+  // Deterministic floor: the prospect's own role + company is always a true,
+  // specific anchor. Never fabricated, never empty. Only unreachable if the
+  // lead has no company name at all (caller already guards that case).
+  return {
+    found: true,
+    signal: `${lead.name || 'The prospect'} is ${role || 'a decision-maker'} at ${company}.`,
+    why_now: `${role || 'A decision-maker'} at an SMB like ${company} typically owns outbound personally.`,
+    angle: `Open on their role at ${company} and the manual-outbound load it implies — position the AI sales crew as the relief.`,
+    signal_type: 'scaling_pain',
+    strength: 'lite',
+    source: 'role_company_floor',
+  };
 }
 
 /**
@@ -336,18 +377,21 @@ or
 async function enrichColdLeadSignal(clientId, lead, tenantConfig) {
   const meta = lead.metadata || {};
   if (meta.signal) return { enriched: false, reason: 'already_has_signal' };
-  if (meta.signal_enrich_attempted_at) return { enriched: false, reason: 'already_attempted' };
+  // No `already_attempted` short-circuit: the synth now always produces a real
+  // angle, so a prior attempt that left no signal (old give-up logic) MUST be
+  // retried, not skipped. The meta.signal guard above already prevents re-spend
+  // on leads that genuinely have an angle.
   const company = (lead.company || '').trim();
   if (!company || /^(unknown|independent|n\/a|self[- ]?employed|freelanc|stealth)$/i.test(company)) {
     return { enriched: false, reason: 'thin_context' };
   }
 
+  // Web search is best-effort. An empty result is NOT a dead end — the synth
+  // falls back to a verifiable role/company angle from the lead's own record.
   const searchResult = await searchFreshSignals(lead);
   if (searchResult?._quota_exhausted) return { enriched: false, reason: 'brave_quota_exhausted' };
 
-  const syn = (searchResult && searchResult.hits)
-    ? await synthesizeColdSignal(clientId, lead, searchResult.hits)
-    : { found: false };
+  const syn = await synthesizeColdSignal(clientId, lead, searchResult?.hits || []);
 
   if (syn.transient) {
     // Transient API failure (overload / rate-limit / timeout). Do NOT mark the
@@ -355,19 +399,11 @@ async function enrichColdLeadSignal(clientId, lead, tenantConfig) {
     return { enriched: false, reason: 'transient_error' };
   }
 
-  if (!syn.found) {
-    // Mark attempted so we never re-spend on this lead. Honest no-signal —
-    // Sales Beaver's SIGNAL-LITE path handles a lead with no trigger.
-    await pool.query(
-      `UPDATE leads
-       SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-             'signal_enrich_attempted_at', $1::text,
-             'signal_enrich_result', 'no_signal'),
-           updated_at = NOW()
-       WHERE id = $2 AND client_id = $3`,
-      [new Date().toISOString(), lead.id, clientId]
-    );
-    return { enriched: false, reason: 'no_signal_found' };
+  if (!syn.found || !syn.signal) {
+    // Should be unreachable — synth always returns an angle when a company name
+    // exists, and the thin-context guard above already rejected company-less
+    // leads. Treat as transient (retry) rather than silently dropping the lead.
+    return { enriched: false, reason: 'transient_error' };
   }
 
   const nowIso = new Date().toISOString();
@@ -380,7 +416,7 @@ async function enrichColdLeadSignal(clientId, lead, tenantConfig) {
     signal_recency_days: 0,
     signal_enriched_at: nowIso,
     signal_enrich_result: 'signal_found',
-    signal_source: 'research_beaver_web_enrichment',
+    signal_source: syn.source || 'research_beaver_web_enrichment',
   };
 
   await pool.query(
@@ -498,6 +534,55 @@ async function runColdPoolSignalEnrichment(clientId, opts = {}) {
   };
 }
 
+/**
+ * Ensure a lead carries a verifiable personalisation angle BEFORE Sales Beaver
+ * drafts (MJ direction 2026-05-19: Sales Beaver finds something real for every
+ * lead — no lead is skipped for lack of a pre-found signal). Idempotent — a
+ * no-op if metadata.signal already exists. NEVER throws: the draft proceeds
+ * regardless; this only enriches.
+ *
+ * Returns { ok:true, signal, angle, signal_type, strength, source }
+ *      or { ok:false, reason }.
+ */
+async function ensureLeadAngle(clientId, leadId) {
+  try {
+    if (!leadId) return { ok: false, reason: 'no_lead_id' };
+    const { rows } = await pool.query(
+      `SELECT id, name, company, title, linkedin_url, metadata, email, email_verified, lead_tier, pipeline_stage
+       FROM leads WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL`,
+      [leadId, clientId]
+    );
+    const lead = rows[0];
+    if (!lead) return { ok: false, reason: 'lead_not_found' };
+
+    const meta = lead.metadata || {};
+    if (meta.signal && String(meta.signal).trim()) {
+      return {
+        ok: true, source: 'existing',
+        signal: meta.signal, why_now: meta.why_now, angle: meta.angle,
+        signal_type: meta.signal_type,
+        strength: Number(meta.signal_strength) >= 0.9 ? 'rich' : 'lite',
+      };
+    }
+
+    let tenantCfg = null;
+    try { tenantCfg = await getTenantConfig(clientId); } catch { /* re-score skipped */ }
+
+    const r = await enrichColdLeadSignal(clientId, lead, tenantCfg);
+    if (r.enriched) {
+      return {
+        ok: true,
+        source: r.strength === 'rich' ? 'web_event' : 'web_or_role_observation',
+        signal: r.signal, signal_type: r.signal_type, strength: r.strength,
+      };
+    }
+    return { ok: false, reason: r.reason || 'not_enriched' };
+  } catch (err) {
+    logger.warn({ msg: '[ensure-angle] failed — draft proceeds without enrichment', leadId, err: err.message });
+    return { ok: false, reason: 'error' };
+  }
+}
+
 module.exports = {
   enrichLeadForFollowUp,
   runDailyEnrichmentPass,
@@ -505,5 +590,6 @@ module.exports = {
   ENRICHMENT_STALE_DAYS,
   synthesizeColdSignal,
   enrichColdLeadSignal,
+  ensureLeadAngle,
   runColdPoolSignalEnrichment,
 };

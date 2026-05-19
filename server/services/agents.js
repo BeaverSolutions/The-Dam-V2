@@ -727,7 +727,8 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
   if (callAgent) {
     try {
       const directivesSvc = require('./directives');
-      const [persona, fileConfig, rangerPatterns, salesDirectives, founderFeedback, teachingNote] = await Promise.all([
+      const { ensureLeadAngle } = require('./researchEnrichment');
+      const [persona, fileConfig, rangerPatterns, salesDirectives, founderFeedback, teachingNote, leadAngle] = await Promise.all([
         getClientPersona(clientId),
         getClientConfig(clientId),
         // MEMORY: Load Ranger rejection patterns — brief Sales Beaver on what to avoid (Sprint 9)
@@ -740,6 +741,10 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         getFounderFeedback(clientId),
         // A8-6: Enforcer's weekly teaching note — the "sharpen the clone" loop.
         getEnforcerTeachingNote(clientId),
+        // MJ direction 2026-05-19: every lead gets a REAL, verifiable angle
+        // before Sales Beaver drafts — researched on the spot if not already
+        // present. No lead is ever skipped for lack of a pre-found signal.
+        ensureLeadAngle(clientId, lead_id),
       ]);
       const personaContext = buildPersonaContext(persona);
       const fileContext = buildClientContext(fileConfig);
@@ -763,6 +768,19 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
       let teachingContext = '';
       if (teachingNote) {
         teachingContext = `\n\nENFORCER'S WEEKLY TEACHING NOTE — the QA agent's coaching from last week's reviews. Apply it:\n${teachingNote}`;
+      }
+
+      // MJ direction 2026-05-19: the verified personalisation angle. Every lead
+      // carries one (researched on the spot by ensureLeadAngle). Sales Beaver
+      // anchors the opener on it — never sends a generic, non-personal message.
+      let angleContext = '';
+      if (leadAngle?.ok && leadAngle.signal) {
+        const tier = leadAngle.strength === 'rich'
+          ? 'SIGNAL-RICH — a dated recent trigger event'
+          : 'SIGNAL-LITE — a verifiable observation about the company/role';
+        angleContext = `\n\nVERIFIED PERSONALISATION ANGLE — anchor the opening line on this. It is verified TRUE; use it, do not contradict it, do not embellish beyond it. Tier: ${tier}.\n- Signal: ${leadAngle.signal}`;
+        if (leadAngle.why_now) angleContext += `\n- Why now: ${leadAngle.why_now}`;
+        if (leadAngle.angle)   angleContext += `\n- Suggested angle: ${leadAngle.angle}`;
       }
 
       // Captain's directive injection — today's hot reject reasons + any other
@@ -805,6 +823,7 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         'sales_beaver',
         `Write a ${channel} outreach message for this lead: ${context}
 ${signOffInstruction}
+${angleContext}
 ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}${founderFeedbackContext}${teachingContext}`,
         { lead_id, channel, clientId }
       );
