@@ -3718,5 +3718,35 @@ router.post('/bulk-redraft', requireInternalKey, async (req, res) => {
   }
 });
 
+/* ─── POST /api/autonomous/enrich-cold-signals ──────────────────────
+ * Manual cold-pool buying-signal enrichment (2026-05-19).
+ *
+ * Research Beaver web-searches signal-less prospecting-stage leads and
+ * persists a verified buying signal to lead.metadata.signal — the field
+ * Sales Beaver already reads when building draft context. Closes the
+ * "fabricate or go generic" failure mode for cold outreach.
+ *
+ * Manual trigger only — NOT wired to any cron. Spend is bounded: limit
+ * is hard-capped 1..25; each lead is <=3 web searches + 1 Haiku call.
+ *
+ * Body: { client_id, limit? }   Returns: { data: <run summary> }
+ */
+router.post('/enrich-cold-signals', async (req, res) => {
+  const clientId = req.body?.client_id;
+  if (!clientId) {
+    return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+  }
+  const limit = Math.min(Math.max(1, parseInt(req.body?.limit, 10) || 5), 25);
+  try {
+    const { runColdPoolSignalEnrichment } = require('../services/researchEnrichment');
+    const result = await runWithClientContext(clientId, () => runColdPoolSignalEnrichment(clientId, { limit }));
+    logger.info({ msg: '[enrich-cold-signals] complete', client_id: clientId, limit, enriched: result.enriched, processed: result.processed });
+    return res.json({ data: result });
+  } catch (err) {
+    logger.error({ msg: '[enrich-cold-signals] failed', err: err.message });
+    return res.status(500).json({ error: err.message, code: 'ENRICH_FAILED' });
+  }
+});
+
 module.exports = router;
 module.exports.runAutonomousKickoff = runAutonomousKickoff;

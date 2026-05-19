@@ -27,6 +27,8 @@ const pool = require('../db/pool');
 const { callAgent } = require('./claude');
 const { searchOpenWeb } = require('./searchService');
 const logger = require('../utils/logger');
+const { scoreAndPersist } = require('./qualityScorer');
+const { getTenantConfig } = require('./tenantConfig');
 
 const ENRICHMENT_STALE_DAYS = 7;
 const MAX_ENRICHMENT_PER_DAY = 30; // hard cap to prevent Brave burn
@@ -258,9 +260,228 @@ async function runDailyEnrichmentPass(clientId) {
   };
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ * COLD-POOL SIGNAL ENRICHMENT (2026-05-19)
+ *
+ * Distinct from the follow-up enrichment above. This enriches COLD
+ * prospecting-stage leads that have NO buying signal — the VP-CSV
+ * imports that landed firmographic-only. It persists a real signal to
+ * the canonical `metadata.signal` fields that Sales Beaver already
+ * reads directly (agents.js ~1983 signal pipeline / ~3373 kickoff
+ * pipeline), so a personalised cold draft becomes possible without
+ * fabrication.
+ *
+ * Additive: reuses searchFreshSignals (proven on the follow-up path),
+ * touches no existing pipeline code. Manual/script-triggered only —
+ * NOT wired to any cron. Spend is bounded by the caller's `limit`.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+// signal_type values the quality scorer + Beaver ICP recognise.
+const COLD_SIGNAL_TYPES = [
+  'hiring_sales', 'hiring_bdr', 'expansion', 'funding',
+  'product_launch', 'scaling_pain', 'agency_expansion',
+];
+
+/**
+ * Haiku: extract ONE verifiable cold-outreach buying signal from search hits.
+ * Returns { found:true, signal, why_now, angle, signal_type, strength } or { found:false }.
+ */
+async function synthesizeColdSignal(clientId, lead, hits) {
+  if (!hits || hits.length === 0) return { found: false };
+
+  const prompt = `Beaver Solutions sells an AI outbound-sales tool to B2B SMBs that run cold outreach manually. We are about to cold-contact ${lead.name || 'a decision-maker'} (${lead.title || 'role unknown'}) at ${lead.company}. Find ONE specific, recent, VERIFIABLE buying signal — a concrete reason to reach out NOW.
+
+SEARCH RESULTS:
+${hits.map((h, i) => `${i + 1}. ${h.title}\n   ${h.snippet || ''}\n   ${h.link || ''}`).join('\n\n')}
+
+Strong signals, priority order: hiring_sales / hiring_bdr (hiring SDR/BDR/sales/BD roles), expansion (new market, new office, scaling the sales team), funding (raised a round), product_launch (launched something with a sales motion), scaling_pain (public outbound/pipeline pain), agency_expansion (agency scaling client load).
+
+RULES:
+- Use ONLY facts verifiable in the snippets above. Do NOT invent or infer a signal.
+- If the snippets are stale, generic, or unrelated, return {"found": false}.
+- "strength": "rich" only if it is a dated/recent trigger event; "lite" if it is a softer but real, specific observation.
+
+Return JSON ONLY:
+{"found": true, "signal": "<one specific verifiable fact incl. detail>", "why_now": "<one sentence>", "angle": "<one-line angle tying the signal to an AI outbound-sales tool>", "signal_type": "<one of: ${COLD_SIGNAL_TYPES.join(', ')}>", "strength": "rich|lite"}
+or
+{"found": false}`;
+
+  try {
+    const result = await callAgent('research_beaver', prompt, { clientId });
+    const raw = typeof result === 'string'
+      ? result
+      : (result?.brief || result?.summary || JSON.stringify(result));
+    const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    if (!parsed || parsed.found !== true || !parsed.signal) return { found: false };
+    // Normalise: keep signal_type within the known set, strength within rich|lite.
+    if (!COLD_SIGNAL_TYPES.includes(parsed.signal_type)) parsed.signal_type = 'scaling_pain';
+    if (parsed.strength !== 'rich') parsed.strength = 'lite';
+    return parsed;
+  } catch (err) {
+    logger.warn({ msg: '[cold-signal] Haiku synthesis failed', leadId: lead.id, err: err.message });
+    return { found: false };
+  }
+}
+
+/**
+ * Enrich ONE cold lead with a buying signal and persist it to the
+ * canonical metadata fields Sales Beaver reads. Re-scores quality.
+ * Returns { enriched:true, ... } or { enriched:false, reason }.
+ */
+async function enrichColdLeadSignal(clientId, lead, tenantConfig) {
+  const meta = lead.metadata || {};
+  if (meta.signal) return { enriched: false, reason: 'already_has_signal' };
+  if (meta.signal_enrich_attempted_at) return { enriched: false, reason: 'already_attempted' };
+  const company = (lead.company || '').trim();
+  if (!company || /^(unknown|independent|n\/a|self[- ]?employed|freelanc|stealth)$/i.test(company)) {
+    return { enriched: false, reason: 'thin_context' };
+  }
+
+  const searchResult = await searchFreshSignals(lead);
+  if (searchResult?._quota_exhausted) return { enriched: false, reason: 'brave_quota_exhausted' };
+
+  const syn = (searchResult && searchResult.hits)
+    ? await synthesizeColdSignal(clientId, lead, searchResult.hits)
+    : { found: false };
+
+  if (!syn.found) {
+    // Mark attempted so we never re-spend on this lead. Honest no-signal —
+    // Sales Beaver's SIGNAL-LITE path handles a lead with no trigger.
+    await pool.query(
+      `UPDATE leads
+       SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+             'signal_enrich_attempted_at', $1::text,
+             'signal_enrich_result', 'no_signal'),
+           updated_at = NOW()
+       WHERE id = $2 AND client_id = $3`,
+      [new Date().toISOString(), lead.id, clientId]
+    );
+    return { enriched: false, reason: 'no_signal_found' };
+  }
+
+  const nowIso = new Date().toISOString();
+  const signalFields = {
+    signal: syn.signal,
+    why_now: syn.why_now || '',
+    angle: syn.angle || '',
+    signal_type: syn.signal_type,
+    signal_strength: syn.strength === 'rich' ? 0.9 : 0.6,
+    signal_recency_days: 0,
+    signal_enriched_at: nowIso,
+    signal_enrich_result: 'signal_found',
+    signal_source: 'research_beaver_web_enrichment',
+  };
+
+  await pool.query(
+    `UPDATE leads
+     SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
+         buying_signal_strength = $2,
+         signal_dated_at = NOW(),
+         updated_at = NOW()
+     WHERE id = $3 AND client_id = $4`,
+    [JSON.stringify(signalFields), syn.strength, lead.id, clientId]
+  );
+
+  // Re-score quality so the SIGNAL dimension lifts (was 0 = no_signal).
+  if (tenantConfig) {
+    try {
+      const updatedLead = { ...lead, metadata: { ...meta, ...signalFields } };
+      await scoreAndPersist(updatedLead, tenantConfig);
+    } catch (err) {
+      logger.warn({ msg: '[cold-signal] re-score failed (signal still persisted)', leadId: lead.id, err: err.message });
+    }
+  }
+
+  return { enriched: true, signal_type: syn.signal_type, strength: syn.strength, signal: syn.signal };
+}
+
+/**
+ * Batch: enrich up to `limit` cold prospecting-stage leads that have no
+ * signal yet. Manual entry point — NOT wired to any cron. Spend-capped:
+ * `limit` is hard-bounded 1..25; each lead is <=3 web searches + 1 Haiku call.
+ */
+async function runColdPoolSignalEnrichment(clientId, opts = {}) {
+  const cap = Math.min(Math.max(1, parseInt(opts.limit, 10) || 5), 25);
+
+  const { rows: leads } = await pool.query(
+    `SELECT id, name, company, title, linkedin_url, metadata, email, email_verified, lead_tier, pipeline_stage
+     FROM leads
+     WHERE client_id = $1
+       AND deleted_at IS NULL
+       AND pipeline_stage IN ('prospecting', 'researched')
+       AND (metadata->>'signal') IS NULL
+       AND (metadata->>'signal_enrich_attempted_at') IS NULL
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    [clientId, cap]
+  );
+
+  if (leads.length === 0) {
+    return { processed: 0, enriched: 0, no_signal: 0, skipped: 0, errors: 0, message: 'No un-enriched cold leads found.' };
+  }
+
+  let tenantCfg = null;
+  try {
+    tenantCfg = await getTenantConfig(clientId);
+  } catch (err) {
+    logger.warn({ msg: '[cold-signal] tenantConfig load failed — re-scoring will be skipped', err: err.message });
+  }
+
+  let enriched = 0, noSignal = 0, skipped = 0, errors = 0, quotaExhausted = false;
+  const details = [];
+
+  for (const lead of leads) {
+    if (quotaExhausted) { skipped++; continue; }
+    try {
+      const r = await enrichColdLeadSignal(clientId, lead, tenantCfg);
+      if (r.enriched) {
+        enriched++;
+        details.push({ lead: lead.name, company: lead.company, signal_type: r.signal_type, strength: r.strength, signal: r.signal });
+      } else if (r.reason === 'no_signal_found') {
+        noSignal++;
+      } else if (r.reason === 'brave_quota_exhausted') {
+        quotaExhausted = true;
+        skipped++;
+      } else {
+        skipped++;
+      }
+    } catch (err) {
+      errors++;
+      logger.warn({ msg: '[cold-signal] enrich error', leadId: lead.id, err: err.message });
+    }
+  }
+
+  // Log the run for visibility (same pattern as the follow-up pass).
+  try {
+    const dayKey = new Date().toISOString().split('T')[0];
+    await pool.query(
+      `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
+       VALUES ($1, 'research_beaver', $2, $3::jsonb, 'journal', NOW())
+       ON CONFLICT (client_id, agent, key) DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
+      [clientId, `cold_signal_enrichment_${dayKey}`, JSON.stringify({
+        ran_at: new Date().toISOString(),
+        processed: leads.length, enriched, no_signal: noSignal, skipped, errors,
+        quota_exhausted: quotaExhausted,
+      })]
+    );
+  } catch { /* non-critical */ }
+
+  return {
+    processed: leads.length,
+    enriched, no_signal: noSignal, skipped, errors,
+    quota_exhausted: quotaExhausted,
+    details,
+    message: `Enriched ${enriched}/${leads.length} cold leads with a buying signal. ${noSignal} had no findable signal, ${skipped} skipped, ${errors} errors${quotaExhausted ? ' (Brave quota hit)' : ''}.`,
+  };
+}
+
 module.exports = {
   enrichLeadForFollowUp,
   runDailyEnrichmentPass,
   isEnrichmentFresh,
   ENRICHMENT_STALE_DAYS,
+  synthesizeColdSignal,
+  enrichColdLeadSignal,
+  runColdPoolSignalEnrichment,
 };
