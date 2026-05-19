@@ -1578,9 +1578,15 @@ ${jsonShape}`,
         }
       }
 
+      const cleanBody = stripEmDashes(finalBody); // safety net even on Ranger's own draft
+      // A1-4: the Enforcer's own fallback draft is NOT exempt from the code
+      // gates. Run them so callers stamp an HONEST score, not a blind 70.
+      const gate = codeEnforcerGates(cleanBody, 0);
       return {
         subject: finalSubject,
-        body: stripEmDashes(finalBody), // safety net even on Ranger's own draft
+        body: cleanBody,
+        score: gate.passed ? 70 : 45,
+        gateReason: gate.passed ? null : gate.reason,
       };
     }
     return null;
@@ -2336,8 +2342,10 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
               subject: enfSubject,
               body: enforcerDraft.body,
               status: 'pending_approval',
-              ranger_score: 70,
-              ranger_notes: 'Enforcer-drafted fallback — Sales Beaver hard-rejected. Review before sending.',
+              ranger_score: enforcerDraft.score ?? 70,
+              ranger_notes: enforcerDraft.gateReason
+                ? `Enforcer fallback FAILED code gates (${enforcerDraft.gateReason}) — needs manual rewrite before sending.`
+                : 'Enforcer-drafted fallback — Sales Beaver hard-rejected. Review before sending.',
               metadata: { original_rejection: rangerResult?.notes },
               draft_source: 'enforcer_fallback',
               signal: meta.signal,
@@ -3805,11 +3813,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
                 currentSubject = enforcerDraft.subject || currentSubject || `${lead.company}`;
                 await pool.query(
                   `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval',
-                   ranger_score = 70, ranger_notes = $3, updated_at = NOW()
+                   ranger_score = $6, ranger_notes = $3, updated_at = NOW()
                    WHERE id = $4 AND client_id = $5`,
                   [currentBody, currentSubject,
-                   'Enforcer-drafted fallback — Sales Beaver failed after 2 attempts. Review before sending.',
-                   msg.id, clientId]
+                   enforcerDraft.gateReason
+                     ? `Enforcer fallback FAILED code gates (${enforcerDraft.gateReason}) — needs manual rewrite.`
+                     : 'Enforcer-drafted fallback — Sales Beaver failed after 2 attempts. Review before sending.',
+                   msg.id, clientId, enforcerDraft.score ?? 70]
                 );
                 await pool.query(
                   `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'enforcer_fallback')`,
@@ -3865,11 +3875,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           currentSubject = enforcerDraft.subject || currentSubject || `${lead.company}`;
           await pool.query(
             `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval',
-             ranger_score = 70, ranger_notes = $3, updated_at = NOW()
+             ranger_score = $6, ranger_notes = $3, updated_at = NOW()
              WHERE id = $4 AND client_id = $5`,
             [currentBody, currentSubject,
-             'Enforcer-drafted fallback — Sales Beaver failed all attempts. Review before sending.',
-             msg.id, clientId]
+             enforcerDraft.gateReason
+               ? `Enforcer fallback FAILED code gates (${enforcerDraft.gateReason}) — needs manual rewrite.`
+               : 'Enforcer-drafted fallback — Sales Beaver failed all attempts. Review before sending.',
+             msg.id, clientId, enforcerDraft.score ?? 70]
           );
           await pool.query(
             `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'enforcer_fallback')`,
