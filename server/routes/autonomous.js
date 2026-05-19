@@ -3737,9 +3737,11 @@ router.post('/enrich-cold-signals', async (req, res) => {
     return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
   }
   const limit = Math.min(Math.max(1, parseInt(req.body?.limit, 10) || 5), 25);
+  // origin: 'vp' targets VP-imported leads only (high signal-yield); 'all' = whole cold pool.
+  const origin = ['vp', 'all'].includes(req.body?.origin) ? req.body.origin : 'vp';
   try {
     const { runColdPoolSignalEnrichment } = require('../services/researchEnrichment');
-    const result = await runWithClientContext(clientId, () => runColdPoolSignalEnrichment(clientId, { limit }));
+    const result = await runWithClientContext(clientId, () => runColdPoolSignalEnrichment(clientId, { limit, origin }));
     logger.info({ msg: '[enrich-cold-signals] complete', client_id: clientId, limit, enriched: result.enriched, processed: result.processed });
     return res.json({ data: result });
   } catch (err) {

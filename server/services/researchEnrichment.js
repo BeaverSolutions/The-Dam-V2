@@ -413,6 +413,11 @@ async function enrichColdLeadSignal(clientId, lead, tenantConfig) {
  */
 async function runColdPoolSignalEnrichment(clientId, opts = {}) {
   const cap = Math.min(Math.max(1, parseInt(opts.limit, 10) || 5), 25);
+  // VP-imported leads enrich at a far higher signal-yield than LinkedIn-scraped
+  // leads (the latter are thin micro-SMBs with no web footprint). Default to
+  // 'vp' so manual runs don't burn web-search + Haiku spend on the low-yield pool.
+  const origin = opts.origin === 'all' ? 'all' : 'vp';
+  const originFilter = origin === 'vp' ? `AND (metadata ? 'vp_prospect_id')` : '';
 
   const { rows: leads } = await pool.query(
     `SELECT id, name, company, title, linkedin_url, metadata, email, email_verified, lead_tier, pipeline_stage
@@ -422,6 +427,7 @@ async function runColdPoolSignalEnrichment(clientId, opts = {}) {
        AND pipeline_stage IN ('prospecting', 'researched')
        AND (metadata->>'signal') IS NULL
        AND (metadata->>'signal_enrich_attempted_at') IS NULL
+       ${originFilter}
      ORDER BY created_at DESC
      LIMIT $2`,
     [clientId, cap]
