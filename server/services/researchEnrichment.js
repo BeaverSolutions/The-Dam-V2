@@ -319,8 +319,12 @@ or
     if (parsed.strength !== 'rich') parsed.strength = 'lite';
     return parsed;
   } catch (err) {
-    logger.warn({ msg: '[cold-signal] Haiku synthesis failed', leadId: lead.id, err: err.message });
-    return { found: false };
+    const emsg = String(err.message || '');
+    // A transient API failure (overload / rate-limit / timeout / 5xx) is NOT
+    // "no signal" — flag it so the caller leaves the lead for a later retry.
+    const transient = /\b(429|529|503|502|500)\b|overload|rate.?limit|timeout|ETIMEDOUT|ECONNRESET|ESOCKETTIMEDOUT|socket hang up/i.test(emsg);
+    logger.warn({ msg: `[cold-signal] Haiku synthesis ${transient ? 'hit a TRANSIENT error — lead left for retry' : 'failed'}`, leadId: lead.id, err: emsg });
+    return { found: false, transient };
   }
 }
 
@@ -344,6 +348,12 @@ async function enrichColdLeadSignal(clientId, lead, tenantConfig) {
   const syn = (searchResult && searchResult.hits)
     ? await synthesizeColdSignal(clientId, lead, searchResult.hits)
     : { found: false };
+
+  if (syn.transient) {
+    // Transient API failure (overload / rate-limit / timeout). Do NOT mark the
+    // lead 'attempted' — it must be retried on a later run, never lost to a blip.
+    return { enriched: false, reason: 'transient_error' };
+  }
 
   if (!syn.found) {
     // Mark attempted so we never re-spend on this lead. Honest no-signal —
@@ -428,11 +438,11 @@ async function runColdPoolSignalEnrichment(clientId, opts = {}) {
     logger.warn({ msg: '[cold-signal] tenantConfig load failed — re-scoring will be skipped', err: err.message });
   }
 
-  let enriched = 0, noSignal = 0, skipped = 0, errors = 0, quotaExhausted = false;
+  let enriched = 0, noSignal = 0, skipped = 0, errors = 0, quotaExhausted = false, transientStop = false;
   const details = [];
 
   for (const lead of leads) {
-    if (quotaExhausted) { skipped++; continue; }
+    if (quotaExhausted || transientStop) { skipped++; continue; }
     try {
       const r = await enrichColdLeadSignal(clientId, lead, tenantCfg);
       if (r.enriched) {
@@ -442,6 +452,11 @@ async function runColdPoolSignalEnrichment(clientId, opts = {}) {
         noSignal++;
       } else if (r.reason === 'brave_quota_exhausted') {
         quotaExhausted = true;
+        skipped++;
+      } else if (r.reason === 'transient_error') {
+        // API overloaded / rate-limited — stop the batch. Remaining leads would
+        // fail the same way; they keep their un-attempted state for the next run.
+        transientStop = true;
         skipped++;
       } else {
         skipped++;
@@ -462,7 +477,7 @@ async function runColdPoolSignalEnrichment(clientId, opts = {}) {
       [clientId, `cold_signal_enrichment_${dayKey}`, JSON.stringify({
         ran_at: new Date().toISOString(),
         processed: leads.length, enriched, no_signal: noSignal, skipped, errors,
-        quota_exhausted: quotaExhausted,
+        quota_exhausted: quotaExhausted, transient_stopped: transientStop,
       })]
     );
   } catch { /* non-critical */ }
@@ -471,8 +486,9 @@ async function runColdPoolSignalEnrichment(clientId, opts = {}) {
     processed: leads.length,
     enriched, no_signal: noSignal, skipped, errors,
     quota_exhausted: quotaExhausted,
+    transient_stopped: transientStop,
     details,
-    message: `Enriched ${enriched}/${leads.length} cold leads with a buying signal. ${noSignal} had no findable signal, ${skipped} skipped, ${errors} errors${quotaExhausted ? ' (Brave quota hit)' : ''}.`,
+    message: `Enriched ${enriched}/${leads.length} cold leads with a buying signal. ${noSignal} had no findable signal, ${skipped} skipped, ${errors} errors${quotaExhausted ? ' (Brave quota hit)' : ''}${transientStop ? ' (STOPPED EARLY: Anthropic API overloaded; un-attempted leads left for retry)' : ''}.`,
   };
 }
 
