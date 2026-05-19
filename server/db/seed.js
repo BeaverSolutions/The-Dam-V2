@@ -3,7 +3,9 @@ const bcrypt = require('bcrypt');
 const pool = require('./pool');
 const logger = require('../utils/logger');
 
-const SEED_PASSWORD = '***REMOVED***';
+// No default — a hardcoded seed password in source/git history is a credential
+// leak (audit A7-20). The seed only runs manually; require it explicitly.
+const SEED_PASSWORD = process.env.SEED_PASSWORD;
 const SALT_ROUNDS = 12;
 
 // Fixed UUIDs — stable across DB resets so JWTs stay valid
@@ -35,6 +37,9 @@ async function runSeed() {
     return;
   }
 
+  if (!SEED_PASSWORD) {
+    throw new Error('SEED_PASSWORD env var is required to run the seed (no hardcoded default).');
+  }
   logger.info({ msg: 'Running seed data...' });
   const passwordHash = await bcrypt.hash(SEED_PASSWORD, SALT_ROUNDS);
 
