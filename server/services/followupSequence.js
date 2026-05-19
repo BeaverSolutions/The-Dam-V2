@@ -209,6 +209,8 @@ async function getDueFollowUps(clientId) {
        AND fq.scheduled_for <= $2
        AND fq.status = 'pending'
        AND l.sequence_status = 'active'
+       AND l.last_reply_at IS NULL
+       AND l.deleted_at IS NULL
      ORDER BY fq.scheduled_for ASC`,
     [clientId, today]
   );

@@ -74,7 +74,11 @@ async function checkRepliesForClient(clientId) {
       if (msg.lead_id) {
         await pool.query(
           `UPDATE leads
-           SET last_reply_at = NOW(), pipeline_stage = 'qualifying', updated_at = NOW()
+           SET last_reply_at = NOW(),
+               pipeline_stage = CASE
+                 WHEN pipeline_stage IN ('meeting_booked', 'booked', 'closed_won', 'closed_lost')
+                 THEN pipeline_stage ELSE 'qualifying' END,
+               updated_at = NOW()
            WHERE id = $1 AND client_id = $2`,
           [msg.lead_id, clientId]
         );
