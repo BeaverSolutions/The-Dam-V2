@@ -45,6 +45,22 @@ async function requireInternalKey(req, res, next) {
   next();
 }
 
+// Resolve the client IDs the autonomous system may fan out to. Honours the
+// AUTONOMOUS_ENABLED_CLIENTS slug whitelist (audit A6-1/A6-2: /kickoff-all and
+// /weekly-review previously fanned out to EVERY client, ignoring the gate).
+// When the whitelist is unset, returns all clients — preserves single-tenant
+// behaviour today; the moment a 2nd tenant onboards, set the env var.
+async function getEnabledClientIds() {
+  const whitelist = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  if (whitelist.length > 0) {
+    const { rows } = await pool.query('SELECT id FROM clients WHERE slug = ANY($1)', [whitelist]);
+    return rows.map(r => r.id);
+  }
+  const { rows } = await pool.query('SELECT id FROM clients');
+  return rows.map(r => r.id);
+}
+
 // Defense-in-depth: apply auth at router level so no future route skips it.
 router.use(requireInternalKey);
 
@@ -495,22 +511,20 @@ router.post('/kickoff-all', requireInternalKey, async (req, res) => {
     }
   }
 
-  const { rows: clients } = await pool.query(
-    `SELECT id FROM clients`
-  );
+  const clientIds = await getEnabledClientIds();
 
   res.json({
     data: {
       status: 'kickoff_started',
-      clients: clients.length,
+      clients: clientIds.length,
       forced: force,
     },
   });
 
-  for (const client of clients) {
-    runWithClientContext(client.id, () =>
-      runAutonomousKickoff(client.id).catch(err =>
-        console.error(`[Autonomous] Kickoff failed for ${client.id}:`, err.message)
+  for (const clientId of clientIds) {
+    runWithClientContext(clientId, () =>
+      runAutonomousKickoff(clientId).catch(err =>
+        console.error(`[Autonomous] Kickoff failed for ${clientId}:`, err.message)
       )
     );
   }
@@ -521,14 +535,12 @@ router.post('/kickoff-all', requireInternalKey, async (req, res) => {
 router.post('/weekly-review', requireInternalKey, async (req, res) => {
   res.json({ data: { status: 'weekly_review_started' } });
 
-  const { rows: clients } = await pool.query(
-    `SELECT id FROM clients`
-  );
+  const clientIds = await getEnabledClientIds();
 
-  for (const client of clients) {
-    runWithClientContext(client.id, () =>
-      runWeeklyReview(client.id).catch(err =>
-        console.error(`[Weekly Review] Failed for ${client.id}:`, err.message)
+  for (const clientId of clientIds) {
+    runWithClientContext(clientId, () =>
+      runWeeklyReview(clientId).catch(err =>
+        console.error(`[Weekly Review] Failed for ${clientId}:`, err.message)
       )
     );
   }
@@ -2170,15 +2182,21 @@ async function logAction(clientId, agent, action, targetType, targetId, metadata
 
 /* ─── GET /api/autonomous/hourly-stats ──────────────────── */
 // Returns aggregated pipeline stats for the hourly Telegram report.
-// No client_id required — aggregates across all tenants (internal tool).
+// Optional ?client_id=UUID — when supplied, every stat is scoped to that
+// tenant (audit A6-3). When omitted, aggregates across all tenants (internal
+// MJ-only report). The router-level guard already validates the UUID format.
 
 router.get('/hourly-stats', requireInternalKey, async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
+    const clientId = req.query.client_id || null; // null → all tenants
 
     const [pending, channelStats, aa, ar, failed, leadStats, patternRows] = await Promise.all([
       pool.query(
-        `SELECT COUNT(*)::int AS c FROM approvals WHERE status='pending' AND (notes IS NULL OR notes != 'linkedin_requested')`
+        `SELECT COUNT(*)::int AS c FROM approvals
+         WHERE status='pending' AND (notes IS NULL OR notes != 'linkedin_requested')
+           AND ($1::uuid IS NULL OR client_id = $1::uuid)`,
+        [clientId]
       ),
       pool.query(
         `SELECT
@@ -2188,26 +2206,44 @@ router.get('/hourly-stats', requireInternalKey, async (req, res) => {
            COUNT(*) FILTER (WHERE channel = 'linkedin' AND status IN ('sent','approved','pending_send') AND created_at::date = CURRENT_DATE)::int AS li_sent,
            COUNT(*) FILTER (WHERE channel = 'linkedin' AND status IN ('pending_approval','linkedin_requested') AND created_at::date = CURRENT_DATE)::int AS li_pending,
            COUNT(*) FILTER (WHERE channel = 'linkedin' AND status = 'replied')::int AS li_replied
-         FROM messages`
+         FROM messages
+         WHERE ($1::uuid IS NULL OR client_id = $1::uuid)`,
+        [clientId]
       ),
       pool.query(
-        `SELECT COUNT(*)::int AS c FROM approval_audit WHERE decision='approved' AND created_at::date = CURRENT_DATE`
+        `SELECT COUNT(*)::int AS c FROM approval_audit
+         WHERE decision='approved' AND created_at::date = CURRENT_DATE
+           AND ($1::uuid IS NULL OR client_id = $1::uuid)`,
+        [clientId]
       ).catch(() => ({ rows: [{ c: 0 }] })),
       pool.query(
-        `SELECT COUNT(*)::int AS c FROM approval_audit WHERE decision='rejected' AND created_at::date = CURRENT_DATE`
+        `SELECT COUNT(*)::int AS c FROM approval_audit
+         WHERE decision='rejected' AND created_at::date = CURRENT_DATE
+           AND ($1::uuid IS NULL OR client_id = $1::uuid)`,
+        [clientId]
       ).catch(() => ({ rows: [{ c: 0 }] })),
       pool.query(
-        `SELECT COUNT(*)::int AS c FROM messages WHERE status='failed' AND updated_at > NOW() - INTERVAL '1 hour'`
+        `SELECT COUNT(*)::int AS c FROM messages
+         WHERE status='failed' AND updated_at > NOW() - INTERVAL '1 hour'
+           AND ($1::uuid IS NULL OR client_id = $1::uuid)`,
+        [clientId]
       ),
       pool.query(
         `SELECT
            COUNT(*)::int AS total,
            COUNT(*) FILTER (WHERE metadata->>'outreach_route' = 'email')::int AS email_route,
            COUNT(*) FILTER (WHERE metadata->>'outreach_route' = 'linkedin')::int AS linkedin_route
-         FROM leads WHERE created_at::date = CURRENT_DATE AND deleted_at IS NULL`
+         FROM leads
+         WHERE created_at::date = CURRENT_DATE AND deleted_at IS NULL
+           AND ($1::uuid IS NULL OR client_id = $1::uuid)`,
+        [clientId]
       ),
       pool.query(
-        `SELECT content FROM agent_memory WHERE agent = 'research_beaver' AND key = 'email_patterns_verified' LIMIT 1`
+        `SELECT content FROM agent_memory
+         WHERE agent = 'research_beaver' AND key = 'email_patterns_verified'
+           AND ($1::uuid IS NULL OR client_id = $1::uuid)
+         LIMIT 1`,
+        [clientId]
       ).catch(() => ({ rows: [] })),
     ]);
 
