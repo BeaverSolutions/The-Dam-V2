@@ -561,7 +561,12 @@ async function start() {
       ).catch(() => {});
 
       const chatId = process.env.TELEGRAM_CHAT_ID;
-      if (!chatId) return;
+      if (!chatId) {
+        // A4-11: never exit silently — a missing chat ID suppresses a scheduled
+        // Captain brief while jobHealth still reports the job 'ok'.
+        console.warn('[captain] TELEGRAM_CHAT_ID not set — a scheduled brief was suppressed; no Telegram message will reach MJ');
+        return;
+      }
 
       try {
         const { rows: [clientRow] } = await pool.query(
@@ -627,7 +632,12 @@ async function start() {
       ).catch(() => {});
 
       const chatId = process.env.TELEGRAM_CHAT_ID;
-      if (!chatId) return;
+      if (!chatId) {
+        // A4-11: never exit silently — a missing chat ID suppresses a scheduled
+        // Captain brief while jobHealth still reports the job 'ok'.
+        console.warn('[captain] TELEGRAM_CHAT_ID not set — a scheduled brief was suppressed; no Telegram message will reach MJ');
+        return;
+      }
 
       try {
         const { rows: [clientRow] } = await pool.query(
@@ -781,7 +791,12 @@ async function start() {
       if (rows.length > 0) return;
 
       const chatId = process.env.TELEGRAM_CHAT_ID;
-      if (!chatId) return;
+      if (!chatId) {
+        // A4-11: never exit silently — a missing chat ID suppresses a scheduled
+        // Captain brief while jobHealth still reports the job 'ok'.
+        console.warn('[captain] TELEGRAM_CHAT_ID not set — a scheduled brief was suppressed; no Telegram message will reach MJ');
+        return;
+      }
       const { rows: [clientRow] } = await pool.query(
         `SELECT id FROM clients WHERE slug = $1 LIMIT 1`,
         [process.env.TELEGRAM_CLIENT_SLUG || 'beaver-solutions']

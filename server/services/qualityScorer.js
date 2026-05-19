@@ -43,6 +43,28 @@ function scoreSignal(lead, signalPreferences) {
   const recencyDays = Number(meta.signal_recency_days);
 
   if (!signalType) {
+    // A2-4: a lead can carry a real, verifiable signal (meta.signal / why_now
+    // text) without a categorised signal_type — the Brave signal-search path
+    // and some enrichment paths set the text but not the type. Credit it at
+    // the neutral tenant weight rather than scoring the whole dimension 0.
+    const hasSignalText =
+      (meta.signal && String(meta.signal).trim().length > 10) ||
+      (meta.why_now && String(meta.why_now).trim().length > 10);
+    if (hasSignalText) {
+      let d = 1.0;
+      if (Number.isFinite(recencyDays) && recencyDays >= 0) {
+        d = Math.max(0, 1 - (recencyDays / SIGNAL_DECAY_MAX_DAYS));
+      }
+      const sm = Number.isFinite(signalStrength) ? Math.max(0, Math.min(1, signalStrength)) : 1.0;
+      return {
+        raw: Math.round(0.5 * d * sm * 100),
+        signal_type: 'uncategorised',
+        tenant_weight: 0.5,
+        decay: Number(d.toFixed(2)),
+        strength_mult: sm,
+        reason: 'signal_text_no_type',
+      };
+    }
     return { raw: 0, reason: 'no_signal' };
   }
 
