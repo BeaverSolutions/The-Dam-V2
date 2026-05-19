@@ -98,6 +98,7 @@ export default function Import() {
   const [result, setResult] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [fileName, setFileName] = useState('');
+  const [error, setError] = useState(null); // A9-01: was used but never declared → crash on import failure
 
   const handleFile = (file) => {
     if (!file || !file.name.endsWith('.csv')) return;
@@ -121,6 +122,7 @@ export default function Import() {
   };
 
   const handleImport = async () => {
+    setError(null);
     if (rows.length > 500) {
       setError('Max 500 rows allowed per import');
       return;
@@ -300,6 +302,11 @@ export default function Import() {
             {!mapping.name && !mapping.company && (
               <div style={{ fontSize: '0.75rem', color: 'var(--orange)', marginTop: '0.5rem', textAlign: 'center' }}>
                 Map at least Name or Company to continue
+              </div>
+            )}
+            {error && (
+              <div style={{ fontSize: '0.8rem', color: 'var(--red, #ff4444)', marginTop: '0.75rem', textAlign: 'center' }}>
+                {error}
               </div>
             )}
           </div>

@@ -27,7 +27,7 @@ const PIPELINE_STAGES = [
   { key: 'prospecting', label: 'Prospecting', color: 'var(--blue)' },
   { key: 'outreach',    label: 'Outreach',    color: 'var(--lime)' },
   { key: 'qualifying',  label: 'Qualifying',  color: 'var(--orange)' },
-  { key: 'booked',      label: 'Booked',      color: 'var(--purple)' },
+  { key: 'meeting_booked', label: 'Booked',   color: 'var(--purple)' }, // A9-03: DB pipeline_stage is 'meeting_booked', not 'booked'
 ];
 
 /* ─── Helpers ────────────────────────────────────────────── */

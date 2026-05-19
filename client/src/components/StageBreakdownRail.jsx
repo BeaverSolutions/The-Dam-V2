@@ -15,7 +15,7 @@ const STAGES = [
   { key: 'prospecting', label: 'Prospecting', color: '#00B4FF' },
   { key: 'outreach',    label: 'Outreach',    color: '#FF8C00' },
   { key: 'qualifying',  label: 'Qualifying',  color: '#A855F7' },
-  { key: 'booked',      label: 'Booked',      color: '#C8FF00' },
+  { key: 'meeting_booked', label: 'Booked',   color: '#C8FF00' }, // A9-25: DB pipeline_stage is 'meeting_booked', not 'booked'
 ];
 
 const SENTIMENT_META = [

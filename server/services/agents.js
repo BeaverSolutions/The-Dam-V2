@@ -371,6 +371,30 @@ async function getRangerRejectionPatterns(clientId) {
 }
 
 /**
+ * A8-6: Pull the Enforcer's latest weekly teaching note. runEnforcerTeaching
+ * writes one to agent_memory (agent='ranger', key=enforcer_teaching_<week>)
+ * every Sunday, but nothing ever consumed it — the "sharpen the clone" loop was
+ * dead. Sales Beaver now folds the most recent note into its draft prompt.
+ * Returns the plain-text note, or null if none / skipped / LLM-failed.
+ */
+async function getEnforcerTeachingNote(clientId) {
+  try {
+    const res = await pool.query(
+      `SELECT content FROM agent_memory
+       WHERE client_id = $1 AND agent = 'ranger' AND key LIKE 'enforcer_teaching_%'
+       ORDER BY updated_at DESC LIMIT 1`,
+      [clientId]
+    );
+    const content = res.rows[0]?.content;
+    if (!content) return null;
+    const parsed = typeof content === 'string' ? JSON.parse(content) : content;
+    return (parsed?.status === 'ok' && parsed?.teaching_note) ? parsed.teaching_note : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fix 6: Pull recent founder feedback (edits + rejections) from founder_feedback table.
  * Returns formatted few-shot examples showing how the founder corrects drafts.
  * Sales Beaver uses these to calibrate tone, length, and style.
@@ -703,7 +727,7 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
   if (callAgent) {
     try {
       const directivesSvc = require('./directives');
-      const [persona, fileConfig, rangerPatterns, salesDirectives, founderFeedback] = await Promise.all([
+      const [persona, fileConfig, rangerPatterns, salesDirectives, founderFeedback, teachingNote] = await Promise.all([
         getClientPersona(clientId),
         getClientConfig(clientId),
         // MEMORY: Load Ranger rejection patterns — brief Sales Beaver on what to avoid (Sprint 9)
@@ -714,6 +738,8 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         directivesSvc.readPendingDirectives(clientId, 'sales_beaver').catch(() => []),
         // Fix 6: Founder feedback — edit diffs + rejection reasons from MJ's corrections
         getFounderFeedback(clientId),
+        // A8-6: Enforcer's weekly teaching note — the "sharpen the clone" loop.
+        getEnforcerTeachingNote(clientId),
       ]);
       const personaContext = buildPersonaContext(persona);
       const fileContext = buildClientContext(fileConfig);
@@ -729,6 +755,14 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
       let founderFeedbackContext = '';
       if (founderFeedback?.length) {
         founderFeedbackContext = `\n\nFOUNDER FEEDBACK — the founder edited or rejected these drafts. Study these examples carefully and match the founder's preferred style, tone, and length:\n\n${founderFeedback.join('\n\n---\n\n')}`;
+      }
+
+      // A8-6: Enforcer's weekly teaching note — the Enforcer reviews a week of
+      // drafts and writes one tightening instruction. Folding it in here is the
+      // "sharpen the clone" loop: this week's drafts learn from last week's QA.
+      let teachingContext = '';
+      if (teachingNote) {
+        teachingContext = `\n\nENFORCER'S WEEKLY TEACHING NOTE — the QA agent's coaching from last week's reviews. Apply it:\n${teachingNote}`;
       }
 
       // Captain's directive injection — today's hot reject reasons + any other
@@ -771,7 +805,7 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         'sales_beaver',
         `Write a ${channel} outreach message for this lead: ${context}
 ${signOffInstruction}
-${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}${founderFeedbackContext}`,
+${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}${founderFeedbackContext}${teachingContext}`,
         { lead_id, channel, clientId }
       );
 
