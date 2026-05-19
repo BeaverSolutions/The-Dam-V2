@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { isAuthenticated, clearToken, setUser } from './utils/auth';
+import { isAuthenticated, clearToken, setUser, getUser } from './utils/auth';
 import Layout from './components/Layout';
 import Login from './pages/Login';
 import VerifyEmail from './pages/VerifyEmail';
@@ -22,6 +22,16 @@ import Join from './pages/Join';
 
 function PrivateRoute({ children }) {
   return isAuthenticated() ? children : <Navigate to="/login" replace />;
+}
+
+// Super-admin gate: the /admin panel manages ALL tenants. Only the
+// Beaver Solutions super-admin may reach it. Mirrors Layout.jsx's
+// isSuperAdmin — a regular client user typing /admin lands back on /.
+function AdminRoute({ children }) {
+  const user = getUser();
+  const isSuperAdmin = user?.role === 'admin' &&
+    (user?.client?.slug === 'beaver-solutions' || user?.client?.name?.toLowerCase().includes('beaver'));
+  return isSuperAdmin ? children : <Navigate to="/" replace />;
 }
 
 function AuthValidator({ children }) {
@@ -68,7 +78,7 @@ export default function App() {
           <Route path="memory" element={<Memory />} />
           <Route path="import" element={<Import />} />
           <Route path="settings" element={<Settings />} />
-          <Route path="admin" element={<Admin />} />
+          <Route path="admin" element={<AdminRoute><Admin /></AdminRoute>} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
