@@ -37,10 +37,27 @@ try {
   client = new Anthropic({
     apiKey: process.env.ANTHROPIC_API_KEY,
     timeout: CLAUDE_REQUEST_TIMEOUT_MS,
-    maxRetries: 2, // SDK default is 2; keep it explicit
+    maxRetries: 5, // bumped from 2 — ride short Anthropic overload (529) windows via the SDK's exponential backoff
   });
 } catch (err) {
   console.warn('[claude] Failed to initialise Anthropic client:', err.message);
+}
+
+// Detect an Anthropic overload / transient-capacity error (529 / 503 / "overloaded").
+function isOverloadError(err) {
+  const status = String(err?.status || '');
+  const type = String(err?.error?.type || err?.name || '');
+  const msg = String(err?.message || '');
+  return status === '529' || status === '503' || /overload/i.test(type) || /overload/i.test(msg);
+}
+
+// The fallback model for an overloaded tier. Anthropic capacity is per-model,
+// so a Haiku overload does not mean Sonnet is also overloaded. Mirrors
+// config/agents.js's MODELS env-var + default pattern.
+function pickFallbackModel(model) {
+  if (/haiku/i.test(model))  return process.env.MODEL_SONNET || 'claude-sonnet-4-6';
+  if (/sonnet/i.test(model)) return process.env.MODEL_HAIKU  || 'claude-haiku-4-5-20251001';
+  return null;
 }
 
 // ─── Execution-mode suffix ─────────────────────────────────────
@@ -113,35 +130,52 @@ async function callAgent(agentKey, userMessage, context = {}) {
     }
   }
 
+  // One request body, parametrised by model so an overloaded primary can be
+  // retried once on the fallback tier.
+  const buildRequest = (modelToUse) => ({
+    model: modelToUse,
+    max_tokens: maxTokens,
+    // Prompt caching: the system prompt is stable across thousands of calls
+    // per day. Marking it as ephemeral-cached means after the first call
+    // subsequent calls pay ~10% of input token cost for this block.
+    system: [
+      {
+        type: 'text',
+        text: resolveSystemPrompt(agentKey, agent.systemPrompt) + EXECUTION_MODE_SUFFIX,
+        cache_control: { type: 'ephemeral' },
+      },
+    ],
+    messages: [
+      { role: 'user', content: userMessage + contextStr },
+    ],
+  });
+
   let response;
+  let usedModel = model;
   const t0 = Date.now();
   try {
-    response = await client.messages.create({
-      model,
-      max_tokens: maxTokens,
-      // Prompt caching: the system prompt is stable across thousands of calls
-      // per day. Marking it as ephemeral-cached means after the first call
-      // subsequent calls pay ~10% of input token cost for this block.
-      // Requires ≥1024 tokens in the cached content; our agent prompts are
-      // all multi-KB so this is always active.
-      system: [
-        {
-          type: 'text',
-          text: resolveSystemPrompt(agentKey, agent.systemPrompt) + EXECUTION_MODE_SUFFIX,
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      messages: [
-        { role: 'user', content: userMessage + contextStr },
-      ],
-    });
+    response = await client.messages.create(buildRequest(model));
   } catch (err) {
     const elapsed = Date.now() - t0;
-    // Surface a clear error to callers. The SDK's APIError includes status + type.
     const status = err?.status || 'unknown';
     const type = err?.error?.type || err?.name || 'error';
-    console.warn(`[claude] ${agentKey} via ${model} failed after ${elapsed}ms: ${status} ${type} ${err?.message || ''}`);
-    throw err;
+    // The SDK already retried (maxRetries) with exponential backoff. If it's
+    // STILL an overload error, cross-fall to the other model tier ONCE — a
+    // 529 window on one tier rarely hits both. Non-overload errors throw as-is.
+    const fallback = isOverloadError(err) ? pickFallbackModel(model) : null;
+    if (fallback) {
+      console.warn(`[claude] ${agentKey} via ${model} overloaded after ${elapsed}ms — falling back to ${fallback}`);
+      try {
+        response = await client.messages.create(buildRequest(fallback));
+        usedModel = fallback;
+      } catch (err2) {
+        console.warn(`[claude] ${agentKey} fallback ${fallback} also failed: ${err2?.status || '?'} ${err2?.error?.type || err2?.name || 'error'} ${err2?.message || ''}`);
+        throw err2;
+      }
+    } else {
+      console.warn(`[claude] ${agentKey} via ${model} failed after ${elapsed}ms: ${status} ${type} ${err?.message || ''}`);
+      throw err;
+    }
   }
 
   // Usage telemetry — stdout for Railway logs, and persisted to llm_usage
@@ -151,13 +185,13 @@ async function callAgent(agentKey, userMessage, context = {}) {
   try {
     const u = response?.usage || {};
     console.log(
-      `[claude:usage] client=${clientId || 'n/a'} agent=${agentKey} model=${model} ` +
+      `[claude:usage] client=${clientId || 'n/a'} agent=${agentKey} model=${usedModel} ` +
       `in=${u.input_tokens || 0} out=${u.output_tokens || 0} ` +
       `cache_write=${u.cache_creation_input_tokens || 0} cache_read=${u.cache_read_input_tokens || 0} ` +
       `elapsed=${elapsedMs}ms`
     );
     // Persist to llm_usage (no await inside try — catch handles promise errors)
-    logUsage({ clientId, agent: agentKey, model, usage: u, elapsedMs })
+    logUsage({ clientId, agent: agentKey, model: usedModel, usage: u, elapsedMs })
       .catch(e => console.warn('[claude:usage] persist failed:', e.message));
   } catch { /* never break the caller on a logging failure */ }
 
