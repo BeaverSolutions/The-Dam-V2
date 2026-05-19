@@ -112,6 +112,25 @@ async function getClientBudget(clientId) {
 }
 
 /**
+ * Client's monthly budget in USD (A8-2). Per-tenant column clients.monthly_budget_usd
+ * (migration 070); falls back to the LLM_MONTHLY_BUDGET_USD env default if the row
+ * or column is missing — so a pre-070 DB still enforces a sane cap.
+ */
+async function getClientMonthlyBudget(clientId) {
+  if (!clientId) return Number.POSITIVE_INFINITY;
+  try {
+    const res = await pool.query(
+      `SELECT monthly_budget_usd::float AS budget FROM clients WHERE id = $1`,
+      [clientId]
+    );
+    return res.rows[0]?.budget ?? LLM_MONTHLY_BUDGET_USD;
+  } catch {
+    // Column not yet migrated — fall back to the global env default.
+    return LLM_MONTHLY_BUDGET_USD;
+  }
+}
+
+/**
  * Check if a client can make another Claude call. Enforces BOTH caps:
  *   - daily   — clients.daily_budget_usd
  *   - monthly — LLM_MONTHLY_BUDGET_USD (the budget MJ actually set)
@@ -134,12 +153,12 @@ async function checkBudget(clientId) {
       monthSpend: 0, monthBudget: Number.POSITIVE_INFINITY,
     };
   }
-  const [daySpend, dayBudget, monthSpend] = await Promise.all([
+  const [daySpend, dayBudget, monthSpend, monthBudget] = await Promise.all([
     getTodaySpend(clientId),
     getClientBudget(clientId),
     getMonthSpend(clientId),
+    getClientMonthlyBudget(clientId),
   ]);
-  const monthBudget = LLM_MONTHLY_BUDGET_USD;
 
   const dayOk = daySpend < dayBudget;
   const monthOk = monthSpend < monthBudget;
@@ -280,6 +299,7 @@ module.exports = {
   getTodaySpend,
   getMonthSpend,
   getClientBudget,
+  getClientMonthlyBudget,
   getMonthlyBudget,
   notifyBudgetExceeded,
   BudgetExceededError,
