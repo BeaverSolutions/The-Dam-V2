@@ -743,17 +743,6 @@ async function start() {
       if (enabledSlugs.length === 0) return;
 
       const dedupeKey = `daily_kickoff_${now.toISOString().slice(0, 10)}`;
-      const { rows: already } = await pool.query(
-        `SELECT 1 FROM agent_memory WHERE agent = 'captain' AND key = $1 LIMIT 1`,
-        [dedupeKey]
-      );
-      if (already.length > 0) return;
-
-      await pool.query(
-        `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
-         SELECT id, 'captain', $1, '"sent"'::jsonb, 'config' FROM clients WHERE slug = ANY($2)`,
-        [dedupeKey, enabledSlugs]
-      ).catch(() => {});
 
       // Defensive: only kickoff active+onboarded tenants. Inactive ones (no ICP
       // / no API keys configured) get explicitly disabled via clients.is_active.
@@ -763,10 +752,29 @@ async function start() {
       );
 
       // Notification policy (set 2026-05-03): user only gets Morning brief, EOD
-       // brief, and Captain-decided impromptu (escalateToMJ via stuck-state monitor).
-       // Daily kickoff fires the pipeline silently — no Telegram noise on start
-       // or per-client failure. Failures still hit server logs for ops visibility.
+      // brief, and Captain-decided impromptu (escalateToMJ via stuck-state monitor).
+      // Daily kickoff fires the pipeline silently — no Telegram noise on start
+      // or per-client failure. Failures still hit server logs for ops visibility.
+      //
+      // A4-26: dedupe is per-tenant. The old code checked one global row and
+      // wrote rows for every tenant up front — so a restart after the write but
+      // before tenant B fired left B's row present, and B silently missed its
+      // kickoff for the day. Each tenant now checks + marks its own row, and the
+      // mark happens BEFORE the kickoff so a crash can't cause a double-fire.
       for (const client of clients) {
+        const { rows: already } = await pool.query(
+          `SELECT 1 FROM agent_memory WHERE client_id = $1 AND agent = 'captain' AND key = $2 LIMIT 1`,
+          [client.id, dedupeKey]
+        );
+        if (already.length > 0) continue;
+
+        await pool.query(
+          `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+           VALUES ($1, 'captain', $2, '"sent"'::jsonb, 'config')
+           ON CONFLICT (client_id, agent, key) DO NOTHING`,
+          [client.id, dedupeKey]
+        ).catch(() => {});
+
         logger.info({ msg: `[daily-kickoff] Starting for ${client.slug}` });
         runWithClientContext(client.id, () =>
           runAutonomousKickoff(client.id).catch(err => {
@@ -776,12 +784,16 @@ async function start() {
       }
     }
 
-    // ── Captain EOD brief (19:00 MYT = 11:00 UTC) ────────────────────────────
+    // ── Captain EOD brief (19:20 MYT = 11:20 UTC) ────────────────────────────
+    // A4-7: fires AFTER the 11:00-11:10 daily agent reflections window, not in
+    // it. The EOD brief summarises the day from agent reflections; running in
+    // the same poll tick as runDailyAgentReflections risked reading them before
+    // they were written. The 11:20-11:30 window gives reflections a clear lead.
     async function runCaptainEodBrief() {
       const now = new Date();
       const utcHour = now.getUTCHours();
       const utcMin  = now.getUTCMinutes();
-      if (utcHour !== 11 || utcMin > 10) return; // 11:00-11:10 UTC = 19:00-19:10 MYT
+      if (utcHour !== 11 || utcMin < 20 || utcMin > 30) return; // 11:20-11:30 UTC = 19:20-19:30 MYT
 
       const dedupeKey = `eod_brief_${now.toISOString().slice(0, 10)}`;
       const { rows } = await pool.query(
@@ -826,11 +838,6 @@ async function start() {
       if (utcHour < 1 || utcHour > 11) return;
       // Only fire once per hour (10-min poll, self-dedupe via timestamp)
       const dedupeKey = `stuck_check_${now.toISOString().slice(0, 13)}`;
-      const { rows } = await pool.query(
-        `SELECT 1 FROM agent_memory WHERE agent = 'captain_orchestrator' AND key = $1 LIMIT 1`,
-        [dedupeKey]
-      );
-      if (rows.length > 0) return;
 
       const { rows: clients } = await pool.query(
         `SELECT id, slug FROM clients WHERE is_active = true AND onboarding_completed = true`
@@ -842,16 +849,26 @@ async function start() {
 
       for (const client of clients) {
         try {
-          const { issues } = await captain.detectStuckStates(client.id);
-          if (issues.length === 0) continue;
-
-          // Mark this hour as checked for this tenant
+          // A4-12: dedupe is per-tenant and marked BEFORE the work. The old code
+          // checked one global row and marked per-tenant AFTER firing tactical
+          // actions — a crash mid-loop left the hour unmarked, so a restart
+          // re-fired coaching directives. Check + mark this tenant's own row up
+          // front; a crash now costs one skipped hourly check, not a double-fire.
+          const { rows: already } = await pool.query(
+            `SELECT 1 FROM agent_memory
+             WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2 LIMIT 1`,
+            [client.id, dedupeKey]
+          );
+          if (already.length > 0) continue;
           await pool.query(
             `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
-             VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
+             VALUES ($1, 'captain_orchestrator', $2, '"checked"'::jsonb, 'config')
              ON CONFLICT (client_id, agent, key) DO NOTHING`,
-            [client.id, dedupeKey, JSON.stringify({ issues_count: issues.length })]
+            [client.id, dedupeKey]
           ).catch(() => {});
+
+          const { issues } = await captain.detectStuckStates(client.id);
+          if (issues.length === 0) continue;
 
           // Fire tactical responses for each issue
           for (const issue of issues) {
@@ -1057,8 +1074,11 @@ async function start() {
     async function runKpiGapKickoff() {
       const now = new Date();
       const utcHour = now.getUTCHours();
-      // 01:00-09:59 UTC = 09:00-17:59 MYT (stop before 18:00 — no late kickoffs)
-      if (utcHour < 1 || utcHour >= 10) return;
+      // 02:00-09:59 UTC = 10:00-17:59 MYT. Starts at 02:00 (not 01:00) so it
+      // never overlaps the 01:30 daily kickoff window — A4-6: at 01:30 the daily
+      // kickoff has fired but sent is still 0, so kpi-gap would see an unmet KPI
+      // and fire a SECOND kickoff before the first registers a cooldown log.
+      if (utcHour < 2 || utcHour >= 10) return;
 
       // 2026-05-12: relaxed minute window 0-9 → 0-29. With 10-min poll cadence,
       // the old window only landed if poll happened to align with :00-:09 of an

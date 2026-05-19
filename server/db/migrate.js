@@ -24,12 +24,20 @@ async function runMigrations() {
     `);
 
     const migrationDir = path.join(__dirname, 'migrations');
+    // Order migrations by their parsed numeric version, not by lexicographic
+    // filename sort (A7-7). A file whose prefix is not a number is skipped with
+    // a loud warning rather than silently parsed to NaN and mis-ordered.
     const files = fs.readdirSync(migrationDir)
       .filter(f => f.endsWith('.sql'))
-      .sort();
+      .map(f => ({ file: f, version: parseInt(f.split('_')[0], 10) }))
+      .filter(m => {
+        if (Number.isInteger(m.version)) return true;
+        logger.warn({ msg: `Skipping migration with non-numeric version prefix: ${m.file}` });
+        return false;
+      })
+      .sort((a, b) => a.version - b.version);
 
-    for (const file of files) {
-      const version = parseInt(file.split('_')[0], 10);
+    for (const { file, version } of files) {
       const existing = await client.query(
         'SELECT version FROM schema_migrations WHERE version = $1',
         [version]
