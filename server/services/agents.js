@@ -22,7 +22,7 @@ const { recordOutcome, attributionFromLead } = require('./outcomeTracker');
 // instructions and produced lower-quality drafts for the best leads. Both
 // pipeline paths now reference this single definition.
 const CHANNEL_HINTS = {
-  email: 'Write a cold email following the MANDATORY DAY 0 TEMPLATE exactly. Must have: subject line "{company_name} x {lead_company}", "Hi {first_name}," greeting, congratulation/hook paragraph, pain bridge paragraph, one question. NO formal sign-off and no "Regards," — end the body at the question; the system appends the signature deterministically. Under 80 words body.',
+  email: 'Write a cold email following the MANDATORY DAY 0 TEMPLATE exactly. Must have: subject line "{company_name} x {lead_company}", "Hi {first_name}," greeting, congratulation/hook paragraph, pain bridge paragraph, one question. Do NOT write your own sign-off — end the body at the question; the system appends the "Regards," / sender-name close deterministically. Under 80 words body.',
   linkedin: 'Write a SHORT LinkedIn DM (NOT an email). 2-3 sentences max, under 50 words total. No subject line. No greeting like "Hi Name,". No sign-off (no "Regards,", no name at end). Just a casual peer-to-peer message ending with one question.',
   instagram: 'Write a casual Instagram DM. 1-2 sentences, under 30 words. No greeting, no sign-off. Reference something about their company. End with a casual question. Most informal channel.',
 };
@@ -762,9 +762,6 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
       // Sender identity — resolved at template layer, NOT in prompt (ICP+channel patches per MJ direction 2026-04-29).
       // The LLM must not produce its own signature; we strip and re-append below.
       const senderName = resolveSenderName(clientId, persona);
-      // v1.0 rules: "No formal sign-offs. End with the question or with 'Michael'."
-      // The deterministic sign-off is the first name only — never "Regards,", never the full name.
-      const senderFirstName = String(senderName).trim().split(/\s+/)[0] || senderName;
 
       const signOffInstruction = channel === 'email'
         ? `\nDO NOT include any sign-off, signature, sender name, "Regards,", "Best,", "Cheers,", or your own name. The system appends the signature deterministically. End the body at the final question.`
@@ -821,7 +818,7 @@ ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}${found
           let stripped = finalBody.replace(SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '');
           stripped = stripped.replace(AGENT_NAME_STRIP_REGEX, '').replace(/\s+$/, '');
           finalBody = (channel === 'email')
-            ? `${stripped}\n\n${senderFirstName}`
+            ? `${stripped}\n\nRegards,\n${senderName}`
             : stripped;
         }
 
@@ -856,7 +853,7 @@ ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}${found
               // Two-pass strip (2026-05-06): SIGNOFF then AGENT_NAME catches "Bryan Beaver" tails.
               let stripped = stripEmDashes(extractedBody).replace(SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '');
               stripped = stripped.replace(AGENT_NAME_STRIP_REGEX, '').replace(/\s+$/, '');
-              return channel === 'email' ? `${stripped}\n\n${senderFirstName}` : stripped;
+              return channel === 'email' ? `${stripped}\n\nRegards,\n${senderName}` : stripped;
             })(),
             status:  'pending_ranger',
           };
@@ -874,7 +871,7 @@ ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}${found
               // Two-pass strip (2026-05-06): SIGNOFF then AGENT_NAME catches "Bryan Beaver" tails.
               let stripped = stripEmDashes(raw.trim()).replace(SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '');
               stripped = stripped.replace(AGENT_NAME_STRIP_REGEX, '').replace(/\s+$/, '');
-              return channel === 'email' ? `${stripped}\n\n${senderFirstName}` : stripped;
+              return channel === 'email' ? `${stripped}\n\nRegards,\n${senderName}` : stripped;
             })(),
             status:  'pending_ranger',
           };
@@ -1505,8 +1502,7 @@ async function rangerDraft(clientId, { lead_name, lead_company, lead_title, lead
     const personaContext = buildPersonaContext(persona);
     const fileContext = buildClientContext(fileConfig);
 
-    // v1.0 rules: sign-off is the first name only, never "Regards,".
-    const rangerSenderFirstName = String(resolveSenderName(clientId, persona)).trim().split(/\s+/)[0] || 'there';
+    const rangerSenderName = resolveSenderName(clientId, persona) || 'there';
     const result = await callAgent(
       'ranger',
       `Sales Beaver has failed your QA gate 3 times for this lead. You must now write the message yourself.
@@ -1532,9 +1528,9 @@ Write a Day 0 cold email that passes ALL your own gates:
 - Specific reference to a real signal about this company
 - Reads like a human, not a vendor
 - No banned phrases
-- End with the question. Then "${rangerSenderFirstName}" on its own line. NO formal sign-off — no "Regards,", "Best,", or "Cheers,".${personaContext}${fileContext}
+- Close the email with "Regards," on one line, then "${rangerSenderName}" on the next line.${personaContext}${fileContext}
 
-Return JSON only: {"subject":"Subject line (max 6 words, no em dashes)","body":"Full email: Hi [name] greeting, body, ends with the question then ${rangerSenderFirstName} on its own line, no Regards,"}`,
+Return JSON only: {"subject":"Subject line (max 6 words, no em dashes)","body":"Full email: Hi [name] greeting, body, one question, then close with Regards, then ${rangerSenderName}"}`,
       { mode: 'ranger_draft', lead_name, lead_company }
     );
 

@@ -147,8 +147,8 @@ Trigger: hire event. Path B. Question: "X%" or rough range — 1-3 words. Pain a
 - No vendor-speak ("we help teams like yours", "leverage", "we work with").
 - No qualification questions ("do you do outbound?") — assume they do, ask HOW.
 - No soft CTAs ("worth a chat", "15 minutes this week", "happy to jump on a call") on first or second message.
-- No formal sign-offs. End with the question or with "Michael".
-- Sign as Michael, never MJ.
+- Sign-off is CHANNEL-SPECIFIC. LinkedIn / Instagram / WhatsApp DMs: NO sign-off — end on the question. Email (cold AND follow-up): ALWAYS close with "Regards," on one line, then the sender name "Michael Jerry" on the next line. This is the standard, polite SEA business-email close and is REQUIRED on every email — the Enforcer must PASS an email that ends this way and REJECT an email missing it.
+- Never sign with the abbreviation "MJ".
 - No bullet points inside prospect-facing messages.
 - Malaysian tone: warm + direct.
 
@@ -343,8 +343,8 @@ If unclear by meeting time, use the meeting to find out. If none are true after 
 - Short sentences, WhatsApp-style, not email-newsletter
 - No em dashes
 - No bullet points in prospect-facing messages
-- No formal sign-offs. End with the question or with "Michael".
-- Sign as Michael, never MJ
+- Sign-off is CHANNEL-SPECIFIC. DMs (LinkedIn / Instagram / WhatsApp): no sign-off, end on the question. Email (cold AND follow-up): ALWAYS close with "Regards," then the sender name "Michael Jerry" on the next line.
+- Never sign with the abbreviation "MJ"
 - Malaysian tone: warm + direct
 
 ---

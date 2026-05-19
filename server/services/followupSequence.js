@@ -437,9 +437,10 @@ Hi ${lead.name?.split(' ')[0] || 'there'},
 
 {body — max ${config.maxWords} words. Must contain all 4 parts: reference/trigger, insight, 1-3-word-answerable diagnostic Q, opt-out clause.}
 
-Michael
+Regards,
+Michael Jerry
 
-HARD RULES: No em dashes (—). Max 1 question mark. No bullets. Sign-off is "Michael" alone on a line — NO "Regards,", NO "Best,", NO "Cheers,", NO comma sign-off line.`
+HARD RULES: No em dashes (—). Max 1 question mark. No bullets. Email ALWAYS closes with "Regards," on one line then "Michael Jerry" on the next line, exactly as shown above.`
     : `FORMAT (${channel} DM follow-up):
 {body — max ${config.maxWords} words. Must contain all 4 parts: reference/trigger, insight, 1-3-word-answerable diagnostic Q, opt-out clause. Casual tone. No greeting line. Name "Michael" only if natural at end.}
 
@@ -475,13 +476,13 @@ BANNED PHRASES (instant regenerate — case-insensitive):
 - "Most founders" / "Most [role]s I talk to" / "Most [persona] I come across" (cold-tell)
 - "quick favor" / "quick ask"
 - "Hope this finds you well" / "Hope you're doing well" / "Hope all is well"
-- Formal sign-offs: "Regards,", "Best regards,", "Sincerely,", "Cheers,"
+${channel === 'email' ? '- Sign-off: the email close is "Regards," then "Michael Jerry" (see FORMAT above). No other closing words.' : '- Formal sign-offs: "Regards,", "Best regards,", "Sincerely,", "Cheers," (DM follow-ups end on the question, no sign-off)'}
 
 OTHER HARD RULES:
 - ANTI-FABRICATION: Every company name, product, role, or fact MUST come from LEAD context or PREVIOUS MESSAGES. Lead context "Unknown" → return needs_more_research.
 - NO STATS OR NUMBERS: No percentage, statistic, or numeric benchmark in follow-ups. The cold message owned the stat — follow-ups don't repeat them.
 - ANTI-REPETITION: NEVER reuse a hook, angle, pain point, or phrase from PREVIOUS MESSAGES. Each touch is a new thought, not a rephrased version of the last.
-- SENDER IDENTITY: Sign as "Michael". Never "The Team", never "Sales Beaver", never the lead's name.
+- SENDER IDENTITY: ${channel === 'email' ? 'The email closes with "Regards," then "Michael Jerry" (see FORMAT).' : 'Sign as "Michael" only if natural at the end, otherwise end on the question.'} Never "The Team", never "Sales Beaver", never the lead's name, never the abbreviation "MJ".
 - If you cannot write a non-fabricated follow-up with the context provided, return: {"status":"needs_more_research","missing_fields":["<what's missing>"],"reason":"Insufficient context for non-fabricated follow-up."}
 
 LEAD:
