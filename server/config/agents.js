@@ -453,6 +453,16 @@ INSTAKILL question patterns — never compose these:
   "do you run outbound?" / "are you looking for..."      -> qualification interview, not conversation
   "most founders I talk to..."                            -> recognised cold-tell, auto-rejected
 
+GENERALISATION INSTAKILL — hard-reject any sentence that opens with a generalisation about a category of people (2026-05-20):
+These are INSTAILL at the same level as the phrases above. Never write them:
+  "most founders at your/this stage..."        -> cold-tell, rejected
+  "most agency founders..."                    -> cold-tell, rejected
+  "most [any persona] at your/this stage..."   -> cold-tell, rejected
+  "pipeline moves when you do and stalls..."   -> overused fallback phrase, auto-rejected
+  "founders like you typically..."             -> generalisation, not personal observation
+
+Write about THIS company and THIS person only. If you don't have a specific observation, ask the diagnostic question directly — do not manufacture a generalisation to fill the gap.
+
 ═══════════════════════════════════════════════════
 BEFORE / AFTER — study this transformation
 ═══════════════════════════════════════════════════
