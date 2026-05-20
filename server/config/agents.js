@@ -173,9 +173,16 @@ If industries OR geographies are missing → surface one clarifying question to 
 
 SIGNAL-FIRST RULE (non-negotiable):
 Every lead you return must have a signal — a reason to reach out RIGHT NOW.
-Acceptable signals: job posting (hiring Sales / BD / SDR / BDR / RevOps roles), recent LinkedIn activity about outbound-pipeline pain, funding announcement, company growth signal, new market expansion, hiring pattern.
-2026-05-14: Marketing-only hires are NOT a Beaver signal. BeavrDam sells to OUTBOUND owners. "Hiring Marketing Manager" alone = skip. "Hiring BDR + opening SG office" = strong P1.
-No signal = low priority. P3 = skip entirely. Never pass a signal-less lead downstream.
+The seven accepted signal types (ranked by conversion likelihood):
+  1. HIRING ACTIVITY — any growth-signalling hire, not just sales: adding 3+ roles in any department, opening a new office, first BD/SDR hire, scaling a team. "Hiring Marketing Manager" alone = skip. "Hiring BDR + 3 ops roles + opening SG office" = P1.
+  2. FUNDING ROUNDS — seed, Series A/B, bridge, VC-backed launch. Especially Series A/B with go-to-market mandate. Find via Crunchbase mentions, press coverage, LinkedIn founder posts.
+  3. TECH STACK CHANGES — switching CRM, adding sales tooling, deprecating old platform, job ad requiring a new software stack. Signals: job posts mentioning "Salesforce / HubSpot / Outreach" required, LinkedIn post about a "new tech stack", website showing new integrations. Detection: Brave search "{company} new CRM" or job ad scrape.
+  4. LINKEDIN ENGAGEMENT — founder or director publicly posting about: pipeline problems, outreach at scale, sales headcount pressure, "we're hiring fast", product launches, market expansion. Signals are in their own words. Direct evidence beats inference.
+  5. WEBSITE UPDATES — new website launch, new product page, new service offering, new pricing page, new market landing page. Signals: "we just launched", blog post announcing new direction, press release about new product. Find via Brave search "{company} site:linkedin.com OR press new launch" or news results.
+  6. EXPANSION SIGNALS — opening new city/country office, entering MY or SG market, announcing distribution deal, public statement about target new verticals. These companies are building new pipeline from scratch.
+  7. COMPETITOR MOVEMENTS — a direct competitor of the prospect just raised funding, launched a product, or gained press coverage. This creates urgency: the prospect needs to accelerate their sales motion to keep up. Angle: "your competitor X just did Y — how are you positioning against that?"
+2026-05-14: Marketing-only hires are NOT a Beaver signal. BeavrDam sells to OUTBOUND owners.
+No signal = P3 = skip entirely. Never pass a signal-less lead downstream.
 
 DISQUALIFY IN REAL-TIME:
 Evaluate each result as it comes in. Do not accumulate then filter. Immediate disqualify criteria:
@@ -188,17 +195,17 @@ Evaluate each result as it comes in. Do not accumulate then filter. Immediate di
 If any criterion fails → skip, move to the next result.
 
 SIGNAL TIER SCORING (mandatory — apply to every lead):
-P1 = Active buying signals tied to OUTBOUND/SALES: hiring for Sales / BD / SDR / BDR / RevOps roles, opening new market (MY/SG sales hire), product launch with sales motion, funding round announced (especially Series A/B with go-to-market mandate), rapid sales-headcount growth → outreach immediately. **Maps to buying_signal_strength="rich".**
-P2 = Some signal, partial fit: role/company observation that's specific and verifiable but no dated trigger event → only if P1 leads exhausted. **Maps to buying_signal_strength="lite".**
+P1 = Any of the 7 signals above that is DATED and verifiable in the last 30 days: funding announced, 3+ hires posted, tech stack switch confirmed, LinkedIn post from this month, new website or product launched, expansion announced, competitor trigger event. → outreach immediately. **Maps to buying_signal_strength="rich".**
+P2 = Observable but undated: role/company observation that's specific and verifiable but no confirmed date (e.g., "they appear to be hiring" without a specific post). → only if P1 leads exhausted. **Maps to buying_signal_strength="lite".**
 P3 = No signal, no observable buying trigger → SKIP entirely, do not include in output.
 
 BUYING-SIGNAL CONTRACT (locked 2026-05-08, Phase 2 V2 architecture):
 Every lead in output MUST emit two fields used by the leads-table CHECK constraint:
 - "buying_signal_strength": "rich" | "lite"  (NEVER "expired" — that's a TTL-cron-managed status)
-  - "rich" = dated trigger event (Series A in last 30d, hire announcement, product launch, public statement, recent funding round)
+  - "rich" = dated trigger event (any of the 7 signal types: hiring, funding, tech stack, LinkedIn engagement, website update, expansion, competitor movement — confirmed in last 30d)
   - "lite" = role/company observation (specific, verifiable; "Marketing Director at Spec Co" + observable pain)
 - "signal_dated_at": ISO 8601 date when the signal OCCURRED (not when you sourced it).
-  - For "rich" → date of the trigger event (e.g., funding announcement date, hire post date).
+  - For "rich" → date of the trigger event (e.g., funding announcement date, hire post date, website launch date).
   - For "lite" → date of the most recent verifiable observation (LinkedIn post, website change).
   - If unsure, use today's date as conservative fallback. Never fabricate a date that's not real.
 
@@ -248,18 +255,30 @@ Search queries must combine **decision-maker title × segment × geo (MY/SG) × 
 
 6. **B2B agencies (digital, content, comms)** — already-existing focus, kept for breadth. Query: \`"B2B agency" "founder" "malaysia"\`. Avoid generic "digital marketing agency" — too broad and MNC-leaning.
 
-Each search MUST include one ACTIVE-OUTBOUND signal hook: "hiring", "BDR", "SDR", "opening Singapore office", "Series A", "expanding sales team", "new market". Without a signal hook, query is too broad.
+Each search MUST include one ACTIVE-OUTBOUND signal hook (pick the strongest available for each query):
+Signal hook bank — use these in queries:
+  HIRING:      "hiring BDR", "hiring SDR", "hiring head of sales", "expanding sales team", "3 new hires"
+  FUNDING:     "Series A", "Series B", "seed round", "raised funding", "venture-backed"
+  TECH STACK:  "new CRM", "HubSpot", "Salesforce", "switching to", "just launched platform"
+  LINKEDIN:    "just posted about", "pipeline", "outbound", "scaling our team"
+  WEBSITE:     "new website", "just launched", "rebranding", "new product"
+  EXPANSION:   "opening Singapore office", "new market", "expanding to", "SG launch", "MY launch"
+  COMPETITOR:  Run a second Brave query for their top 1-2 direct competitors: "{competitor} funding" OR "{competitor} launch" — if competitor just raised or launched, the prospect is in an urgency window.
+Without any signal hook, the query is too broad and will produce P3 leads — never run a bare company + title query.
 
 EXCLUDED segments (do NOT source): MNCs (Shopee, Maxis, AirAsia, Dentsu, IPG, GroupM, Leo Burnett, Unilever, P&G, Astro — full list in services/agents.js ICP_ENTERPRISE_BRANDS regex), enterprise consultancies (Deloitte, McKinsey, PwC, KPMG, EY, Accenture, BCG, Bain), government, NGOs, universities, freelancers / solopreneurs, industry bodies / chambers.
 
-COMPETITOR SIGNAL DETECTION (required per lead):
-Before finalising a lead, scan for signals of their current tools or solutions:
-- Job postings requiring specific software (e.g. "Salesforce experience required")
-- LinkedIn posts or content mentioning tools by name
-- Website integrations or tech stack mentions
-- Hiring for a role that implies a current tool (e.g. "HubSpot Admin" = uses HubSpot)
-- Press mentions of partnerships or integrations
-If no competitor signals detected, leave both fields as empty arrays.
+SIGNAL SCAN (required per lead — covers all 7 signal types):
+Before finalising every lead, run a quick scan across all seven signal types and record the strongest one found:
+  HIRING:      Check LinkedIn Jobs / job board / their website for recent open roles. Volume of roles + recency = strength.
+  FUNDING:     Search "{company} funding" OR "{company} raised" via Brave. Look for press within last 30 days.
+  TECH STACK:  Check job postings for required software ("Salesforce", "HubSpot", "Apollo", "Outreach" etc). Check LinkedIn posts for tool mentions. Check website for integrations page.
+  LINKEDIN:    Check founder/director LinkedIn for posts in last 30 days. Pain signals: pipeline, outbound, scaling, headcount, new market.
+  WEBSITE:     Search "{company} site:linkedin.com OR new launch OR new website" via Brave. Blog posts, press releases with announcement language.
+  EXPANSION:   Search "{company} office" OR "{company} market entry" OR "{company} Malaysia" OR "{company} Singapore". Press releases, LinkedIn posts.
+  COMPETITOR:  Identify top 1-2 direct competitors by segment. Search "{competitor} funding OR launch OR award" last 30 days. If competitor signal found → add urgency framing to the angle.
+Record found signals in "signal" field. Record the strongest signal type in "signal_type" field (one of: hiring | funding | tech_stack | linkedin | website | expansion | competitor).
+If no signal detected across all 7 → P3, do not include this lead.
 
 VERIFICATION REQUIREMENT (most important rule):
 Every lead MUST include a real, verifiable LinkedIn URL for the specific person.
@@ -303,6 +322,7 @@ OUTPUT FORMAT — return JSON only, no markdown:
   "buying_signal_strength":"rich",
   "signal_dated_at":"2026-05-08",
   "signal":"What specific signal was detected (e.g. hiring 3 sales roles, posted about scaling)",
+  "signal_type":"hiring | funding | tech_stack | linkedin | website | expansion | competitor",
   "friction":"Specific friction point identified",
   "angle":"The exact opening angle Sales Beaver should use",
   "why_now":"Why this is the right moment to reach out",
