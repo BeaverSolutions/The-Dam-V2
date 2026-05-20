@@ -56,14 +56,14 @@ router.get('/stats', async (req, res, next) => {
             SELECT COUNT(*) AS total FROM logs
             WHERE client_id = $1
               AND agent = 'ranger'
-              AND action IN ('message_approved', 'message_rejected')
+              AND action = 'ranger_review'
               AND created_at >= NOW() - INTERVAL '7 days'
           ),
           enforcer_passed_7d AS (
             SELECT COUNT(*) AS total FROM logs
             WHERE client_id = $1
-              AND agent = 'ranger'
-              AND action = 'message_approved'
+              AND ((agent = 'enforcer_beaver' AND action = 'message_auto_approved')
+                OR (agent = 'system'          AND action = 'user_approved_message'))
               AND created_at >= NOW() - INTERVAL '7 days'
           ),
           sentiment_counts AS (
@@ -120,14 +120,14 @@ router.get('/stats', async (req, res, next) => {
             SELECT COUNT(*) AS total FROM logs
             WHERE client_id = $1
               AND agent = 'ranger'
-              AND action IN ('message_approved', 'message_rejected')
+              AND action = 'ranger_review'
               AND created_at >= date_trunc('week', CURRENT_DATE)
           ),
           passed_this_week AS (
             SELECT COUNT(*) AS total FROM logs
             WHERE client_id = $1
-              AND agent = 'ranger'
-              AND action = 'message_approved'
+              AND ((agent = 'enforcer_beaver' AND action = 'message_auto_approved')
+                OR (agent = 'system'          AND action = 'user_approved_message'))
               AND created_at >= date_trunc('week', CURRENT_DATE)
           )
         SELECT
