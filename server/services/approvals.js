@@ -162,8 +162,8 @@ async function resolveApproval(clientId, approvalId, { status, notes, userId, ed
           `UPDATE messages SET metadata = metadata - 'original_body' WHERE id = $1 AND client_id = $2`,
           [msg.id, clientId]
         );
-      } else if (status === 'rejected' && (notes || edited_body)) {
-        // Founder rejected with a reason — capture for pattern learning
+      } else if (status === 'rejected') {
+        // Founder rejected — capture for pattern learning (always, reason optional)
         const { rows: [lead] } = await pool.query(
           `SELECT name, company, title FROM leads WHERE id = $1 AND client_id = $2`,
           [msg.lead_id, clientId]
