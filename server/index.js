@@ -1114,17 +1114,43 @@ async function start() {
         try {
           const today = now.toISOString().split('T')[0];
 
-          // Check daily target vs sent
-          const { rows: [kpiRow] } = await pool.query(
-            `SELECT target, outreach_sent FROM daily_kpi WHERE client_id = $1 AND date = $2`,
+          // Email-only KPI gate (2026-05-20): Captain stops when email target is hit.
+          // LinkedIn is acceptance-gated and variable — excluded from Captain's stop
+          // condition. Captain can only control what it auto-sends (email). LinkedIn
+          // drain is MJ/Cowork territory and runs independently.
+          const EMAIL_TARGET = 30;
+          const { rows: [{ email_sent_today }] } = await pool.query(
+            `SELECT COUNT(*)::int AS email_sent_today FROM messages
+             WHERE client_id = $1 AND status = 'sent' AND channel = 'email'
+               AND DATE(sent_at) = $2`,
             [client.id, today]
           );
-          const target = kpiRow?.target || 50;
-          const sent = kpiRow?.outreach_sent || 0;
-          if (sent >= target) {
-            logger.info({ msg: `[kpi-gap] ${client.slug}: KPI met (${sent}/${target}), skipping` });
+          if (email_sent_today >= EMAIL_TARGET) {
+            // Notify MJ once per day when email KPI is first hit
+            const kpiHitKey = `kpi_email_hit_${today}`;
+            const { rows: alreadyNotified } = await pool.query(
+              `SELECT 1 FROM agent_memory WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2 LIMIT 1`,
+              [client.id, kpiHitKey]
+            );
+            if (alreadyNotified.length === 0) {
+              await pool.query(
+                `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+                 VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
+                 ON CONFLICT (client_id, agent, key) DO NOTHING`,
+                [client.id, kpiHitKey, JSON.stringify({ email_sent: email_sent_today, hit_at: now.toISOString() })]
+              ).catch(() => {});
+              const chatId = process.env.TELEGRAM_CHAT_ID;
+              if (chatId) {
+                telegramService.sendMessage(chatId,
+                  `Email KPI hit — ${email_sent_today}/${EMAIL_TARGET} emails sent today. Captain standing down. LinkedIn drain is yours.`
+                ).catch(() => {});
+              }
+            }
+            logger.info({ msg: `[kpi-gap] ${client.slug}: email KPI met (${email_sent_today}/${EMAIL_TARGET}), standing down` });
             continue;
           }
+          const target = EMAIL_TARGET;
+          const sent = email_sent_today;
 
           // Daily cap: max 6 kpi_gap kickoffs per day. Count this function's OWN
           // dedupe-key writes (1 per Captain decision to fire) — NOT signal_pipeline_executing
@@ -1171,20 +1197,20 @@ async function start() {
           }
 
           // Mark this slot as checked
+          const gap = EMAIL_TARGET - email_sent_today;
           await pool.query(
             `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
              VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
              ON CONFLICT (client_id, agent, key) DO NOTHING`,
-            [client.id, dedupeKey, JSON.stringify({ gap: target - sent, sent, target, pool_size, kickoffs_today: kickoffsToday })]
+            [client.id, dedupeKey, JSON.stringify({ gap, email_sent: email_sent_today, email_target: EMAIL_TARGET, pool_size, kickoffs_today: kickoffsToday })]
           ).catch(() => {});
 
           // Fire kickoff
-          const gap = target - sent;
-          logger.info({ msg: `[kpi-gap] ${client.slug}: ${sent}/${target} sent, gap=${gap}, pool=${pool_size}, kickoff #${kickoffsToday + 1} — firing` });
+          logger.info({ msg: `[kpi-gap] ${client.slug}: email ${email_sent_today}/${EMAIL_TARGET}, gap=${gap}, pool=${pool_size}, kickoff #${kickoffsToday + 1} — firing` });
           await pool.query(
             `INSERT INTO logs (client_id, agent, action, target_type, metadata)
              VALUES ($1, 'captain', 'kpi_gap_kickoff', 'system', $2::jsonb)`,
-            [client.id, JSON.stringify({ sent, target, gap, pool_size, kickoff_number: kickoffsToday + 1 })]
+            [client.id, JSON.stringify({ email_sent: email_sent_today, email_target: EMAIL_TARGET, gap, pool_size, kickoff_number: kickoffsToday + 1 })]
           ).catch(() => {});
 
           runWithClientContext(client.id, () =>
