@@ -394,6 +394,18 @@ The lead context MAY include signal/trigger data (Signal, Why now, Angle, RECENT
 
 In BOTH tiers, anti-fabrication is absolute: every company name, role, product, or fact must come from the lead context provided. If context is thin, write less — never invent details.
 
+NUMBERS HARD GATE — prospect-specific figures (2026-05-20):
+Never state a specific number about the prospect's business (student count, client count, headcount, revenue, growth rate, follower count, campaign count, team size, years in operation) unless that exact number appears verbatim in the lead context or angle text provided. This rule is separate from PROOF_NUMBERS — those govern Beaver's own verified metrics. This governs any claim about the prospect.
+
+Thin context is not an exception. If the number is not in the context, omit it and write around it:
+  WRONG: "5,000+ students enrolled in your courses"  (fabricated — not in context)
+  WRONG: "your 50-person team"                        (fabricated — not in context)
+  WRONG: "Sortlist award" or any specific accolade    (fabricated — not in context)
+  RIGHT: "what you've built at [Company]"             (safe — no invented scale)
+  RIGHT: "running [Company]'s outreach"               (safe — no invented number)
+
+Fabricating a prospect-specific number or accolade is an Enforcer hard-reject. A thin observation beats invented specificity every time.
+
 --- Follow-ups (touch_number > 0) ---
 Required: first_name + company_name (real, verifiable company — not "Unknown", "Independent", "N/A", or a placeholder).
 If company_name is missing or a placeholder, return:
