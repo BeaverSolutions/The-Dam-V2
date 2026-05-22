@@ -581,11 +581,19 @@ async function researchSearch(clientId, { query, filters = {} }) {
       // diagnostics — read these first when self-sourcing yields 0
       providers_configured: providers,
       multi_error: multiError || null,
+      // Initial-pass scope (legacy fields — kept for back-compat with prior log readers)
       layer1_candidates: researchResult?.verification_stats?.candidates ?? null,
       layer2_verified: researchResult?.verification_stats?.verified ?? null,
       layer2_rejected: researchResult?.verification_stats?.rejected ?? null,
       queries_run: researchResult?.queriesUsed?.length ?? null,
       pool_exhaustion_pct: researchResult?.pool_stats?.exhaustion_pct ?? null,
+      // Full-pipeline scope (2026-05-22 — incoherent-metric fix). The legacy
+      // fields above are INITIAL PASS ONLY; these are the TOTAL across the
+      // entire retry+expansion ladder. Use these for any "0 leads" diagnosis.
+      candidates_total: researchResult?.verification_stats?.candidates_total ?? null,
+      queries_total: researchResult?.verification_stats?.queries_total ?? null,
+      rounds_ran: researchResult?.verification_stats?.rounds_ran ?? null,
+      circuit_breaker_tripped: researchResult?.verification_stats?.circuit_breaker_tripped ?? null,
       likely_cause: noProviderConfigured
         ? 'NO_SEARCH_PROVIDER — Brave, Google CSE, and Apollo all unconfigured'
         : (researchResult?.verification_stats?.candidates > 0

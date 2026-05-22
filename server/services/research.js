@@ -38,14 +38,23 @@ const ICP_TITLE_EXACT = new Set([
 ]);
 
 /* Hard-reject titles — if the lead's title contains any of these, reject immediately.
-   These are junior/mid-level roles that should never reach outreach. */
+   These are junior/mid-level roles that should never reach outreach.
+
+   2026-05-22 — removed 'executive', 'officer', 'head of' because the substring
+   .includes() match was killing ICP-approved titles BEFORE Haiku even ran:
+     - 'executive'  matched "Chief Executive Officer"  (a real C-suite title)
+     - 'officer'    matched "Chief Executive Officer", "Chief Operating Officer"
+     - 'head of'    matched "Head of Sales", "Head of Growth" (both in ICP)
+   Junior IC titles like "Account Executive" / "Marketing Officer" still get
+   rejected — Haiku marks them role=unlikely. The pre-gate's job is to skip
+   obvious junior roles cheaply, not to second-guess the ICP. */
 const BANNED_TITLE_KEYWORDS = [
   'intern', 'trainee', 'junior', 'associate', 'assistant',
-  'coordinator', 'executive', 'specialist', 'analyst', 'officer',
+  'coordinator', 'specialist', 'analyst',
   'manager', 'supervisor', 'admin', 'receptionist', 'clerk',
   'engineer', 'developer', 'designer', 'writer', 'editor',
   'consultant', 'advisor', 'agent', 'representative', 'lead',
-  'team lead', 'senior', 'staff', 'head of',
+  'team lead', 'senior', 'staff',
 ];
 
 /* ─── Helpers ────────────────────────────────────────────── */
@@ -954,6 +963,17 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
 
     console.log(`[research] Layer 2 complete: ${verified.length} verified, ${rejected.length} rejected`);
 
+    // ── Metric accumulators (2026-05-22) ───────────────────────────────
+    // Previously, verification_stats reported `candidates: deduped.length` —
+    // the INITIAL Layer 1 count only — while `rejected` accumulated across
+    // every retry round. That made the metric internally incoherent: 14
+    // initial candidates could "produce" 51 rejections, with no signal that
+    // retry rounds had fired. Fix: track candidates / queries / rounds
+    // across the entire pipeline so a single log entry is self-consistent.
+    let candidatesVerifiedTotal = preFiltered.length;
+    let queriesUsedTotal = picked.length;
+    let roundsRan = 1; // the initial Layer 2 pass counts as round 1
+
     // ── Phase B3: Retry + expansion ladder ──
     // Retry up to MAX_RETRIES times. If the pool is exhausted or zero new candidates
     // come back, WIDEN the ICP progressively instead of giving up.
@@ -1010,6 +1030,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         break;
       }
       searchRounds++;
+      queriesUsedTotal += actualPicked.length; // accumulate for metric
 
       const retryResults = await Promise.all([
         ...retryDirectQueries.map(q => strategyDirectPeople(q.query, perQueryLimit).catch(() => [])),
@@ -1047,6 +1068,10 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       verified.push(...retryVerification.verified.filter(l => !allVerifiedUrls.has(l.linkedin_url)));
       rejected.push(...retryVerification.rejected);
       retryVerification.verified.forEach(l => { if (l.linkedin_url) allVerifiedUrls.add(l.linkedin_url); });
+
+      // Accumulate metrics for this round
+      candidatesVerifiedTotal += retryCandidates.length;
+      roundsRan++;
 
       // CIRCUIT BREAKER: a round where verification rejects every candidate
       // is a paid round that produced nothing. Two in a row → stop. No point
@@ -1142,7 +1167,11 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         exhaustion_pct: Math.round(exhaustionRate * 100),
       },
       verification_stats: {
-        candidates: deduped.length,
+        candidates: deduped.length,                  // initial Layer 1 pool (BACKCOMPAT)
+        candidates_total: candidatesVerifiedTotal,   // total fetched across all rounds (TRUTH)
+        queries_total: queriesUsedTotal,             // total queries across all rounds
+        rounds_ran: roundsRan,                       // initial pass + retry rounds
+        circuit_breaker_tripped: circuitBreakerTripped, // reason if breaker tripped, else null
         verified: verified.length,
         rejected: rejected.length,
         rejection_reasons: rejected.map(r => `${r.name}: ${r.verification?.rejectReason || 'unknown'}`),
