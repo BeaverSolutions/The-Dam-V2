@@ -22,6 +22,64 @@ try {
   console.error('[replyHandler] CRITICAL: Claude module failed to load — reply drafting disabled:', err.message);
 }
 
+// ── Failure observability (added 2026-05-22, P0.5 fix) ──────────────
+// Every silent early-return in handleReply now writes a `reply_handler_failure`
+// log row AND queues a Telegram alert. Telegram is batched via a 5s debounced
+// flush so multiple failures from a single replyDetector polling tick collapse
+// into ONE message — MJ doesn't want one alert per failure. DB log is always
+// per-failure (audit trail; logs table is pulled, not pushed).
+//
+// Root cause this fixes: Jacob Froats / Tin City Impact replied 2026-05-21
+// 12:57 MYT; Anthropic API limit was hit; callAgent('reply_classifier') errored
+// or returned null; handleReply exited silently at the classification null
+// check; no DB log, no Telegram, no draft. Brain only learned 24h later.
+
+const pendingFailures = [];
+let failureFlushTimer = null;
+
+function scheduleFailureFlush() {
+  if (failureFlushTimer) clearTimeout(failureFlushTimer);
+  failureFlushTimer = setTimeout(flushFailureBatch, 5000);
+}
+
+async function flushFailureBatch() {
+  failureFlushTimer = null;
+  if (pendingFailures.length === 0) return;
+  const batch = pendingFailures.splice(0);
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!chatId) return;
+  try {
+    const { sendMessage } = require('./telegram');
+    const header = `<b>🚨 Reply handler — ${batch.length} failure${batch.length > 1 ? 's' : ''}</b>\n\n`;
+    const lines = batch.map((f, i) => {
+      const lead = f.leadName ? `${f.leadName}` : `Lead ${f.leadId || '?'}`;
+      const detail = f.detail ? `\n   Detail: ${String(f.detail).slice(0, 120)}` : '';
+      return `${i + 1}. ${lead}\n   Reason: <code>${f.reason}</code>${detail}`;
+    }).join('\n\n');
+    const footer = `\n\nReply detected, draft did NOT land in approvals. Manual rescue needed.`;
+    await sendMessage(chatId, header + lines + footer);
+  } catch (err) {
+    console.warn('[replyHandler] Batched failure alert failed:', err.message);
+  }
+}
+
+// recordFailure: DB log synchronously + queue Telegram for batched flush.
+async function recordFailure(clientId, { leadId, leadName, messageId, reason, detail }) {
+  try {
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'reply_handler_failure',
+      target_type: 'message',
+      target_id: messageId,
+      metadata: { reason, lead_id: leadId, lead_name: leadName, error_detail: detail ? String(detail).slice(0, 500) : null },
+    });
+  } catch (logErr) {
+    console.error('[replyHandler] DB log write for failure failed:', logErr.message);
+  }
+  pendingFailures.push({ leadId, leadName, messageId, reason, detail });
+  scheduleFailureFlush();
+}
+
 /**
  * Handle a single detected reply.
  * Called by replyDetector after marking reply_detected_at.
@@ -29,6 +87,7 @@ try {
 async function handleReply(clientId, { messageId, leadId, replySnippet }) {
   if (!callAgent) {
     console.warn('[replyHandler] Claude not available — skipping reply intelligence');
+    await recordFailure(clientId, { leadId, leadName: null, messageId, reason: 'claude_module_unloaded', detail: 'callAgent unavailable at handler entry' });
     return;
   }
 
@@ -39,7 +98,10 @@ async function handleReply(clientId, { messageId, leadId, replySnippet }) {
       [leadId, clientId]
     );
     const lead = leadRes.rows[0];
-    if (!lead) return;
+    if (!lead) {
+      await recordFailure(clientId, { leadId, leadName: null, messageId, reason: 'lead_not_found', detail: `SELECT returned 0 rows for lead_id=${leadId}` });
+      return;
+    }
 
     // 2026-05-13: Channel discipline. The reply draft + every downstream
     // trackEvent / feedback_events / message INSERT must use the SOURCE
@@ -74,10 +136,22 @@ Their reply:
 
 Classify this reply and tell Sales Beaver exactly what to write next.`;
 
-    const classification = await callAgent('reply_classifier', classifyPrompt);
+    // 2026-05-22 P0.5: wrap callAgent so a throw produces a logged failure +
+    // batched Telegram, not a silent outer-catch swallow with leadId-as-string.
+    // Root cause for Jacob's reply: API limit → callAgent threw/returned null →
+    // silent exit. Now: failure is named, MJ alerted within 5s.
+    let classification;
+    try {
+      classification = await callAgent('reply_classifier', classifyPrompt);
+    } catch (err) {
+      console.error('[replyHandler] Classification call threw for lead', leadId, ':', err.message);
+      await recordFailure(clientId, { leadId, leadName: lead.name, messageId, reason: 'classification_call_threw', detail: err.message });
+      return;
+    }
 
     if (!classification || !classification.classification) {
-      console.warn('[replyHandler] Classification failed for lead', leadId);
+      console.warn('[replyHandler] Classification returned null/empty for lead', leadId);
+      await recordFailure(clientId, { leadId, leadName: lead.name, messageId, reason: 'classification_returned_null', detail: classification ? JSON.stringify(classification).slice(0, 200) : 'null' });
       return;
     }
 
@@ -273,6 +347,13 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
 
     if (!draft?.body) {
       console.warn('[replyHandler] Sales Beaver returned no draft for lead', leadId);
+      await recordFailure(clientId, {
+        leadId,
+        leadName: lead.name,
+        messageId,
+        reason: 'sales_beaver_no_draft',
+        detail: `sentiment=${sentiment}; draft=${draft ? JSON.stringify(draft).slice(0, 200) : 'null'}`,
+      });
       return;
     }
 
@@ -381,6 +462,15 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
 
   } catch (err) {
     console.error('[replyHandler] Error handling reply for lead', leadId, ':', err.message);
+    // 2026-05-22 P0.5: outer catch was console.error-only — silent from DB +
+    // Telegram. Now: record failure with stack so MJ knows within 5s.
+    await recordFailure(clientId, {
+      leadId,
+      leadName: null,
+      messageId,
+      reason: 'unexpected_exception',
+      detail: `${err.message} | ${err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : ''}`,
+    }).catch(() => {});
   }
 }
 
