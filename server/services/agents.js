@@ -2130,7 +2130,20 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       const channel = channelChoice_sp.channel;
       let kickoffMessageStatus = channelChoice_sp.status;
       if (channelChoice_sp.status === 'blocked_no_email') {
-        console.log(`[signal-pipeline] ${lead.name} — no verified email, marking blocked_no_email`);
+        // 2026-05-23 SHORT-CIRCUIT (lead-completeness contract):
+        // Incomplete leads — no verified email AND no usable LinkedIn — must
+        // NEVER reach Sales Beaver. Previously code logged the trace then fell
+        // through to draftWithFallback + persistDraft, burning Sonnet tokens
+        // and creating wasted message rows. Lead now stays in `prospecting`
+        // until Research Beaver enriches an email or a new LinkedIn lever
+        // opens. Captain re-queues on demand via the event-driven enrichment
+        // path.
+        console.log(`[signal-pipeline] ${lead.name} — incomplete (no usable channel), skipping draft`);
+        await logsService.createLog(clientId, {
+          agent: 'director', action: 'lead_incomplete',
+          target_type: 'lead', target_id: lead.id,
+          metadata: { reason: channelChoice_sp.reason, path: 'signal_pipeline', lead_name: lead.name },
+        }).catch(() => {});
         pipelineTrace.traceStage(clientId, {
           lead_id: lead.id, kickoff_id: plan_id,
           stage: 'channel_blocked', status: 'blocked_no_email',
@@ -2138,6 +2151,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           reason: channelChoice_sp.reason,
           metadata: { lead_name: lead.name },
         }).catch(() => {});
+        continue;
       }
 
       if (channel === 'linkedin') {
@@ -3553,6 +3567,30 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     const kickoffMessageStatus = channelChoice.status;
 
     console.log(`[pipeline] Channel for ${lead.name}: ${selectedChannel} status=${kickoffMessageStatus} — ${channelReason}`);
+
+    // 2026-05-23 SHORT-CIRCUIT (lead-completeness contract):
+    // Mirror of the signal-pipeline guard. Incomplete leads must not consume
+    // Sales Beaver / Enforcer tokens. Lead stays in `prospecting`; Research
+    // Beaver event-driven enrichment moves it back into the pipeline once a
+    // verified email or fresh LinkedIn URL lands. Both router sites must
+    // ship this together (half-fix rule, corrections.md 2026-04-30).
+    if (kickoffMessageStatus === 'blocked_no_email') {
+      console.log(`[pipeline] ${lead.name} — incomplete (no usable channel), skipping draft`);
+      diagnostics.messages_failed++;
+      await logsService.createLog(clientId, {
+        agent: 'director', action: 'lead_incomplete',
+        target_type: 'lead', target_id: lead.id,
+        metadata: { reason: channelReason, path: 'kickoff_pipeline', lead_name: lead.name },
+      }).catch(() => {});
+      pipelineTrace.traceStage(clientId, {
+        lead_id: lead.id, kickoff_id: plan_id,
+        stage: 'channel_blocked', status: 'blocked_no_email',
+        agent: 'director', pipeline_path: 'kickoff_pipeline',
+        reason: channelReason,
+        metadata: { lead_name: lead.name },
+      }).catch(() => {});
+      return;
+    }
 
     const hint = CHANNEL_HINTS[selectedChannel];
 
