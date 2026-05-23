@@ -325,7 +325,7 @@ async function sendEmail(clientId, { to, subject, body, messageDbId }) {
 /**
  * Fetch a Gmail thread and return its messages.
  */
-async function getThread(clientId, threadId) {
+async function getThread(clientId, threadId, options = {}) {
   if (!google) return null;
   const tokens = await getTokens(clientId);
   if (!tokens) return null;
@@ -333,7 +333,14 @@ async function getThread(clientId, threadId) {
     const client = getOAuthClient();
     client.setCredentials(tokens);
     const gmail = google.gmail({ version: 'v1', auth: client });
-    const res = await gmail.users.threads.get({ userId: 'me', id: threadId, format: 'metadata' });
+    // 2026-05-23 P0.5: callers can opt in to header extraction for reply
+    // classification (From/Subject needed for bounce + OOO detection). Default
+    // remains snippet-only for backward compatibility with existing callers.
+    const params = { userId: 'me', id: threadId, format: 'metadata' };
+    if (Array.isArray(options.metadataHeaders) && options.metadataHeaders.length > 0) {
+      params.metadataHeaders = options.metadataHeaders;
+    }
+    const res = await gmail.users.threads.get(params);
     return res.data;
   } catch (err) {
     console.warn('[gmail] getThread failed:', err.message);

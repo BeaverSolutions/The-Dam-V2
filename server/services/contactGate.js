@@ -36,6 +36,37 @@ const pool = require('../db/pool');
 
 const TIER_B_SCORE_THRESHOLD = 85;
 
+// 2026-05-23 P0.5: source-side fake-domain blocklist. Hunter false-positives
+// on these as "verified" (May 13 incident — 2x @independent.com leads, both
+// guaranteed bounce). Treat any email on these domains as no usable email
+// regardless of email_verified flag. Lead can still qualify via LinkedIn
+// (Tier B) if it has the URL + score; otherwise it falls to Tier C with a
+// research_misses log row for sourcing-strategy tuning.
+const FAKE_EMAIL_DOMAINS = new Set([
+  'independent.com',
+  'example.com',
+  'example.org',
+  'example.net',
+  'test.com',
+  'email.com',
+  'noemail.com',
+  'mailinator.com',
+  'tempmail.com',
+  'placeholder.com',
+  'freelance.com',
+  'self-employed.com',
+  'stealth.com',
+  'confidential.com',
+  'unknown.com',
+]);
+
+function isFakeDomain(email) {
+  if (!email || typeof email !== 'string') return false;
+  const at = email.lastIndexOf('@');
+  if (at < 0) return false;
+  return FAKE_EMAIL_DOMAINS.has(email.slice(at + 1).toLowerCase().trim());
+}
+
 /**
  * Gate + classify a sourced lead.
  *
@@ -53,7 +84,8 @@ async function tryPersistSourcedLead(clientId, candidate, options = {}) {
   const hasUsableEmail =
     !!candidate.email &&
     String(candidate.email).trim() !== '' &&
-    candidate.email !== 'unknown@example.com';
+    candidate.email !== 'unknown@example.com' &&
+    !isFakeDomain(candidate.email);
 
   // Tier A REQUIRES email_verified=true (SMTP-verified by Hunter or other
   // provider). Pattern-inferred emails (Hunter findEmail with verified=false)
@@ -87,6 +119,11 @@ async function tryPersistSourcedLead(clientId, candidate, options = {}) {
     missReason = `linkedin_only_below_p1_score_${score}`;
   } else if (hasUsableEmail && !emailVerified && !hasLinkedin) {
     missReason = 'unverified_email_no_linkedin_fallback';
+  } else if (candidate.email && isFakeDomain(candidate.email)) {
+    // Caught for visibility: a fake-domain email was supplied (Hunter false-
+    // positive class). Lead may still have passed via Tier B above; if it
+    // reached here, it had no LinkedIn fallback either.
+    missReason = 'fake_email_domain_at_source';
   } else {
     missReason = 'unclassified';
   }
@@ -156,5 +193,7 @@ module.exports = {
   tryPersistSourcedLead,
   gateBatch,
   missRateBy,
+  isFakeDomain,
+  FAKE_EMAIL_DOMAINS,
   TIER_B_SCORE_THRESHOLD,
 };

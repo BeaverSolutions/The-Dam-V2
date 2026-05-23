@@ -6,6 +6,28 @@ const agentmailService = require('./agentmail');
 const logsService = require('./logs');
 const pipelineTrace = require('./pipelineTrace');
 const { handleReply } = require('./replyHandler');
+const replyClassifier = require('./replyClassifier');
+
+// 2026-05-23 P0.5 (Contract 1): inbound classification BEFORE setting
+// reply_detected_at. Six categories (spam deferred to v2). Source of truth:
+// MJxClaude/memory/preferences.md 2026-05-21 reply pipeline contracts.
+//
+// Triggered for Jacob Froats / Tin City Impact case (real reply correctly
+// flowed through) AND Bharadwaj/bitquest NDR (was misclassified as reply,
+// moved to qualifying, fired Telegram). Pre-classification stops NDRs +
+// OOOs + opt-outs from polluting the reply queue and triggering false
+// positives in handleReply().
+const SOFT_BOUNCE_ESCALATE_THRESHOLD = 3;
+const SOFT_BOUNCE_ESCALATE_WINDOW_DAYS = 7;
+
+function extractHeader(headers, name) {
+  if (!Array.isArray(headers)) return '';
+  const target = name.toLowerCase();
+  for (const h of headers) {
+    if (h && h.name && h.name.toLowerCase() === target) return h.value || '';
+  }
+  return '';
+}
 
 /**
  * Check for replies on all sent messages with thread IDs for a given client.
@@ -32,15 +54,26 @@ async function checkRepliesForClient(clientId) {
   for (const msg of messagesRes.rows) {
     try {
       let snippet = null;
+      let inboundFrom = '';
+      let inboundSubject = '';
 
       // --- Gmail path ---
       if (msg.gmail_thread_id) {
-        const thread = await gmailService.getThread(clientId, msg.gmail_thread_id).catch(() => null);
+        // 2026-05-23 P0.5: request From/Subject headers in addition to default
+        // metadata so replyClassifier can match sender + subject patterns
+        // (NDR / OOO / unsubscribe). Body not needed — Gmail's snippet is
+        // typically the first ~120 chars and includes bounce/OOO markers.
+        const thread = await gmailService.getThread(clientId, msg.gmail_thread_id, {
+          metadataHeaders: ['From', 'Subject'],
+        }).catch(() => null);
         if (thread) {
           const messageCount = thread.messages?.length || 0;
           if (messageCount > 1) {
             const latestMsg = thread.messages[thread.messages.length - 1];
             snippet = latestMsg?.snippet || '';
+            const headers = latestMsg?.payload?.headers || [];
+            inboundFrom = extractHeader(headers, 'From');
+            inboundSubject = extractHeader(headers, 'Subject');
           }
         }
       }
@@ -53,6 +86,9 @@ async function checkRepliesForClient(clientId) {
           if (msgs.length > 1) {
             const latestMsg = msgs[msgs.length - 1];
             snippet = latestMsg?.text?.slice(0, 200) || latestMsg?.snippet || '';
+            // Defensive extraction — AgentMail SDK shape may vary by version.
+            inboundFrom = latestMsg?.from || latestMsg?.from_address || latestMsg?.sender || '';
+            inboundSubject = latestMsg?.subject || amThread.subject || '';
           }
         }
       }
@@ -61,6 +97,27 @@ async function checkRepliesForClient(clientId) {
       if (snippet === null) continue;
 
       const threadId = msg.gmail_thread_id || msg.agentmail_thread_id;
+
+      // ── Contract 1: classify inbound BEFORE setting reply_detected_at ──
+      const classification = replyClassifier.classify({
+        from: inboundFrom,
+        subject: inboundSubject,
+        body: snippet,
+      });
+
+      if (classification.category !== 'real_reply') {
+        await handleNonReply(clientId, {
+          messageId: msg.id,
+          leadId: msg.lead_id,
+          threadId,
+          provider: msg.gmail_thread_id ? 'gmail' : 'agentmail',
+          snippet,
+          inboundFrom,
+          inboundSubject,
+          classification,
+        });
+        continue;
+      }
 
       // Mark reply on message
       await pool.query(
@@ -189,6 +246,248 @@ async function checkRepliesForClient(clientId) {
     }
   }
   return repliesFound;
+}
+
+/**
+ * Handle a non-real-reply classification (hard/soft bounce, auto-reply, unsubscribe).
+ * Each category writes its own metadata + logs. NO reply_detected_at write.
+ * NO handleReply() call. NO Telegram for bounces/auto-replies (existing daily
+ * Health Pack carries those volumes). Unsubscribes get a single [info] alert.
+ *
+ * Source of truth: MJxClaude/memory/preferences.md 2026-05-21 contract.
+ */
+async function handleNonReply(clientId, ctx) {
+  const { messageId, leadId, threadId, provider, snippet, inboundFrom, inboundSubject, classification } = ctx;
+  const { category, reason, matched_pattern } = classification;
+
+  const logMetaBase = {
+    lead_id: leadId,
+    thread_id: threadId,
+    provider,
+    inbound_from: (inboundFrom || '').slice(0, 200),
+    inbound_subject: (inboundSubject || '').slice(0, 200),
+    snippet: (snippet || '').slice(0, 200),
+    matched_pattern,
+    reason,
+  };
+
+  try {
+    if (category === 'hard_bounce') {
+      // Message: mark failed, persist bounce metadata. Do NOT set reply_detected_at.
+      await pool.query(
+        `UPDATE messages
+         SET status = 'failed',
+             metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
+             updated_at = NOW()
+         WHERE id = $2 AND client_id = $3`,
+        [
+          JSON.stringify({
+            bounce_type: 'hard_bounce',
+            bounce_reason: reason,
+            bounce_matched: matched_pattern,
+            bounced_at: new Date().toISOString(),
+            original_reply_snippet: (snippet || '').slice(0, 300),
+          }),
+          messageId, clientId,
+        ]
+      );
+
+      // Lead: invalidate email + downgrade tier if LinkedIn fallback exists.
+      if (leadId) {
+        await pool.query(
+          `UPDATE leads
+           SET email_verified = false,
+               lead_tier = CASE WHEN linkedin_url IS NOT NULL AND linkedin_url <> '' THEN 'B' ELSE lead_tier END,
+               metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
+               updated_at = NOW()
+           WHERE id = $2 AND client_id = $3`,
+          [
+            JSON.stringify({
+              email_status: 'bounced_hard',
+              email_bounced_at: new Date().toISOString(),
+            }),
+            leadId, clientId,
+          ]
+        );
+      }
+
+      await logsService.createLog(clientId, {
+        agent: 'system',
+        action: 'bounce_recorded',
+        target_type: 'message',
+        target_id: messageId,
+        metadata: { ...logMetaBase, bounce_type: 'hard_bounce' },
+      });
+      return;
+    }
+
+    if (category === 'soft_bounce') {
+      // Read current bounce_attempts to detect escalation. Single query — cheap.
+      const cur = await pool.query(
+        `SELECT COALESCE((metadata->>'bounce_attempts')::int, 0) AS attempts,
+                (metadata->>'first_soft_bounce_at')::timestamptz AS first_at
+         FROM messages WHERE id = $1 AND client_id = $2`,
+        [messageId, clientId]
+      );
+      const attempts = (cur.rows[0]?.attempts || 0) + 1;
+      const firstAt = cur.rows[0]?.first_at || new Date().toISOString();
+      const windowMs = SOFT_BOUNCE_ESCALATE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+      const escalate = attempts >= SOFT_BOUNCE_ESCALATE_THRESHOLD
+        && (Date.now() - new Date(firstAt).getTime()) < windowMs;
+
+      if (escalate) {
+        // Recurse via the hard-bounce branch — same downstream treatment.
+        return handleNonReply(clientId, {
+          ...ctx,
+          classification: {
+            category: 'hard_bounce',
+            reason: `escalated from soft_bounce (${attempts} attempts in window)`,
+            matched_pattern,
+          },
+        });
+      }
+
+      await pool.query(
+        `UPDATE messages
+         SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
+             updated_at = NOW()
+         WHERE id = $2 AND client_id = $3`,
+        [
+          JSON.stringify({
+            bounce_type: 'soft_bounce',
+            bounce_attempts: attempts,
+            first_soft_bounce_at: firstAt,
+            last_soft_bounce_at: new Date().toISOString(),
+            soft_bounce_matched: matched_pattern,
+          }),
+          messageId, clientId,
+        ]
+      );
+
+      await logsService.createLog(clientId, {
+        agent: 'system',
+        action: 'soft_bounce_recorded',
+        target_type: 'message',
+        target_id: messageId,
+        metadata: { ...logMetaBase, attempts },
+      });
+      return;
+    }
+
+    if (category === 'auto_reply') {
+      // v1: log only. No reply_detected_at, no Telegram, no pipeline_stage
+      // change. Re-check scheduling after return-date is deferred to v2.
+      await pool.query(
+        `UPDATE messages
+         SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
+             updated_at = NOW()
+         WHERE id = $2 AND client_id = $3`,
+        [
+          JSON.stringify({
+            auto_reply: true,
+            auto_reply_at: new Date().toISOString(),
+            auto_reply_matched: matched_pattern,
+            original_reply_snippet: (snippet || '').slice(0, 300),
+          }),
+          messageId, clientId,
+        ]
+      );
+
+      await logsService.createLog(clientId, {
+        agent: 'system',
+        action: 'auto_reply_recorded',
+        target_type: 'message',
+        target_id: messageId,
+        metadata: logMetaBase,
+      });
+      return;
+    }
+
+    if (category === 'unsubscribe') {
+      // Lead: stash unsubscribe in metadata (no top-level column per migration 053 deferred-hook comment).
+      if (leadId) {
+        await pool.query(
+          `UPDATE leads
+           SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
+               sequence_status = 'replied',
+               updated_at = NOW()
+           WHERE id = $2 AND client_id = $3`,
+          [
+            JSON.stringify({
+              unsubscribed: true,
+              unsubscribed_at: new Date().toISOString(),
+              unsubscribe_matched: matched_pattern,
+            }),
+            leadId, clientId,
+          ]
+        );
+
+        // Cancel all pending follow-ups for this lead.
+        await pool.query(
+          `UPDATE followup_queue
+           SET status = 'cancelled', updated_at = NOW()
+           WHERE lead_id = $1 AND client_id = $2 AND status = 'pending'`,
+          [leadId, clientId]
+        );
+      }
+
+      // Mark the inbound message itself so Approvals UI doesn't show it as a reply.
+      await pool.query(
+        `UPDATE messages
+         SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
+             updated_at = NOW()
+         WHERE id = $2 AND client_id = $3`,
+        [
+          JSON.stringify({
+            opted_out: true,
+            opted_out_at: new Date().toISOString(),
+            opt_out_matched: matched_pattern,
+            original_reply_snippet: (snippet || '').slice(0, 300),
+          }),
+          messageId, clientId,
+        ]
+      );
+
+      await logsService.createLog(clientId, {
+        agent: 'system',
+        action: 'unsubscribe_recorded',
+        target_type: 'message',
+        target_id: messageId,
+        metadata: logMetaBase,
+      });
+
+      // Single info-priority Telegram so MJ knows a lead exited the funnel.
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (chatId && leadId) {
+        try {
+          const { rows: [leadRow] } = await pool.query(
+            `SELECT name, company FROM leads WHERE id = $1 AND client_id = $2`,
+            [leadId, clientId]
+          );
+          if (leadRow) {
+            const telegramService = require('./telegram');
+            const txt = `<b>[info] unsubscribe</b>\n${leadRow.name || 'unknown'} (${leadRow.company || 'unknown'})\nLead removed from sequence.`;
+            telegramService.sendMessage(chatId, txt).catch(err =>
+              console.warn('[replyDetector] unsubscribe telegram failed:', err.message)
+            );
+          }
+        } catch (err) {
+          console.warn('[replyDetector] unsubscribe telegram lookup failed:', err.message);
+        }
+      }
+      return;
+    }
+  } catch (err) {
+    console.error(`[replyDetector] handleNonReply (${category}) failed for message ${messageId}:`, err.message);
+    // Best-effort failure log so silent drops are visible.
+    await logsService.createLog(clientId, {
+      agent: 'system',
+      action: 'classification_handler_failure',
+      target_type: 'message',
+      target_id: messageId,
+      metadata: { ...logMetaBase, error: err.message, category },
+    }).catch(() => {});
+  }
 }
 
 /**
