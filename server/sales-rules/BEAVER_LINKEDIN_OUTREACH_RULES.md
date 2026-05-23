@@ -115,7 +115,9 @@ One person to one person. Not a brand, not "the team." Founder-to-founder. You r
 - Email: max ~15-18 words/sentence. 4-6 short body lines (excludes greeting + sign-off).
 - Subject (email only): 3-6 words, lowercase OK, specific. Banned subject patterns: "Quick question", "Touching base", "Partnership Opportunity", "Following up".
 - Start with substance. Banned openers: "Hope this finds you well", "I wanted to reach out", "I hope this email finds you well", "My name is", "I'm reaching out".
-- One ask per message, max. Easy yes/no or low-effort reply.
+- One ask per message, max. The ask MUST be a RELATABLE DIAGNOSTIC QUESTION — never a lazy yes/no.
+- DIAGNOSTIC question rule: quantitative or pick-one, answerable in 1-3 words (e.g., "How many hours/week does the team spend on research and outreach?" / "Who's running outbound right now — you, an SDR, or an agency?" / "What reply rate are you seeing on cold templates lately?").
+- BANNED ask patterns: "Worth a look?", "Make sense?", "Sound interesting?", "Can I send X?", "Open to chatting?", "Quick chat?". Any yes/no is lazy and signals you didn't think about their reality.
 - No emojis cold. One OK once warm.
 - Plain words. If a 12-year-old wouldn't say it, cut it.
 
@@ -181,9 +183,9 @@ If the writer agent generates a hook that anchors to the prospect's vertical-spe
 
 > Hi Sarah — saw your team's running campaigns across 4 markets manually.
 > We automate the repetitive 80%, keep the judgment calls human.
-> Worth a look? Can send a 2-min Loom, no call needed.
+> How many hours a week is the team losing to the cross-market coordination?
 
-Three lines. Specific observation (4 markets, manual). One relevant thing (automate 80%, keep judgment human). Low-friction ask (Loom, no call). No greeting line break. No sign-off. ≤12 words/sentence.
+Three lines. Specific observation (4 markets, manual). One relevant thing (automate 80%, keep judgment human). RELATABLE diagnostic question (hours/week — answerable in 1-3 words). No greeting line break. No sign-off. ≤12 words/sentence. **Not** "Worth a look?" — that's lazy yes/no.
 
 ### GOOD — Email
 
@@ -195,12 +197,12 @@ Three lines. Specific observation (4 markets, manual). One relevant thing (autom
 >
 > We automate the repetitive 80% of that (scheduling, reporting, variants) and keep the judgment calls with your team. Built for SEA specifically.
 >
-> Worth a quick look? Happy to send a 2-min Loom, no call needed.
+> How many hours a week is the team spending on research and outreach across the three markets right now?
 >
 > Regards,
 > Michael Jerry
 
-Subject: 4 words, specific, lowercase OK. 4 body lines. Greeting + sign-off present. Sentences ~15-18 words. Specific observation first, then the relevant thing, then one ask. No buzzwords.
+Subject: 4 words, specific, lowercase OK. 4 body lines. Greeting + sign-off present. Sentences ~15-18 words. Specific observation first, then the relevant thing, then a RELATABLE diagnostic (hours/week). No "Worth a look?" yes/no padding.
 
 ### BAD — DM (every failure mode in one)
 
@@ -269,6 +271,15 @@ Any draft containing the following must be rejected and regenerated. Max 3 regen
 - "worth a chat" / "15 minutes this week" / "happy to jump on a call" on first/second message
 - "passionate about" / "results-driven"
 - Em dashes (— or –)
+
+**Banned lazy-yes/no asks (2026-05-23):**
+- "Worth a look?" / "Worth a quick look?"
+- "Make sense?" / "Sound interesting?" / "Sound good?"
+- "Can I send X?" / "Mind if I send X?"
+- "Open to chatting?" / "Open to a quick chat?"
+- "Quick chat?" / "Quick call?"
+- Any binary yes/no CTA disguised as an ask
+- Rule: every ask MUST be a relatable diagnostic question (quantitative or pick-one, answerable in 1-3 words). No yes/no. No exceptions.
 
 **Banned email subject patterns:**
 - "Quick question" / "Touching base" / "Partnership Opportunity" / "Following up"
