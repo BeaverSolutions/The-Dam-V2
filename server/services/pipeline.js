@@ -566,97 +566,59 @@ async function persistDraft(clientId, params) {
 async function enrichEmail(clientId, lead, options = {}) {
   const {
     pipeline_path = 'unknown',
-    hunterService,
-    enableVp = false,
-    vpService = null,
-    tenantConfigService = null,
   } = options;
 
   if (lead.email) {
     return { enriched: false, source: null, reason: 'already_has_email' };
   }
-  if (!hunterService) {
-    throw new Error('enrichEmail: hunterService is required');
-  }
 
   const logPrefix = `[${pipeline_path}]`;
 
-  // ── Hunter (always tried first; Email-Priority Rule, MJ 2026-04-29) ─
+  // ── v2 (P0 2026-05-23): findEmail orchestrator ───────────────────────
+  // Hunter+VP retired from this path per NEXT-SESSION.md P0 spec ("NO
+  // Hunter/Apollo in the new orchestrator path"). findEmail discovers
+  // domain via Brave, scrapes /contact + /about, generates 8 patterns,
+  // verifies via MillionVerifier only when ambiguous (consensus scoring
+  // saves credits on high-confidence matches).
+  //
+  // hunterService / vpService / tenantConfigService options are now
+  // ignored (legacy callers may still pass them — harmless).
+  //
+  // Spend gate: MillionVerifier 500 credits is finite (corrections.md
+  // 2026-05-23). findEmail prefers free signals (Brave + scrape + pattern)
+  // and only calls verifyEmail for the top 3 ambiguous candidates per lead.
+  // Per-tenant daily cap upstream (deferred — for now, count via metadata
+  // on inserts). Worst case: 3 verify calls per lead × 50 leads/day = 150
+  // credits/day. At 500-credit free cap, that's ~3 days. Monitor + paid
+  // top-up decision is MJ's.
   try {
-    const nameParts = (lead.name || '').split(' ');
-    const hunterResult = await hunterService.findEmail(clientId, {
-      firstName: nameParts[0] || '',
-      lastName: nameParts.slice(1).join(' ') || '',
+    const { findEmail } = require('./emailEnrichment');
+    const result = await findEmail({
+      name: lead.name,
       company: lead.company,
+      first_name: lead.first_name || null,
+      last_name: lead.last_name || null,
+      domain: lead.domain || null,
     });
-    if (hunterResult?.email) {
+    if (result?.email) {
       await pool.query(
-        `UPDATE leads SET email = $1, email_verified = $2, email_source = 'hunter', updated_at = NOW()
-          WHERE id = $3 AND client_id = $4`,
-        [hunterResult.email, hunterResult.verified === true, lead.id, clientId]
+        `UPDATE leads SET email = $1, email_verified = $2, email_source = $3, updated_at = NOW()
+          WHERE id = $4 AND client_id = $5`,
+        [result.email, result.status === 'deliverable', result.email_source || 'findemail', lead.id, clientId]
       );
-      lead.email = hunterResult.email;
-      lead.email_source = 'hunter';
-      lead.email_verified = hunterResult.verified === true;
-      console.log(`${logPrefix} Hunter sourced email for ${lead.name}: ${hunterResult.email}`);
-      return { enriched: true, source: 'hunter', reason: null };
+      lead.email = result.email;
+      lead.email_source = result.email_source || 'findemail';
+      lead.email_verified = result.status === 'deliverable';
+      lead.email_confidence = result.confidence;
+      lead.email_is_catch_all = result.isCatchAll;
+      console.log(`${logPrefix} findEmail sourced ${result.email} for ${lead.name} (status=${result.status}, conf=${result.confidence}, source=${result.email_source})`);
+      return { enriched: true, source: result.email_source || 'findemail', reason: null };
     }
-    console.log(`${logPrefix} Hunter found no email for ${lead.name} — will use LinkedIn`);
+    return { enriched: false, source: null, reason: 'no_email_found' };
   } catch (err) {
-    console.warn(`${logPrefix} Hunter lookup failed for ${lead.name}: ${err.message}`);
+    console.warn(`${logPrefix} findEmail failed for ${lead.name}: ${err.message}`);
+    return { enriched: false, source: null, reason: 'findemail_error' };
   }
-
-  // ── Vibe Prospecting fallback (kickoff path only) ───────────────────
-  // Fires when: (a) Hunter found nothing, (b) lead's quality_score >= tenant
-  // vp_threshold_score (default 75), (c) daily VP credit budget not exhausted.
-  if (enableVp && vpService && tenantConfigService) {
-    try {
-      const cfg = await tenantConfigService.getTenantConfig(clientId);
-      const qScore = Number(lead.quality_score) || 0;
-      const threshold = cfg.vp_threshold_score ?? 75;
-
-      if (qScore < threshold) {
-        console.log(`${logPrefix} VP skipped: quality_score ${qScore} < threshold ${threshold} for ${lead.name}`);
-        return { enriched: false, source: null, reason: 'vp_below_threshold' };
-      }
-      if ((cfg.vp_credits_used_today || 0) >= (cfg.vp_daily_budget_credits || 0)) {
-        console.log(`${logPrefix} VP skipped: daily budget exhausted (${cfg.vp_credits_used_today}/${cfg.vp_daily_budget_credits}) for ${lead.name}`);
-        return { enriched: false, source: null, reason: 'vp_budget_exhausted' };
-      }
-
-      const nameParts = (lead.name || '').split(' ');
-      const result = await vpService.findVerifiedEmail(clientId, {
-        firstName: nameParts[0] || '',
-        lastName:  nameParts.slice(1).join(' ') || '',
-        company:   lead.company,
-      });
-
-      // Charge actual credits used (even on partial failure VP may have spent)
-      if (result?.credits > 0) {
-        await tenantConfigService.chargeVpCredits(clientId, result.credits).catch(() => {});
-      }
-
-      if (result?.ok && result.email) {
-        await pool.query(
-          `UPDATE leads SET email = $1, email_verified = $2, email_source = 'vp', updated_at = NOW()
-            WHERE id = $3 AND client_id = $4`,
-          [result.email, result.email_verified === true, lead.id, clientId]
-        );
-        lead.email          = result.email;
-        lead.email_source   = 'vp';
-        lead.email_verified = result.email_verified === true;
-        console.log(`${logPrefix} VP enrichment: ${result.email} (verified=${lead.email_verified}, ${result.credits}c) for ${lead.name}`);
-        return { enriched: true, source: 'vp', reason: null };
-      }
-      console.log(`${logPrefix} VP enrichment no match for ${lead.name}: ${result?.error || 'unknown'} (${result?.credits || 0}c)`);
-      return { enriched: false, source: null, reason: 'vp_no_match' };
-    } catch (err) {
-      console.warn(`${logPrefix} VP enrichment failed for ${lead.name}: ${err.message}`);
-      return { enriched: false, source: null, reason: 'vp_error' };
-    }
-  }
-
-  return { enriched: false, source: null, reason: 'no_email_found' };
 }
 
 /**

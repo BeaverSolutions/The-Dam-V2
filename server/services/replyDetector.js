@@ -29,6 +29,30 @@ function extractHeader(headers, name) {
   return '';
 }
 
+// 2026-05-23 P0.5: extract bare email address from a From header value.
+// "Mail Delivery Subsystem <mailer-daemon@google.com>" → "mailer-daemon@google.com"
+// "jacob@tincityimpact.com" → "jacob@tincityimpact.com"
+function extractEmailAddr(headerValue) {
+  if (!headerValue) return '';
+  const m = String(headerValue).match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+  return m ? m[0].toLowerCase() : '';
+}
+
+// Per-client cache of the connected outbound Gmail address. Refreshed lazily;
+// missing/error → empty string (no skip applied, defensive default).
+const _outboundEmailCache = new Map();
+async function getOutboundEmail(clientId) {
+  if (_outboundEmailCache.has(clientId)) return _outboundEmailCache.get(clientId);
+  try {
+    const addr = (await gmailService.getConnectedEmail(clientId)) || '';
+    _outboundEmailCache.set(clientId, addr.toLowerCase());
+    return addr.toLowerCase();
+  } catch {
+    _outboundEmailCache.set(clientId, '');
+    return '';
+  }
+}
+
 /**
  * Check for replies on all sent messages with thread IDs for a given client.
  * Handles both Gmail threads and AgentMail threads.
@@ -97,6 +121,31 @@ async function checkRepliesForClient(clientId) {
       if (snippet === null) continue;
 
       const threadId = msg.gmail_thread_id || msg.agentmail_thread_id;
+
+      // 2026-05-23 P0.5: skip when the "latest message" is actually MJ's own
+      // outbound reply (sent via Gmail manually). Without this, replyDetector
+      // misclassifies the founder's outbound as an inbound reply. Surfaced by
+      // Jacob replay test 14:12 MYT — MJ had responded manually 2026-05-22
+      // and the polling grabbed his outbound as Jacob's "reply", which then
+      // got auto-drafted in a useless self-loop.
+      const outboundAddr = await getOutboundEmail(clientId);
+      const inboundAddr = extractEmailAddr(inboundFrom);
+      if (outboundAddr && inboundAddr && inboundAddr === outboundAddr) {
+        await logsService.createLog(clientId, {
+          agent: 'system',
+          action: 'reply_skipped_own_outbound',
+          target_type: 'message',
+          target_id: msg.id,
+          metadata: {
+            lead_id: msg.lead_id,
+            thread_id: threadId,
+            outbound_addr: outboundAddr,
+            inbound_addr: inboundAddr,
+            snippet: snippet.slice(0, 120),
+          },
+        }).catch(() => {});
+        continue;
+      }
 
       // ── Contract 1: classify inbound BEFORE setting reply_detected_at ──
       const classification = replyClassifier.classify({
