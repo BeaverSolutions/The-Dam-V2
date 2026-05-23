@@ -3,6 +3,19 @@
 const pool = require('../db/pool');
 const { callAgent } = require('./claude');
 
+// 2026-05-23: post-process strip duplicated from agents.js (lines 110-118)
+// to avoid circular require. Sales Beaver writes drafts that often include
+// "Regards, / Michael Jerry" even when the prompt forbids it on LinkedIn.
+// Without this strip in the FU path (draftFollowUp at line ~537), the bad
+// sign-off survives to Enforcer → hard reject. Cold path (salesGenerate)
+// already strips at line 894-901. This brings FU to parity.
+const FU_SIGNOFF_STRIP_REGEX = /\n*\s*(regards|best(\s+regards)?|cheers|kind\s+regards|sincerely|warm\s+regards|thanks|thank\s+you|talk\s+soon|speak\s+soon|looking\s+forward(\s+to[\s\S]{0,40}?)?|chat\s+soon|all\s+the\s+best|yours(\s+truly|\s+sincerely)?|see\s+you\s+soon)[,!.\s]*[\r\n]+[\s\S]*$/i;
+const FU_AGENT_NAME_STRIP_REGEX = /\n+\s*[—–-]*\s*(bryan(\s+beaver)?|enforcer(\s+beaver)?|sales(\s+beaver)?|captain(\s+beaver)?|ranger(\s+beaver)?|director(\s+beaver)?|research(\s+beaver)?|the\s+beaver(\s+(team|crew|solutions))?|the\s+team\s+at\s+beaver(\s+solutions)?|baver\s+solutions|beaver\s+solutions|the\s+beavrdam(\s+team)?|bobby(\s+beaver)?|bitton)[\s.!]*$/i;
+function fuStripEmDashes(text) {
+  if (!text) return text;
+  return text.replace(/\s*—\s*/g, ', ').replace(/—/g, ' ').replace(/\s*–\s*/g, ', ').replace(/–/g, ' ');
+}
+
 /**
  * Malaysian public holidays 2026 (YYYY-MM-DD).
  * Islamic dates are estimates — update when gazette is published.
@@ -482,6 +495,7 @@ ${channel === 'email' ? '- Sign-off: the email close is "Regards," then "Michael
 
 OTHER HARD RULES:
 - ANTI-FABRICATION: Every company name, product, role, or fact MUST come from LEAD context or PREVIOUS MESSAGES. Lead context "Unknown" → return needs_more_research.
+- ANTI-ABSTRACTION (2026-05-23): When PART 1 references a prior message, you MUST quote a specific phrase or fact verbatim from PREVIOUS MESSAGES (e.g., "your note about hiring senior talent", "the SeekSocial positioning point"). Generic abstractions like "growth", "momentum", "positioning", "scaling", "success", "expansion" are NOT references — they are fabrications. If the prior message did not state the exact fact you want to reference, switch to PART 1 = new trigger instead. The Enforcer will reject any reference that paraphrases or generalizes the prior message's specifics.
 - NO STATS OR NUMBERS: No percentage, statistic, or numeric benchmark in follow-ups. The cold message owned the stat — follow-ups don't repeat them.
 - ANTI-REPETITION: NEVER reuse a hook, angle, pain point, or phrase from PREVIOUS MESSAGES. Each touch is a new thought, not a rephrased version of the last.
 - SENDER IDENTITY: ${channel === 'email' ? 'The email closes with "Regards," then "Michael Jerry" (see FORMAT).' : 'Sign as "Michael" only if natural at the end, otherwise end on the question.'} Never "The Team", never "Sales Beaver", never the lead's name, never the abbreviation "MJ".
@@ -518,7 +532,7 @@ THINK BEFORE YOU WRITE (mandatory reasoning + self-check)
 ═══════════════════════════════════════════════════
 Before drafting, fill out this self-check in your "thinking" field. ALL 8 items must pass. If any fail, regenerate or return needs_more_research.
 
-1. PART 1 (Reference OR new trigger): Quote the exact phrase you'll use. Confirm: it's either a reference to a prior touch OR a NEW verifiable signal — not both, not neither.
+1. PART 1 (Reference OR new trigger): Quote the exact phrase you'll use. Confirm: (a) it's either a reference to a prior touch OR a NEW verifiable signal, not both, not neither. (b) IF a reference: the exact specific phrase you reference MUST appear verbatim or near-verbatim in PREVIOUS MESSAGES above — quote that source phrase too. Generic abstractions ("growth", "momentum", "positioning", "scaling", "success", "expansion") are NOT valid references — they are fabrications.
 2. PART 2 (Insight): Quote it. Confirm: not a stat, not a pitch, not generic industry commentary.
 3. PART 3 (1-3-word-answerable diagnostic Q): Quote it. Confirm: not "does this make sense?" / "any thoughts?" / "want to chat?".
 4. PART 4 (Opt-out clause): Quote it.
@@ -534,7 +548,22 @@ Before returning, re-verify the 8-item self-check above. If any item fails, rewr
 Return JSON only:
 {"thinking":"Your 8-item self-check here, each item on its own line","subject":${channel === 'email' ? '"..."' : 'null'},"body":"...","touch_number":${touchNumber}}`;
 
-  return await callAgent('sales_beaver', prompt);
+  // 2026-05-23: post-process strip+append parity with salesGenerate cold path
+  // (agents.js:894-901). Sales Beaver writes "Regards, Michael Jerry" on
+  // LinkedIn FU drafts despite the prompt forbidding it; without this strip,
+  // the bad sign-off survives to Enforcer → hard reject. Today: 14 of 23
+  // rejects today were this exact pattern. Hardcoded "Michael Jerry" matches
+  // the existing hardcode in the email FORMAT block at line ~442.
+  const result = await callAgent('sales_beaver', prompt);
+  if (result && typeof result.body === 'string' && result.body.length > 0) {
+    let stripped = fuStripEmDashes(result.body)
+      .replace(FU_SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '')
+      .replace(FU_AGENT_NAME_STRIP_REGEX, '').replace(/\s+$/, '');
+    result.body = (channel === 'email')
+      ? `${stripped}\n\nRegards,\nMichael Jerry`
+      : stripped;
+  }
+  return result;
 }
 
 /**
