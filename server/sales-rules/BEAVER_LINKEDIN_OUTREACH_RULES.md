@@ -103,44 +103,61 @@ Approved variants (rotate across batch — never the same closer twice in a row)
 
 ---
 
-## MESSAGE LAYOUT (HARD GATE — locked 2026-05-23)
+## VOICE — MJ operator running his own sales (locked 2026-05-23, supersedes prior MESSAGE LAYOUT)
 
-Every message must follow the per-touch layout below. **Enforcer hard-rejects on layout violation.** Content rules above are SEPARATE from layout — both must pass.
+The canonical voice spec. Replaces the earlier Layout A/B sections. Applies to every cold outreach, follow-up, and reply.
 
-### Layout A — First outreach (Day 0 cold AND warm intro)
+### Identity
+One person to one person. Not a brand, not "the team." Founder-to-founder. You read their stuff before reaching out.
 
-Multi-line, paragraph-broken structure. Four blocks separated by ONE blank line each:
+### Hard rules (Enforcer-checkable, mandatory)
+- DM: max ~12 words/sentence. One idea per line. 3-5 short lines per message.
+- Email: max ~15-18 words/sentence. 4-6 short body lines (excludes greeting + sign-off).
+- Subject (email only): 3-6 words, lowercase OK, specific. Banned subject patterns: "Quick question", "Touching base", "Partnership Opportunity", "Following up".
+- Start with substance. Banned openers: "Hope this finds you well", "I wanted to reach out", "I hope this email finds you well", "My name is", "I'm reaching out".
+- One ask per message, max. Easy yes/no or low-effort reply.
+- No emojis cold. One OK once warm.
+- Plain words. If a 12-year-old wouldn't say it, cut it.
 
+### Banned verbs (auto-reject, case-insensitive)
+leverage, leveraging, empower, empowering, unlock, unlocking, elevate, elevating, streamline, streamlining, synergize, synergizing
+
+### Banned adjectives (auto-reject, case-insensitive)
+revolutionary, game-changing, game changing, cutting-edge, cutting edge, seamless, innovative, transformative, disruptive
+
+### Malaysian warm-direct
+Warmth = specificity + acknowledgment, NOT particles. At most one light marker if natural ("ya", "can"). Never stack Manglish. Acknowledge them first, then your point. No grovelling, no over-apology.
+
+### DM shape (LinkedIn, Instagram, WhatsApp)
+Three lines:
+1. Specific observation about THEM (proves you looked).
+2. The one relevant thing you noticed/do.
+3. Low-friction ask.
+
+No formal greeting line ("Hi Name —" inline opener acceptable). NO sign-off. End on the ask.
+
+### Email shape
 ```
-Hi {{first_name}},
+Subject: [3-6 words, lowercase OK, specific]
 
-Saw {{verifiable trigger or specific observation about company/role}}.
+Hi [Name],
 
-{{1-2 sentence pain hook tied to segment-pain whitelist}} {{1-3 word answerable diagnostic question ending in ?}}
+[Line 1: specific observation about them — proves you looked]
+[Line 2-3: the one relevant thing you do, tied to their situation]
+[Line 4: one low-friction ask]
 
-{{varied opt-out closer}}
+Regards,
+Michael Jerry
 ```
 
-Rules:
-- Greeting on its own line. Comma after first name. Blank line after.
-- The "Saw" sentence is its own line/paragraph. Anchor to a verifiable trigger or specific observation (per Part 1). No filler.
-- Pain hook + question are ONE block (can be 1-2 sentences flowing into the question).
-- Opt-out is its own line. Skip the opt-out only when implicit per Part 4.
-- For warm intros (connector-led), substitute the "Saw" line with the connector reference + specific observation. Same multi-line shape.
+Formality dial vs DM: greeting + sign-off always. Sentences slightly fuller (~15-18 words). Body stays SHORT — 4-6 lines total. Formality ≠ length.
 
-### Layout B — Follow-ups (FU1 / FU2 / FU3, touches 2-6)
-
-Single-line, single-sentence-after-greeting structure:
-
-```
-Hi {{first_name}}, {{one-sentence continuation referencing new trigger or angle, optionally ending with a 1-3 word answerable question}}.
-```
-
-Rules:
-- Greeting + body on the SAME LINE (comma after first name, then continuation).
-- NO blank lines, NO paragraph breaks, NO bullet points.
-- Total length stays under the per-touch word limit (Hard limits section).
-- Question is OPTIONAL on follow-ups — break-up touches (FU3 value-leave) may close without a question.
+### Self-check (Enforcer runs these as gates)
+- Could this go to 500 people? → too generic, reject.
+- Sounds like a newsletter? → cut adjectives, reject.
+- More than one ask? → reject.
+- Subject specific enough to open (email only)? → generic subject = reject.
+- More than 6 body lines (email) or 5 lines (DM)? → reject.
 
 ---
 
@@ -158,70 +175,65 @@ If the writer agent generates a hook that anchors to the prospect's vertical-spe
 
 ---
 
-## Cold message examples (v1.0-compliant)
+## Canonical examples (2026-05-23)
 
-### Path B example 1 — Agency founder, trigger = recent post (Layout A)
+### GOOD — DM (LinkedIn)
 
-> Hi Zheng Yen,
+> Hi Sarah — saw your team's running campaigns across 4 markets manually.
+> We automate the repetitive 80%, keep the judgment calls human.
+> Worth a look? Can send a 2-min Loom, no call needed.
+
+Three lines. Specific observation (4 markets, manual). One relevant thing (automate 80%, keep judgment human). Low-friction ask (Loom, no call). No greeting line break. No sign-off. ≤12 words/sentence.
+
+### GOOD — Email
+
+> Subject: automating your multi-market campaigns
 >
-> Saw Mackyclyde is running SEO retainers across SEA.
+> Hi Sarah,
 >
-> Outbound is eating 8-10 hours a week for most agency founders running their own pipeline in MY/SG, with reply rates under 5% on generic templates. How many hours a week does the team spend on cold outreach?
+> Saw Acme's running paid social across MY, SG and ID, looks like a lot of manual coordination across the three markets.
 >
-> If outbound isn't a 2026 priority, no worries.
-
-Trigger: Mackyclyde anchor (specific company + service). Path B (no Beaver case study). Question: "X hours" or "too many" — 1-3 words. Pain anchor: hours on outreach (whitelist #1) + low reply rates (whitelist #2). Opt-out: present, varied. Layout A: greeting / Saw / pain+question / opt-out (4 blocks).
-
-### Path B example 2 — B2B founder, trigger = funding announcement (Layout A)
-
-> Hi [first_name],
+> We automate the repetitive 80% of that (scheduling, reporting, variants) and keep the judgment calls with your team. Built for SEA specifically.
 >
-> Saw [Company] closed the [round] last month.
+> Worth a quick look? Happy to send a 2-min Loom, no call needed.
 >
-> Most founders post-raise are still personally writing 50+ DMs a week before they delegate, and pipeline volatility tracks the founder's calendar. Is outbound running through you, an SDR hire, or an agency?
+> Regards,
+> Michael Jerry
+
+Subject: 4 words, specific, lowercase OK. 4 body lines. Greeting + sign-off present. Sentences ~15-18 words. Specific observation first, then the relevant thing, then one ask. No buzzwords.
+
+### BAD — DM (every failure mode in one)
+
+> Hi [Name], I help agencies leverage AI to streamline their outbound. Would love to jump on a call to explore how we can help teams like yours achieve results.
+
+Brand voice not person voice. Zero specificity. "leverage" + "streamline" banned. "I help" banned opener. Soft CTA "jump on a call" banned. "teams like yours" banned. Wall of text instead of 3 short lines.
+
+### BAD — Email (formality used as padding)
+
+> Subject: Partnership Opportunity with [Company]
 >
-> Happy to drop the BeavrDam walkthrough here if useful, no obligation.
-
-Trigger: funding event verified. Path B. Question: pick-one (founder / SDR / agency) — 1-3 words. Pain anchor: founder doing outbound (whitelist #3) + inconsistent outbound (whitelist #5). Opt-out: varied phrasing. *(Note: walkthrough mention assumes the asset exists. If not, drop the offer line.)*
-
-### Path B example 3 — SDR-led sales team, trigger = SDR job posting (Layout A)
-
-> Hi [first_name],
+> Dear Sarah,
 >
-> Saw [Company] is hiring an SDR on LinkedIn.
->
-> Agencies and B2B teams in MY/SG using AI for prospecting research are clearing 10-15% on personalised sends, while generic templates are still stuck at 1-5%. What reply rate is your current SDR pulling on cold LinkedIn, weekly average?
->
-> If pipeline's already full, no rush.
+> I hope this email finds you well. My name is MJ and I'm reaching out from [Company], a leading omnichannel marketing platform that leverages cutting-edge AI to empower marketing teams to unlock their full potential and streamline workflows...
 
-Trigger: hire event. Path B. Question: "X%" or rough range — 1-3 words. Pain anchor: low reply rates (whitelist #2) + pipeline gap (whitelist #4). Opt-out: varied.
-
-### Follow-up example — FU1 single-sentence (Layout B)
-
-> Hi [first_name], saw [Company] just announced [new trigger from their world] — curious how that's shifting the outbound priority list this quarter?
-
-Single line. Greeting + body fused. New trigger anchor (not a check-in). Question optional but kept here for engagement.
-
-### Follow-up example — FU3 break-up, no question (Layout B)
-
-> Hi [first_name], dropping this thread for now — if outbound becomes a 2026 priority, easy to pick back up.
-
-Single line. No question. Value-leave + open door per FU3 rules.
+Subject is banned pattern ("Partnership Opportunity"). "Dear" too formal. "I hope this email finds you well" + "My name is" + "I'm reaching out" all banned openers. "leverage" + "cutting-edge" + "empower" + "unlock" + "streamline" — five banned terms in one sentence. Brand voice not person voice. Zero specificity. No real ask. Formality used as padding instead of structure.
 
 ---
 
 ## Hard limits
 
-- 4 sentences MAX after greeting. 3 is better.
-- Total word count under 70.
+- DM: 3-5 short lines per message. ≤12 words/sentence. One idea per line.
+- Email: 4-6 body lines. ≤15-18 words/sentence. Body excludes greeting + sign-off.
+- Total word count under 70 (DM) / under 100 (email body).
 - No em dashes anywhere.
-- No vendor-speak ("we help teams like yours", "leverage", "we work with").
+- No vendor-speak. No buzzwords. Plain words only (12-year-old test).
 - No qualification questions ("do you do outbound?") — assume they do, ask HOW.
 - No soft CTAs ("worth a chat", "15 minutes this week", "happy to jump on a call") on first or second message.
-- Sign-off is CHANNEL-SPECIFIC. LinkedIn / Instagram / WhatsApp DMs: NO sign-off — end on the question. Email (cold AND follow-up): ALWAYS close with "Regards," on one line, then the sender name "Michael Jerry" on the next line. This is the standard, polite SEA business-email close and is REQUIRED on every email — the Enforcer must PASS an email that ends this way and REJECT an email missing it.
-- Never sign with the abbreviation "MJ".
+- Sign-off is CHANNEL-SPECIFIC. **LinkedIn / Instagram / WhatsApp DMs: NO sign-off** — end on the ask. **Email (cold AND follow-up): ALWAYS close with "Regards," on one line, then "Michael Jerry" on the next.** Required on every email. Forbidden on every DM. Enforcer hard-rejects both directions.
+- Never sign with the abbreviation "MJ" (full "Michael Jerry" only).
 - No bullet points inside prospect-facing messages.
-- Malaysian tone: warm + direct.
+- No emojis cold. One OK once warm.
+- Malaysian tone: warm + direct. Warmth = specificity + acknowledgment, NOT particles.
 
 ---
 
@@ -229,28 +241,51 @@ Single line. No question. Value-leave + open door per FU3 rules.
 
 Any draft containing the following must be rejected and regenerated. Max 3 regen attempts before routing back to research.
 
+**Banned verbs (case-insensitive):**
+- leverage, leveraging
+- empower, empowering
+- unlock, unlocking
+- elevate, elevating
+- streamline, streamlining
+- synergize, synergizing
+
+**Banned adjectives (case-insensitive):**
+- revolutionary
+- game-changing, game changing
+- cutting-edge, cutting edge
+- seamless
+- innovative
+- transformative
+- disruptive
+
+**Banned opener / framing patterns:**
+- "Hope this finds you well" / "I hope you're doing well" / "I hope this email finds you well"
+- "I wanted to reach out" / "I'm reaching out" / "My name is"
+- "I help" / "I work with" as opening verb
+- "Dear [Name]" (use "Hi [Name],")
 - "Most founders I talk to" / "Most [persona] I talk to" pattern
 - "At what point does" / "How do you think about" / "What's your approach to"
-- "I help" or "I work with" as the opening verb
-- "leverage" / "leveraging"
 - "we help teams like yours" / "agencies like yours" / "founders like you"
 - "worth a chat" / "15 minutes this week" / "happy to jump on a call" on first/second message
 - "passionate about" / "results-driven"
-- Em dashes (—)
-- "Hope this finds you well" / "I hope you're doing well"
+- Em dashes (— or –)
 
-Structural rejects:
-- More than 4 sentences after greeting
-- Total word count over 70
+**Banned email subject patterns:**
+- "Quick question" / "Touching base" / "Partnership Opportunity" / "Following up"
+- Generic non-specific subjects
+
+**Structural rejects:**
+- DM: more than 5 lines OR any sentence over ~12 words
+- Email: more than 6 body lines OR any sentence over ~18 words
 - Question not ending in "?"
 - Question over 14 words
 - Line 1 missing `{{company_name}}` or a specific named asset (service, client, market, post topic)
-- Value hook (line 3) NOT tied to the segment-pain whitelist
-- **Layout violation (HARD — 2026-05-23):**
-  - Cold first outreach: NOT in Layout A multi-line structure (greeting line / Saw line / pain+question block / opt-out line, separated by blank lines)
-  - Follow-up: NOT in Layout B single-line structure (greeting + body fused on one line, no blank lines, no paragraph breaks)
-  - Greeting missing comma after first name
-  - Cold first outreach missing the explicit "Saw " opener on its own line/block (variants: "Noticed", "Came across" acceptable; the point is a specific observation block, not narrative flow)
+- Value hook NOT tied to the segment-pain whitelist
+- More than one ask in a single message
+- "Could this go to 500 people?" (newsletter test): too generic → reject
+- Greeting missing comma after first name (email only)
+- Email missing "Regards,\nMichael Jerry" sign-off
+- DM containing any sign-off ("Regards,", "Best,", "Cheers,", "Thanks,", "Talk soon", etc.)
 
 ---
 
