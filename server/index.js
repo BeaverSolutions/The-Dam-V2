@@ -1,4 +1,8 @@
 'use strict';
+// 2026-05-23 16:34 MYT — force redeploy after RLS env-var change (RLS_ENFORCE_ENABLED=false)
+// to clear in-memory bad state. Root cause: Supavisor pooler in transaction mode doesn't
+// preserve SET ROLE state. Need session-mode connection OR refactor to SET LOCAL inside
+// transactions before re-enabling RLS_ENFORCE_ENABLED=true.
 require('dotenv').config();
 
 const express = require('express');
