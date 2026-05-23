@@ -229,14 +229,15 @@ function buildQueryPool(icpMemory) {
   const rawLocation = (icp.geographies || icp.geography || icp.location || '').trim();
   const baseLocation = rawLocation || KL_LOCATIONS[0];
 
-  // 2026-05-23: detect SG scope so we emit "Pte Ltd" query variants in addition
-  // to the existing MY-only "Sdn Bhd"/"Berhad" templates. Without this, the
-  // agent_memory.icp.geographies widening from "Malaysia" → "Malaysia, Singapore"
-  // (commit 240919a) was data-only — the query layer kept generating MY-only
-  // queries that returned 0 results after 4 days of cycling. Detection is loose:
-  // any explicit mention of "singapore" / "sg" / "pte" enables SG variants.
+  // 2026-05-23: detect geo scope so we emit per-country query variants in
+  // addition to the existing MY-only "Sdn Bhd"/"Berhad" templates. Detection
+  // is loose — any mention of the country name OR legal-entity suffix OR
+  // ISO code enables that country's variants. MJ scope: MY, SG, AU, US, UK.
   const geoLower = baseLocation.toLowerCase();
   const includesSG = /singapore|\bsg\b|pte\s*\.?\s*ltd/i.test(geoLower);
+  const includesAU = /australia|\baus?\b|\bpty\s*\.?\s*ltd/i.test(geoLower);
+  const includesUS = /united states|\bu\.?s\.?a?\b|america/i.test(geoLower);
+  const includesUK = /united kingdom|\buk\b|britain|england|\bgb\b/i.test(geoLower);
 
   const queryPool = [];
 
@@ -286,6 +287,37 @@ function buildQueryPool(icpMemory) {
           location: baseLocation,
         });
       }
+      // AU variant — "Pty Ltd" suffix (Australian proprietary limited).
+      if (includesAU) {
+        queryPool.push({
+          query:    `${title} ${phrase} "Pty Ltd" Australia`,
+          strategy: 'direct',
+          title,
+          industry: phrase,
+          location: baseLocation,
+        });
+      }
+      // US variant — no clean legal suffix (Inc/LLC are noisy at scale).
+      // Use the explicit country tag in the query plus a B2B qualifier.
+      if (includesUS) {
+        queryPool.push({
+          query:    `${title} ${phrase} "United States" B2B`,
+          strategy: 'direct',
+          title,
+          industry: phrase,
+          location: baseLocation,
+        });
+      }
+      // UK variant — "Ltd" / "Limited" suffix + UK geography keyword.
+      if (includesUK) {
+        queryPool.push({
+          query:    `${title} ${phrase} "Ltd" UK`,
+          strategy: 'direct',
+          title,
+          industry: phrase,
+          location: baseLocation,
+        });
+      }
     }
 
     // Strategy: company search — no location in query, gl:'my' handles geo bias
@@ -301,6 +333,36 @@ function buildQueryPool(icpMemory) {
       if (includesSG) {
         queryPool.push({
           query:    `site:linkedin.com/company ${phrase} "Pte Ltd"`,
+          strategy: 'company',
+          title:    '',
+          industry: phrase,
+          location: baseLocation,
+        });
+      }
+      // AU variant
+      if (includesAU) {
+        queryPool.push({
+          query:    `site:linkedin.com/company ${phrase} "Pty Ltd"`,
+          strategy: 'company',
+          title:    '',
+          industry: phrase,
+          location: baseLocation,
+        });
+      }
+      // US variant
+      if (includesUS) {
+        queryPool.push({
+          query:    `site:linkedin.com/company ${phrase} "United States"`,
+          strategy: 'company',
+          title:    '',
+          industry: phrase,
+          location: baseLocation,
+        });
+      }
+      // UK variant
+      if (includesUK) {
+        queryPool.push({
+          query:    `site:linkedin.com/company ${phrase} "Ltd" UK`,
           strategy: 'company',
           title:    '',
           industry: phrase,

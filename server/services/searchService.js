@@ -143,15 +143,19 @@ function parseCompanyItems(items) {
 
 // ── Provider calls (throw on failure so the fallback chain can catch) ────────
 
-async function callBrave(searchQuery, num) {
+async function callBrave(searchQuery, num, country = 'MY') {
   const apiKey = process.env.BRAVE_API_KEY;
   if (!apiKey) throw new Error('BRAVE_API_KEY not set');
 
+  // 2026-05-23: country now caller-controllable. Default MY for backward
+  // compat with existing call sites (LinkedIn search, signal search). New
+  // multi-geo query pool (research.js) passes per-query country so AU/US/UK
+  // queries don't get heavily MY-biased results.
   const resp = await axios.get('https://api.search.brave.com/res/v1/web/search', {
     params: {
       q: searchQuery,
       count: Math.min(num, 20),
-      country: 'MY',
+      country: String(country).toUpperCase(),
       search_lang: 'en',
       safesearch: 'moderate',
     },
@@ -172,7 +176,7 @@ async function callBrave(searchQuery, num) {
   }));
 }
 
-async function callGoogleCSE(searchQuery, num) {
+async function callGoogleCSE(searchQuery, num, country = 'MY') {
   const apiKey = process.env.GOOGLE_CSE_API_KEY;
   const cx     = process.env.GOOGLE_CSE_CX;
   if (!apiKey || !cx) throw new Error('GOOGLE_CSE_API_KEY or GOOGLE_CSE_CX not set');
@@ -184,7 +188,7 @@ async function callGoogleCSE(searchQuery, num) {
   console.log('[google-cse] Query:', cseQuery);
 
   const resp = await axios.get(GOOGLE_CSE_URL, {
-    params: { key: apiKey, cx, q: cseQuery, num: Math.min(num, 10), gl: 'MY', hl: 'en' },
+    params: { key: apiKey, cx, q: cseQuery, num: Math.min(num, 10), gl: String(country).toLowerCase(), hl: 'en' },
     timeout: 10000,
   });
   // Google CSE uses `items[]` with same { link, title, snippet } shape

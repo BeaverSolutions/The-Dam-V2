@@ -38,8 +38,12 @@ const CHANNEL_HINTS = {
 // - CMO removed from standalone — was a Beaver-irrelevant exception slipping leads.
 // When Emplifive onboards as a BeavrDam tenant, these constants split per-tenant.
 const ICP_ALLOWED_COUNTRIES = new Set([
+  // SEA-2 (Beaver Solutions home)
   'malaysia','singapore',
   'my','sg',
+  // 2026-05-23: expanded per MJ — AU/US/UK added for global SMB B2B founder ICP
+  'australia','united states','united kingdom',
+  'au','us','usa','uk','gb',
 ]);
 
 // 2026-05-23: explicit deny list — fires BEFORE the allow check. Defensive
