@@ -1201,65 +1201,55 @@ async function start() {
           }
 
           // ── ZERO-YIELD CIRCUIT BREAKER (2026-05-23) ──
-          // Enforces the PRE-ACTION SPEND GATE (corrections.md 2026-05-22) on
-          // the autonomous Captain itself. If the last 3 kickoffs have fired
-          // and produced ZERO new messages AND ZERO new leads since the
-          // oldest of those 3, the pipeline is broken — stop burning LLM
-          // tokens until the underlying cause is fixed. Self-releases as
-          // soon as any source produces a message or lead.
-          const { rows: lastThreeKickoffs } = await pool.query(
-            `SELECT created_at FROM logs
-             WHERE client_id = $1 AND action = 'kpi_gap_kickoff'
-             ORDER BY created_at DESC LIMIT 3`,
+          // Enforces corrections.md 2026-05-22 PRE-ACTION SPEND GATE on the
+          // autonomous Captain. Keyed off the canonical kickoff_zero_output
+          // signal already written by routes/autonomous.js:~1996 after any
+          // kickoff that produces 0 sent + 0 pending + 0 rejected. If 3+
+          // such rows landed in the last 4h, the pipeline is broken — stop
+          // burning LLM tokens until the underlying cause is fixed.
+          // Self-releases as soon as any kickoff lands non-zero output
+          // (the 4h window decays past the zero rows).
+          const { rows: [{ zero_count }] } = await pool.query(
+            `SELECT COUNT(*)::int AS zero_count FROM logs
+             WHERE client_id = $1
+               AND action = 'kickoff_zero_output'
+               AND created_at > NOW() - INTERVAL '4 hours'`,
             [client.id]
           );
-          if (lastThreeKickoffs.length >= 3) {
-            const oldestOfLastThree = lastThreeKickoffs[2].created_at;
-            const { rows: [{ msg_count, lead_count }] } = await pool.query(
-              `SELECT
-                 (SELECT COUNT(*)::int FROM messages
-                    WHERE client_id = $1 AND created_at > $2) AS msg_count,
-                 (SELECT COUNT(*)::int FROM leads
-                    WHERE client_id = $1 AND created_at > $2) AS lead_count`,
-              [client.id, oldestOfLastThree]
+          if (zero_count >= 3) {
+            const breakerKey = `captain_breaker_${today}`;
+            const { rows: alreadyAlerted } = await pool.query(
+              `SELECT 1 FROM agent_memory
+               WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2 LIMIT 1`,
+              [client.id, breakerKey]
             );
-            if (msg_count === 0 && lead_count === 0) {
-              const breakerKey = `captain_breaker_${today}`;
-              const { rows: alreadyAlerted } = await pool.query(
-                `SELECT 1 FROM agent_memory
-                 WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2 LIMIT 1`,
-                [client.id, breakerKey]
-              );
-              if (alreadyAlerted.length === 0) {
-                await pool.query(
-                  `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
-                   VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
-                   ON CONFLICT (client_id, agent, key) DO NOTHING`,
-                  [client.id, breakerKey, JSON.stringify({
-                    tripped_at: now.toISOString(),
-                    last_three_kickoffs: lastThreeKickoffs.map(r => r.created_at),
-                    msg_count_since: msg_count,
-                    lead_count_since: lead_count,
-                  })]
+            if (alreadyAlerted.length === 0) {
+              await pool.query(
+                `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+                 VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
+                 ON CONFLICT (client_id, agent, key) DO NOTHING`,
+                [client.id, breakerKey, JSON.stringify({
+                  tripped_at: now.toISOString(),
+                  zero_output_count_4h: zero_count,
+                })]
+              ).catch(() => {});
+              await pool.query(
+                `INSERT INTO logs (client_id, agent, action, target_type, metadata)
+                 VALUES ($1, 'captain_orchestrator', 'captain_circuit_breaker_tripped', 'system', $2::jsonb)`,
+                [client.id, JSON.stringify({
+                  reason: 'zero-output kickoffs >= 3 in last 4h',
+                  zero_output_count_4h: zero_count,
+                })]
+              ).catch(() => {});
+              const chatId = process.env.TELEGRAM_CHAT_ID;
+              if (chatId) {
+                telegramService.sendMessage(chatId,
+                  `[critical] Captain CIRCUIT BREAKER tripped for ${client.slug}: ${zero_count} zero-output kickoffs in last 4h. Pausing kickoffs to stop LLM burn. Fix the root cause (sourcing / pipeline / Sales Beaver), then breaker auto-releases as the 4h window decays past the zero rows.`
                 ).catch(() => {});
-                await pool.query(
-                  `INSERT INTO logs (client_id, agent, action, target_type, metadata)
-                   VALUES ($1, 'captain', 'captain_circuit_breaker_tripped', 'system', $2::jsonb)`,
-                  [client.id, JSON.stringify({
-                    reason: 'last 3 kickoffs produced 0 messages AND 0 leads',
-                    last_three_kickoffs: lastThreeKickoffs.map(r => r.created_at),
-                  })]
-                ).catch(() => {});
-                const chatId = process.env.TELEGRAM_CHAT_ID;
-                if (chatId) {
-                  telegramService.sendMessage(chatId,
-                    `[critical] Captain CIRCUIT BREAKER tripped for ${client.slug}: last 3 kickoffs produced 0 messages and 0 leads. Pausing kickoffs to stop LLM burn. Fix root cause (sourcing / pipeline / Sales Beaver), then any new message or lead will auto-release.`
-                  ).catch(() => {});
-                }
               }
-              logger.warn({ msg: `[kpi-gap] ${client.slug}: CIRCUIT BREAKER tripped — 0 yield over last 3 kickoffs, skipping` });
-              continue;
             }
+            logger.warn({ msg: `[kpi-gap] ${client.slug}: CIRCUIT BREAKER tripped — ${zero_count} zero-output kickoffs in last 4h, skipping` });
+            continue;
           }
 
           // Mark this slot as checked
