@@ -42,6 +42,15 @@ const ICP_ALLOWED_COUNTRIES = new Set([
   'my','sg',
 ]);
 
+// 2026-05-23: explicit deny list — fires BEFORE the allow check. Defensive
+// against paths that bypass agent_memory.icp.geographies (e.g. Director Chat
+// where user-typed prompts can surface out-of-ICP leads). MJ flagged that
+// India recommendations were leaking through. Even with India absent from
+// the allow set, an explicit deny gives a clear rejection reason in logs.
+const ICP_DENIED_COUNTRIES = new Set([
+  'india','in','bharat','भारत',
+]);
+
 // Senior decision-maker titles. If any matches standalone, lead passes title gate.
 // Founder/Co-founder/CEO/MD/CRO/COO/CFO/CTO/President/Owner/Principal/Managing Partner
 // stand alone. Director/Head/VP/GM/Chief must combine with a sales/BD/revenue function
@@ -145,6 +154,10 @@ function applyIcpV2Filter(lead) {
 
   if (!rawCountry) {
     return { pass: false, status: 'rejected_unresolved_country', reason: 'country could not be resolved from LinkedIn / company website' };
+  }
+  // 2026-05-23: explicit deny check fires before the allow check.
+  if (ICP_DENIED_COUNTRIES.has(rawCountry)) {
+    return { pass: false, status: 'rejected_country_denied', reason: `country "${rawCountry}" is explicitly excluded from ICP` };
   }
   if (!ICP_ALLOWED_COUNTRIES.has(rawCountry)) {
     return { pass: false, status: 'rejected_country', reason: `country "${rawCountry}" is outside SEA-6` };
