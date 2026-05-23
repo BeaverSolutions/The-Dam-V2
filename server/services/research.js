@@ -229,6 +229,15 @@ function buildQueryPool(icpMemory) {
   const rawLocation = (icp.geographies || icp.geography || icp.location || '').trim();
   const baseLocation = rawLocation || KL_LOCATIONS[0];
 
+  // 2026-05-23: detect SG scope so we emit "Pte Ltd" query variants in addition
+  // to the existing MY-only "Sdn Bhd"/"Berhad" templates. Without this, the
+  // agent_memory.icp.geographies widening from "Malaysia" → "Malaysia, Singapore"
+  // (commit 240919a) was data-only — the query layer kept generating MY-only
+  // queries that returned 0 results after 4 days of cycling. Detection is loose:
+  // any explicit mention of "singapore" / "sg" / "pte" enables SG variants.
+  const geoLower = baseLocation.toLowerCase();
+  const includesSG = /singapore|\bsg\b|pte\s*\.?\s*ltd/i.test(geoLower);
+
   const queryPool = [];
 
   // Generate compound industry search phrases
@@ -265,6 +274,18 @@ function buildQueryPool(icpMemory) {
         industry: phrase,
         location: baseLocation,
       });
+
+      // SG variant — "Pte Ltd" suffix (Singapore legal entity). Only if SG is
+      // in ICP scope. Same structure as MY direct query, swapped suffix.
+      if (includesSG) {
+        queryPool.push({
+          query:    `${title} ${phrase} "Pte Ltd"`,
+          strategy: 'direct',
+          title,
+          industry: phrase,
+          location: baseLocation,
+        });
+      }
     }
 
     // Strategy: company search — no location in query, gl:'my' handles geo bias
@@ -276,6 +297,16 @@ function buildQueryPool(icpMemory) {
         industry: phrase,
         location: baseLocation,
       });
+      // SG variant
+      if (includesSG) {
+        queryPool.push({
+          query:    `site:linkedin.com/company ${phrase} "Pte Ltd"`,
+          strategy: 'company',
+          title:    '',
+          industry: phrase,
+          location: baseLocation,
+        });
+      }
     }
   }
 
@@ -297,6 +328,24 @@ function buildQueryPool(icpMemory) {
       industry: phrase,
       location: baseLocation,
     });
+
+    // SG variants
+    if (includesSG) {
+      queryPool.push({
+        query:    `${phrase} "Pte Ltd" hiring`,
+        strategy: 'signal_jobs',
+        title:    '',
+        industry: phrase,
+        location: baseLocation,
+      });
+      queryPool.push({
+        query:    `${phrase} "Pte Ltd" hiring OR raised OR launched`,
+        strategy: 'signal_news',
+        title:    '',
+        industry: phrase,
+        location: baseLocation,
+      });
+    }
   }
 
   // Strategy: growth signals — different angle, breaks dedup loop
@@ -312,7 +361,20 @@ function buildQueryPool(icpMemory) {
     'Malaysia founder "first enterprise client"',
     'Malaysia CEO agency "scaling"',
   ];
-  for (const sig of GROWTH_SIGNALS) {
+  // SG growth signals — parallel structure to MY set
+  const GROWTH_SIGNALS_SG = includesSG ? [
+    'hiring first sales person "Pte Ltd"',
+    'hiring BD manager "Pte Ltd"',
+    '"Series A" Singapore founder',
+    '"bootstrapped" founder Singapore B2B',
+    'Singapore startup founder 2024 OR 2025 B2B',
+    'founder CEO "small team" Singapore B2B clients',
+    '"head of sales" hiring Singapore "Pte Ltd"',
+    'Singapore B2B SaaS founder "growing team"',
+    'Singapore founder "first enterprise client"',
+    'Singapore CEO agency "scaling"',
+  ] : [];
+  for (const sig of [...GROWTH_SIGNALS, ...GROWTH_SIGNALS_SG]) {
     queryPool.push({
       query:    sig,
       strategy: 'signal_growth',
@@ -347,6 +409,30 @@ function buildQueryPool(icpMemory) {
       industry: phrase,
       location: baseLocation,
     });
+    // SG variants
+    if (includesSG) {
+      queryPool.push({
+        query:    `site:rocketreach.co "${phrase}" "Pte Ltd"`,
+        strategy: 'email_derivable',
+        title:    '',
+        industry: phrase,
+        location: baseLocation,
+      });
+      queryPool.push({
+        query:    `"team" "${phrase}" "@" Singapore`,
+        strategy: 'email_derivable',
+        title:    '',
+        industry: phrase,
+        location: baseLocation,
+      });
+      queryPool.push({
+        query:    `"contact" "${phrase}" "Pte Ltd"`,
+        strategy: 'email_derivable',
+        title:    '',
+        industry: phrase,
+        location: baseLocation,
+      });
+    }
   }
 
     // Deduplicate by query string
