@@ -103,6 +103,47 @@ Approved variants (rotate across batch — never the same closer twice in a row)
 
 ---
 
+## MESSAGE LAYOUT (HARD GATE — locked 2026-05-23)
+
+Every message must follow the per-touch layout below. **Enforcer hard-rejects on layout violation.** Content rules above are SEPARATE from layout — both must pass.
+
+### Layout A — First outreach (Day 0 cold AND warm intro)
+
+Multi-line, paragraph-broken structure. Four blocks separated by ONE blank line each:
+
+```
+Hi {{first_name}},
+
+Saw {{verifiable trigger or specific observation about company/role}}.
+
+{{1-2 sentence pain hook tied to segment-pain whitelist}} {{1-3 word answerable diagnostic question ending in ?}}
+
+{{varied opt-out closer}}
+```
+
+Rules:
+- Greeting on its own line. Comma after first name. Blank line after.
+- The "Saw" sentence is its own line/paragraph. Anchor to a verifiable trigger or specific observation (per Part 1). No filler.
+- Pain hook + question are ONE block (can be 1-2 sentences flowing into the question).
+- Opt-out is its own line. Skip the opt-out only when implicit per Part 4.
+- For warm intros (connector-led), substitute the "Saw" line with the connector reference + specific observation. Same multi-line shape.
+
+### Layout B — Follow-ups (FU1 / FU2 / FU3, touches 2-6)
+
+Single-line, single-sentence-after-greeting structure:
+
+```
+Hi {{first_name}}, {{one-sentence continuation referencing new trigger or angle, optionally ending with a 1-3 word answerable question}}.
+```
+
+Rules:
+- Greeting + body on the SAME LINE (comma after first name, then continuation).
+- NO blank lines, NO paragraph breaks, NO bullet points.
+- Total length stays under the per-touch word limit (Hard limits section).
+- Question is OPTIONAL on follow-ups — break-up touches (FU3 value-leave) may close without a question.
+
+---
+
 ## Segment-pain whitelist (NEW — Beaver-specific)
 
 Every Path B line 3 must tie back to ONE of these five approved BeavrDam pains. If the generated value hook does not anchor to one of these, reject and regenerate.
@@ -119,23 +160,53 @@ If the writer agent generates a hook that anchors to the prospect's vertical-spe
 
 ## Cold message examples (v1.0-compliant)
 
-### Path B example 1 — Agency founder, trigger = recent post
+### Path B example 1 — Agency founder, trigger = recent post (Layout A)
 
-> Hi Zheng Yen, saw Mackyclyde is running SEO retainers across SEA. Quick question: how many hours a week does the team spend on cold outreach to fill the pipeline? Asking because outbound is eating 8-10 hours a week for most agency founders running their own pipeline in MY/SG, with reply rates under 5% on generic templates. If outbound isn't a 2026 priority, no worries.
+> Hi Zheng Yen,
+>
+> Saw Mackyclyde is running SEO retainers across SEA.
+>
+> Outbound is eating 8-10 hours a week for most agency founders running their own pipeline in MY/SG, with reply rates under 5% on generic templates. How many hours a week does the team spend on cold outreach?
+>
+> If outbound isn't a 2026 priority, no worries.
 
-Trigger: Mackyclyde anchor (specific company + service). Path B (no Beaver case study). Question: "X hours" or "too many" — 1-3 words. Pain anchor: hours on outreach (whitelist #1) + low reply rates (whitelist #2). Opt-out: present, varied. Word count: 67. 4 sentences.
+Trigger: Mackyclyde anchor (specific company + service). Path B (no Beaver case study). Question: "X hours" or "too many" — 1-3 words. Pain anchor: hours on outreach (whitelist #1) + low reply rates (whitelist #2). Opt-out: present, varied. Layout A: greeting / Saw / pain+question / opt-out (4 blocks).
 
-### Path B example 2 — B2B founder, trigger = funding announcement
+### Path B example 2 — B2B founder, trigger = funding announcement (Layout A)
 
-> Hi [first_name], saw [Company] closed the [round] last month. Quick question: now that you're scaling, is outbound running through you, an SDR hire, or an agency? Asking because most founders post-raise are still personally writing 50+ DMs a week before they delegate, and pipeline volatility tracks the founder's calendar. Happy to drop the BeavrDam walkthrough here if useful, no obligation.
+> Hi [first_name],
+>
+> Saw [Company] closed the [round] last month.
+>
+> Most founders post-raise are still personally writing 50+ DMs a week before they delegate, and pipeline volatility tracks the founder's calendar. Is outbound running through you, an SDR hire, or an agency?
+>
+> Happy to drop the BeavrDam walkthrough here if useful, no obligation.
 
-Trigger: funding event verified. Path B. Question: pick-one (founder / SDR / agency) — 1-3 words. Pain anchor: founder doing outbound (whitelist #3) + inconsistent outbound (whitelist #5). Opt-out: varied phrasing. *(Note: walkthrough mention assumes the asset exists. If not in Andika-equivalent Beaver library, drop the offer line.)*
+Trigger: funding event verified. Path B. Question: pick-one (founder / SDR / agency) — 1-3 words. Pain anchor: founder doing outbound (whitelist #3) + inconsistent outbound (whitelist #5). Opt-out: varied phrasing. *(Note: walkthrough mention assumes the asset exists. If not, drop the offer line.)*
 
-### Path B example 3 — SDR-led sales team, trigger = SDR job posting
+### Path B example 3 — SDR-led sales team, trigger = SDR job posting (Layout A)
 
-> Hi [first_name], saw [Company] is hiring an SDR on LinkedIn. Quick question: what reply rate is your current SDR pulling on cold LinkedIn DMs, weekly average? Asking because the agencies and B2B teams in MY/SG using AI for prospecting research are clearing 10-15% on personalised sends — generic templates are still stuck at 1-5%. If pipeline's already full, no rush.
+> Hi [first_name],
+>
+> Saw [Company] is hiring an SDR on LinkedIn.
+>
+> Agencies and B2B teams in MY/SG using AI for prospecting research are clearing 10-15% on personalised sends, while generic templates are still stuck at 1-5%. What reply rate is your current SDR pulling on cold LinkedIn, weekly average?
+>
+> If pipeline's already full, no rush.
 
 Trigger: hire event. Path B. Question: "X%" or rough range — 1-3 words. Pain anchor: low reply rates (whitelist #2) + pipeline gap (whitelist #4). Opt-out: varied.
+
+### Follow-up example — FU1 single-sentence (Layout B)
+
+> Hi [first_name], saw [Company] just announced [new trigger from their world] — curious how that's shifting the outbound priority list this quarter?
+
+Single line. Greeting + body fused. New trigger anchor (not a check-in). Question optional but kept here for engagement.
+
+### Follow-up example — FU3 break-up, no question (Layout B)
+
+> Hi [first_name], dropping this thread for now — if outbound becomes a 2026 priority, easy to pick back up.
+
+Single line. No question. Value-leave + open door per FU3 rules.
 
 ---
 
@@ -175,6 +246,11 @@ Structural rejects:
 - Question over 14 words
 - Line 1 missing `{{company_name}}` or a specific named asset (service, client, market, post topic)
 - Value hook (line 3) NOT tied to the segment-pain whitelist
+- **Layout violation (HARD — 2026-05-23):**
+  - Cold first outreach: NOT in Layout A multi-line structure (greeting line / Saw line / pain+question block / opt-out line, separated by blank lines)
+  - Follow-up: NOT in Layout B single-line structure (greeting + body fused on one line, no blank lines, no paragraph breaks)
+  - Greeting missing comma after first name
+  - Cold first outreach missing the explicit "Saw " opener on its own line/block (variants: "Noticed", "Came across" acceptable; the point is a specific observation block, not narrative flow)
 
 ---
 
