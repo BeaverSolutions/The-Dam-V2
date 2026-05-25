@@ -1265,7 +1265,7 @@ async function start() {
           logger.info({ msg: `[kpi-gap] ${client.slug}: email ${email_sent_today}/${EMAIL_TARGET}, gap=${gap}, pool=${pool_size}, kickoff #${kickoffsToday + 1} — firing` });
           await pool.query(
             `INSERT INTO logs (client_id, agent, action, target_type, metadata)
-             VALUES ($1, 'captain', 'kpi_gap_kickoff', 'system', $2::jsonb)`,
+             VALUES ($1, 'captain_orchestrator', 'kpi_gap_kickoff', 'system', $2::jsonb)`,
             [client.id, JSON.stringify({ email_sent: email_sent_today, email_target: EMAIL_TARGET, gap, pool_size, kickoff_number: kickoffsToday + 1 })]
           ).catch(() => {});
 
