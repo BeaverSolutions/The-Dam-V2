@@ -1,6 +1,7 @@
 'use strict';
 
 const secrets = require('./secrets');
+const spendGuard = require('./spendGuard');
 
 let axios;
 try {
@@ -27,6 +28,12 @@ async function searchPeople(clientId, { query, limit = 5 }) {
   const apiKey = await getApiKey(clientId);
   if (!apiKey) return null; // caller should fall back to Claude
 
+  const guard = await spendGuard.checkProvider('apollo', { clientId, estimatedUnits: 1 });
+  if (!guard.allowed) {
+    console.warn(`[apollo] BLOCKED by spendGuard: ${guard.reason}`);
+    return null;
+  }
+
   // Parse query into title + keywords
   const titleMatch = query.match(/\b(ceo|cto|coo|cfo|vp|director|manager|founder|head|lead|engineer|developer|sales|marketing)\b/i);
   const title = titleMatch ? titleMatch[0] : undefined;
@@ -45,6 +52,11 @@ async function searchPeople(clientId, { query, limit = 5 }) {
     });
 
     const people = resp.data?.people || [];
+    await spendGuard.logProviderUsage('apollo', {
+      clientId,
+      units: 1,
+      metadata: { operation: 'people_search', limit },
+    });
 
     return people.map(p => ({
       name: [p.first_name, p.last_name].filter(Boolean).join(' ') || 'Unknown',
@@ -81,11 +93,23 @@ async function testConnection(clientId) {
   if (!axios) return false;
   const apiKey = await getApiKey(clientId);
   if (!apiKey) return false;
+  const guard = await spendGuard.checkProvider('apollo', { clientId, estimatedUnits: 1 });
+  if (!guard.allowed) {
+    console.warn(`[apollo] testConnection BLOCKED by spendGuard: ${guard.reason}`);
+    return false;
+  }
   try {
     const resp = await axios.post(`${APOLLO_BASE}/mixed_people/search`, {
       q_keywords: 'test',
       per_page: 1,
     }, { headers: { 'X-Api-Key': apiKey }, timeout: 10000 });
+    if (resp.status === 200) {
+      await spendGuard.logProviderUsage('apollo', {
+        clientId,
+        units: 1,
+        metadata: { operation: 'test_connection' },
+      });
+    }
     return resp.status === 200;
   } catch {
     return false;

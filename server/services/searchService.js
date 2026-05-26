@@ -16,6 +16,48 @@ try {
 
 const GOOGLE_CSE_URL = 'https://www.googleapis.com/customsearch/v1';
 const DDG_URL        = 'https://api.duckduckgo.com/';
+const spendGuard = require('./spendGuard');
+const { getCurrentClientId } = require('../middleware/clientContext');
+
+function currentClientId() {
+  return getCurrentClientId() || null;
+}
+
+function providerBlockedError(provider, guard) {
+  const err = new Error(`${provider} provider blocked by spend guard: ${guard.reason || 'not_allowed'}`);
+  err.code = 'PROVIDER_SPEND_BLOCKED';
+  err.provider = provider;
+  err.guard = guard;
+  return err;
+}
+
+function envInt(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const DEFAULT_PARALLEL_SEARCH_PAID_QUERY_CAP = envInt('SEARCH_MAX_PAID_QUERIES_PER_OPERATION', 6);
+
+function splitPaidQueryBudget(braveQueries, cseQueries, maxPaidQueries = DEFAULT_PARALLEL_SEARCH_PAID_QUERY_CAP) {
+  const cap = Math.max(1, maxPaidQueries);
+  let braveBudget = Math.min(braveQueries.length, Math.ceil(cap / 2));
+  let cseBudget = Math.min(cseQueries.length, cap - braveBudget);
+  const unused = cap - braveBudget - cseBudget;
+
+  if (unused > 0) {
+    const braveExtra = Math.min(unused, Math.max(0, braveQueries.length - braveBudget));
+    braveBudget += braveExtra;
+    cseBudget += Math.min(unused - braveExtra, Math.max(0, cseQueries.length - cseBudget));
+  }
+
+  return {
+    brave: braveQueries.slice(0, braveBudget),
+    cse: cseQueries.slice(0, cseBudget),
+    cap,
+  };
+}
 
 // ── Shared parsing helpers ──────────────────────────────────────────────────
 
@@ -146,6 +188,9 @@ function parseCompanyItems(items) {
 async function callBrave(searchQuery, num, country = 'MY') {
   const apiKey = process.env.BRAVE_API_KEY;
   if (!apiKey) throw new Error('BRAVE_API_KEY not set');
+  const clientId = currentClientId();
+  const guard = await spendGuard.checkProvider('brave', { clientId, estimatedUnits: 1 });
+  if (!guard.allowed) throw providerBlockedError('brave', guard);
 
   // 2026-05-23: country now caller-controllable. Default MY for backward
   // compat with existing call sites (LinkedIn search, signal search). New
@@ -166,6 +211,11 @@ async function callBrave(searchQuery, num, country = 'MY') {
     },
     timeout: 10000,
   });
+  await spendGuard.logProviderUsage('brave', {
+    clientId,
+    units: 1,
+    metadata: { query_preview: String(searchQuery).slice(0, 160), country: String(country).toUpperCase(), count: Math.min(num, 20) },
+  });
 
   const results = resp.data?.web?.results || [];
   // Map Brave format to normalised format (title, link, snippet)
@@ -180,6 +230,9 @@ async function callGoogleCSE(searchQuery, num, country = 'MY') {
   const apiKey = process.env.GOOGLE_CSE_API_KEY;
   const cx     = process.env.GOOGLE_CSE_CX;
   if (!apiKey || !cx) throw new Error('GOOGLE_CSE_API_KEY or GOOGLE_CSE_CX not set');
+  const clientId = currentClientId();
+  const guard = await spendGuard.checkProvider('google_cse', { clientId, estimatedUnits: 1 });
+  if (!guard.allowed) throw providerBlockedError('google_cse', guard);
 
   // CSE is domain-restricted to linkedin.com — strip any existing site: operator and force linkedin.com/in
   const strippedQuery = searchQuery.replace(/\bsite:\S+\s*/gi, '').trim();
@@ -190,6 +243,11 @@ async function callGoogleCSE(searchQuery, num, country = 'MY') {
   const resp = await axios.get(GOOGLE_CSE_URL, {
     params: { key: apiKey, cx, q: cseQuery, num: Math.min(num, 10), gl: String(country).toLowerCase(), hl: 'en' },
     timeout: 10000,
+  });
+  await spendGuard.logProviderUsage('google_cse', {
+    clientId,
+    units: 1,
+    metadata: { query_preview: cseQuery.slice(0, 160), country: String(country).toUpperCase(), count: Math.min(num, 10) },
   });
   // Google CSE uses `items[]` with same { link, title, snippet } shape
   return resp.data?.items || [];
@@ -320,12 +378,18 @@ async function runAllCSEQueries(queries) {
  * Returns a flat array of parsed profile leads (scorer format not applied here —
  * callers should pass through leadScorer.normalize() if needed).
  */
-async function parallelSearch(braveQueries, cseQueries) {
-  console.log(`[search] parallelSearch — Brave: ${braveQueries.length} queries, CSE: ${cseQueries.length} queries`);
+async function parallelSearch(braveQueries, cseQueries, options = {}) {
+  const budget = splitPaidQueryBudget(braveQueries, cseQueries, options.maxPaidQueries);
+  const totalRequested = braveQueries.length + cseQueries.length;
+  const totalBudgeted = budget.brave.length + budget.cse.length;
+  if (totalRequested > totalBudgeted) {
+    console.log(`[search] Capping parallelSearch paid queries from ${totalRequested} to ${totalBudgeted}`);
+  }
+  console.log(`[search] parallelSearch — Brave: ${budget.brave.length} queries, CSE: ${budget.cse.length} queries`);
 
   const [braveSettled, cseSettled] = await Promise.allSettled([
-    runAllBraveQueries(braveQueries),
-    runAllCSEQueries(cseQueries),
+    runAllBraveQueries(budget.brave),
+    runAllCSEQueries(budget.cse),
   ]);
 
   const combined = [];
@@ -347,7 +411,7 @@ async function parallelSearch(braveQueries, cseQueries) {
   // DDG only runs if BOTH Brave AND CSE returned 0 results
   if (combined.length === 0) {
     console.log('[search] Both Brave and CSE returned 0 results — falling back to DuckDuckGo');
-    const fallbackQuery = braveQueries[0] || cseQueries[0];
+    const fallbackQuery = budget.brave[0] || budget.cse[0] || braveQueries[0] || cseQueries[0];
     if (fallbackQuery) {
       try {
         const ddgItems = await callDuckDuckGo(fallbackQuery);
@@ -406,6 +470,9 @@ async function searchOpenWeb(query, limit = 5) {
   try {
     const braveKey = process.env.BRAVE_API_KEY;
     if (!braveKey) throw new Error('BRAVE_API_KEY not set');
+    const clientId = currentClientId();
+    const guard = await spendGuard.checkProvider('brave', { clientId, estimatedUnits: 1 });
+    if (!guard.allowed) throw providerBlockedError('brave', guard);
 
     const resp = await axios.get('https://api.search.brave.com/res/v1/web/search', {
       params: {
@@ -421,6 +488,11 @@ async function searchOpenWeb(query, limit = 5) {
         'Accept-Encoding': 'gzip',
       },
       timeout: 10000,
+    });
+    await spendGuard.logProviderUsage('brave', {
+      clientId,
+      units: 1,
+      metadata: { query_preview: String(query).slice(0, 160), country: 'MY', count: Math.min(limit, 20), mode: 'open_web' },
     });
 
     const results = resp.data?.web?.results || [];
@@ -444,10 +516,18 @@ async function searchOpenWeb(query, limit = 5) {
     const apiKey = process.env.GOOGLE_CSE_API_KEY;
     const cx     = process.env.GOOGLE_CSE_CX;
     if (!apiKey || !cx) throw new Error('GOOGLE_CSE not configured');
+    const clientId = currentClientId();
+    const guard = await spendGuard.checkProvider('google_cse', { clientId, estimatedUnits: 1 });
+    if (!guard.allowed) throw providerBlockedError('google_cse', guard);
 
     const resp = await axios.get(GOOGLE_CSE_URL, {
       params: { key: apiKey, cx, q: query, num: Math.min(limit, 10), gl: 'MY', hl: 'en' },
       timeout: 10000,
+    });
+    await spendGuard.logProviderUsage('google_cse', {
+      clientId,
+      units: 1,
+      metadata: { query_preview: String(query).slice(0, 160), country: 'MY', count: Math.min(limit, 10), mode: 'open_web' },
     });
 
     return (resp.data?.items || []).map(r => ({

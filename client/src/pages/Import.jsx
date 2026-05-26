@@ -19,6 +19,19 @@ const LEAD_FIELDS = [
   { key: 'notes',        label: 'Notes' },
 ];
 
+const IMPORT_SOURCES = [
+  {
+    key: 'vibe_csv',
+    title: 'Vibe CSV',
+    description: 'User-prompted Vibe export. Emails are trusted and skip MillionVerifier.',
+  },
+  {
+    key: 'csv_import',
+    title: 'Standard CSV',
+    description: 'Generic lead list from Apollo, LinkedIn, WaveLeads, or another source.',
+  },
+];
+
 // Try to auto-match CSV headers to lead fields
 function autoMap(headers) {
   const mapping = {};
@@ -98,6 +111,7 @@ export default function Import() {
   const [result, setResult] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [fileName, setFileName] = useState('');
+  const [importSource, setImportSource] = useState('vibe_csv');
   const [error, setError] = useState(null); // A9-01: was used but never declared → crash on import failure
 
   const handleFile = (file) => {
@@ -131,7 +145,7 @@ export default function Import() {
     try {
       const res = await request('/import/leads', {
         method: 'POST',
-        body: JSON.stringify({ rows, mapping }),
+        body: JSON.stringify({ rows, mapping, source: importSource }),
       });
       setResult(res?.data);
       setStep('done');
@@ -146,6 +160,7 @@ export default function Import() {
     setMapping({});
     setResult(null);
     setFileName('');
+    setImportSource('vibe_csv');
   };
 
   const previewRows = rows.slice(0, 5);
@@ -203,6 +218,38 @@ export default function Import() {
 
       {/* Step 1: Upload */}
       {step === 'upload' && (
+        <>
+        <div className="card" style={{ marginBottom: '1rem' }}>
+          <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Import source</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0.75rem' }}>
+            {IMPORT_SOURCES.map(option => {
+              const active = importSource === option.key;
+              return (
+                <button
+                  key={option.key}
+                  type="button"
+                  onClick={() => setImportSource(option.key)}
+                  style={{
+                    textAlign: 'left',
+                    background: active ? 'rgba(200,255,0,0.08)' : 'var(--bg)',
+                    border: `1px solid ${active ? 'rgba(200,255,0,0.35)' : 'var(--border)'}`,
+                    borderRadius: 'var(--radius)',
+                    padding: '0.85rem 1rem',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontWeight: 600, color: active ? 'var(--lime)' : 'var(--text)' }}>
+                    {active && <CheckCircle size={14} />}
+                    {option.title}
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.35rem', lineHeight: 1.45 }}>
+                    {option.description}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
         <div
           onDragOver={e => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
@@ -226,6 +273,7 @@ export default function Import() {
             Using Excel? File → Save As → CSV UTF-8 before uploading. Click <strong>Download template</strong> above for the recommended format.
           </div>
         </div>
+        </>
       )}
 
       {/* Step 2: Map columns */}
@@ -235,7 +283,7 @@ export default function Import() {
           <div className="card">
             <div style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <FileText size={16} style={{ color: 'var(--lime)' }} /> Column mapping
-              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 400, marginLeft: '0.25rem' }}>Auto-mapped from "{fileName}"</span>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 400, marginLeft: '0.25rem' }}>Auto-mapped from "{fileName}" as {IMPORT_SOURCES.find(s => s.key === importSource)?.title}</span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.625rem' }}>
               {LEAD_FIELDS.map(field => (

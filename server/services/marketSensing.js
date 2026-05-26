@@ -23,6 +23,7 @@ const axios = require('axios');
 const pool = require('../db/pool');
 const logger = require('../utils/logger');
 const { callAgent } = require('./claude');
+const spendGuard = require('./spendGuard');
 
 // MY + SEA-agency news sources for v1. Mix of MY-general business/tech
 // publications and SEA agency-vertical publications (which heavily cover
@@ -150,10 +151,20 @@ async function fetchSignals(clientId) {
   let errCount = 0;
   for (const { source, signal, query } of queries) {
     try {
+      const guard = await spendGuard.checkProvider('brave', { clientId, estimatedUnits: 1 });
+      if (!guard.allowed) {
+        logger.warn({ msg: '[market-sensing] brave blocked by spend guard', source, signal, reason: guard.reason });
+        break;
+      }
       const resp = await axios.get('https://api.search.brave.com/res/v1/web/search', {
         params: { q: query, count: RESULTS_PER_QUERY, country: 'MY', search_lang: 'en', safesearch: 'moderate' },
         headers: { 'X-Subscription-Token': apiKey, Accept: 'application/json', 'Accept-Encoding': 'gzip' },
         timeout: 8000,
+      });
+      await spendGuard.logProviderUsage('brave', {
+        clientId,
+        units: 1,
+        metadata: { query_preview: query.slice(0, 160), source, signal, mode: 'market_sensing' },
       });
       const items = (resp.data?.web?.results || []).map(r => ({
         title:   r.title || '',

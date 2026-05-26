@@ -525,25 +525,7 @@ function DirectorBubble({ prefilledCommand, onCommandUsed }) {
 
 /* ─── KPI Progress Card ──────────────────────────────────── */
 
-function KpiCard({ onDirectorCommand }) {
-  const { request } = useApi();
-  const [kpi, setKpi] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  const loadKpi = useCallback(async () => {
-    try {
-      const res = await request('/dashboard/daily-progress');
-      setKpi(res?.data || null);
-    } catch {}
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    loadKpi();
-    const iv = setInterval(loadKpi, 5 * 60 * 1000); // refresh every 5 min
-    return () => clearInterval(iv);
-  }, []);
-
+function KpiCard({ kpi, loading, onDirectorCommand }) {
   if (loading) return <div className="card"><div className="skeleton" style={{ height: 80 }} /></div>;
   if (!kpi) return null;
 
@@ -853,7 +835,7 @@ export default function Dashboard() {
 
   const [stats, setStats] = useState({});
   const [statsLoading, setStatsLoading] = useState(true);
-  const [sentToday, setSentToday] = useState(null);
+  const [dailyProgress, setDailyProgress] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   // Wave 3 (2026-05-03): Goal Hunt widget — Captain's latest snapshot + active directives
   const [goalHunt, setGoalHunt] = useState(null);
@@ -884,7 +866,7 @@ export default function Dashboard() {
         request('/dashboard/goal-hunt').catch(() => null),
       ]);
       setStats(statsRes?.data || {});
-      if (kpiRes?.data) setSentToday(kpiRes.data.sent ?? null);
+      if (kpiRes?.data) setDailyProgress(kpiRes.data);
       if (ghRes) setGoalHunt(ghRes);
     } catch (err) { setError('Failed to load data'); }
     setStatsLoading(false);
@@ -952,8 +934,8 @@ export default function Dashboard() {
             sourced_this_week: stats.sourced_this_week,
             total_in_pipeline: totalLeads,
             pool_health: stats.pool_health,
-            sent_today: sentToday ?? 0,
-            sent_target: 50,
+            sent_today: dailyProgress?.sent ?? 0,
+            sent_target: dailyProgress?.target ?? 50,
             sent_this_week: stats.sent_this_week,
             sent_all_time: stats.messages_sent,
             messages_sent: stats.messages_sent,
@@ -1014,7 +996,7 @@ export default function Dashboard() {
         />
       </div>
 
-      <KpiCard onDirectorCommand={(cmd) => setDirectorCommand(cmd)} />
+      <KpiCard kpi={dailyProgress} loading={statsLoading} onDirectorCommand={(cmd) => setDirectorCommand(cmd)} />
 
       <div className="card" style={{ marginBottom: '1.25rem' }}>
         <TodaySchedule events={stats.today_events || []} loading={statsLoading} />

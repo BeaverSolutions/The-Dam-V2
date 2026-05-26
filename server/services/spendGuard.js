@@ -1,81 +1,158 @@
 'use strict';
 
 /**
- * spendGuard — a hard, in-code brake on metered-API consumption.
+ * spendGuard - hard brakes for metered provider calls.
  *
- * Why this exists (2026-05-16): Brave's quota was burned three times in one
- * month, and the Explorium/VP credit balance was drained — every single time
- * because the "check quota before spending" discipline lived in a doc
- * (corrections.md) and depended on a human or an agent *remembering* it. A
- * safeguard that depends on memory is not a safeguard.
- *
- * This moves the brake INTO THE CODE. Before any metered call, the caller asks
- * spendGuard. If today's spend on that provider is at or over the cap, the
- * guard refuses — loudly — and the caller skips the spend. The cap physically
- * cannot be exceeded, because nothing is allowed to spend past a refusal here.
- *
- * Daily spend is read from the existing `logs` table — no new table, no
- * migration. Each metered provider already logs its consumption. Caps are
- * env-overridable so they can be tuned without a code change.
- *
- * Fail-CLOSED: if the spend cannot be read, the guard assumes the cap is hit.
- * Pausing sourcing is always safer than burning an unknown amount of money.
+ * Metered providers must pass through this file before any HTTP call that can
+ * consume tokens, credits, searches, or verification quota. Fail closed: if the
+ * guard cannot prove a call is attributed and under cap, the call is blocked.
  */
 
 const pool = require('../db/pool');
 
-// Per-provider daily caps. Env-overridable.
+function envNumber(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// Defaults are intentionally zero for search/enrichment providers. Production
+// must opt in through env caps so a missing knob cannot burn quota by accident.
 const CAPS = {
-  vp: Number(process.env.VP_DAILY_CREDIT_CAP) || 60,        // Explorium credits / day (global account)
-  brave: Number(process.env.BRAVE_DAILY_QUERY_CAP) || 300,  // Brave search queries / day
+  vp: envNumber('VP_DAILY_CREDIT_CAP', 60),
+  brave: envNumber('BRAVE_DAILY_QUERY_CAP', 0),
+  google_cse: envNumber('GOOGLE_CSE_DAILY_QUERY_CAP', 0),
+  hunter: envNumber('HUNTER_DAILY_QUERY_CAP', 0),
+  millionverifier: envNumber('MILLIONVERIFIER_DAILY_VERIFY_CAP', envNumber('MILLION_VERIFIER_DAILY_CAP', 0)),
+  apollo: envNumber('APOLLO_DAILY_QUERY_CAP', 0),
 };
 
-// ~credits charged per VP contact enrichment (1cr fetch + 2cr email).
-const VP_CREDITS_PER_LEAD = Number(process.env.VP_CREDITS_PER_LEAD) || 3;
-
+const VP_CREDITS_PER_LEAD = envNumber('VP_CREDITS_PER_LEAD', 3);
 const klDateExpr = `(NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date`;
 
-/**
- * Today's total VP/Explorium credit spend. VP credits are a GLOBAL account
- * (one balance shared across all tenants), so this sums across every client.
- * Source: logs.action = 'vp_sourcing_complete', metadata.credits_spent.
- */
-async function vpSpentToday() {
+function allowUnattributedMeteredCalls() {
+  return process.env.ALLOW_UNATTRIBUTED_METERED_API === 'true' || process.env.NODE_ENV === 'test';
+}
+
+function providerCap(provider) {
+  return CAPS[provider] ?? 0;
+}
+
+async function vpSpentToday(clientId = null) {
   try {
+    const params = [];
+    let clientPredicate = '';
+    if (clientId) {
+      params.push(clientId);
+      clientPredicate = `AND client_id = $${params.length}`;
+    }
     const { rows } = await pool.query(
       `SELECT COALESCE(SUM(NULLIF(metadata->>'credits_spent','')::int), 0) AS spent
          FROM logs
         WHERE action = 'vp_sourcing_complete'
-          AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = ${klDateExpr}`
+          ${clientPredicate}
+          AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = ${klDateExpr}`,
+      params
     );
     return parseInt(rows[0]?.spent || 0, 10);
   } catch (err) {
-    console.warn('[spendGuard] vpSpentToday query failed — failing CLOSED:', err.message);
-    return CAPS.vp; // fail-closed: treat as cap-reached
+    console.warn('[spendGuard] vpSpentToday query failed - failing CLOSED:', err.message);
+    return CAPS.vp;
   }
 }
 
-/**
- * Pre-flight check before spending VP/Explorium credits.
- * @param {number} estimatedCredits credits the caller is about to spend (0 = just report)
- * @returns {Promise<{allowed:boolean, spentToday:number, cap:number, remaining:number, affordableLeads:number}>}
- */
-async function checkVP(estimatedCredits = 0) {
+async function providerUsageToday(provider, clientId = null) {
+  const cap = providerCap(provider);
+  try {
+    const params = [provider];
+    let clientPredicate = '';
+    if (clientId) {
+      params.push(clientId);
+      clientPredicate = `AND client_id = $${params.length}`;
+    }
+    const { rows } = await pool.query(
+      `SELECT COALESCE(SUM(COALESCE(NULLIF(metadata->>'units','')::int, 1)), 0) AS spent
+         FROM logs
+        WHERE action = 'provider_usage'
+          AND metadata->>'provider' = $1
+          ${clientPredicate}
+          AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = ${klDateExpr}`,
+      params
+    );
+    return parseInt(rows[0]?.spent || 0, 10);
+  } catch (err) {
+    console.warn(`[spendGuard] ${provider} usage query failed - failing CLOSED:`, err.message);
+    return cap;
+  }
+}
+
+async function checkVP(estimatedCredits = 0, { clientId = null } = {}) {
   const cap = CAPS.vp;
-  const spentToday = await vpSpentToday();
+  const spentToday = await vpSpentToday(clientId);
   const remaining = Math.max(0, cap - spentToday);
   const affordableLeads = Math.floor(remaining / VP_CREDITS_PER_LEAD);
   const allowed = spentToday + estimatedCredits <= cap;
 
   if (!allowed) {
     console.warn(
-      `[spendGuard] VP BLOCKED — today's spend ${spentToday} + requested ${estimatedCredits} ` +
-      `exceeds cap ${cap}. Enrichment skipped. Raise VP_DAILY_CREDIT_CAP or top up Explorium.`
+      `[spendGuard] VP BLOCKED - today's spend ${spentToday} + requested ${estimatedCredits} ` +
+      `exceeds cap ${cap}. Enrichment skipped.`
     );
   } else if (remaining < cap * 0.2) {
-    console.warn(`[spendGuard] VP WARN — only ${remaining}/${cap} credits left under today's cap.`);
+    console.warn(`[spendGuard] VP WARN - only ${remaining}/${cap} credits left under today's cap.`);
   }
   return { allowed, spentToday, cap, remaining, affordableLeads };
 }
 
-module.exports = { checkVP, vpSpentToday, CAPS, VP_CREDITS_PER_LEAD };
+async function checkProvider(provider, { clientId = null, estimatedUnits = 1 } = {}) {
+  if (!provider) {
+    return { allowed: false, reason: 'missing_provider', spentToday: 0, cap: 0, remaining: 0 };
+  }
+  if (!clientId && !allowUnattributedMeteredCalls()) {
+    console.warn(`[spendGuard] ${provider} BLOCKED - missing clientId`);
+    return { allowed: false, reason: 'missing_client_id', spentToday: 0, cap: providerCap(provider), remaining: 0 };
+  }
+
+  if (provider === 'vp') {
+    const vp = await checkVP(estimatedUnits, { clientId });
+    return { ...vp, reason: vp.allowed ? null : 'daily_cap_reached' };
+  }
+
+  const cap = providerCap(provider);
+  if (cap <= 0) {
+    console.warn(`[spendGuard] ${provider} BLOCKED - cap is ${cap}. Set provider cap env to allow usage.`);
+    return { allowed: false, reason: 'provider_cap_zero', spentToday: 0, cap, remaining: 0 };
+  }
+
+  const spentToday = await providerUsageToday(provider, clientId);
+  const remaining = Math.max(0, cap - spentToday);
+  const allowed = spentToday + estimatedUnits <= cap;
+  if (!allowed) {
+    console.warn(`[spendGuard] ${provider} BLOCKED - spent ${spentToday} + requested ${estimatedUnits} exceeds cap ${cap}`);
+  }
+  return { allowed, reason: allowed ? null : 'daily_cap_reached', spentToday, cap, remaining };
+}
+
+async function logProviderUsage(provider, { clientId, units = 1, metadata = {} } = {}) {
+  if (!clientId || !provider) return;
+  try {
+    await pool.query(
+      `INSERT INTO logs (client_id, agent, action, target_type, metadata)
+       VALUES ($1, 'system', 'provider_usage', 'provider', $2)`,
+      [clientId, JSON.stringify({ provider, units, ...metadata })]
+    );
+  } catch (err) {
+    console.warn(`[spendGuard] ${provider} usage log failed:`, err.message);
+  }
+}
+
+module.exports = {
+  checkVP,
+  vpSpentToday,
+  checkProvider,
+  logProviderUsage,
+  providerUsageToday,
+  CAPS,
+  VP_CREDITS_PER_LEAD,
+};

@@ -7,6 +7,10 @@ const apolloService = require('../services/apollo');
 const agentmailService = require('../services/agentmail');
 const hunterService = require('../services/hunter');
 
+function todayInMalaysia() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kuala_Lumpur' });
+}
+
 // GET /api/dashboard/stats
 router.get('/stats', async (req, res, next) => {
   try {
@@ -250,26 +254,28 @@ router.get('/stats', async (req, res, next) => {
 });
 
 // GET /api/dashboard/daily-progress
-// Returns today's KPI progress, upserts daily_kpi row
+// Returns today's KPI progress without mutating KPI state.
 router.get('/daily-progress', async (req, res, next) => {
   try {
     const clientId = req.clientId;
-    const today = new Date().toISOString().split('T')[0];
+    const today = todayInMalaysia();
 
-    // Ensure today's row exists
-    await pool.query(
-      `INSERT INTO daily_kpi (client_id, date) VALUES ($1, $2)
-       ON CONFLICT (client_id, date) DO NOTHING`,
-      [clientId, today]
-    );
-
-    // Count today's sent messages from the messages table
+    // Count actual sent messages by channel. Do not count LinkedIn twice.
     const { rows: counts } = await pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE status = 'sent' AND DATE(sent_at) = $2) AS email_sent,
-         COUNT(*) FILTER (WHERE status = 'sent' AND DATE(sent_at) = $2 AND channel = 'linkedin') AS linkedin_sent
+         COUNT(*) FILTER (
+           WHERE status = 'sent'
+             AND channel = 'email'
+             AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+         ) AS email_sent,
+         COUNT(*) FILTER (
+           WHERE status = 'sent'
+             AND channel = 'linkedin'
+             AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+         ) AS linkedin_sent
        FROM messages
-       WHERE client_id = $1`,
+       WHERE client_id = $1
+         AND sent_at IS NOT NULL`,
       [clientId, today]
     );
 
@@ -277,33 +283,32 @@ router.get('/daily-progress', async (req, res, next) => {
     const linkedinSent = parseInt(counts[0].linkedin_sent) || 0;
     const totalSent = emailSent + linkedinSent;
 
-    await pool.query(
-      `UPDATE daily_kpi SET
-         outreach_sent = $1,
-         outreach_email = $2,
-         outreach_linkedin = $3,
-         updated_at = NOW()
-       WHERE client_id = $4 AND date = $5`,
-      [totalSent, emailSent, linkedinSent, clientId, today]
-    );
-
-    const { rows: [kpi] } = await pool.query(
-      `SELECT * FROM daily_kpi WHERE client_id = $1 AND date = $2`,
+    const { rows: [kpi] = [] } = await pool.query(
+      `SELECT target, target_email_sent, target_linkedin_sent
+       FROM daily_kpi
+       WHERE client_id = $1 AND date = $2::date
+       LIMIT 1`,
       [clientId, today]
     );
 
-    const gap = Math.max(0, kpi.target - totalSent);
+    const target = Number(kpi?.target) || 50;
+    const targetEmail = Number(kpi?.target_email_sent) || 30;
+    const targetLinkedIn = Number(kpi?.target_linkedin_sent) || 20;
+    const gap = Math.max(0, target - totalSent);
+    const kpiMet = totalSent >= target;
 
     res.json({
       data: {
         date: today,
-        target: kpi.target,
+        target,
+        target_email_sent: targetEmail,
+        target_linkedin_sent: targetLinkedIn,
         sent: totalSent,
         email: emailSent,
         linkedin: linkedinSent,
         gap,
-        kpi_met: kpi.kpi_met,
-        percentage: Math.min(100, Math.round((totalSent / kpi.target) * 100)),
+        kpi_met: kpiMet,
+        percentage: target > 0 ? Math.min(100, Math.round((totalSent / target) * 100)) : 0,
       }
     });
   } catch (err) { next(err); }

@@ -1,6 +1,7 @@
 'use strict';
 
 const secrets = require('./secrets');
+const spendGuard = require('./spendGuard');
 
 const MCP_URL = 'https://mcp.explorium.ai/mcp';
 const MCP_PROTOCOL_VERSION = '2025-06-18';
@@ -12,6 +13,23 @@ const MCP_TIMEOUT_MS = 20_000;
 // next call and retry once.
 const sessions = new Map();
 const SESSION_TTL_MS = 10 * 60 * 1000;
+
+function paidVpEnabled() {
+  return process.env.ALLOW_VP_PAID_ENRICHMENT === 'true';
+}
+
+async function guardPaidVp(clientId, estimatedCredits, operation) {
+  if (!paidVpEnabled()) {
+    console.warn(`[vibeProspecting] ${operation} blocked - ALLOW_VP_PAID_ENRICHMENT is not true`);
+    return { allowed: false, reason: 'vp_paid_enrichment_disabled', credits: 0 };
+  }
+  const guard = await spendGuard.checkProvider('vp', { clientId, estimatedUnits: estimatedCredits });
+  if (!guard.allowed) {
+    console.warn(`[vibeProspecting] ${operation} blocked by spend guard: ${guard.reason}`);
+    return { allowed: false, reason: guard.reason || 'vp_daily_cap_reached', credits: 0 };
+  }
+  return { allowed: true };
+}
 
 /* ─── API key resolution (per-tenant, with bootstrap env fallback) ─── */
 
@@ -257,6 +275,8 @@ async function matchProspect(clientId, { full_name, company_name, business_id, e
 
 /** Enrich contact data (PAID — ~5 credits) → returns { email, email_verified, phone } or null */
 async function enrichProspectContacts(clientId, prospect_id) {
+  const gate = await guardPaidVp(clientId, 5, 'enrichProspectContacts');
+  if (!gate.allowed) return { ok: false, error: gate.reason, credits: 0 };
   const result = await callTool(clientId, 'enrich-prospects', {
     prospect_ids: [prospect_id],
     enrichments: ['contacts'],
@@ -288,6 +308,8 @@ async function enrichProspectContacts(clientId, prospect_id) {
 
 /** Enrich profile data (PAID) → returns { linkedin_url } or null. Used by 6.6 LinkedIn fallback. */
 async function enrichProspectProfile(clientId, prospect_id) {
+  const gate = await guardPaidVp(clientId, 1, 'enrichProspectProfile');
+  if (!gate.allowed) return { ok: false, error: gate.reason, credits: 0 };
   const result = await callTool(clientId, 'enrich-prospects', {
     prospect_ids: [prospect_id],
     enrichments: ['profiles'],
@@ -311,6 +333,8 @@ async function enrichProspectProfile(clientId, prospect_id) {
 
 /** Enrich business firmographics (PAID) → returns { company_size, industry, country } or null. ICP gate input. */
 async function enrichBusinessFirmographics(clientId, business_id) {
+  const gate = await guardPaidVp(clientId, 1, 'enrichBusinessFirmographics');
+  if (!gate.allowed) return { ok: false, error: gate.reason, credits: 0 };
   const result = await callTool(clientId, 'enrich-business', {
     business_ids: [business_id],
     enrichments: ['firmographics'],

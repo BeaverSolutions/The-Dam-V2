@@ -29,10 +29,6 @@ const tenantConfig = require('./tenantConfig');
 const jobHealth = require('./jobHealth');
 const pipelineTrace = require('./pipelineTrace');
 
-// MJ's monthly meeting target per tenant (set 2026-04-30 with MJ).
-// Drives the "on pace for X meetings" projection in the brief.
-const MONTHLY_MEETING_TARGET = 10;
-
 /* ─── KPI snapshot collector ──────────────────────────────────────── */
 
 /**
@@ -325,9 +321,7 @@ async function collectTeamKPIs(clientId) {
     meetings: {
       this_week: Number(meetingsWeek.rows[0].n) || 0,
       mtd: Number(meetingsMtd.rows[0].n) || 0,
-      monthly_target: MONTHLY_MEETING_TARGET,
       mtd_pace_projected: projectMonthEndMeetings(Number(meetingsMtd.rows[0].n) || 0),
-      gap_to_target: Math.max(0, MONTHLY_MEETING_TARGET - projectMonthEndMeetings(Number(meetingsMtd.rows[0].n) || 0)),
     },
     // ─── CHANNEL MIX (Wave 1: 30 email / 20 linkedin) ──
     // Three KPIs per channel — drafted (kickoff's job), approved (MJ's job),
@@ -543,7 +537,7 @@ Sales Beaver: ${salesStatus}.
 Enforcer: ${enforcerStatus}
 Pipeline: ${kpis.pipeline.pending_approvals} pending MJ, ${kpis.pipeline.approved_unsent_linkedin} LinkedIn unsent, ${kpis.pipeline.approved_unsent_email} email unsent, ${kpis.pipeline.bounces_7d} bounces 7d.
 Funnel today (pipeline_traces — Phase 1): ${funnelDetailLine || 'no traced kickoffs yet today'}.${funnelAnomalyFlag ? ' Anomaly:' + funnelAnomalyFlag.replace(' ⚠️ ', ' ') : ''}
-Meetings: ${kpis.meetings.this_week} this week, ${kpis.meetings.mtd} mtd, projecting ${kpis.meetings.mtd_pace_projected} by month-end (gap ${kpis.meetings.gap_to_target} of target ${kpis.meetings.monthly_target}).
+Meetings: ${kpis.meetings.this_week} this week, ${kpis.meetings.mtd} mtd, projecting ${kpis.meetings.mtd_pace_projected} by month-end.
 
 <b>ORDERS OF THE DAY</b>
 TASKS — what each beaver works on today, 1-2 lines.
@@ -689,7 +683,7 @@ function renderPlainBrief(k) {
     `sales beaver: ${k.sales_beaver.drafts_24h} drafts, ${k.sales_beaver.first_attempt_pass_rate_pct ?? '—'}% first-pass, ${k.sales_beaver.sent_24h} sent, ${k.sales_beaver.replies_24h} replies`,
     `enforcer: ${k.enforcer.approve_rate_pct ?? '—'}% approve, top reject: ${k.enforcer.top_reject_reasons[0]?.reason || 'none'}`,
     `pipeline: ${k.pipeline.pending_approvals} pending you, ${k.pipeline.approved_unsent_linkedin} linkedin unsent, ${k.pipeline.approved_unsent_email} email unsent, ${k.pipeline.bounces_7d} bounces 7d`,
-    `meetings: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd, projecting ${k.meetings.mtd_pace_projected}/${k.meetings.monthly_target} (gap ${k.meetings.gap_to_target})`,
+    `meetings: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd, projecting ${k.meetings.mtd_pace_projected} by month-end`,
     ``,
     `<b>ORDERS OF THE DAY</b>`,
     `(captain's llm offline — fallback brief. plan: clear ${k.pipeline.pending_approvals} pending approvals, hit ${k.research_beaver.sourced_floor} quality leads, watch bounces.)`,
@@ -781,7 +775,7 @@ enforcer self-report: ${JSON.stringify(beaverReports.ranger || 'no report submit
 
 aggregated 24h: sourced ${kpis.research_beaver.sourced_24h}, drafts ${kpis.sales_beaver.drafts_24h}, sent ${kpis.sales_beaver.sent_24h}, replies ${kpis.sales_beaver.replies_24h}
 channel mix today: email ${kpis.channel_mix.email.sent}/${kpis.channel_mix.target_email_sent} sent, linkedin ${kpis.channel_mix.linkedin.sent}/${kpis.channel_mix.target_linkedin_sent} sent
-meetings: ${kpis.meetings.this_week} this week, ${kpis.meetings.mtd} mtd, projecting ${kpis.meetings.mtd_pace_projected} (gap ${kpis.meetings.gap_to_target} to target ${kpis.meetings.monthly_target})
+meetings: ${kpis.meetings.this_week} this week, ${kpis.meetings.mtd} mtd, projecting ${kpis.meetings.mtd_pace_projected} by month-end
 
 actions you took today: ${todaysActions.length === 0 ? 'none' : todaysActions.map(a => a.action).join(', ')}${beaverSelfReports}${directiveLanding}${costRollup}
 
@@ -825,7 +819,7 @@ function renderPlainEodBrief(k, reports, actions) {
     ``,
     `═══ today's results ═══`,
     `sourced ${k.research_beaver.sourced_24h}/${k.research_beaver.sourced_floor}, drafts ${k.sales_beaver.drafts_24h}, sent ${k.sales_beaver.sent_24h}, replies ${k.sales_beaver.replies_24h}`,
-    `meetings: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd, projecting ${k.meetings.mtd_pace_projected}/${k.meetings.monthly_target}`,
+    `meetings: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd, projecting ${k.meetings.mtd_pace_projected} by month-end`,
     `captain actions today: ${actions?.length || 0}`,
     ``,
     `═══ tomorrow's setup ═══`,

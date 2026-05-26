@@ -1,6 +1,7 @@
 'use strict';
 
 const secrets = require('./secrets');
+const spendGuard = require('./spendGuard');
 
 let axios;
 try {
@@ -99,6 +100,11 @@ async function findEmail(clientId, { firstName, lastName, domain, company }) {
 
   for (const targetDomain of domainsToTry) {
     try {
+      const guard = await spendGuard.checkProvider('hunter', { clientId, estimatedUnits: 1 });
+      if (!guard.allowed) {
+        console.warn(`[hunter] findEmail blocked by spend guard: ${guard.reason}`);
+        return null;
+      }
       const resp = await axios.get(`${BASE}/email-finder`, {
         params: {
           domain: targetDomain,
@@ -107,6 +113,11 @@ async function findEmail(clientId, { firstName, lastName, domain, company }) {
         },
         headers: { 'X-Api-Key': apiKey },
         timeout: 10000,
+      });
+      await spendGuard.logProviderUsage('hunter', {
+        clientId,
+        units: 1,
+        metadata: { operation: 'email-finder', domain: targetDomain },
       });
 
       const data = resp.data?.data;
@@ -147,10 +158,20 @@ async function domainSearch(clientId, { domain, company, limit = 5 }) {
   if (!targetDomain) return [];
 
   try {
+    const guard = await spendGuard.checkProvider('hunter', { clientId, estimatedUnits: 1 });
+    if (!guard.allowed) {
+      console.warn(`[hunter] domainSearch blocked by spend guard: ${guard.reason}`);
+      return [];
+    }
     const resp = await axios.get(`${BASE}/domain-search`, {
       params: { domain: targetDomain, limit },
       headers: { 'X-Api-Key': apiKey },
       timeout: 10000,
+    });
+    await spendGuard.logProviderUsage('hunter', {
+      clientId,
+      units: 1,
+      metadata: { operation: 'domain-search', domain: targetDomain, limit },
     });
 
     const emails = resp.data?.data?.emails || [];
@@ -177,10 +198,20 @@ async function verifyEmail(clientId, email) {
   if (!apiKey) return null;
 
   try {
+    const guard = await spendGuard.checkProvider('hunter', { clientId, estimatedUnits: 1 });
+    if (!guard.allowed) {
+      console.warn(`[hunter] verifyEmail blocked by spend guard: ${guard.reason}`);
+      return null;
+    }
     const resp = await axios.get(`${BASE}/email-verifier`, {
       params: { email },
       headers: { 'X-Api-Key': apiKey },
       timeout: 10000,
+    });
+    await spendGuard.logProviderUsage('hunter', {
+      clientId,
+      units: 1,
+      metadata: { operation: 'email-verifier', email_domain: String(email || '').split('@')[1] || null },
     });
     return resp.data?.data?.status || null; // 'valid', 'invalid', 'accept_all', 'unknown'
   } catch {

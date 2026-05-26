@@ -16,6 +16,8 @@
 const { searchEmailDomain } = require('./searchService');
 const hunter = require('./hunter');
 const logger = require('../utils/logger');
+const spendGuard = require('./spendGuard');
+const { getCurrentClientId } = require('../middleware/clientContext');
 
 // Domain guesser mirrors hunter.domainsFromCompany so Brave gets a domain to search.
 // Slightly looser (no Bahasa-specific suffixes) — Hunter still handles those on fallback.
@@ -313,6 +315,12 @@ async function verifyEmail(email) {
     console.warn('[emailEnrichment] verifyEmail: no MILLION_VERIFIER / EMAIL_VERIFY_API_KEY set — returning unknown');
     return unknown;
   }
+  const clientId = getCurrentClientId() || null;
+  const guard = await spendGuard.checkProvider('millionverifier', { clientId, estimatedUnits: 1 });
+  if (!guard.allowed) {
+    console.warn(`[emailEnrichment] MillionVerifier blocked by spend guard: ${guard.reason}`);
+    return { ...unknown, provider: 'millionverifier', blocked: true, reason: guard.reason };
+  }
 
   try {
     const url = `https://api.millionverifier.com/api/v3/?api=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}&timeout=10`;
@@ -320,6 +328,11 @@ async function verifyEmail(email) {
     const timer = setTimeout(() => ctl.abort(), 12000);
     const res = await fetch(url, { signal: ctl.signal });
     clearTimeout(timer);
+    await spendGuard.logProviderUsage('millionverifier', {
+      clientId,
+      units: 1,
+      metadata: { email_domain: email.split('@')[1] || null },
+    });
     if (!res.ok) {
       console.warn(`[emailEnrichment] MillionVerifier HTTP ${res.status} for ${email}`);
       return { ...unknown, provider: 'millionverifier' };

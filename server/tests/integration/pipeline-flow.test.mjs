@@ -8,7 +8,7 @@ function selectChannel(lead, options = {}) {
   const meta = lead.metadata || {};
   const linkedinFirstOverride = meta.linkedin_first_override === true || meta.linkedin_first_override === 'true';
   const hasVerifiedEmail = lead.email
-    && (lead.email_verified === true || lead.email_source === 'hunter' || lead.email_source === 'apollo');
+    && (lead.email_verified === true || lead.email_source === 'hunter');
   const isLinkedinOnlyLead = lead.lead_tier === 'B' && lead.linkedin_url;
 
   if (linkedinFirstOverride && lead.linkedin_url && !linkedinAlreadyTried) {

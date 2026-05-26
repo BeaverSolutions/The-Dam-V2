@@ -423,7 +423,7 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
     }
 
     // Update lead stage and store sentiment in metadata for UI display
-    const stageMap = { positive: 'booked', neutral: 'qualifying', objection: 'qualifying' };
+    const stageMap = { positive: 'meeting_booked', neutral: 'qualifying', objection: 'qualifying' };
     const newStage = stageMap[sentiment];
     if (newStage) {
       await pool.query(
@@ -442,7 +442,7 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
     }
 
     // Track stage transition
-    if (newStage === 'booked') {
+    if (newStage === 'meeting_booked') {
       trackEvent(clientId, {
         lead_id: leadId, event_type: 'meeting_booked', channel: 'email',
         reply_sentiment: sentiment, agent: 'director',

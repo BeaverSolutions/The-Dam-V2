@@ -100,11 +100,16 @@ describe('No infinite retry loops', () => {
     expect(fnBody).not.toMatch(/for\s*\(/);
   });
 
-  it('processLead throws (not yet composed — no silent pass-through)', () => {
+  it('processLead is composed with traceable exits and dedup guard', () => {
     const fnStart = pipelineSource.indexOf('async function processLead');
-    const fnBody = pipelineSource.slice(fnStart, fnStart + 500);
-    expect(fnBody).toContain("throw new Error");
-    expect(fnBody).toContain('not yet composed');
+    const fnEnd = pipelineSource.indexOf('async function checkActiveMessage', fnStart);
+    const fnBody = pipelineSource.slice(fnStart, fnEnd);
+    expect(fnBody).toContain('const existingActive = await checkActiveMessage(clientId, lead.id)');
+    expect(fnBody).toContain("outcome: 'dedup_skip'");
+    expect(fnBody).toContain("trace('draft_failed'");
+    expect(fnBody).toContain("outcome: 'draft_failed'");
+    expect(fnBody).not.toMatch(/while\s*\(\s*true\s*\)/);
+    expect(fnBody).not.toMatch(/for\s*\(\s*;\s*;\s*\)/);
   });
 });
 

@@ -19,6 +19,7 @@ const logsService = require('./logs');
 const logger = require('../utils/logger');
 const { evaluateLeadQuality } = require('../utils/leadQuality');
 const { searchEmailDomain } = require('./searchService');
+const spendGuard = require('./spendGuard');
 
 // ── Email pattern helpers ─────────────────────────────────────────────────────
 
@@ -733,40 +734,28 @@ async function runDbBuilder() {
 //   - applyIcpV2Filter runs on every prospect BEFORE enrichment — credits are
 //     never spent on a lead that would be rejected.
 //   - enrich-prospects requests CONTACTS ONLY (~3cr) — never the full report.
-//   - Hard daily cap: 60 credits/day (20 leads at 3cr each). Checked from logs.
+//   - Hard daily cap is enforced by spendGuard and VP_DAILY_CREDIT_CAP.
 //
 // EMAIL CHANNEL ONLY. VP exists to get verified emails. LinkedIn sourcing
-// continues via Brave (resumes June 1 when quota resets).
-
-const VP_DAILY_CREDIT_CAP = 60;
-
-async function getVpCreditsSpentToday(clientId) {
-  const { rows } = await pool.query(
-    `SELECT COALESCE(SUM((metadata->>'credits_spent')::int), 0) AS spent
-     FROM logs
-     WHERE client_id = $1
-       AND agent = 'research_beaver'
-       AND action = 'vp_sourcing_complete'
-       AND created_at >= CURRENT_DATE`,
-    [clientId]
-  );
-  return rows[0]?.spent || 0;
-}
+// continues via guarded search providers only when provider caps are enabled.
 
 async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
   const vp = require('./vibeProspecting');
   const { applyIcpV2Filter } = require('./agents');
 
-  // Hard daily credit cap — refuse to source if we've already spent enough today
-  const spentToday = await getVpCreditsSpentToday(clientId);
-  if (spentToday >= VP_DAILY_CREDIT_CAP) {
-    logger.info({ msg: '[db-builder] VP daily credit cap reached', spentToday, cap: VP_DAILY_CREDIT_CAP });
-    return { saved: 0, credits: 0, reason: 'daily_credit_cap', spentToday };
+  if (process.env.ALLOW_VP_PAID_ENRICHMENT !== 'true') {
+    return { saved: 0, credits: 0, reason: 'vp_paid_enrichment_disabled' };
   }
-  const remainingBudget = VP_DAILY_CREDIT_CAP - spentToday;
-  const maxEnrichments = Math.min(batchSize, Math.floor(remainingBudget / 3));
+
+  // Hard daily credit cap via central spend guard.
+  const vpGuard = await spendGuard.checkProvider('vp', { clientId, estimatedUnits: 3 });
+  if (!vpGuard.allowed) {
+    logger.info({ msg: '[db-builder] VP spend guard blocked sourcing', reason: vpGuard.reason, spentToday: vpGuard.spentToday, cap: vpGuard.cap });
+    return { saved: 0, credits: 0, reason: vpGuard.reason || 'daily_credit_cap', spentToday: vpGuard.spentToday };
+  }
+  const maxEnrichments = Math.min(batchSize, vpGuard.affordableLeads || 0);
   if (maxEnrichments <= 0) {
-    return { saved: 0, credits: 0, reason: 'daily_credit_cap', spentToday };
+    return { saved: 0, credits: 0, reason: 'daily_credit_cap', spentToday: vpGuard.spentToday };
   }
 
   const { rows: icpRows } = await pool.query(

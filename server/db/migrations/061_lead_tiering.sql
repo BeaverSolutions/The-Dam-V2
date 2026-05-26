@@ -63,7 +63,7 @@ CREATE INDEX IF NOT EXISTS idx_leads_client_tier_b_retry
 -- lead before discarding.
 --
 -- Retroactive rules (more permissive than the gate):
---   A: email_verified = true OR provider-sourced email (hunter/apollo/manual)
+--   A: email_verified = true OR provider-sourced email (hunter/manual)
 --   B: lead_tier still NULL after A + linkedin_url present  ← any score
 --   C: everything else still NULL (rare — no email AND no linkedin)
 --
@@ -82,7 +82,7 @@ UPDATE leads
    AND (
          email_verified = true
       OR (email IS NOT NULL AND email <> ''
-          AND email_source IN ('hunter','hunter_backfill','apollo','manual'))
+          AND email_source IN ('hunter','hunter_backfill','manual'))
        );
 
 -- Tier B: any remaining lead with linkedin_url. The retry worker will

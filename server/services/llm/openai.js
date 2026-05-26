@@ -96,8 +96,19 @@ function normaliseUsage(u) {
   };
 }
 
+function allowUnattributedLLM() {
+  return process.env.ALLOW_UNATTRIBUTED_LLM === 'true' || process.env.NODE_ENV === 'test';
+}
+
+function requireClientIdForLLM(agentKey) {
+  const err = new Error(`OpenAI LLM call blocked for ${agentKey}: missing clientId`);
+  err.code = 'LLM_CLIENT_ID_REQUIRED';
+  err.status = 400;
+  return err;
+}
+
 async function enforceBudget(clientId, agentKey) {
-  if (!clientId) return;
+  if (!clientId && !allowUnattributedLLM()) throw requireClientIdForLLM(agentKey);
   const { allowed, spend, budget, pct, period } = await checkBudget(clientId);
   if (!allowed) {
     console.warn(`[openai:budget] BLOCKED client=${clientId} agent=${agentKey} ${period} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);

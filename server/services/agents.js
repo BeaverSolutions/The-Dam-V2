@@ -226,8 +226,7 @@ function applyIcpV2Filter(lead) {
 function resolveSignalTier(lead) {
   const score = Number(lead.score || 0);
   const verified = lead.email_verified === true
-    || lead.email_source === 'hunter'
-    || lead.email_source === 'apollo';
+    || lead.email_source === 'hunter';
   if (score >= 85 && verified) return 'P1';
   if (score >= 75) return 'P2';
   if (score >= 65) return 'P3';
@@ -261,7 +260,7 @@ function selectChannel(lead, options = {}) {
   const meta = lead.metadata || {};
   const linkedinFirstOverride = meta.linkedin_first_override === true || meta.linkedin_first_override === 'true';
   const hasVerifiedEmail = lead.email
-    && (lead.email_verified === true || lead.email_source === 'hunter' || lead.email_source === 'apollo');
+    && (lead.email_verified === true || lead.email_source === 'hunter');
   const isLinkedinOnlyLead = lead.lead_tier === 'B' && lead.linkedin_url;
 
   if (linkedinFirstOverride && lead.linkedin_url && !linkedinAlreadyTried) {
@@ -560,7 +559,8 @@ async function researchSearch(clientId, { query, filters = {} }) {
     console.warn('[research_beaver] Multi-source research failed, trying Apollo:', err.message);
   }
 
-  // Fallback: Apollo (when configured — 275M verified contacts)
+  // Fallback: Apollo only when explicitly capped on. Default cap is 0 because
+  // Apollo is a stale paid path and must not burn quota silently.
   try {
     const apolloLeads = await apolloService.searchPeople(clientId, { query, limit: filters.limit || 5 });
     if (apolloLeads && apolloLeads.length > 0) {
@@ -580,7 +580,7 @@ async function researchSearch(clientId, { query, filters = {} }) {
   const providers = {
     brave:      !!process.env.BRAVE_API_KEY,
     google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX),
-    apollo:     !!process.env.APOLLO_API_KEY,
+    apollo:     !!process.env.APOLLO_API_KEY && Number(process.env.APOLLO_DAILY_QUERY_CAP || 0) > 0,
   };
   const missingKeys = [];
   if (!providers.brave) missingKeys.push('BRAVE_API_KEY');
@@ -2980,10 +2980,10 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   diagnostics.search_query = allSearchQueries.join(' | ') || null;
 
   // ── Step 1b: Captain Beaver verification gate ────────────
-  // If a lead came from Claude fallback (not Apollo) and has no linkedin_url,
+  // If a lead came from unverified fallback and has no linkedin_url,
   // it cannot be verified and must be skipped to prevent hallucinated outreach.
   const researchSource = diagnostics.research_source || 'claude';
-  const isVerifiedSource = researchSource === 'apollo' || researchSource === 'brave' || researchSource === 'multi';
+  const isVerifiedSource = researchSource === 'brave' || researchSource === 'multi';
   // ══════════════════════════════════════════════════════════════
   // CAPTAIN'S QUALITY GATE — strict filtering, fewer but real leads
   // Philosophy: 3 verified leads > 20 garbage leads
@@ -3150,8 +3150,6 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // If mismatch detected → clear the email, keep the lead, log the issue.
   const cleanedLeads = enrichedLeads.map(lead => {
     if (!lead.email) return lead;
-    if (lead.email_source === 'apollo') return lead; // Apollo matches are trusted
-
     const emailLocal = lead.email.split('@')[0].toLowerCase();
     const emailFirstName = emailLocal.split('.')[0].split('_')[0].split('+')[0];
     const leadFirstName = (lead.name || '').trim().split(/\s+/)[0].toLowerCase();

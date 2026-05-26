@@ -24,6 +24,7 @@ const pool = require('../db/pool');
 const logsService = require('./logs');
 const { searchOpenWeb, searchLinkedInProfiles } = require('./searchService');
 const hunterService = require('./hunter');
+const { callAgent } = require('./claude');
 
 // Default signal queries — used when no client-specific config exists.
 // Phrased as Google search queries with SEA/MY bias.
@@ -67,47 +68,22 @@ async function loadSignalConfig(clientId) {
 }
 
 /**
- * Extract companies + signal data from search results using Haiku.
+ * Extract companies + signal data through the budgeted Research Beaver path.
  */
-async function extractSignalsFromResults(results, signal_type) {
+async function extractSignalsFromResults(clientId, results, signal_type) {
   if (!results || results.length === 0) return [];
 
-  let Anthropic;
-  try {
-    Anthropic = require('@anthropic-ai/sdk');
-  } catch {
-    // No Anthropic SDK — return raw results with low confidence
-    return results.map(r => ({
-      company: '',
-      signal_type,
-      signal_summary: r.title,
-      signal_date: r.date || '',
-      source_url: r.link,
-      raw_snippet: r.snippet,
-      confidence: 0.4,
-    }));
-  }
-
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-  const snippets = results.map((r, i) =>
+  const snippetsForBudgetedAgent = results.map((r, i) =>
     `[${i + 1}] ${r.title}\n${r.snippet}\nURL: ${r.link}${r.date ? `\nDate: ${r.date}` : ''}`
   ).join('\n\n');
 
   try {
-    const resp = await client.messages.create({
-      // 2026-05-15: was a hardcoded literal that bypassed the MODEL_HAIKU env
-      // override every other agent respects. Now env-driven, same default.
-      model: process.env.MODEL_HAIKU || 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
-      messages: [{
-        role: 'user',
-        content: `You are a buying signal detector. Analyse these search results and extract real buying signals for B2B outreach.
+    const parsed = await callAgent('research_beaver', `You are a buying signal detector. Analyse these search results and extract real buying signals for B2B outreach.
 
 Signal type: ${signal_type}
 
 Search results:
-${snippets}
+${snippetsForBudgetedAgent}
 
 For each result containing a REAL buying signal from a Malaysian company, return JSON array:
 [{
@@ -127,20 +103,20 @@ Rules:
 - Ignore generic articles, listicles, job boards with no specific company
 - Confidence 0.9 = very clear specific company + event, 0.5 = weak
 - If no real signals found, return []
-- Return ONLY the JSON array, nothing else`
-      }],
-    });
-
-    const content = resp.content[0]?.text || '[]';
-    const jsonMatch = content.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+- Return ONLY the JSON array, nothing else`, { clientId });
+    if (Array.isArray(parsed)) return parsed;
+    if (Array.isArray(parsed?.signals)) return parsed.signals;
+    if (Array.isArray(parsed?.data)) return parsed.data;
+    if (typeof parsed?.raw === 'string') {
+      const jsonMatch = parsed.raw.match(/\[[\s\S]*\]/);
+      if (jsonMatch) return JSON.parse(jsonMatch[0]);
     }
   } catch (err) {
-    console.warn('[signalHunt] Haiku parsing failed:', err.message);
+    console.warn('[signalHunt] budgeted signal parsing failed:', err.message);
   }
 
   return [];
+
 }
 
 /**
@@ -204,7 +180,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {} } = {}) {
       const results = await searchOpenWeb(q.query, config.max_results_per_query || 5);
       if (results.length === 0) continue;
 
-      const extracted = await extractSignalsFromResults(results, q.signal_type);
+      const extracted = await extractSignalsFromResults(clientId, results, q.signal_type);
       const validSignals = extracted.filter(s => s.company && s.confidence >= 0.5);
 
       // Assign tier from the query config

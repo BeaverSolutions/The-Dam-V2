@@ -13,6 +13,7 @@ const { trackEvent } = require('./conversionTracker');
 // Retry intervals (exponential backoff)
 const RETRY_INTERVALS = ['5 minutes', '30 minutes', '2 hours'];
 const MAX_ATTEMPTS = 3;
+const STALE_SENDING_MINUTES = Number(process.env.SEND_QUEUE_STALE_SENDING_MINUTES || 15);
 
 // Safety: max emails per client per day (prevents rogue agent runs from spamming)
 const MAX_DAILY_SENDS_PER_CLIENT = parseInt(process.env.MAX_DAILY_SENDS || '200', 10);
@@ -34,6 +35,8 @@ function getSendFn() {
  * Called every 60 seconds from server/index.js.
  */
 async function processSendQueue() {
+  await recoverStaleSendingJobs();
+
   // Find up to 20 pending jobs ready to run now
   const res = await pool.query(
     `SELECT sq.id, sq.client_id, sq.message_id, sq.attempt_count
@@ -50,6 +53,32 @@ async function processSendQueue() {
 
   for (const job of res.rows) {
     await processJob(job);
+  }
+}
+
+async function recoverStaleSendingJobs() {
+  const res = await pool.query(
+    `UPDATE send_queue
+        SET status = 'pending',
+            next_retry_at = NOW(),
+            error_reason = 'stale_sending_recovered',
+            updated_at = NOW()
+      WHERE status = 'sending'
+        AND last_attempted_at < NOW() - ($1::int * INTERVAL '1 minute')
+      RETURNING id, client_id, message_id`,
+    [STALE_SENDING_MINUTES]
+  );
+  if (res.rows.length === 0) return;
+
+  console.warn(`[send_queue] Recovered ${res.rows.length} stale sending job(s)`);
+  for (const row of res.rows) {
+    logsService.createLog(row.client_id, {
+      agent: 'system',
+      action: 'send_queue_stale_recovered',
+      target_type: 'message',
+      target_id: row.message_id,
+      metadata: { send_queue_id: row.id, stale_after_minutes: STALE_SENDING_MINUTES },
+    }).catch(() => {});
   }
 }
 
@@ -79,7 +108,33 @@ async function processJob(job) {
       throw err;
     }
 
-    // Success (or simulated — both are terminal states for the queue entry)
+    if (result && result.status === 'simulated') {
+      await pool.query(
+        `UPDATE send_queue SET status = 'failed', attempt_count = attempt_count + 1,
+         error_reason = 'simulated_send_not_delivered', updated_at = NOW()
+         WHERE id = $1`,
+        [id]
+      );
+      await logsService.createLog(client_id, {
+        agent: 'system',
+        action: 'send_simulated_not_counted',
+        target_type: 'message',
+        target_id: message_id,
+        metadata: { attempt_count: attempt_count + 1, send_status: result.status },
+      }).catch(() => {});
+      pipelineTrace.traceStage(client_id, {
+        message_id,
+        stage: 'send_failed',
+        status: 'simulated_not_delivered',
+        agent: 'system',
+        pipeline_path: 'sendQueue',
+        metadata: { attempt_count: attempt_count + 1, send_status: result.status },
+      }).catch(() => {});
+      console.warn(`[send_queue] Simulated send for message ${message_id} was not counted as sent`);
+      return;
+    }
+
+    // Success: only actual provider delivery can become terminal sent.
     await pool.query(
       `UPDATE send_queue SET status = 'sent', updated_at = NOW() WHERE id = $1`,
       [id]
@@ -98,7 +153,7 @@ async function processJob(job) {
         lead_id: traceMsg?.lead_id,
         message_id,
         stage: 'sent',
-        status: result?.status === 'simulated' ? 'simulated' : 'success',
+        status: 'success',
         agent: 'system',
         pipeline_path: 'sendQueue',
         metadata: { attempt_count: attempt_count + 1, send_status: result?.status, channel: traceMsg?.channel },

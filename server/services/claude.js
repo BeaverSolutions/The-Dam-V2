@@ -60,6 +60,17 @@ function pickFallbackModel(model) {
   return null;
 }
 
+function allowUnattributedLLM() {
+  return process.env.ALLOW_UNATTRIBUTED_LLM === 'true' || process.env.NODE_ENV === 'test';
+}
+
+function requireClientIdForLLM(agentKey) {
+  const err = new Error(`LLM call blocked for ${agentKey}: missing clientId`);
+  err.code = 'LLM_CLIENT_ID_REQUIRED';
+  err.status = 400;
+  return err;
+}
+
 // ─── Execution-mode suffix ─────────────────────────────────────
 // Appended to every agent's system prompt. Kept as a SEPARATE constant so
 // prompt caching treats the base system prompt as the cache key — small
@@ -117,7 +128,10 @@ async function callAgent(agentKey, userMessage, context = {}) {
   // ─── Budget gate ───────────────────────────────────────────
   // If we know who's paying, enforce their daily cap BEFORE burning tokens.
   // Unattributed calls (no clientId) pass straight through.
-  if (clientId) {
+  if (!clientId && !allowUnattributedLLM()) {
+    throw requireClientIdForLLM(agentKey);
+  }
+  {
     const { allowed, spend, budget, pct, period } = await checkBudget(clientId);
     if (!allowed) {
       console.warn(`[claude:budget] BLOCKED client=${clientId} agent=${agentKey} ${period} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);
@@ -249,7 +263,10 @@ async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, con
   const clientId = context?.clientId || getCurrentClientId() || null;
 
   // Budget gate (reuse single-shot logic)
-  if (clientId) {
+  if (!clientId && !allowUnattributedLLM()) {
+    throw requireClientIdForLLM(agentKey);
+  }
+  {
     const { allowed, spend, budget, pct, period } = await checkBudget(clientId);
     if (!allowed) {
       console.warn(`[claude:budget] BLOCKED client=${clientId} agent=${agentKey} ${period} spend=$${spend.toFixed(4)} budget=$${budget.toFixed(2)}`);

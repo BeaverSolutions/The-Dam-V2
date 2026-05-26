@@ -7,6 +7,7 @@ const { trackEvent, upsertDealSummary } = require('./conversionTracker');
 
 async function getLeads(clientId, filters = {}, pagination = {}) {
   const { status, signal_tier, source, pipeline_stage, search } = filters;
+  const normalizedPipelineStage = normalizePipelineStage(pipeline_stage);
   const { page = 1, perPage = 20 } = pagination;
   const offset = (page - 1) * perPage;
 
@@ -21,7 +22,7 @@ async function getLeads(clientId, filters = {}, pagination = {}) {
        AND ($4::text IS NULL OR source = $4)
        AND ($5::text IS NULL OR pipeline_stage = $5)
        AND ($6::text IS NULL OR name ILIKE $6 OR company ILIKE $6 OR email ILIKE $6)`,
-    [clientId, status || null, signal_tier || null, source || null, pipeline_stage || null, searchPattern]
+    [clientId, status || null, signal_tier || null, source || null, normalizedPipelineStage || null, searchPattern]
   );
 
   const result = await pool.query(
@@ -35,7 +36,7 @@ async function getLeads(clientId, filters = {}, pagination = {}) {
        AND ($6::text IS NULL OR name ILIKE $6 OR company ILIKE $6 OR email ILIKE $6)
      ORDER BY created_at DESC
      LIMIT $7 OFFSET $8`,
-    [clientId, status || null, signal_tier || null, source || null, pipeline_stage || null, searchPattern, perPage, offset]
+    [clientId, status || null, signal_tier || null, source || null, normalizedPipelineStage || null, searchPattern, perPage, offset]
   );
 
   return {
@@ -59,17 +60,57 @@ const STATUS_TO_PIPELINE = {
   new: 'prospecting',
   contacted: 'outreach',
   replied: 'qualifying',
-  meeting_booked: 'booked',
+  meeting_booked: 'meeting_booked',
   closed_won: 'closed',
   closed_lost: 'closed',
 };
+
+const PIPELINE_STAGES = Object.freeze([
+  'researched',
+  'qualified',
+  'rejected',
+  'outreach_ready',
+  'prospecting',
+  'outreach',
+  'contacted',
+  'replied',
+  'qualifying',
+  'meeting_booked',
+  'proposal',
+  'closed_won',
+  'closed_lost',
+  'nurture',
+  'closed',
+]);
+const PIPELINE_STAGE_SET = new Set(PIPELINE_STAGES);
+const PIPELINE_STAGE_INPUTS = Object.freeze([...PIPELINE_STAGES, 'booked']);
+
+function normalizePipelineStage(stage) {
+  return stage === 'booked' ? 'meeting_booked' : stage;
+}
+
+function parseMetadata(metadata) {
+  if (!metadata) return {};
+  if (typeof metadata === 'string') {
+    try {
+      const parsed = JSON.parse(metadata);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {};
+}
 
 async function createLead(clientId, data) {
   const {
     name, email, company, title, linkedin_url, source, signal_tier,
     status = 'new', score = 0, metadata = {},
   } = data;
-  const pipeline_stage = data.pipeline_stage || STATUS_TO_PIPELINE[status] || 'prospecting';
+  const pipeline_stage = normalizePipelineStage(data.pipeline_stage || STATUS_TO_PIPELINE[status] || 'prospecting');
+  if (!PIPELINE_STAGE_SET.has(pipeline_stage)) {
+    throw new AppError('Invalid pipeline_stage', 400, 'INVALID_PIPELINE_STAGE');
+  }
 
   // 2026-05-14: ICP v2 gate at the generic createLead helper. Used by Captain's
   // create_lead tool + manual /api/leads POST + import routes. Without this gate,
@@ -128,10 +169,10 @@ async function updateLead(clientId, leadId, data) {
 
   // ── Reschedule tracking: auto-nurture after 2 reschedules ──
   if (data.meeting_date && existing.meeting_date && data.meeting_date !== existing.meeting_date) {
-    const existingMeta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
+    const existingMeta = parseMetadata(existing.metadata);
     const rescheduleCount = (existingMeta.reschedule_count || 0) + 1;
     // Merge into data.metadata so it persists
-    const dataMeta = typeof data.metadata === 'object' && data.metadata !== null ? data.metadata : {};
+    const dataMeta = parseMetadata(data.metadata);
     data.metadata = { ...existingMeta, ...dataMeta, reschedule_count: rescheduleCount };
     if (rescheduleCount >= 2) {
       data.pipeline_stage = 'nurture';
@@ -146,15 +187,51 @@ async function updateLead(clientId, leadId, data) {
     }
   }
 
-  // Pipeline stage change requires non-empty next_action
-  if (data.pipeline_stage && data.pipeline_stage !== existing.pipeline_stage) {
-    if (!data.next_action && !data.metadata?.next_action) {
-      const { AppError } = require('../utils/errors');
-      throw new AppError('Pipeline stage change requires a next_action field', 400, 'MISSING_NEXT_ACTION');
-    }
+  if (data.pipeline_stage) {
+    data.pipeline_stage = normalizePipelineStage(data.pipeline_stage);
   }
 
-  const fields = ['name', 'email', 'company', 'title', 'linkedin_url', 'source', 'signal_tier', 'status', 'score', 'pipeline_stage', 'next_action', 'metadata'];
+  if (data.pipeline_stage && !PIPELINE_STAGE_SET.has(data.pipeline_stage)) {
+    throw new AppError('Invalid pipeline_stage', 400, 'INVALID_PIPELINE_STAGE');
+  }
+
+  // Pipeline stage change requires non-empty next_action
+  const stageChanged = Boolean(data.pipeline_stage && data.pipeline_stage !== existing.pipeline_stage);
+  const incomingMeta = parseMetadata(data.metadata);
+  const nextAction = data.next_action || incomingMeta.next_action;
+  if (stageChanged && !nextAction) {
+    throw new AppError('Pipeline stage change requires a next_action field', 400, 'MISSING_NEXT_ACTION');
+  }
+
+  if (data.next_action !== undefined || data.metadata !== undefined || stageChanged) {
+    const existingMeta = parseMetadata(existing.metadata);
+    const nowIso = new Date().toISOString();
+    const mergedMeta = { ...existingMeta, ...incomingMeta };
+
+    if (nextAction) {
+      mergedMeta.next_action = nextAction;
+      mergedMeta.stage_action = nextAction;
+      mergedMeta.stage_action_at = nowIso;
+    }
+
+    if (stageChanged) {
+      const history = Array.isArray(existingMeta.stage_history) ? existingMeta.stage_history : [];
+      mergedMeta.stage_history = [
+        ...history.slice(-9),
+        {
+          from: existing.pipeline_stage,
+          to: data.pipeline_stage,
+          action: nextAction,
+          at: nowIso,
+        },
+      ];
+    }
+
+    data.metadata = mergedMeta;
+  }
+  delete data.next_action;
+
+  const fields = ['name', 'email', 'company', 'title', 'linkedin_url', 'source', 'signal_tier', 'status', 'score', 'pipeline_stage', 'metadata'];
   const updates = [];
   const values = [clientId, leadId];
   let idx = 3;
@@ -195,7 +272,7 @@ async function updateLead(clientId, leadId, data) {
   const newStage = data.pipeline_stage || (data.status && STATUS_TO_PIPELINE[data.status]);
   if (newStage && newStage !== existing.pipeline_stage) {
     const eventMap = {
-      booked: 'meeting_booked',
+      meeting_booked: 'meeting_booked',
       closed: data.status === 'closed_won' ? 'deal_won' : 'deal_lost',
       nurture: 'lead_nurtured',
     };
@@ -210,7 +287,9 @@ async function updateLead(clientId, leadId, data) {
 
     // Update deal summary on key milestones
     const summaryUpdates = {};
-    if (newStage === 'booked') summaryUpdates.meeting_booked_at = new Date().toISOString();
+    if (newStage === 'meeting_booked') {
+      summaryUpdates.meeting_booked_at = new Date().toISOString();
+    }
     if (newStage === 'closed') {
       summaryUpdates.closed_at = new Date().toISOString();
       summaryUpdates.outcome = data.status === 'closed_won' ? 'won' : 'lost';
@@ -261,4 +340,4 @@ async function getStaleLeads(clientId, daysThreshold = 4) {
   return rows;
 }
 
-module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, getStaleLeads };
+module.exports = { getLeads, getLead, createLead, updateLead, deleteLead, getStaleLeads, PIPELINE_STAGES, PIPELINE_STAGE_INPUTS };

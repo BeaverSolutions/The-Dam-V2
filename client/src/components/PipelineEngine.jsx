@@ -191,9 +191,10 @@ export default function PipelineEngine({ data = {}, rail = null }) {
     {
       id: 'prospecting', name: 'Research Beaver', pos: 'tl',
       color: '#00B4FF', img: '/assets/beavers/research-beaver.png',
-      posDeg: 315, ringR: 204, dotCount: 5, dotSpeed: 8, dotSize: 4,
-      role: 'sourcing intel',
-      week: [
+	      posDeg: 315, ringR: 204, dotCount: 5, dotSpeed: 8, dotSize: 4,
+	      role: 'sourcing intel',
+	      status: (data.sourced_this_week || data.pool_health) ? 'Pool tracked' : 'No pool signal',
+	      week: [
         { k: 'Found',    v: fmt(data.sourced_this_week) },
         { k: 'In pool',  v: fmt(data.pool_health) },
         { k: 'Pipeline', v: fmt(data.total_in_pipeline) },
@@ -206,9 +207,10 @@ export default function PipelineEngine({ data = {}, rail = null }) {
     {
       id: 'outreach', name: 'Sales Beaver', pos: 'br',
       color: '#FF8C00', img: '/assets/beavers/sales-beaver.png',
-      posDeg: 135, ringR: 174, dotCount: 4, dotSpeed: 6, dotSize: 4,
-      role: 'drafting outreach',
-      week: [
+	      posDeg: 135, ringR: 174, dotCount: 4, dotSpeed: 6, dotSize: 4,
+	      role: 'drafting outreach',
+	      status: (data.sent_this_week || data.in_flight || data.replies_this_week) ? 'Outreach tracked' : 'No send signal',
+	      week: [
         { k: 'Sent',      v: fmt(data.sent_this_week) },
         { k: 'In flight', v: fmt(data.in_flight) },
         { k: 'Replies',   v: fmt(data.replies_this_week) },
@@ -221,9 +223,10 @@ export default function PipelineEngine({ data = {}, rail = null }) {
     {
       id: 'qualifying', name: 'Enforcer Beaver', pos: 'tr',
       color: '#2563EB', img: '/assets/beavers/ranger-beaver.png',
-      posDeg: 45, ringR: 145, dotCount: 3, dotSpeed: 5, dotSize: 3,
-      role: 'guarding quality',
-      week: [
+	      posDeg: 45, ringR: 145, dotCount: 3, dotSpeed: 5, dotSize: 3,
+	      role: 'guarding quality',
+	      status: reviewed > 0 ? 'QA tracked' : 'No QA signal',
+	      week: [
         { k: 'Reviewed',  v: fmt(reviewed) },
         { k: 'Rejected',  v: fmt(rejectedWk) },
         { k: 'Rewrite %', v: rewritePct != null ? `${rewritePct}%` : '—' },
@@ -236,9 +239,10 @@ export default function PipelineEngine({ data = {}, rail = null }) {
     {
       id: 'booked', name: 'Captain Beaver', pos: 'bl',
       color: '#A855F7', img: '/assets/beavers/director-beaver.png',
-      posDeg: 225, ringR: 121, dotCount: 2, dotSpeed: 4, dotSize: 3,
-      role: 'orchestrating crew',
-      week: [
+	      posDeg: 225, ringR: 121, dotCount: 2, dotSpeed: 4, dotSize: 3,
+	      role: 'orchestrating crew',
+	      status: data.sent_target ? 'KPI tracked' : 'No KPI signal',
+	      week: [
         { k: 'Sent',    v: fmt(data.sent_this_week) },
         { k: 'Replies', v: fmt(data.replies_this_week) },
         { k: 'Meets',   v: fmt(data.meetings_this_week) },
@@ -423,7 +427,7 @@ export default function PipelineEngine({ data = {}, rail = null }) {
                   <div className="bl-name" style={{ color: s.color }}>{s.name}</div>
                   <div className="bl-status">
                     <span className="bl-status-dot"></span>
-                    <span>Standby</span>
+	                    <span>{s.status}</span>
                     <span className="bl-role">· {s.role}</span>
                   </div>
                   <div className="bl-section">

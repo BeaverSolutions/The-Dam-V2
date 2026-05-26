@@ -57,7 +57,7 @@ ALTER TABLE clients
   ADD COLUMN IF NOT EXISTS daily_quality_lead_floor  INT  DEFAULT 100;
 
 COMMENT ON COLUMN clients.daily_quality_lead_floor IS
-  'Minimum quality-score-passing leads Research Beaver must source per day. Auto-adjusts monthly based on actual reply/meeting rates. Default 100 = conservative for 10 meetings/month per tenant.';
+  'Minimum quality-score-passing leads Research Beaver must source per day. Auto-adjusts monthly based on actual reply and meeting outcome rates. Default 100 = conservative for the 50 targeted outreaches/day operating floor.';
 
 -- ─── Seed Beaver Solutions with current defaults ───────────────────────────
 -- Beaver Solutions is the bootstrap tenant. These values mirror what

@@ -4,12 +4,38 @@ const router = require('express').Router();
 const pool = require('../db/pool');
 const logger = require('../utils/logger');
 
+const IMPORT_SOURCES = new Set(['csv_import', 'vibe_csv']);
+
+function normalizeImportSource(raw) {
+  return IMPORT_SOURCES.has(raw) ? raw : 'csv_import';
+}
+
+function normalizeEmail(email) {
+  const value = String(email || '').trim().toLowerCase();
+  return value || null;
+}
+
+function normalizeLinkedIn(url) {
+  const value = String(url || '').trim().toLowerCase();
+  if (!value) return null;
+  return value.split('?')[0].replace(/\/+$/, '');
+}
+
+function normalizeNameCompany(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
 // POST /api/import/leads
-// Body: { rows: [...], mapping: { name, email, company, title, linkedin_url, website, industry, company_size, signal, notes } }
+// Body: { rows: [...], source?: 'csv_import'|'vibe_csv', mapping: { name, email, company, title, linkedin_url, website, industry, company_size, signal, notes } }
 router.post('/leads', async (req, res, next) => {
   try {
     const clientId = req.clientId;
     const { rows, mapping } = req.body;
+    const importSource = normalizeImportSource(req.body.source || req.body.sourceType);
+    const isVibeCsv = importSource === 'vibe_csv';
 
     if (!Array.isArray(rows) || rows.length === 0) {
       return res.status(400).json({ error: 'No rows provided', code: 'NO_ROWS' });
@@ -35,7 +61,9 @@ router.post('/leads', async (req, res, next) => {
     for (const row of rows) {
       const name    = get(row, mapping.name)    || get(row, mapping.company) || 'Unknown Contact';
       const company = get(row, mapping.company) || 'Unknown Company';
-      const email   = get(row, mapping.email);
+      const email   = normalizeEmail(get(row, mapping.email));
+      const linkedinUrl = get(row, mapping.linkedin_url);
+      const normalizedLinkedIn = normalizeLinkedIn(linkedinUrl);
 
       // Skip blank rows
       if (name === 'Unknown Contact' && company === 'Unknown Company') {
@@ -43,11 +71,34 @@ router.post('/leads', async (req, res, next) => {
         continue;
       }
 
-      // Dedup by email
+      // Dedupe by email, LinkedIn URL, then normalized name + company.
+      const dedupeParams = [clientId];
+      const dedupeConditions = [];
       if (email) {
+        dedupeParams.push(email);
+        dedupeConditions.push(`LOWER(TRIM(email)) = $${dedupeParams.length}`);
+      }
+      if (normalizedLinkedIn) {
+        dedupeParams.push(normalizedLinkedIn);
+        dedupeConditions.push(`LOWER(TRIM(TRAILING '/' FROM SPLIT_PART(linkedin_url, '?', 1))) = $${dedupeParams.length}`);
+      }
+      const nameKey = normalizeNameCompany(name);
+      const companyKey = normalizeNameCompany(company);
+      if (nameKey && companyKey && name !== 'Unknown Contact' && company !== 'Unknown Company') {
+        dedupeParams.push(nameKey, companyKey);
+        dedupeConditions.push(
+          `(LOWER(REGEXP_REPLACE(COALESCE(name, ''), '[^a-z0-9]+', '', 'g')) = $${dedupeParams.length - 1}` +
+          ` AND LOWER(REGEXP_REPLACE(COALESCE(company, ''), '[^a-z0-9]+', '', 'g')) = $${dedupeParams.length})`
+        );
+      }
+      if (dedupeConditions.length > 0) {
         const dup = await pool.query(
-          `SELECT id FROM leads WHERE client_id = $1 AND email = $2 AND deleted_at IS NULL LIMIT 1`,
-          [clientId, email]
+          `SELECT id FROM leads
+           WHERE client_id = $1
+             AND deleted_at IS NULL
+             AND (${dedupeConditions.join(' OR ')})
+           LIMIT 1`,
+          dedupeParams
         );
         if (dup.rows.length > 0) {
           skipped++;
@@ -64,29 +115,45 @@ router.post('/leads', async (req, res, next) => {
       if (get(row, mapping.why_now))      meta.why_now      = get(row, mapping.why_now);
       if (get(row, mapping.friction))     meta.friction     = get(row, mapping.friction);
       if (get(row, mapping.notes))        meta.notes        = get(row, mapping.notes);
-      meta.source = 'csv_import';
-      meta.data_source = 'csv_import';
+      meta.source = importSource;
+      meta.data_source = importSource;
       meta.verified = true; // user-curated data is trusted by default
+      if (isVibeCsv) {
+        meta.email_source = email ? 'vibe_csv' : null;
+        meta.import_mode = 'vibe_csv';
+        meta.email_verification = email ? 'trusted_from_vibe_csv' : 'not_present';
+      }
 
       // Optional signal_tier from CSV — default P2 for imported leads (mid-priority).
       // P1 = active signal, P2 = some signal, P3 = no signal. Captain's gates use this.
       const tierRaw = (get(row, mapping.signal_tier) || '').toUpperCase();
       const signalTier = ['P1', 'P2', 'P3'].includes(tierRaw) ? tierRaw : 'P2';
+      const emailVerified = isVibeCsv && !!email;
+      const emailSource = emailVerified ? 'vibe_csv' : null;
+      const leadTier = isVibeCsv
+        ? (email ? 'A' : normalizedLinkedIn ? 'B' : null)
+        : null;
 
       try {
         await pool.query(
           `INSERT INTO leads
              (client_id, name, email, company, title, linkedin_url,
-              source, pipeline_stage, status, signal_tier, metadata)
-           VALUES ($1,$2,$3,$4,$5,$6,'csv_import','prospecting','new',$7,$8)`,
+              source, pipeline_stage, status, signal_tier,
+              email_verified, email_source, lead_tier, tiered_at, metadata)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'prospecting','new',$8,$9,$10,$11,
+                   CASE WHEN $11 IS NULL THEN NULL ELSE NOW() END,$12)`,
           [
             clientId,
             name,
             email || null,
             company,
             get(row, mapping.title)        || null,
-            get(row, mapping.linkedin_url) || null,
+            linkedinUrl || null,
+            importSource,
             signalTier,
+            emailVerified,
+            emailSource,
+            leadTier,
             JSON.stringify(meta),
           ]
         );
@@ -101,7 +168,7 @@ router.post('/leads', async (req, res, next) => {
     await pool.query(
       `INSERT INTO logs (client_id, agent, action, target_type, metadata)
        VALUES ($1, 'director', 'leads_imported', 'leads', $2)`,
-      [clientId, JSON.stringify({ imported, skipped, failed, source: 'csv_import' })]
+      [clientId, JSON.stringify({ imported, skipped, failed, source: importSource })]
     );
 
     res.json({ data: { imported, skipped, failed, errors } });
