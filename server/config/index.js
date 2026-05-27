@@ -15,7 +15,7 @@ const config = {
     key: process.env.ENCRYPTION_KEY,
   },
   llm: {
-    provider: (process.env.LLM_PROVIDER || 'anthropic').toLowerCase(),
+    provider: (process.env.LLM_PROVIDER || (process.env.OPENAI_API_KEY ? 'openai' : 'anthropic')).toLowerCase(),
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     openaiApiKey: process.env.OPENAI_API_KEY,
   },

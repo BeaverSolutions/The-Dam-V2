@@ -17,11 +17,12 @@ function envNumber(name, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-// Defaults are intentionally zero for search/enrichment providers. Production
-// must opt in through env caps so a missing knob cannot burn quota by accident.
+// Defaults stay conservative. Brave gets a small bounded default so manual
+// Captain sourcing can work when BRAVE_API_KEY is present but the cap knob is
+// missing; higher-volume enrichment/search providers remain opt-in.
 const CAPS = {
   vp: envNumber('VP_DAILY_CREDIT_CAP', 60),
-  brave: envNumber('BRAVE_DAILY_QUERY_CAP', 0),
+  brave: envNumber('BRAVE_DAILY_QUERY_CAP', 10),
   google_cse: envNumber('GOOGLE_CSE_DAILY_QUERY_CAP', 0),
   hunter: envNumber('HUNTER_DAILY_QUERY_CAP', 0),
   millionverifier: envNumber('MILLIONVERIFIER_DAILY_VERIFY_CAP', envNumber('MILLION_VERIFIER_DAILY_CAP', 0)),
