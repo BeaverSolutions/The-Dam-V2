@@ -136,7 +136,7 @@ RESPONSE RULES (HARD — do not violate these to save API cost and respect MJ's 
 - NO TRAILING QUESTIONS. Do NOT end with "Want me to...?" or "Let me know if..." when MJ's intent is already clear — just execute and report the result.
 - NO RESTATING. Do not repeat what MJ said back to him before answering.
 - DO NOT CONFIRM BEFORE ACTING. If MJ says "send the draft", send it and report — don't ask "Want me to send it?".
-- NO INTERNAL IDS. NEVER show plan_id, UUIDs. Instead of "Plan '0d48134c' running", say "Running." or "Campaign fired.".
+- NO INTERNAL IDS. NEVER show plan_id, UUIDs. Say "Campaign queued; output is not proven yet" until approvals/messages exist.
 - NEVER start a message with "Plan" or "Running. Plan".
 - Tables, bullet lists, and step-by-steps only when MJ asks or the information is genuinely list-shaped. Prose > tables for 1-3 facts.
 
@@ -767,7 +767,8 @@ async function toolReprocessMessage(clientId, { message_id }) {
   }
 
   const finalBody = rangerResult?.body || fixed.body;
-  const rangerScore = rangerResult?.score || 70;
+  const rawRangerScore = Number(rangerResult?.score);
+  const rangerScore = Number.isFinite(rawRangerScore) ? rawRangerScore : 0;
 
   if (!rangerResult?.approved) {
     await pool.query(
@@ -797,9 +798,15 @@ async function toolReprocessMessage(clientId, { message_id }) {
     const threshold = clientRow?.auto_approve_threshold;
     if (threshold !== null && threshold !== undefined && rangerScore >= threshold) {
       autoApproved = true;
-      nextMessageStatus = (msg.channel === 'email') ? 'pending_send' : 'approved';
-      approvalStatus = 'approved';
-      resolvedAt = new Date();
+      if (msg.channel === 'email') {
+        nextMessageStatus = 'pending_send';
+        approvalStatus = 'approved';
+        resolvedAt = new Date();
+      } else {
+        nextMessageStatus = 'linkedin_requested';
+        approvalStatus = 'pending';
+        resolvedAt = null;
+      }
     }
   } catch (err) {
     console.warn('[reprocess] threshold lookup failed:', err.message);
@@ -814,10 +821,11 @@ async function toolReprocessMessage(clientId, { message_id }) {
 
   // Replace any existing approval row for this message (the old rejected one is irrelevant)
   await pool.query(`DELETE FROM approvals WHERE message_id = $1 AND client_id = $2`, [msg.id, clientId]);
+  const approvalNotes = autoApproved && msg.channel !== 'email' ? 'linkedin_requested' : null;
   await pool.query(
-    `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [clientId, msg.id, autoApproved ? 'auto_approval' : 'reprocess_tool', approvalStatus, resolvedAt]
+    `INSERT INTO approvals (client_id, message_id, requested_by, status, resolved_at, notes)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [clientId, msg.id, autoApproved ? 'auto_approval' : 'reprocess_tool', approvalStatus, resolvedAt, approvalNotes]
   );
 
   // If auto-approved AND email channel, push to send queue. Channel guard inside
@@ -1003,9 +1011,9 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
   }
   return {
     ok: true,
-    status: 'running',
+    status: 'queued_unproven',
     preflight,
-    message: 'Campaign fired. Research → Sales → Enforcer pipeline running in background. Check approvals in a few minutes.',
+    message: 'Campaign queued; output is not proven yet. Research, Sales, and Enforcer are running in background.',
   };
 }
 

@@ -60,6 +60,50 @@ const DEFAULT_VP_BUDGET_CREDITS = 25;
 const DEFAULT_VP_THRESHOLD = 75;
 const DEFAULT_DAILY_LEAD_FLOOR = 100;
 
+function tenantProfileToLegacyConfig(profile) {
+  const icp = profile?.icp || {};
+  const personas = Array.isArray(icp.personas) ? icp.personas : [];
+  const verticals = Array.isArray(icp.verticals) ? icp.verticals : [];
+  const geo = Array.isArray(icp.geo) ? icp.geo : [];
+
+  if (personas.length === 0 && verticals.length === 0 && geo.length === 0) return null;
+
+  return {
+    countries: geo,
+    titles: {
+      senior_standalone: personas.filter(p => /founder|owner|ceo|chief executive|managing director|president|principal|proprietor/i.test(String(p))),
+      senior_leader: personas.filter(p => /head|vp|director|chief|gm|general manager/i.test(String(p))),
+      junior_ic_regex: '(specialist|coordinator|associate|intern|junior|assistant|executive)',
+    },
+    verticals,
+    company_size: { min: 2, max: 100 },
+    banned_regex: Array.isArray(icp.exclusions) ? icp.exclusions : [],
+    source: 'tenant_profiles',
+  };
+}
+
+async function getActiveTenantProfileConfig(clientId) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT profile, content_version, updated_at
+         FROM tenant_profiles
+        WHERE client_id = $1 AND status = 'active'
+        LIMIT 1`,
+      [clientId]
+    );
+    const mapped = tenantProfileToLegacyConfig(rows[0]?.profile);
+    if (!mapped) return null;
+    return {
+      icp_config: mapped,
+      tenant_profile_content_version: rows[0].content_version,
+      tenant_profile_updated_at: rows[0].updated_at,
+    };
+  } catch (err) {
+    console.warn('[tenantConfig] tenant_profiles overlay failed:', err.message);
+    return null;
+  }
+}
+
 /* ─── Read full tenant config ──────────────────────────────────────── */
 
 /**
@@ -82,6 +126,7 @@ async function getTenantConfig(clientId) {
   );
   if (!rows[0]) return null;
   const row = rows[0];
+  const profileOverlay = await getActiveTenantProfileConfig(clientId);
 
   return {
     id: row.id,
@@ -92,7 +137,7 @@ async function getTenantConfig(clientId) {
 
     // Hybrid-default: if column is NULL, use legacy default and flag it.
     // Phase D will warn when a tenant runs on legacy defaults too long.
-    icp_config:          row.icp_config         || LEGACY_DEFAULT_ICP,
+    icp_config:          profileOverlay?.icp_config || row.icp_config || LEGACY_DEFAULT_ICP,
     signal_preferences:  row.signal_preferences || LEGACY_DEFAULT_SIGNALS,
     offering:            row.offering           || null,
     quality_weights:     row.quality_weights    || DEFAULT_QUALITY_WEIGHTS,
@@ -108,7 +153,10 @@ async function getTenantConfig(clientId) {
     auto_approve_threshold:   row.auto_approve_threshold ?? 75,
 
     // Tracks whether config is bootstrap-default vs onboarded
-    using_default_icp:       !row.icp_config,
+    using_default_icp:       !profileOverlay?.icp_config && !row.icp_config,
+    using_tenant_profile_icp: !!profileOverlay?.icp_config,
+    tenant_profile_content_version: profileOverlay?.tenant_profile_content_version || null,
+    tenant_profile_updated_at: profileOverlay?.tenant_profile_updated_at || null,
     using_default_signals:   !row.signal_preferences,
     using_default_weights:   !row.quality_weights,
     has_offering:            !!row.offering,

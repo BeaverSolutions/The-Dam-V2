@@ -350,7 +350,7 @@ async function processLead(clientId, lead, ctx = {}) {
           currentBody = enforcerDraft.body;
           currentSubject = enforcerDraft.subject || currentSubject || `${lead.company}`;
           await pool.query(
-            `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval', ranger_score = 70, ranger_notes = $3, updated_at = NOW() WHERE id = $4 AND client_id = $5`,
+            `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval', ranger_score = 0, ranger_notes = $3, updated_at = NOW() WHERE id = $4 AND client_id = $5`,
             [currentBody, currentSubject, 'Enforcer-drafted fallback — Sales Beaver failed quality gates. Review before sending.', msg.id, clientId]
           );
           await pool.query(
@@ -361,8 +361,8 @@ async function processLead(clientId, lead, ctx = {}) {
             agent: 'enforcer_beaver', action: 'enforcer_fallback_draft', target_type: 'message', target_id: msg.id,
             metadata: { channel, lead_name: lead.name },
           }).catch(() => {});
-          await trace('reviewed', 'enforcer_fallback', { message_id: msg.id, agent: 'enforcer_beaver', score: 70, metadata: { channel } });
-          return { outcome: 'approved', messageId: msg.id, channel, viaEnforcerFallback: true };
+          await trace('reviewed', 'manual_review', { message_id: msg.id, agent: 'enforcer_beaver', score: 0, metadata: { channel, viaEnforcerFallback: true } });
+          return { outcome: 'manual_review', messageId: msg.id, channel, viaEnforcerFallback: true };
         }
         // Last resort — both Sales and Enforcer failed
         await pool.query(
@@ -910,7 +910,8 @@ function leadReadinessGate(lead) {
  * @returns {Promise<{autoApproved:boolean, isBorderline:boolean, rangerScore:number, nextMessageStatus:string}>}
  */
 async function applyEnforcerDecision(clientId, { msg, lead, rangerResult, finalBody, subject, kickoffId, pipelinePath, source }) {
-  const rangerScore = rangerResult?.score || 70;
+  const rawRangerScore = Number(rangerResult?.score);
+  const rangerScore = Number.isFinite(rawRangerScore) ? rawRangerScore : 0;
   let autoApproved = false;
   let isBorderline = false;
   let gateFailReason = null;

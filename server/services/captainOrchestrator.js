@@ -123,8 +123,15 @@ async function collectTeamKPIs(clientId) {
   // ─── Pipeline state ──
   const pipelinePromise = pool.query(
     `SELECT
-       (SELECT COUNT(*) FROM approvals
-          WHERE client_id = $1 AND status IN ('pending', 'pending_approval')) AS pending_approvals,
+       (SELECT COUNT(*)
+          FROM approvals a
+          JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
+          WHERE a.client_id = $1
+            AND a.status IN ('pending', 'pending_approval')
+            AND (
+              (a.notes = 'linkedin_requested' AND m.status = 'linkedin_requested')
+              OR (COALESCE(a.notes, '') <> 'linkedin_requested' AND m.status = 'pending_approval')
+            )) AS pending_approvals,
        (SELECT COUNT(*) FROM messages
           WHERE client_id = $1 AND channel = 'linkedin' AND status IN ('approved', 'linkedin_requested') AND sent_at IS NULL) AS approved_unsent_linkedin,
        (SELECT COUNT(*) FROM messages

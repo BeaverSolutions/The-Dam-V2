@@ -423,7 +423,7 @@ Classify this reply and tell Sales Beaver exactly what to write next.`;
     }
 
     // Update lead stage and store sentiment in metadata for UI display
-    const stageMap = { positive: 'meeting_booked', neutral: 'qualifying', objection: 'qualifying' };
+    const stageMap = { positive: 'qualifying', neutral: 'qualifying', objection: 'qualifying' };
     const newStage = stageMap[sentiment];
     if (newStage) {
       await pool.query(

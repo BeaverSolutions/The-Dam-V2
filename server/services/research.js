@@ -240,6 +240,14 @@ function buildQueryPool(icpMemory) {
   const includesUK = /united kingdom|\buk\b|britain|england|\bgb\b/i.test(geoLower);
 
   const queryPool = [];
+  const countryForQuery = (query) => {
+    const q = String(query || '').toLowerCase();
+    if (/pte\s*\.?\s*ltd|singapore|\bsg\b/.test(q)) return 'SG';
+    if (/pty\s*\.?\s*ltd|australia|\bau\b/.test(q)) return 'AU';
+    if (/united states|\bu\.?s\.?a?\b|america|\bus\b/.test(q)) return 'US';
+    if (/united kingdom|\buk\b|britain|england|\bgb\b/.test(q)) return 'GB';
+    return 'MY';
+  };
 
   // Generate compound industry search phrases
   const industryPhrases = [];
@@ -408,6 +416,24 @@ function buildQueryPool(icpMemory) {
         location: baseLocation,
       });
     }
+    if (includesUS) {
+      queryPool.push({
+        query:    `${phrase} "United States" "hiring" "sales" B2B founder`,
+        strategy: 'signal_jobs',
+        title:    '',
+        industry: phrase,
+        location: baseLocation,
+        country:  'US',
+      });
+      queryPool.push({
+        query:    `${phrase} "United States" "raised" OR "launched" B2B founder`,
+        strategy: 'signal_news',
+        title:    '',
+        industry: phrase,
+        location: baseLocation,
+        country:  'US',
+      });
+    }
   }
 
   // Strategy: growth signals — different angle, breaks dedup loop
@@ -497,13 +523,24 @@ function buildQueryPool(icpMemory) {
     }
   }
 
-    // Deduplicate by query string
+  const strategyPriority = {
+    signal_jobs: 0,
+    signal_news: 1,
+    signal_growth: 2,
+    signal: 3,
+    direct: 4,
+    company: 5,
+    email_derivable: 6,
+  };
+
+  // Deduplicate by query string, then run signal-led strategies first.
   const seen = new Set();
   return queryPool.filter(item => {
     if (seen.has(item.query)) return false;
     seen.add(item.query);
     return true;
-  });
+  }).map(item => ({ ...item, country: item.country || countryForQuery(item.query) }))
+    .sort((a, b) => (strategyPriority[a.strategy] ?? 99) - (strategyPriority[b.strategy] ?? 99));
 }
 
 /* ─── Query tracker ──────────────────────────────────────── */
@@ -642,7 +679,7 @@ ${hunterContext}
 ICP REQUIREMENTS:
 ${icpContext}
 
-CRITICAL: Do NOT count search query terms as evidence of location. Only count as Malaysia evidence: .my domain, "Sdn Bhd" or "Berhad" in company name, Malaysian city names in the company description or person's headline, Malay language markers. Generic mentions of "Malaysia" in snippets are unreliable.
+CRITICAL: Do NOT count search query terms as evidence of location. Only count actual evidence: country-specific company suffix/TLD, city names in the company description or person's headline, LinkedIn country/city hints, or company website location markers. Generic mentions of a country in snippets are unreliable.
 
 CRITICAL ROLE CHECK: The ONLY acceptable roles are: ${icp.job_titles || 'CEO, Founder, Co-Founder, Managing Director, Owner, Director'}. If the title is anything else — Manager, Head of, VP, Coordinator, Lead, Specialist, Engineer — mark role as "unlikely". We only want founders and top-level decision-makers who own the business or run it.
 
@@ -776,9 +813,11 @@ async function verifyBatch(candidates, icp, clientId = null) {
  * STRATEGY 1: Direct LinkedIn people search.
  * Brave: site:linkedin.com/in [title] [industry] [location]
  */
-async function strategyDirectPeople(query, limit) {
+async function strategyDirectPeople(queryItem, limit) {
+  const query = typeof queryItem === 'string' ? queryItem : queryItem.query;
+  const country = typeof queryItem === 'string' ? 'MY' : (queryItem.country || 'MY');
   try {
-    const results = await searchService.searchLinkedInProfiles(query, limit);
+    const results = await searchService.searchLinkedInProfiles(query, limit, { country });
     return results.map(r => normaliseLead({
       ...r,
       data_source:  'brave',
@@ -813,9 +852,11 @@ async function strategyCompanyFirst(clientId, icpMemory, limit) {
         // Step 1: find company LinkedIn pages via Brave search.
         // Pass item.industry (just the phrase) — searchLinkedInCompanies prepends
         // "site:linkedin.com/company" itself. Passing item.query would double it.
-        const searchPhrase = `${item.industry} "Sdn Bhd"`;
+        const searchPhrase = String(item.query || `${item.industry} "Sdn Bhd"`)
+          .replace(/^site:linkedin\.com\/company\s+/i, '')
+          .trim();
         const companyResults = await searchService.searchLinkedInCompanies
-          ? searchService.searchLinkedInCompanies(searchPhrase, 3)
+          ? searchService.searchLinkedInCompanies(searchPhrase, 3, { country: item.country || 'MY' })
           : Promise.resolve([]);
 
         const companies = await companyResults;
@@ -865,7 +906,7 @@ async function strategyCompanyFirst(clientId, icpMemory, limit) {
             // Fallback: Brave people search scoped to this company
             try {
               const fallbackQuery = `site:linkedin.com/in "${companyName}" CEO OR Founder`;
-              const fallbackResults = await searchService.searchLinkedInProfiles(fallbackQuery, 3);
+              const fallbackResults = await searchService.searchLinkedInProfiles(fallbackQuery, 3, { country: item.country || 'MY' });
               for (const r of fallbackResults) {
                 leads.push(normaliseLead({
                   ...r,
@@ -896,9 +937,11 @@ async function strategyCompanyFirst(clientId, icpMemory, limit) {
  * STRATEGY 3: Signal-based search.
  * Brave: "[location]" "[title]" "[signal]" site:linkedin.com/in
  */
-async function strategySignalBased(query, limit) {
+async function strategySignalBased(queryItem, limit) {
+  const query = typeof queryItem === 'string' ? queryItem : queryItem.query;
+  const country = typeof queryItem === 'string' ? 'MY' : (queryItem.country || 'MY');
   try {
-    const results = await searchService.searchLinkedInProfiles(query, limit);
+    const results = await searchService.searchLinkedInProfiles(query, limit, { country });
     return results.map(r => normaliseLead({
       ...r,
       data_source:  'brave_signal',
@@ -921,6 +964,17 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
   const emptyResult = { leads: [], queriesUsed: [], source: 'multi' };
 
   try {
+    try {
+      const { getLegacyIcpForClient } = require('./tenantContext');
+      const canonicalIcp = await getLegacyIcpForClient(clientId, {
+        source: 'service',
+        fallback: icpMemory && Object.keys(icpMemory).length > 0 ? icpMemory : null,
+      });
+      if (canonicalIcp) icpMemory = canonicalIcp;
+    } catch (ctxErr) {
+      console.warn('[research] tenant profile ICP load failed, using provided ICP memory:', ctxErr.message);
+    }
+
     // 0. Log ICP consumption for debugging
     console.log(`[research] ═══ Starting research for client ${clientId} ═══`);
     console.log(`[research] ICP job_titles: ${icpMemory?.job_titles || 'NONE (using defaults)'}`);
@@ -988,7 +1042,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     const perQueryLimit = Math.max(Math.ceil(targetCount / Math.max(directQueries.length + allSignalCount, 1)), 2);
 
     const directPromises = directQueries.map(q =>
-      strategyDirectPeople(q.query, perQueryLimit)
+      strategyDirectPeople(q, perQueryLimit)
         .catch(err => {
           console.warn('[research] Direct query failed:', err.message);
           return [];
@@ -996,7 +1050,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     );
 
     const signalPromises = signalQueries.map(q =>
-      strategySignalBased(q.query, perQueryLimit)
+      strategySignalBased(q, perQueryLimit)
         .catch(err => {
           console.warn('[research] Signal query failed:', err.message);
           return [];
@@ -1005,7 +1059,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
 
     // Buying signal queries — tag matched leads with signal + why_now
     const signalJobsPromises = signalJobsQueries.map(q =>
-      strategySignalBased(q.query, perQueryLimit)
+      strategySignalBased(q, perQueryLimit)
         .then(leads => leads.map(l => ({
           ...l,
           signal: l.signal || `Hiring signal: ${q.industry} company in ${q.location} is actively hiring`,
@@ -1019,7 +1073,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     );
 
     const signalNewsPromises = signalNewsQueries.map(q =>
-      strategySignalBased(q.query, perQueryLimit)
+      strategySignalBased(q, perQueryLimit)
         .then(leads => leads.map(l => ({
           ...l,
           signal: l.signal || `Growth signal: ${q.industry} company in ${q.location} recently hired, raised, or launched`,
@@ -1181,8 +1235,8 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       queriesUsedTotal += actualPicked.length; // accumulate for metric
 
       const retryResults = await Promise.all([
-        ...retryDirectQueries.map(q => strategyDirectPeople(q.query, perQueryLimit).catch(() => [])),
-        ...retrySignalQueries.map(q => strategySignalBased(q.query, perQueryLimit).catch(() => [])),
+        ...retryDirectQueries.map(q => strategyDirectPeople(q, perQueryLimit).catch(() => [])),
+        ...retrySignalQueries.map(q => strategySignalBased(q, perQueryLimit).catch(() => [])),
       ]);
 
       const retryCandidates = retryResults.flat()

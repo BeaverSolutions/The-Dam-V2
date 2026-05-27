@@ -367,13 +367,17 @@ async function enqueueMessage(clientId, messageId) {
     return { enqueued: false, reason: 'daily_limit_reached' };
   }
 
-  await pool.query(
+  const inserted = await pool.query(
     `INSERT INTO send_queue (client_id, message_id, status, next_retry_at)
      VALUES ($1, $2, 'pending', NOW())
-     ON CONFLICT (message_id) DO NOTHING`,
+     ON CONFLICT (message_id) DO NOTHING
+     RETURNING id`,
     [clientId, messageId]
   );
-  return { enqueued: true };
+  if (inserted.rowCount === 0) {
+    return { enqueued: false, reason: 'already_enqueued' };
+  }
+  return { enqueued: true, queue_id: inserted.rows[0]?.id };
 }
 
 module.exports = { processSendQueue, enqueueMessage };

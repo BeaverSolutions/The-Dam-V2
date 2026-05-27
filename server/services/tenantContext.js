@@ -332,8 +332,45 @@ async function getTenantContext(authCtx, opts) {
   };
 }
 
+function legacyIcpFromProfile(profile) {
+  const icp = profile?.icp || {};
+  return {
+    job_titles:  Array.isArray(icp.personas) ? icp.personas.join(', ') : '',
+    industries:  Array.isArray(icp.verticals) ? icp.verticals.join(', ') : '',
+    geographies: Array.isArray(icp.geo) ? icp.geo.join(', ') : '',
+    exclusions:  Array.isArray(icp.exclusions) ? icp.exclusions : [],
+    competitor_offers: Array.isArray(icp.competitor_offers) ? icp.competitor_offers : [],
+    source: 'tenant_profiles',
+  };
+}
+
+/**
+ * Bridge for legacy JS beaver paths while tenant_profiles is rolled into every
+ * caller. Prefer this over reading agent_memory/director/icp directly.
+ */
+async function getLegacyIcpForClient(clientId, { source = 'service', fallback = null } = {}) {
+  const loaded = await loadActiveProfile(clientId);
+  if (loaded.found && loaded.status === 'active') {
+    const parsed = profileSchema.safeParse(loaded.profile);
+    if (!parsed.success) {
+      const err = new Error(`tenant profile validation failed: ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+      err.code = 'profile_invalid';
+      err.zodIssues = parsed.error.issues;
+      throw err;
+    }
+    return {
+      ...legacyIcpFromProfile(parsed.data),
+      content_version: loaded.contentVersion,
+      schema_version: loaded.schemaVersion,
+      auth_source: source,
+    };
+  }
+  return fallback || null;
+}
+
 module.exports = {
   getTenantContext,
+  getLegacyIcpForClient,
   createAuthContext,
   // Internal projections exported for unit/smoke testing only.
   // Production code uses getTenantContext.

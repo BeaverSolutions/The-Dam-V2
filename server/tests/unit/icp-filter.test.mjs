@@ -5,13 +5,13 @@ const { leads } = require('../fixtures/synthetic-leads');
 // Inline the ICP logic for unit testing without loading the full agents.js dependency tree
 // (agents.js has heavy side effects: pool, claude, etc.)
 const ICP_ALLOWED_COUNTRIES = new Set([
-  'malaysia','singapore','indonesia','philippines','thailand','vietnam',
-  'my','sg','id','ph','th','vn',
+  'malaysia','singapore','australia','united states','united kingdom',
+  'my','sg','au','us','usa','uk','gb',
 ]);
 
-const ICP_SENIOR_STANDALONE = /\b(founder|co-?founder|ceo|chief executive|cmo|coo|cfo|cto|managing director|managing partner|president|owner|principal|proprietor|\bmd\b|chairman|chairwoman)\b/i;
+const ICP_SENIOR_STANDALONE = /\b(founder|co-?founder|ceo|chief executive|\bcro\b|chief revenue|coo|cfo|cto|managing director|managing partner|president|owner|principal|proprietor|\bmd\b|chairman|chairwoman)\b/i;
 const ICP_SENIOR_LEADER = /\b(director|head\s+of|vp|vice\s+president|general\s+manager|\bgm\b|chief)\b/i;
-const ICP_SENIOR_FUNCTION = /\b(sales|business\s+development|\bbd\b|growth|marketing|revenue|commercial|operations|brand|partnerships|comms|communications|client\s+services)\b/i;
+const ICP_SENIOR_FUNCTION = /\b(sales|business\s+development|\bbd\b|revenue|commercial|outbound)\b/i;
 const ICP_JUNIOR_TITLE = /\b(intern|trainee|junior|associate|assistant|coordinator|specialist|analyst|officer|admin|receptionist|clerk|engineer|developer|designer|writer|editor|representative|agent\b|strategist)\b/i;
 const ICP_JUNIOR_QUALIFIED = /\b(executive|manager|lead|consultant)\b/i;
 const ICP_SENIOR_QUALIFIER = /\b(senior|head|chief|principal|lead\s+(of|the)|managing|global|regional)\b/i;
@@ -45,7 +45,7 @@ function applyIcpV2Filter(lead) {
     return { pass: false, status: 'rejected_unresolved_country', reason: 'country could not be resolved from LinkedIn / company website' };
   }
   if (!ICP_ALLOWED_COUNTRIES.has(rawCountry)) {
-    return { pass: false, status: 'rejected_country', reason: `country "${rawCountry}" is outside SEA-6` };
+    return { pass: false, status: 'rejected_country', reason: `country "${rawCountry}" is outside target ICP geographies` };
   }
 
   if (ICP_INDUSTRY_BODIES.test(allText)) {
@@ -92,7 +92,7 @@ function applyIcpV2Filter(lead) {
 }
 
 describe('ICP v2 Filter', () => {
-  describe('passes valid SEA decision-makers', () => {
+  describe('passes valid target-market decision-makers', () => {
     it('passes Malaysian MD with verified email', () => {
       const result = applyIcpV2Filter(leads[0]); // Ahmad Razak, Kingdom Digital, MD
       expect(result.pass).toBe(true);
@@ -108,9 +108,10 @@ describe('ICP v2 Filter', () => {
       expect(result.pass).toBe(true);
     });
 
-    it('passes Indonesia Head of Marketing', () => {
+    it('rejects Indonesia Head of Marketing', () => {
       const result = applyIcpV2Filter(leads[3]); // Budi, Narasi Digital, Head of Marketing
-      expect(result.pass).toBe(true);
+      expect(result.pass).toBe(false);
+      expect(result.status).toBe('rejected_country');
     });
 
     it('passes borderline score 65', () => {
@@ -119,11 +120,10 @@ describe('ICP v2 Filter', () => {
     });
   });
 
-  describe('rejects non-SEA countries', () => {
-    it('rejects United States', () => {
+  describe('rejects out-of-ICP countries', () => {
+    it('passes United States founder', () => {
       const result = applyIcpV2Filter(leads[5]); // John Smith, US
-      expect(result.pass).toBe(false);
-      expect(result.status).toBe('rejected_country');
+      expect(result.pass).toBe(true);
     });
 
     it('rejects empty/unresolved country', () => {

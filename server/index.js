@@ -738,6 +738,8 @@ async function start() {
     // runWithClientContext already imported above for follow-up scheduler
 
     async function runDailyKickoff() {
+      if (process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true') return;
+
       const now = new Date();
       const utcHour = now.getUTCHours();
       const utcMin  = now.getUTCMinutes();

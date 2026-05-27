@@ -21,6 +21,22 @@ const { evaluateLeadQuality } = require('../utils/leadQuality');
 const { searchEmailDomain } = require('./searchService');
 const spendGuard = require('./spendGuard');
 
+async function loadCanonicalIcp(clientId) {
+  const { rows: icpRows } = await pool.query(
+    `SELECT content FROM agent_memory
+     WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
+    [clientId]
+  );
+  const fallback = icpRows[0]?.content || null;
+  try {
+    const { getLegacyIcpForClient } = require('./tenantContext');
+    return await getLegacyIcpForClient(clientId, { source: 'service', fallback });
+  } catch (err) {
+    logger.warn({ msg: '[db-builder] canonical ICP load failed, using agent_memory fallback', err: err.message });
+    return fallback;
+  }
+}
+
 // ── Email pattern helpers ─────────────────────────────────────────────────────
 
 async function loadEmailPatterns(clientId) {
@@ -387,13 +403,8 @@ async function sourceLeads(clientId, deficit, config) {
   // Lazy-load to avoid circular requires at startup
   const researchModule = require('./research');
 
-  // Load ICP memory
-  const { rows: icpRows } = await pool.query(
-    `SELECT content FROM agent_memory
-     WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
-    [clientId]
-  );
-  const icpMemory = icpRows[0]?.content || null;
+  // Load canonical tenant ICP, falling back to director memory when needed.
+  const icpMemory = await loadCanonicalIcp(clientId);
 
   if (!icpMemory) {
     logger.warn({ msg: '[db-builder] No ICP memory found, skipping sourcing', clientId });
@@ -538,12 +549,7 @@ async function runDbBuilder() {
           const coldResearchDirectives = dbDirectives.filter(d => d.directive_type === 'cold_research_request');
           if (coldResearchDirectives.length > 0) {
             const researchModule = require('./research');
-            const { rows: icpRows } = await pool.query(
-              `SELECT content FROM agent_memory
-               WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
-              [client.id]
-            );
-            const icpMemory = icpRows[0]?.content || null;
+            const icpMemory = await loadCanonicalIcp(client.id);
             const enrichPatterns = await loadEmailPatterns(client.id);
 
             for (const directive of coldResearchDirectives) {
@@ -758,12 +764,7 @@ async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
     return { saved: 0, credits: 0, reason: 'daily_credit_cap', spentToday: vpGuard.spentToday };
   }
 
-  const { rows: icpRows } = await pool.query(
-    `SELECT content FROM agent_memory
-     WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
-    [clientId]
-  );
-  const icp = icpRows[0]?.content || null;
+  const icp = await loadCanonicalIcp(clientId);
   if (!icp) return { saved: 0, credits: 0, reason: 'no_icp_memory' };
 
   // Build ICP-precise filters using autocomplete for linkedin_category.
@@ -938,12 +939,7 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
   // Brave path — handles LinkedIn always + email when VP is capped/exhausted
   const researchModule = require('./research');
 
-  const { rows: icpRows } = await pool.query(
-    `SELECT content FROM agent_memory
-     WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
-    [clientId]
-  );
-  const icpMemory = icpRows[0]?.content || null;
+  const icpMemory = await loadCanonicalIcp(clientId);
   if (!icpMemory) {
     logger.warn({ msg: '[db-builder] on-demand: no ICP memory, cannot source' });
     return { saved: 0, reason: 'no_icp_memory' };

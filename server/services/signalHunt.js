@@ -26,6 +26,16 @@ const { searchOpenWeb, searchLinkedInProfiles } = require('./searchService');
 const hunterService = require('./hunter');
 const { callAgent } = require('./claude');
 
+function envInt(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const MAX_SIGNAL_QUERIES_PER_RUN = envInt('SIGNAL_HUNT_MAX_QUERIES', 6);
+const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
+
 // Default signal queries — used when no client-specific config exists.
 // Phrased as Google search queries with SEA/MY bias.
 const DEFAULT_SIGNAL_QUERIES = [
@@ -46,31 +56,157 @@ const DEFAULT_SIGNAL_QUERIES = [
 
 const SIGNAL_HUNT_CONFIG_KEY = 'signal_hunt_config';
 
+function listFrom(value) {
+  if (Array.isArray(value)) return value.map(v => String(v).trim()).filter(Boolean);
+  if (typeof value === 'string') return value.split(/[,;\n]/).map(v => v.trim()).filter(Boolean);
+  return [];
+}
+
+function countryCodeFromText(value) {
+  const s = String(value || '').toLowerCase();
+  if (/\b(united states|usa|u\.s\.|us)\b/.test(s)) return 'US';
+  if (/\b(singapore|sg)\b/.test(s)) return 'SG';
+  if (/\b(malaysia|my|kuala lumpur|klang valley)\b/.test(s)) return 'MY';
+  if (/\b(australia|au)\b/.test(s)) return 'AU';
+  if (/\b(united kingdom|uk|great britain|gb|england)\b/.test(s)) return 'GB';
+  return null;
+}
+
+function countryNameFromCode(code) {
+  const c = String(code || '').toUpperCase();
+  if (c === 'US') return 'United States';
+  if (c === 'SG') return 'Singapore';
+  if (c === 'AU') return 'Australia';
+  if (c === 'GB' || c === 'UK') return 'United Kingdom';
+  return 'Malaysia';
+}
+
+function countriesFromIcp(icp = {}) {
+  const raw = [
+    ...listFrom(icp.geographies),
+    ...listFrom(icp.geo),
+    ...listFrom(icp.countries),
+    ...listFrom(icp.locations),
+    ...listFrom(icp.target_markets),
+  ];
+  const countries = raw
+    .map(v => countryCodeFromText(v))
+    .filter(Boolean)
+    .map(code => ({ code, name: countryNameFromCode(code) }));
+  const seen = new Set();
+  const unique = countries.filter(c => {
+    if (seen.has(c.code)) return false;
+    seen.add(c.code);
+    return true;
+  });
+  return unique.length > 0 ? unique : [{ code: 'MY', name: 'Malaysia' }];
+}
+
+function industriesFromIcp(icp = {}) {
+  const industries = [
+    ...listFrom(icp.industries),
+    ...listFrom(icp.verticals),
+    ...listFrom(icp.segments),
+  ];
+  return (industries.length > 0 ? industries : ['B2B corporate training', 'digital agency'])
+    .slice(0, 3);
+}
+
+function buildSignalQueriesFromIcp(icp = {}) {
+  const countries = countriesFromIcp(icp);
+  const industries = industriesFromIcp(icp);
+  const queries = [];
+  for (const country of countries) {
+    for (const industry of industries) {
+      queries.push({
+        query: `"${industry}" "${country.name}" "hiring" "sales"`,
+        signal_type: 'hiring_sales',
+        tier: 'P1',
+        country: country.code,
+      });
+      queries.push({
+        query: `"${industry}" "${country.name}" ("expanding" OR "launched" OR "growth") founder OR CEO`,
+        signal_type: 'growth_signal',
+        tier: 'P1',
+        country: country.code,
+      });
+    }
+  }
+  return queries;
+}
+
+function normalizeSignalQuery(item, fallbackCountry = 'MY') {
+  const raw = typeof item === 'string' ? { query: item } : (item || {});
+  const query = String(raw.query || raw.search || raw.text || '').trim();
+  if (!query) return null;
+  const country = String(raw.country || countryCodeFromText(query) || fallbackCountry || 'MY').toUpperCase();
+  return {
+    query,
+    signal_type: raw.signal_type || raw.type || 'buying_signal',
+    tier: raw.tier || 'P2',
+    country,
+  };
+}
+
+function queriesFromConfigContent(content) {
+  if (Array.isArray(content?.queries) && content.queries.length > 0) return content.queries;
+  const signalQueries = content?.signal_queries;
+  if (Array.isArray(signalQueries)) return signalQueries;
+  if (signalQueries && typeof signalQueries === 'object') {
+    return Object.entries(signalQueries).flatMap(([signalType, value]) => {
+      const items = Array.isArray(value) ? value : [value];
+      return items.map(item => (
+        typeof item === 'string'
+          ? { query: item, signal_type: signalType }
+          : { ...(item || {}), signal_type: item?.signal_type || signalType }
+      ));
+    });
+  }
+  return [];
+}
+
 /**
  * Load the client's signal hunt config, or return defaults.
  */
-async function loadSignalConfig(clientId) {
+async function loadSignalConfig(clientId, icp = {}) {
+  let content = null;
   try {
     const { rows } = await pool.query(
       `SELECT content FROM agent_memory WHERE client_id = $1 AND key = $2 LIMIT 1`,
       [clientId, SIGNAL_HUNT_CONFIG_KEY]
     );
-    if (rows[0]?.content?.queries?.length > 0) {
-      return rows[0].content;
+    content = rows[0]?.content || null;
+    if (typeof content === 'string') {
+      try { content = JSON.parse(content); } catch { content = null; }
     }
   } catch (err) {
     console.warn('[signalHunt] Failed to load config, using defaults:', err.message);
   }
+
+  const configuredQueries = queriesFromConfigContent(content);
+  const fallbackQueries = configuredQueries.length > 0
+    ? configuredQueries
+    : (Object.keys(icp || {}).length > 0 ? buildSignalQueriesFromIcp(icp) : DEFAULT_SIGNAL_QUERIES);
+  const fallbackCountry = countriesFromIcp(icp)[0]?.code || 'MY';
+  const queries = fallbackQueries
+    .map(q => normalizeSignalQuery(q, fallbackCountry))
+    .filter(Boolean)
+    .slice(0, MAX_SIGNAL_QUERIES_PER_RUN);
+  const requestedResults = Number(content?.max_results_per_query || MAX_SIGNAL_RESULTS_PER_QUERY);
+
   return {
-    queries: DEFAULT_SIGNAL_QUERIES,
-    max_results_per_query: 5,
+    ...(content || {}),
+    queries,
+    max_results_per_query: Number.isFinite(requestedResults) && requestedResults > 0
+      ? Math.min(requestedResults, MAX_SIGNAL_RESULTS_PER_QUERY)
+      : MAX_SIGNAL_RESULTS_PER_QUERY,
   };
 }
 
 /**
  * Extract companies + signal data through the budgeted Research Beaver path.
  */
-async function extractSignalsFromResults(clientId, results, signal_type) {
+async function extractSignalsFromResults(clientId, results, signal_type, geoText = 'the configured target geographies') {
   if (!results || results.length === 0) return [];
 
   const snippetsForBudgetedAgent = results.map((r, i) =>
@@ -85,7 +221,7 @@ Signal type: ${signal_type}
 Search results:
 ${snippetsForBudgetedAgent}
 
-For each result containing a REAL buying signal from a Malaysian company, return JSON array:
+For each result containing a REAL buying signal from a company in ${geoText}, return JSON array:
 [{
   "company": "Exact company name",
   "signal_type": "${signal_type}",
@@ -99,7 +235,7 @@ For each result containing a REAL buying signal from a Malaysian company, return
 }]
 
 Rules:
-- Only include REAL signals from Malaysian (MY) or SEA companies
+- Only include REAL signals from companies in ${geoText}
 - Ignore generic articles, listicles, job boards with no specific company
 - Confidence 0.9 = very clear specific company + event, 0.5 = weak
 - If no real signals found, return []
@@ -123,14 +259,14 @@ Rules:
  * For a company with a signal, find the best decision-maker via LinkedIn.
  * Returns { name, title, linkedin_url } or null.
  */
-async function findDecisionMaker(companyName, icpTitles = []) {
+async function findDecisionMaker(companyName, icpTitles = [], country = 'MY') {
   if (!companyName) return null;
 
   const titleHints = icpTitles.length > 0 ? icpTitles.slice(0, 3).join(' OR ') : 'founder OR CEO OR director';
   const query = `"${companyName}" (${titleHints})`;
 
   try {
-    const profiles = await searchLinkedInProfiles(query, 3);
+    const profiles = await searchLinkedInProfiles(query, 3, { country });
     if (profiles.length === 0) return null;
 
     // Prefer the highest-seniority title
@@ -167,7 +303,7 @@ async function findDecisionMaker(companyName, icpTitles = []) {
 async function runSignalHunt(clientId, { maxLeads = 20, icp = {} } = {}) {
   console.log(`[signalHunt] Starting signal hunt for client ${clientId} (target: ${maxLeads})`);
 
-  const config = await loadSignalConfig(clientId);
+  const config = await loadSignalConfig(clientId, icp);
   const allSignals = [];
   const leads = [];
 
@@ -177,14 +313,19 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {} } = {}) {
 
     console.log(`[signalHunt] Running query: ${q.query}`);
     try {
-      const results = await searchOpenWeb(q.query, config.max_results_per_query || 5);
+      const country = q.country || 'MY';
+      const geoText = countryNameFromCode(country);
+      const results = await searchOpenWeb(q.query, config.max_results_per_query || 5, { country });
       if (results.length === 0) continue;
 
-      const extracted = await extractSignalsFromResults(clientId, results, q.signal_type);
+      const extracted = await extractSignalsFromResults(clientId, results, q.signal_type, geoText);
       const validSignals = extracted.filter(s => s.company && s.confidence >= 0.5);
 
       // Assign tier from the query config
-      validSignals.forEach(s => { s.tier = q.tier || 'P2'; });
+      validSignals.forEach(s => {
+        s.tier = q.tier || 'P2';
+        s.country = country;
+      });
       allSignals.push(...validSignals);
 
       console.log(`[signalHunt] Query "${q.signal_type}" extracted ${validSignals.length} signals`);
@@ -220,9 +361,25 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {} } = {}) {
   for (const signal of uniqueSignals.slice(0, maxLeads * 2)) {
     if (leads.length >= maxLeads) break;
 
-    const person = await findDecisionMaker(signal.company, icpTitles);
+    const country = signal.country || countryCodeFromText(signal.raw_snippet || signal.signal_summary || '') || 'MY';
+    const countryName = countryNameFromCode(country);
+    const person = await findDecisionMaker(signal.company, icpTitles, country);
     if (!person || !person.linkedin_url) {
       console.log(`[signalHunt] No decision-maker found for ${signal.company}`);
+      continue;
+    }
+
+    const { applyIcpV2Filter } = require('./agents');
+    const gate = applyIcpV2Filter({
+      name: person.name,
+      company: signal.company,
+      title: person.title || '',
+      country: countryName,
+      score: signal.tier === 'P1' ? 90 : 70,
+      metadata: { country: countryName },
+    });
+    if (!gate.pass) {
+      console.log(`[signalHunt] ICP gate blocked ${person.name} / ${signal.company}: ${gate.reason}`);
       continue;
     }
 
@@ -267,6 +424,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {} } = {}) {
         signal_type: signal.signal_type,
         signal_source_url: signal.source_url,
         signal_confidence: signal.confidence,
+        country: countryName,
         tier: signal.tier,
         source: 'signal_hunt',
       },

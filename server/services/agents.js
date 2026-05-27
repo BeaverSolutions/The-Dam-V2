@@ -164,7 +164,7 @@ function applyIcpV2Filter(lead) {
     return { pass: false, status: 'rejected_country_denied', reason: `country "${rawCountry}" is explicitly excluded from ICP` };
   }
   if (!ICP_ALLOWED_COUNTRIES.has(rawCountry)) {
-    return { pass: false, status: 'rejected_country', reason: `country "${rawCountry}" is outside SEA-6` };
+    return { pass: false, status: 'rejected_country', reason: `country "${rawCountry}" is outside target ICP geographies` };
   }
 
   // Gate 2: Vertical / company shape exclusions.
@@ -1515,16 +1515,16 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
     }
   }
 
-  // No Claude agent available — return auto-fixed body as approved
+  // No LLM agent available: fail closed and surface for manual review.
   return {
     message_id,
-    approved: true,
-    decision: 'approve',
-    score: 60,
+    approved: false,
+    decision: 'reject',
+    score: 0,
     body: fixedBody,
     fixes_applied: fixesApplied,
-    notes: 'Auto-fix only (Claude agent not configured)',
-    issues: [],
+    notes: 'Enforcer unavailable (agent not configured) - blocked pending manual review',
+    issues: ['enforcer_unavailable'],
     suggestions: [],
   };
 }
@@ -2140,6 +2140,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         },
       });
       if (r.outcome === 'approved') { approvedCount++; messagesDrafted++; }
+      else if (r.outcome === 'manual_review') { messagesDrafted++; }
       else if (r.outcome === 'rejected' || r.outcome === 'brand_safety_rejected') { rejectedCount++; messagesDrafted++; }
       else if (r.outcome === 'blocked_no_email') { messagesDrafted++; }
       continue;
@@ -2522,7 +2523,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
               subject: enfSubject,
               body: enforcerDraft.body,
               status: 'pending_approval',
-              ranger_score: enforcerDraft.score ?? 70,
+              ranger_score: 0,
               ranger_notes: enforcerDraft.gateReason
                 ? `Enforcer fallback FAILED code gates (${enforcerDraft.gateReason}) — needs manual rewrite before sending.`
                 : 'Enforcer-drafted fallback — Sales Beaver hard-rejected. Review before sending.',
@@ -2558,7 +2559,6 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
             }).catch(() => {});
             // (Phase 2 Step 2: drafted trace now emitted internally by pipeline.persistDraft above —
             //  agent='enforcer_beaver' inferred from draft_source='enforcer_fallback')
-            approvedCount++;
             console.log(`[signal-pipeline] Enforcer fallback draft for ${lead.name} → pending_approval`);
           } else {
             // NEVER BURN A LEAD: Enforcer rewrite produced no body. Surface the
@@ -2579,7 +2579,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
               pipeline_path: 'signal_pipeline',
               metadata: { channel },
             }).catch(() => {});
-            if (surfaced) approvedCount++; else rejectedCount++;
+            if (!surfaced) rejectedCount++;
           }
         } catch (fallbackErr) {
           console.warn(`[signal-pipeline] Enforcer fallback failed for ${lead.name}:`, fallbackErr.message);
@@ -2599,7 +2599,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
             pipeline_path: 'signal_pipeline',
             metadata: { channel },
           }).catch(() => {});
-          if (surfaced) approvedCount++; else rejectedCount++;
+          if (!surfaced) rejectedCount++;
         }
       }
     } catch (err) {
@@ -3545,6 +3545,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         execStatus.beavers.enforcer.rejected++;
       } else if (r.outcome === 'blocked_no_email') {
         diagnostics.messages_drafted++;
+      } else if (r.outcome === 'manual_review') {
+        diagnostics.messages_drafted++;
       } else {
         diagnostics.messages_failed++;
       }
@@ -4034,7 +4036,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
                    enforcerDraft.gateReason
                      ? `Enforcer fallback FAILED code gates (${enforcerDraft.gateReason}) — needs manual rewrite.`
                      : 'Enforcer-drafted fallback — Sales Beaver failed after 2 attempts. Review before sending.',
-                   msg.id, clientId, enforcerDraft.score ?? 70]
+                   msg.id, clientId, 0]
                 );
                 await pool.query(
                   `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'enforcer_fallback')`,
@@ -4049,9 +4051,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
                   target_type: 'message', target_id: msg.id,
                   metadata: { channel: msg.channel, lead_name: lead.name, attempts: attemptCount + 1 },
                 }).catch(() => {});
-                approvedCount++;
                 execStatus.beavers.enforcer.status = 'done';
-                rangerResult = { approved: true, score: 70 }; // continue to approval block
+                return;
               } else {
                 // NEVER BURN A LEAD: Enforcer rewrite failed. Surface the Sales
                 // Beaver draft to MJ's approval queue instead of discarding it.
@@ -4059,9 +4060,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
                   messageId: msg.id, body: currentBody, subject: currentSubject,
                   reason: `Sales Beaver failed ${attemptCount + 1} attempts; Enforcer rewrite also failed`,
                 });
-                if (surfaced) {
-                  approvedCount++;
-                } else {
+                if (!surfaced) {
                   await pool.query(
                     `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
                     [`Sales Beaver failed ${attemptCount + 1} attempts; Enforcer draft also failed.`, msg.id]
@@ -4100,7 +4099,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
              enforcerDraft.gateReason
                ? `Enforcer fallback FAILED code gates (${enforcerDraft.gateReason}) — needs manual rewrite.`
                : 'Enforcer-drafted fallback — Sales Beaver failed all attempts. Review before sending.',
-             msg.id, clientId, enforcerDraft.score ?? 70]
+             msg.id, clientId, 0]
           );
           await pool.query(
             `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'enforcer_fallback')`,
@@ -4115,8 +4114,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
             target_type: 'message', target_id: msg.id,
             metadata: { channel: msg.channel, lead_name: lead.name, method: 'enforcer_fallback' },
           }).catch(() => {});
-          approvedCount++;
           execStatus.beavers.enforcer.status = 'done';
+          return;
         } else {
           // NEVER BURN A LEAD: both Sales and Enforcer failed to produce a clean
           // draft. Surface the last draft to MJ's approval queue rather than
@@ -4125,9 +4124,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
             messageId: msg.id, body: currentBody, subject: currentSubject,
             reason: 'Sales Beaver and Enforcer both failed to produce a clean draft',
           });
-          if (surfaced) {
-            approvedCount++;
-          } else {
+          if (!surfaced) {
             await pool.query(
               `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
               ['Sales and Enforcer both failed to draft. Manual message required.', msg.id]

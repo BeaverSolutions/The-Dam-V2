@@ -39,6 +39,9 @@ const dbBuilder = readFile('services/dbBuilder.js');
 const sendQueue = readFile('services/sendQueueWorker.js');
 const pipeline = readFile('services/pipeline.js');
 const pipelineTrace = readFile('services/pipelineTrace.js');
+const signalHunt = readFile('services/signalHunt.js');
+const replyHandler = readFile('services/replyHandler.js');
+const index = readFile('index.js');
 const allSources = [agents, dbBuilder, sendQueue, pipeline];
 
 // 1. Enforcer gate: both pipeline paths must call runRanger / callAgent with enforcer
@@ -89,6 +92,30 @@ check('VP sources email channel only', vpEmailOnly,
 const enforcerModel = readFile('config/agents.js').match(/ranger:\s*\{[\s\S]*model:\s*MODELS\.SONNET/);
 check('Enforcer uses Sonnet model', !!enforcerModel,
   enforcerModel ? 'Sonnet reference found' : 'Enforcer may be using wrong model');
+
+// 9. Daily kickoff is explicitly opt-in while sourcing/output paths are being repaired.
+const dailyKickoffBrake = index.includes("CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'");
+check('Daily kickoff opt-in brake', dailyKickoffBrake,
+  dailyKickoffBrake ? 'CAPTAIN_DAILY_KICKOFF_ENABLED guard found' : 'daily kickoff can run without explicit flag');
+
+// 10. send_queue enqueue must report conflict truth, not claim duplicate rows enqueued.
+const enqueueConflictTruth = sendQueue.includes('RETURNING id')
+  && sendQueue.includes("reason: 'already_enqueued'");
+check('send_queue enqueue conflict truth', enqueueConflictTruth,
+  enqueueConflictTruth ? 'RETURNING id + already_enqueued found' : 'enqueue may report true on conflict no-op');
+
+// 11. Signal Hunt must read both historical config shapes and pass country into search.
+const signalConfigShape = signalHunt.includes('content?.signal_queries')
+  && signalHunt.includes('Object.entries(signalQueries)')
+  && signalHunt.includes('searchOpenWeb(q.query, config.max_results_per_query || 5, { country })');
+check('Signal Hunt config + country-aware search', signalConfigShape,
+  signalConfigShape ? 'signal_queries object/array + country search found' : 'signal hunt may ignore DB config or country');
+
+// 12. Positive replies must not become booked meetings without a calendar/meeting side effect.
+const replyNoFalseMeeting = replyHandler.includes("positive: 'qualifying'")
+  && !replyHandler.includes("positive: 'meeting_booked'");
+check('Positive reply does not mark meeting_booked', replyNoFalseMeeting,
+  replyNoFalseMeeting ? 'positive reply maps to qualifying' : 'positive reply may count as booked meeting');
 
 // ── Summary ──
 const failures = results.filter(r => !r.pass);

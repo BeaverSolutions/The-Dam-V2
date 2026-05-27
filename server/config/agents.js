@@ -236,24 +236,25 @@ ANGLE SELECTION HIERARCHY:
 4. Attribution problems
 Always pick the highest available angle on this list.
 
-SEA FOCUS (Phase 1 — locked 2026-05-14):
-Geography: **Malaysia (MY) and Singapore (SG) ONLY.** Indonesia / Philippines / Thailand / Vietnam will activate in Phase 2 after MY+SG funnel hits steady state. Default MY priority (Klang Valley + Penang), SG as adjacent market.
-Apollo data is unreliable for SEA — rely on Brave search and Hunter for enrichment.
+TARGET GEOGRAPHY:
+Geography: use the tenant ICP geography. Beaver Solutions currently targets **Malaysia (MY), Singapore (SG), and United States (US)**. Do not reject US leads because older prompts said MY/SG only.
+Current tenant override: prioritize B2B corporate/professional training, L&D, sales training/coaching, B2B agencies, consultancies, MSPs, and software/IT service firms. Do not prioritize lead-generation or appointment-setting vendors when their own offer overlaps with AI sales, outbound automation, SDR, GTM, lead-gen, cold-email, or appointment-setting services; those are competitor-offer leads and must be parked, not drafted.
+Apollo data is not trusted as a verified-email source. Use guarded search and enrichment paths.
 
 PRIORITY SEGMENTS (Beaver Solutions ICP — rank top to bottom):
-Search queries must combine **decision-maker title × segment × geo (MY/SG) × active-outbound signal**. Generic "marketing manager malaysia" queries produce pool pollution and are banned. Use this segment hierarchy:
+Search queries must combine **decision-maker title × segment × target geography × active-outbound signal**. Generic "marketing manager malaysia" queries produce pool pollution and are banned. Use this segment hierarchy:
 
-1. **Lead-generation / appointment-setting agencies** — entire offering IS outbound. They buy because outbound is their product. HIGHEST meta-fit. Query examples: \`"lead generation agency" "founder" "malaysia"\`, \`site:linkedin.com/in "appointment setting" "head of sales" "kuala lumpur"\`.
+1. **B2B corporate / professional training companies** — founder-led providers selling training, L&D, sales enablement, leadership, and workforce upskilling into companies. Query examples: \`"corporate training" "founder" "malaysia" "hiring sales"\`, \`"sales training" "CEO" "United States" "expanding"\`.
 
-2. **BPO / call centers** — sales teams cold-call B2B daily. BeavrDam fits their workflow shape. Query: \`"BPO" "head of sales" "malaysia"\`, \`"call center" "VP business development" "singapore"\`.
+2. **B2B agencies and consultancies** — digital, growth, content, CRM, transformation, RevOps, and professional-services firms where outbound is still founder/sales-led. Query: \`"B2B agency" "founder" "singapore" "hiring sales"\`.
 
 3. **Recruitment / executive search firms** — cold-call B2B clients + candidates. Two outbound funnels. Query: \`"recruitment agency" "founder" "kuala lumpur"\`, \`"executive search" "managing director" "singapore"\`.
 
-4. **MSPs (Managed IT Service Providers)** — sell to SMB founders by outbound. Query: \`"managed services" "founder" "malaysia"\`, \`"MSP" "head of sales" "singapore"\`.
+4. **MSPs and custom software / IT service firms** — sell to SMB or mid-market buyers by outbound. Query: \`"managed services" "founder" "malaysia" "sales team"\`, \`"software development" "CEO" "United States" "growth"\`.
 
-5. **Custom software development shops** — compete on outbound to find projects. Many in SEA. Query: \`"software development" "founder" "5-50" "malaysia"\`, \`"web development agency" "CEO" "singapore"\`.
+5. **BPO / call centers** — sales teams cold-call B2B daily. BeavrDam fits their workflow shape. Query: \`"BPO" "head of sales" "malaysia"\`, \`"call center" "VP business development" "singapore"\`.
 
-6. **B2B agencies (digital, content, comms)** — already-existing focus, kept for breadth. Query: \`"B2B agency" "founder" "malaysia"\`. Avoid generic "digital marketing agency" — too broad and MNC-leaning.
+6. **Other B2B service firms** — sales-led companies with public decision-makers, clear outbound need, and no competitor-offer overlap.
 
 Each search MUST include one ACTIVE-OUTBOUND signal hook (pick the strongest available for each query):
 Signal hook bank — use these in queries:
@@ -266,7 +267,7 @@ Signal hook bank — use these in queries:
   COMPETITOR:  Run a second Brave query for their top 1-2 direct competitors: "{competitor} funding" OR "{competitor} launch" — if competitor just raised or launched, the prospect is in an urgency window.
 Without any signal hook, the query is too broad and will produce P3 leads — never run a bare company + title query.
 
-EXCLUDED segments (do NOT source): MNCs (Shopee, Maxis, AirAsia, Dentsu, IPG, GroupM, Leo Burnett, Unilever, P&G, Astro — full list in services/agents.js ICP_ENTERPRISE_BRANDS regex), enterprise consultancies (Deloitte, McKinsey, PwC, KPMG, EY, Accenture, BCG, Bain), government, NGOs, universities, freelancers / solopreneurs, industry bodies / chambers.
+EXCLUDED segments (do NOT source): MNCs (Shopee, Maxis, AirAsia, Dentsu, IPG, GroupM, Leo Burnett, Unilever, P&G, Astro — full list in services/agents.js ICP_ENTERPRISE_BRANDS regex), enterprise consultancies (Deloitte, McKinsey, PwC, KPMG, EY, Accenture, BCG, Bain), government, NGOs, universities, freelancers / solopreneurs, industry bodies / chambers, and competitor-offer companies selling AI sales / GTM / outbound automation / SDR / lead generation / appointment-setting as their own service.
 
 SIGNAL SCAN (required per lead — covers all 7 signal types):
 Before finalising every lead, run a quick scan across all seven signal types and record the strongest one found:
@@ -304,7 +305,7 @@ RULES:
   * Creative Director / Art Director / Copywriter (creative roles).
   * CMO / Head of Marketing / Marketing Director / VP Marketing.
 - Data-integrity reject: lead name == company name, "Unknown" in name, missing LinkedIn URL.
-- Geography MY + SG only (Phase 1). Skip leads in TH/ID/PH/VN until Phase 2 unlocks them.
+- Geography must match the tenant ICP. Beaver Solutions currently allows MY, SG, and US.
 - Return exactly the number of leads requested, or fewer if real verified leads are not available.
 - P3 leads are never returned.
 

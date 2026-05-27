@@ -330,6 +330,13 @@ async function enrichProspectProfile(clientId, prospect_id) {
   const credits = result.payload?.credit_usage_breakdown
     ?.filter(c => c.operation_type === 'Profiles')
     ?.reduce((sum, c) => sum + (c.total_credits || 0), 0) ?? 0;
+  if (credits > 0) {
+    await spendGuard.logProviderUsage('vp', {
+      clientId,
+      units: credits,
+      metadata: { operation: 'enrichProspectProfile', prospect_id },
+    });
+  }
   return {
     ok: true,
     linkedin_url: data?.linkedin_url || data?.linkedin || null,
@@ -355,6 +362,13 @@ async function enrichBusinessFirmographics(clientId, business_id) {
   const credits = result.payload?.credit_usage_breakdown
     ?.filter(c => c.operation_type === 'Firmographics')
     ?.reduce((sum, c) => sum + (c.total_credits || 0), 0) ?? 0;
+  if (credits > 0) {
+    await spendGuard.logProviderUsage('vp', {
+      clientId,
+      units: credits,
+      metadata: { operation: 'enrichBusinessFirmographics', business_id },
+    });
+  }
   return {
     ok: true,
     company_size: data?.number_of_employees_range || data?.number_of_employees || null,

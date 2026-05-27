@@ -310,10 +310,11 @@ async function callDuckDuckGo(searchQuery) {
 
 // ── Fallback chain ───────────────────────────────────────────────────────────
 
-async function withFallback(label, searchQuery, num, parseItems) {
+async function withFallback(label, searchQuery, num, parseItems, options = {}) {
+  const country = options.country || 'MY';
   // 1. Brave (primary)
   try {
-    const items = await callBrave(searchQuery, num);
+    const items = await callBrave(searchQuery, num, country);
     if (items.length > 0) return parseItems(items);
   } catch (err) {
     await logProviderError('brave', err, { mode: label, query_preview: String(searchQuery).slice(0, 160) });
@@ -322,7 +323,7 @@ async function withFallback(label, searchQuery, num, parseItems) {
 
   // 2. Google CSE
   try {
-    const items = await callGoogleCSE(searchQuery, num);
+    const items = await callGoogleCSE(searchQuery, num, country);
     console.log('[search] Using fallback: Google CSE');
     return parseItems(items);
   } catch (err) {
@@ -462,27 +463,27 @@ async function parallelSearch(braveQueries, cseQueries, options = {}) {
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-async function searchLinkedInProfiles(query, limit = 5) {
+async function searchLinkedInProfiles(query, limit = 5, options = {}) {
   if (!axios) return [];
-  console.log('[search] Profile search:', query, '| Limit:', limit);
+  console.log('[search] Profile search:', query, '| Limit:', limit, '| Country:', options.country || 'MY');
   const searchQuery = `site:linkedin.com/in ${query}`;
-  const results = await withFallback('profiles', searchQuery, limit * 2, items => parseProfileItems(items, 'brave'));
+  const results = await withFallback('profiles', searchQuery, limit * 2, items => parseProfileItems(items, 'brave'), options);
   return results.slice(0, limit);
 }
 
-async function searchLinkedInCompanies(query, limit = 5) {
+async function searchLinkedInCompanies(query, limit = 5, options = {}) {
   if (!axios) return [];
-  console.log('[search] Company search:', query, '| Limit:', limit);
+  console.log('[search] Company search:', query, '| Limit:', limit, '| Country:', options.country || 'MY');
   const searchQuery = `site:linkedin.com/company ${query}`;
-  const results = await withFallback('companies', searchQuery, limit * 2, parseCompanyItems);
+  const results = await withFallback('companies', searchQuery, limit * 2, parseCompanyItems, options);
   return results.slice(0, limit);
 }
 
-async function searchBySignal(query, limit = 5) {
+async function searchBySignal(query, limit = 5, options = {}) {
   if (!axios) return [];
-  console.log('[search] Signal search:', query, '| Limit:', limit);
+  console.log('[search] Signal search:', query, '| Limit:', limit, '| Country:', options.country || 'MY');
   const searchQuery = `site:linkedin.com/in ${query}`;
-  const results = await withFallback('signal', searchQuery, limit * 2, items => parseProfileItems(items, 'brave_signal'));
+  const results = await withFallback('signal', searchQuery, limit * 2, items => parseProfileItems(items, 'brave_signal'), options);
   return results.slice(0, limit);
 }
 
@@ -495,9 +496,10 @@ async function searchBySignal(query, limit = 5) {
  *
  * Fallback chain: Brave → Google CSE.
  */
-async function searchOpenWeb(query, limit = 5) {
+async function searchOpenWeb(query, limit = 5, options = {}) {
   if (!axios) return [];
-  console.log('[search] Open web search:', query, '| Limit:', limit);
+  const country = options.country || 'MY';
+  console.log('[search] Open web search:', query, '| Limit:', limit, '| Country:', country);
 
   // Brave Search (primary) — fast, no site: restrictions, gentle rate limits
   try {
@@ -511,7 +513,7 @@ async function searchOpenWeb(query, limit = 5) {
       params: {
         q: query,
         count: Math.min(limit, 20),
-        country: 'MY',
+        country: String(country).toUpperCase(),
         search_lang: 'en',
         safesearch: 'moderate',
       },
@@ -525,7 +527,7 @@ async function searchOpenWeb(query, limit = 5) {
     await spendGuard.logProviderUsage('brave', {
       clientId,
       units: 1,
-      metadata: { query_preview: String(query).slice(0, 160), country: 'MY', count: Math.min(limit, 20), mode: 'open_web' },
+      metadata: { query_preview: String(query).slice(0, 160), country: String(country).toUpperCase(), count: Math.min(limit, 20), mode: 'open_web' },
     });
 
     const results = resp.data?.web?.results || [];
@@ -555,13 +557,13 @@ async function searchOpenWeb(query, limit = 5) {
     if (!guard.allowed) throw providerBlockedError('google_cse', guard);
 
     const resp = await axios.get(GOOGLE_CSE_URL, {
-      params: { key: apiKey, cx, q: query, num: Math.min(limit, 10), gl: 'MY', hl: 'en' },
+      params: { key: apiKey, cx, q: query, num: Math.min(limit, 10), gl: String(country).toLowerCase(), hl: 'en' },
       timeout: 10000,
     });
     await spendGuard.logProviderUsage('google_cse', {
       clientId,
       units: 1,
-      metadata: { query_preview: String(query).slice(0, 160), country: 'MY', count: Math.min(limit, 10), mode: 'open_web' },
+      metadata: { query_preview: String(query).slice(0, 160), country: String(country).toUpperCase(), count: Math.min(limit, 10), mode: 'open_web' },
     });
 
     return (resp.data?.items || []).map(r => ({
