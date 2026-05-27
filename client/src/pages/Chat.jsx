@@ -6,9 +6,17 @@ import BeaverStatusBoard from '../components/BeaverStatusBoard';
 import { useApi } from '../hooks/useApi';
 
 function PlanSteps({ steps }) {
+  const rows = Array.isArray(steps)
+    ? steps.map((s, i) => ({
+        step: s?.step ?? i,
+        agent: s?.agent || 'director',
+        action: s?.action || 'Queued',
+      }))
+    : [];
+  if (rows.length === 0) return null;
   return (
     <div style={{ marginTop: '0.75rem', background: 'var(--bg)', borderRadius: 'var(--radius)', padding: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-      {steps.map(s => (
+      {rows.map(s => (
         <div key={s.step} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <BeaverAvatar agent={s.agent} size="xs" />
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -25,10 +33,19 @@ function PlanSteps({ steps }) {
 }
 
 function ExecutionResults({ results }) {
+  const rows = Array.isArray(results)
+    ? results.map((r, i) => ({
+        step: r?.step ?? i,
+        agent: r?.agent || 'director',
+        status: String(r?.status || 'pending'),
+        result: r?.result,
+      }))
+    : [];
+  if (rows.length === 0) return null;
   const statusColors = { completed: 'var(--lime)', in_progress: 'var(--blue)', pending: 'var(--text-muted)', failed: 'var(--orange)' };
   return (
     <div style={{ marginTop: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-      {results.map(r => (
+      {rows.map(r => (
         <div key={r.step} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.75rem' }}>
           <div style={{ width: 6, height: 6, borderRadius: '50%', background: statusColors[r.status] || 'var(--text-muted)', flexShrink: 0 }} />
           <BeaverAvatar agent={r.agent} size="xs" />
@@ -226,6 +243,9 @@ const WELCOME_MSG = {
 // Plans that were pending approval are marked expired so stale buttons don't appear.
 function serializeMessages(msgs) {
   return msgs.map(m => {
+    const safeMessage = sanitizeMessage(m);
+    if (!safeMessage) return null;
+    m = safeMessage;
     if (!m.plan) return m;
     const { onApprove, onReject, ...planData } = m.plan;
     return {
@@ -235,7 +255,28 @@ function serializeMessages(msgs) {
         resolved: planData.resolved === null ? 'expired' : planData.resolved,
       },
     };
-  });
+  }).filter(Boolean);
+}
+
+function sanitizeMessage(m) {
+  if (!m || typeof m !== 'object') return null;
+  const next = { ...m };
+  if (typeof next.content !== 'string') next.content = '';
+  if (next.results && !Array.isArray(next.results)) delete next.results;
+  if (next.leads && !Array.isArray(next.leads)) delete next.leads;
+  if (next.summary && typeof next.summary !== 'object') delete next.summary;
+  if (next.diagnostics && typeof next.diagnostics !== 'object') delete next.diagnostics;
+  if (next.plan) {
+    if (typeof next.plan !== 'object') {
+      delete next.plan;
+    } else {
+      next.plan = {
+        ...next.plan,
+        steps: Array.isArray(next.plan.steps) ? next.plan.steps : [],
+      };
+    }
+  }
+  return next;
 }
 
 function loadMessages() {
@@ -245,11 +286,15 @@ function loadMessages() {
       const parsed = JSON.parse(stored);
       if (Array.isArray(parsed) && parsed.length > 0) {
         // Any plan that was still pending when the page unloaded is now expired
-        return parsed.map(m =>
-          m.plan && !m.plan.resolved
-            ? { ...m, plan: { ...m.plan, resolved: 'expired' } }
-            : m
-        );
+        const messages = parsed
+          .map(sanitizeMessage)
+          .filter(Boolean)
+          .map(m =>
+            m.plan && !m.plan.resolved
+              ? { ...m, plan: { ...m.plan, resolved: 'expired' } }
+              : m
+          );
+        return messages.length > 0 ? messages : [WELCOME_MSG];
       }
     }
   } catch {}
