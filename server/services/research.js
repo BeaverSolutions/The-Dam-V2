@@ -4,6 +4,15 @@ const pool = require('../db/pool');
 const searchService = require('./searchService');
 const hunterService = require('./hunter');
 
+function envInt(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const MAX_PAID_SEARCH_QUERIES_PER_RUN = envInt('RESEARCH_MAX_PAID_QUERIES_PER_RUN', 6);
+
 /* ─── Rotation pools ─────────────────────────────────────── */
 
 const DEFAULT_TITLES = [
@@ -960,7 +969,7 @@ async function strategySignalBased(queryItem, limit) {
  * Runs all strategies, merges results, deduplicates by linkedin_url.
  * Returns { leads: [], queriesUsed: [], source: 'multi' }
  */
-async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchIndex = 0, commandOverride = '' } = {}) {
+async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchIndex = 0, commandOverride = '', maxPaidQueries = MAX_PAID_SEARCH_QUERIES_PER_RUN } = {}) {
   const emptyResult = { leads: [], queriesUsed: [], source: 'multi' };
 
   try {
@@ -981,6 +990,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     console.log(`[research] ICP industries: ${icpMemory?.industries || 'NONE (using defaults)'}`);
     console.log(`[research] ICP geographies: ${icpMemory?.geographies || icpMemory?.geography || 'NONE (using defaults)'}`);
     console.log(`[research] Target count: ${targetCount}, Batch index: ${batchIndex}`);
+    const paidQueryCap = Math.max(1, Math.min(MAX_PAID_SEARCH_QUERIES_PER_RUN, Number(maxPaidQueries) || MAX_PAID_SEARCH_QUERIES_PER_RUN));
 
     // 1. Load used queries
     const usedSet = await loadUsedQueries(clientId);
@@ -1027,7 +1037,10 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     const safePick = Math.min(pickCount, combined.length);
     const offset = safePick > 0 ? (batchIndex * safePick) % safeLength : 0;
     const rotated = [...combined.slice(offset), ...combined.slice(0, offset)];
-    const picked  = rotated.slice(0, safePick);
+    const picked  = rotated.slice(0, Math.min(safePick, paidQueryCap));
+    if (safePick > picked.length) {
+      console.log(`[research] Capping paid query fanout from ${safePick} to ${picked.length} for this run`);
+    }
 
     // 4. Split by strategy
     const directQueries      = picked.filter(q => q.strategy === 'direct');
@@ -1218,7 +1231,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       }
 
       // Pick next batch of unused queries
-      const actualPicked = freshUnused.slice(0, Math.min(pickCount, freshUnused.length));
+      const actualPicked = freshUnused.slice(0, Math.min(pickCount, freshUnused.length, paidQueryCap));
 
       const retryDirectQueries = actualPicked.filter(q => q.strategy === 'direct');
       const retrySignalQueries = actualPicked.filter(q =>

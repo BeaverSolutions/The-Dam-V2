@@ -269,6 +269,9 @@ function selectChannel(lead, options = {}) {
   if (hasVerifiedEmail) {
     return { channel: 'email', status: 'pending_ranger', reason: `Verified email (${lead.email_source || 'known'})` };
   }
+  if (lead.linkedin_url && linkedinAlreadyTried) {
+    return { channel: 'linkedin', status: 'channel_exhausted', reason: 'LinkedIn already tried and no verified email found' };
+  }
   if (isLinkedinOnlyLead && !linkedinAlreadyTried) {
     return { channel: 'linkedin', status: 'pending_ranger', reason: 'Tier B linkedin-only lead' };
   }
@@ -546,6 +549,7 @@ async function researchSearch(clientId, { query, command = null, filters = {} })
       icpMemory,
       targetCount: filters.limit || 5,
       batchIndex,
+      maxPaidQueries: filters.maxPaidQueries,
       commandOverride: query, // user's actual command — takes priority over ICP for query building
     });
 
@@ -1748,6 +1752,36 @@ function screenCommand(command) {
   return null;
 }
 
+async function getSearchProviderCapacity(clientId) {
+  const { CAPS, providerUsageToday } = require('./spendGuard');
+  const providers = [
+    {
+      provider: 'brave',
+      configured: !!process.env.BRAVE_API_KEY,
+      cap: CAPS.brave,
+      spent: await providerUsageToday('brave', clientId).catch(() => CAPS.brave),
+    },
+    {
+      provider: 'google_cse',
+      configured: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX),
+      cap: CAPS.google_cse,
+      spent: await providerUsageToday('google_cse', clientId).catch(() => CAPS.google_cse),
+    },
+  ];
+
+  const withRemaining = providers.map(p => ({
+    ...p,
+    remaining: Math.max(0, (Number(p.cap) || 0) - (Number(p.spent) || 0)),
+    usable: p.configured && (Number(p.cap) || 0) > (Number(p.spent) || 0),
+  }));
+
+  return {
+    hasCapacity: withRemaining.some(p => p.usable),
+    providers: withRemaining,
+    remainingPaidQueries: withRemaining.reduce((sum, p) => sum + (p.usable ? p.remaining : 0), 0),
+  };
+}
+
 async function directorPlan(clientId, { command, source }) {
   // Pre-screen before calling AI or building a plan
   const rejection = screenCommand(command);
@@ -1789,7 +1823,11 @@ async function directorPlan(clientId, { command, source }) {
     const { rows: [{ count }] } = await pool.query(
       `SELECT COUNT(*)::int AS count FROM leads l
        WHERE l.client_id = $1 AND l.deleted_at IS NULL AND l.status = 'new'
-         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.lead_id = l.id AND m.client_id = $1)`,
+         AND NOT EXISTS (
+           SELECT 1 FROM messages m
+            WHERE m.lead_id = l.id AND m.client_id = $1
+              AND m.status <> 'deleted'
+         )`,
       [clientId]
     );
     uncontactedCount = count;
@@ -2121,6 +2159,8 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
   let approvedCount = 0;
   let rejectedCount = 0;
   let messagesDrafted = 0;
+  let skippedCount = 0;
+  let channelExhaustedCount = 0;
 
   for (const lead of leads) {
     // ── Phase 2 Step 7 (Jules F-03): unified path behind PIPELINE_V2_ENABLED.
@@ -2235,6 +2275,24 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       const channelChoice_sp = selectChannel(lead, { linkedinAlreadyTried: linkedinAlreadyTried_sp });
       const channel = channelChoice_sp.channel;
       let kickoffMessageStatus = channelChoice_sp.status;
+      if (kickoffMessageStatus === 'channel_exhausted') {
+        skippedCount++;
+        channelExhaustedCount++;
+        console.log(`[signal-pipeline] ${lead.name} — channel exhausted, skipping draft: ${channelChoice_sp.reason}`);
+        await logsService.createLog(clientId, {
+          agent: 'director', action: 'lead_channel_exhausted',
+          target_type: 'lead', target_id: lead.id,
+          metadata: { reason: channelChoice_sp.reason, path: 'signal_pipeline', lead_name: lead.name, channel },
+        }).catch(() => {});
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id, kickoff_id: plan_id,
+          stage: 'channel_exhausted', status: 'linkedin_already_tried',
+          agent: 'director', pipeline_path: 'signal_pipeline',
+          reason: channelChoice_sp.reason,
+          metadata: { lead_name: lead.name, channel },
+        }).catch(() => {});
+        continue;
+      }
       if (channelChoice_sp.status === 'blocked_no_email') {
         // 2026-05-23 SHORT-CIRCUIT (lead-completeness contract):
         // Incomplete leads — no verified email AND no usable LinkedIn — must
@@ -2257,6 +2315,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           reason: channelChoice_sp.reason,
           metadata: { lead_name: lead.name },
         }).catch(() => {});
+        skippedCount++;
         continue;
       }
 
@@ -2266,6 +2325,8 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           [clientId, lead.id]
         );
         if (prevLinkedinRes.rows.length > 0) {
+          skippedCount++;
+          channelExhaustedCount++;
           console.log(`[signal-pipeline] ${lead.name} — LinkedIn already tried, Hunter found nothing — skipping`);
           pipelineTrace.traceStage(clientId, {
             lead_id: lead.id, kickoff_id: plan_id,
@@ -2620,7 +2681,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
   await logsService.createLog(clientId, {
     agent: 'director',
     action: 'signal_pipeline_completed',
-    metadata: { plan_id, leads: leads.length, drafted: messagesDrafted, approved: approvedCount, rejected: rejectedCount, original_lead_count: originalLeadCount, skipped_same_day: skippedSameDay },
+    metadata: { plan_id, leads: leads.length, drafted: messagesDrafted, approved: approvedCount, rejected: rejectedCount, skipped: skippedCount, channel_exhausted: channelExhaustedCount, original_lead_count: originalLeadCount, skipped_same_day: skippedSameDay },
   });
 
   // ── Phase 1 (2026-05-08): emit pipeline_traces summary so funnel survival rate
@@ -2639,7 +2700,9 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       rejected: rejectedCount,
       icp_audit_rejected: icpAuditRejected,
       skipped_same_day: skippedSameDay,
-      silent_drop_count: leads.length - messagesDrafted - rejectedCount,
+      skipped_count: skippedCount,
+      channel_exhausted_count: channelExhaustedCount,
+      silent_drop_count: Math.max(0, leads.length - messagesDrafted - rejectedCount - skippedCount),
     },
   }).catch(() => {});
 
@@ -2678,7 +2741,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
     plan_id,
     status: 'completed',
     leads: leads.length,
-    summary: { leads_found: leads.length, messages_drafted: messagesDrafted, approved: approvedCount, rejected: rejectedCount },
+    summary: { leads_found: leads.length, messages_drafted: messagesDrafted, approved: approvedCount, rejected: rejectedCount, skipped: skippedCount, channel_exhausted: channelExhaustedCount },
     source: 'signal_hunt',
   };
 }
@@ -2688,7 +2751,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
  * DIRECTOR — EXECUTE (full pipeline)
  * =========================
  */
-async function directorExecute(clientId, { plan_id, command, batchIndex = 0, limit, use_existing_leads = null }) {
+async function directorExecute(clientId, { plan_id, command, batchIndex = 0, limit, use_existing_leads = null, completionAttempt = 0, maxCompletionAttempts = 2, requestedTarget = null, deliveredSoFar = 0, draftedSoFar = 0, rejectedSoFar = 0, leadsFoundSoFar = 0 }) {
   await logsService.createLog(clientId, {
     agent: 'director',
     action: 'plan_executing',
@@ -2941,13 +3004,19 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
   // ── Step 0: DB-first — process uncontacted leads already in pipeline ──
   // Check for existing leads that haven't had messages drafted yet.
-  // Hand DB leads to Sales Beaver WHILE simultaneously doing external research
-  // for the remaining gap. Both run in parallel.
+  // Process fresh DB leads first, then source only the approval-ready output
+  // shortfall. This keeps "find 5" tied to delivered approvals, not attempts.
   const cmdCountMatch = command && command.match(/\b(\d+)\b/);
   const targetLimit = limit || (cmdCountMatch ? parseInt(cmdCountMatch[1], 10) : 50);
+  const campaignRequested = Number(requestedTarget) || targetLimit;
 
-  let dbLeadsPromise = null;
   let dbLeadsCount = 0;
+  let dbPipelineResult = null;
+  let dbApprovedCount = 0;
+  let dbDraftedCount = 0;
+  let dbRejectedCount = 0;
+  let dbSkippedCount = 0;
+  let remainingTarget = targetLimit;
 
   try {
     // 2026-05-14: NOT EXISTS narrowed to ACTIVE-state messages only.
@@ -2966,8 +3035,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           AND NOT EXISTS (
             SELECT 1 FROM messages m
             WHERE m.lead_id = l.id AND m.client_id = $1
-              AND m.status IN ('sent', 'approved', 'linkedin_requested',
-                               'pending_send', 'pending_approval', 'pending_ranger')
+              AND m.status <> 'deleted'
           )
           AND NOT EXISTS (
             SELECT 1 FROM pipeline_traces pt
@@ -3000,35 +3068,98 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         progress: { total: dbLeadsCount, complete: 0 },
       });
 
-      // Start Sales pipeline for DB leads in background (non-blocking)
-      dbLeadsPromise = processExistingLeadsPipeline(clientId, plan_id, uncontactedLeads)
+      // Completion-driven: process DB leads first, then source only the actual
+      // output shortfall. Enrolled/drafted leads do not satisfy MJ's requested count.
+      dbPipelineResult = await processExistingLeadsPipeline(clientId, plan_id, uncontactedLeads)
         .catch(err => {
           console.error('[director] DB-first pipeline failed:', err.message);
           return null;
         });
 
-      // If DB leads fully satisfy target, await result and check actual success count
-      if (dbLeadsCount >= targetLimit) {
-        const dbResult = await dbLeadsPromise;
-        // Count actual successes — don't skip research if most leads failed
-        const actualDrafted = dbResult?.summary?.messages_drafted || 0;
-        if (actualDrafted >= targetLimit) {
-          console.log(`[director] DB-first: ${actualDrafted} drafts produced from ${dbLeadsCount} leads — target met, skipping external research`);
-          return dbResult;
+      dbApprovedCount = Number(dbPipelineResult?.summary?.approved) || 0;
+      dbDraftedCount = Number(dbPipelineResult?.summary?.messages_drafted) || 0;
+      dbRejectedCount = Number(dbPipelineResult?.summary?.rejected) || 0;
+      dbSkippedCount = Number(dbPipelineResult?.summary?.skipped) || 0;
+      remainingTarget = Math.max(0, targetLimit - dbApprovedCount);
+
+      if (remainingTarget === 0) {
+        console.log(`[director] DB-first: ${dbApprovedCount}/${targetLimit} approval-ready outputs produced — target met, skipping external research`);
+        if (dbPipelineResult?.summary) {
+          dbPipelineResult.summary.requested = campaignRequested;
+          dbPipelineResult.summary.delivered = deliveredSoFar + dbApprovedCount;
+          dbPipelineResult.summary.shortfall = 0;
+          dbPipelineResult.summary.target_fulfilled = true;
         }
-        // Some failed — continue to external research to fill the gap
-        const gap = targetLimit - actualDrafted;
-        console.log(`[director] DB-first: only ${actualDrafted} drafts from ${dbLeadsCount} leads — ${gap} more needed from external research`);
-        // Don't return — fall through to external research below
-      } else {
-        // Otherwise: DB pipeline runs in background while we continue to external research below
-        console.log(`[director] DB-first: ${dbLeadsCount} leads processing in parallel, ${targetLimit - dbLeadsCount} more needed from research`);
+        await logsService.createLog(clientId, {
+          agent: 'director',
+          action: 'campaign_target_fulfilled',
+          metadata: { plan_id, requested: campaignRequested, delivered: deliveredSoFar + dbApprovedCount, source: 'database_first' },
+        }).catch(() => {});
+        return dbPipelineResult;
       }
+
+      console.log(`[director] DB-first: ${dbApprovedCount}/${targetLimit} approval-ready outputs — ${remainingTarget} more needed from research`);
     } else {
       console.log('[director] DB-first: no uncontacted leads in pipeline — proceeding to external research');
     }
   } catch (err) {
     console.warn('[director] DB-first check failed, proceeding to external research:', err.message);
+  }
+
+  const searchCapacity = await getSearchProviderCapacity(clientId);
+  diagnostics.search_capacity = searchCapacity;
+  if (!searchCapacity.hasCapacity) {
+    const delivered = deliveredSoFar + dbApprovedCount;
+    const drafted = draftedSoFar + dbDraftedCount;
+    const rejected = rejectedSoFar + dbRejectedCount;
+    const leadsFound = leadsFoundSoFar + dbLeadsCount;
+    const shortfall = Math.max(0, campaignRequested - delivered);
+    const blocker = 'paid_search_capacity_exhausted';
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'campaign_target_unfulfilled',
+      metadata: {
+        plan_id,
+        requested: campaignRequested,
+        delivered,
+        shortfall,
+        blocker,
+        providers: searchCapacity.providers,
+      },
+    }).catch(() => {});
+    await updateExecStatus(clientId, plan_id, {
+      status: shortfall > 0 ? 'blocked' : 'completed',
+      phase: 'captain',
+      beavers: {
+        research: { status: 'blocked', task: 'No paid search capacity available', found: 0, passed: 0 },
+        sales:    { status: 'done', task: `${drafted} messages drafted`, drafted, approved: delivered },
+        enforcer: { status: 'done', task: `${delivered} approved, ${rejected} rejected`, reviewed: drafted, rejected },
+        captain:  { status: shortfall > 0 ? 'blocked' : 'done', task: `${delivered}/${campaignRequested} requested outputs delivered`, approved: delivered },
+      },
+      progress: { total: campaignRequested, complete: Math.min(campaignRequested, delivered) },
+      started_at: new Date().toISOString(),
+    });
+    return {
+      plan_id,
+      status: shortfall > 0 ? 'blocked' : 'completed',
+      leads_found: leadsFound,
+      messages_drafted: drafted,
+      messages_failed: 0,
+      summary: {
+        requested: campaignRequested,
+        delivered,
+        shortfall,
+        target_fulfilled: shortfall === 0,
+        blocker,
+        db_leads_processed: dbLeadsCount,
+        leads_found: leadsFound,
+        messages_drafted: drafted,
+        approved: delivered,
+        rejected,
+        skipped: dbSkippedCount,
+      },
+      diagnostics,
+    };
   }
 
   // ── Step 1: Research Beaver (with retry loop) ───────────
@@ -3048,7 +3179,11 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     const researchResult = await researchSearch(clientId, {
       query: '',
       command,
-      filters: { batchIndex: currentBatchIndex, limit: targetLimit },
+      filters: {
+        batchIndex: currentBatchIndex,
+        limit: remainingTarget,
+        maxPaidQueries: Math.max(1, Math.min(searchCapacity.remainingPaidQueries || 1, remainingTarget * 2)),
+      },
     });
 
     const roundLeads = researchResult?.data?.leads || [];
@@ -3062,8 +3197,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
     console.log(`[research] Round ${round + 1}: got ${roundLeads.length} (${newLeads.length} new), total raw: ${rawLeads.length}`);
 
-    if (rawLeads.length >= targetLimit * 2) {
-      console.log(`[research] Have ${rawLeads.length} raw leads (>= ${targetLimit * 2} buffer) — stopping search`);
+    if (rawLeads.length >= remainingTarget * 2) {
+      console.log(`[research] Have ${rawLeads.length} raw leads (>= ${remainingTarget * 2} buffer) — stopping search`);
       break;
     }
 
@@ -3686,6 +3821,24 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
     console.log(`[pipeline] Channel for ${lead.name}: ${selectedChannel} status=${kickoffMessageStatus} — ${channelReason}`);
 
+    if (kickoffMessageStatus === 'channel_exhausted') {
+      console.log(`[pipeline] ${lead.name} — channel exhausted, skipping draft: ${channelReason}`);
+      diagnostics.messages_failed++;
+      await logsService.createLog(clientId, {
+        agent: 'director', action: 'lead_channel_exhausted',
+        target_type: 'lead', target_id: lead.id,
+        metadata: { reason: channelReason, path: 'kickoff_pipeline', lead_name: lead.name, channel: selectedChannel },
+      }).catch(() => {});
+      pipelineTrace.traceStage(clientId, {
+        lead_id: lead.id, kickoff_id: plan_id,
+        stage: 'channel_exhausted', status: 'linkedin_already_tried',
+        agent: 'director', pipeline_path: 'kickoff_pipeline',
+        reason: channelReason,
+        metadata: { lead_name: lead.name, channel: selectedChannel },
+      }).catch(() => {});
+      return;
+    }
+
     // 2026-05-23 SHORT-CIRCUIT (lead-completeness contract):
     // Mirror of the signal-pipeline guard. Incomplete leads must not consume
     // Sales Beaver / Enforcer tokens. Lead stays in `prospecting`; Research
@@ -4170,33 +4323,76 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     await processLeadPipeline(lead);
   }
 
-  // Final status update: pipeline complete
-  await updateExecStatus(clientId, plan_id, {
-    status: 'completed',
-    phase: 'captain',
-    beavers: {
-      research: { status: 'done', task: `${savedLeads.length} leads found`, found: rawLeads.length, passed: savedLeads.length },
-      sales:    { status: 'done', task: `${diagnostics.messages_drafted} messages drafted`, drafted: diagnostics.messages_drafted, approved: approvedCount },
-      enforcer: { status: 'done', task: `${approvedCount} approved, ${rejectedCount} rejected`, reviewed: diagnostics.messages_drafted, rejected: rejectedCount },
-      captain:  { status: 'done', task: `${approvedCount} queued for your approval`, approved: approvedCount },
-    },
-    progress: { total: leadsToProcess.length, complete: leadsToProcess.length },
-    started_at: new Date().toISOString(),
-  });
+  // Combine DB-first + research counts for final summary
+  const totalLeadsFound = leadsFoundSoFar + savedLeads.length + dbLeadsCount;
+  const totalMessagesDrafted = draftedSoFar + dbDraftedCount + diagnostics.messages_drafted;
+  const attemptApproved = dbApprovedCount + approvedCount;
+  const totalApproved = deliveredSoFar + attemptApproved;
+  const totalRejected = rejectedSoFar + dbRejectedCount + rejectedCount;
+  const targetShortfall = Math.max(0, campaignRequested - totalApproved);
+  const targetFulfilled = targetShortfall === 0;
 
-  // Await DB-first pipeline if it was running in parallel
-  if (dbLeadsPromise) {
-    console.log(`[director] Awaiting DB-first pipeline completion (${dbLeadsCount} leads)...`);
-    await dbLeadsPromise;
+  if (!targetFulfilled && completionAttempt < maxCompletionAttempts) {
+    const retryCapacity = await getSearchProviderCapacity(clientId);
+    if (retryCapacity.hasCapacity) {
+      await logsService.createLog(clientId, {
+        agent: 'director',
+        action: 'campaign_completion_retry',
+        metadata: {
+          plan_id,
+          requested: campaignRequested,
+          delivered: totalApproved,
+          shortfall: targetShortfall,
+          completion_attempt: completionAttempt + 1,
+          providers: retryCapacity.providers,
+        },
+      }).catch(() => {});
+      return await directorExecute(clientId, {
+        plan_id,
+        command,
+        batchIndex: batchIndex + 1,
+        limit: targetShortfall,
+        completionAttempt: completionAttempt + 1,
+        maxCompletionAttempts,
+        requestedTarget: campaignRequested,
+        deliveredSoFar: totalApproved,
+        draftedSoFar: totalMessagesDrafted,
+        rejectedSoFar: totalRejected,
+        leadsFoundSoFar: totalLeadsFound,
+      });
+    }
   }
 
-  // Combine DB-first + research counts for final summary
-  const totalLeadsFound = savedLeads.length + dbLeadsCount;
+  // Final status update: output complete or truthfully blocked.
+  await updateExecStatus(clientId, plan_id, {
+    status: targetFulfilled ? 'completed' : 'blocked',
+    phase: 'captain',
+    beavers: {
+      research: { status: 'done', task: `${savedLeads.length} new leads found`, found: rawLeads.length, passed: savedLeads.length },
+      sales:    { status: 'done', task: `${totalMessagesDrafted} messages drafted`, drafted: totalMessagesDrafted, approved: totalApproved },
+      enforcer: { status: 'done', task: `${totalApproved} approved, ${totalRejected} rejected`, reviewed: totalMessagesDrafted, rejected: totalRejected },
+      captain:  { status: targetFulfilled ? 'done' : 'blocked', task: `${totalApproved}/${campaignRequested} requested outputs delivered`, approved: totalApproved },
+    },
+    progress: { total: campaignRequested, complete: Math.min(campaignRequested, totalApproved) },
+    started_at: new Date().toISOString(),
+  });
 
   await logsService.createLog(clientId, {
     agent: 'director',
     action: 'plan_completed',
-    metadata: { plan_id, leads_found: totalLeadsFound, db_leads: dbLeadsCount, research_leads: savedLeads.length, messages_drafted: savedMessages.length, approved: approvedCount },
+    metadata: {
+      plan_id,
+      requested: campaignRequested,
+      delivered: totalApproved,
+      target_fulfilled: targetFulfilled,
+      shortfall: targetShortfall,
+      leads_found: totalLeadsFound,
+      db_leads: dbLeadsCount,
+      research_leads: savedLeads.length,
+      messages_drafted: totalMessagesDrafted,
+      approved: totalApproved,
+      rejected: totalRejected,
+    },
   });
 
   const { rows: [fuRow] } = await pool.query(
@@ -4206,14 +4402,35 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   const followupsPending = parseInt(fuRow.count, 10);
 
   const summary = {
+    requested: campaignRequested,
+    delivered: totalApproved,
+    shortfall: targetShortfall,
+    target_fulfilled: targetFulfilled,
     leads_found: totalLeadsFound,
-    messages_drafted: savedMessages.length,
-    approved: approvedCount,
-    new_outreach_pending: approvedCount,
+    messages_drafted: totalMessagesDrafted,
+    approved: totalApproved,
+    rejected: totalRejected,
+    new_outreach_pending: totalApproved,
     followups_pending: followupsPending,
-    pending_your_approval: approvedCount + followupsPending,
+    pending_your_approval: totalApproved + followupsPending,
     db_leads_processed: dbLeadsCount,
+    db_approved: dbApprovedCount,
+    research_approved: approvedCount,
   };
+
+  await logsService.createLog(clientId, {
+    agent: 'director',
+    action: targetFulfilled ? 'campaign_target_fulfilled' : 'campaign_target_unfulfilled',
+    metadata: {
+      plan_id,
+      requested: campaignRequested,
+      delivered: totalApproved,
+      shortfall: targetShortfall,
+      target_fulfilled: targetFulfilled,
+      completion_attempt: completionAttempt,
+      providers: diagnostics.search_capacity?.providers || null,
+    },
+  }).catch(() => {});
 
   // ─── Daily KPI report to Captain (Sales + Enforcer perspectives) ──
   // Mirrors the Research Beaver pattern in services/research.js. Each beaver
@@ -4222,14 +4439,14 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // Failure non-fatal — directorExecute completes regardless.
   try {
     const beaverState = require('./beaverState');
-    const passRate = diagnostics.messages_drafted > 0
-      ? Math.round((approvedCount / diagnostics.messages_drafted) * 100)
+    const passRate = totalMessagesDrafted > 0
+      ? Math.round((totalApproved / totalMessagesDrafted) * 100)
       : null;
 
     beaverState.reportDailyKPIs(clientId, 'sales_beaver', {
-      drafted: diagnostics.messages_drafted,
+      drafted: totalMessagesDrafted,
       drafted_failed: diagnostics.messages_failed || 0,
-      approved_first_pass: approvedCount,
+      approved_first_pass: totalApproved,
       first_pass_rate_pct: passRate,
       followups_pending: followupsPending,
       run_kind: dbLeadsCount > 0 ? 'pool_drain' : 'cold_research',
@@ -4239,9 +4456,9 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     // Note: Enforcer KPIs persist under agent='ranger' to match the
     // canonical name beaverState.readAllBeaversKPIsForToday() reads from.
     beaverState.reportDailyKPIs(clientId, 'ranger', {
-      reviewed: diagnostics.messages_drafted,
-      approved: approvedCount,
-      rejected: rejectedCount,
+      reviewed: totalMessagesDrafted,
+      approved: totalApproved,
+      rejected: totalRejected,
       approve_rate_pct: passRate,
       plan_id,
     }).catch(err => console.warn('[ranger] daily KPI report failed:', err.message));
@@ -4255,29 +4472,30 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     postCampaignDebrief(clientId, {
       planId: plan_id,
       leadsFound: totalLeadsFound,
-      messagesDrafted: diagnostics.messages_drafted,
-      enforcerPassed: approvedCount,
-      enforcerFailed: rejectedCount,
+      messagesDrafted: totalMessagesDrafted,
+      enforcerPassed: totalApproved,
+      enforcerFailed: totalRejected,
     }).catch(() => {});
   } catch { /* learningEngine optional */ }
 
   return {
     plan_id,
-    status: 'completed',
+    status: targetFulfilled ? 'completed' : 'blocked',
     leads: savedLeads.map(l => ({ name: l.name, company: l.company, title: l.title })),
     leads_found: totalLeadsFound,
-    messages_drafted: diagnostics.messages_drafted,
+    messages_drafted: totalMessagesDrafted,
     messages_failed: diagnostics.messages_failed,
     summary,
     diagnostics,
     results: [
       ...(dbLeadsCount > 0 ? [{ step: 0, agent: 'research_beaver', status: 'completed', result: `${dbLeadsCount} existing lead${dbLeadsCount !== 1 ? 's' : ''} processed from DB` }] : []),
       { step: 1, agent: 'research_beaver', status: 'completed', result: `${savedLeads.length} new lead${savedLeads.length !== 1 ? 's' : ''} found via research` },
-      { step: 2, agent: 'sales_beaver', status: 'completed', result: `${savedMessages.length} message${savedMessages.length !== 1 ? 's' : ''} drafted (1 message per lead, best channel)` },
-      { step: 3, agent: 'ranger', status: 'completed', result: `${approvedCount} approved${rejectedCount > 0 ? `, ${rejectedCount} rejected by server gates` : ''}` },
-      { step: 4, agent: 'director', status: (approvedCount + followupsPending) > 0 ? 'completed' : 'pending', result: [
-        approvedCount > 0 ? `${approvedCount} new outreach in approval queue` : 'All new outreach failed Ranger QA',
+      { step: 2, agent: 'sales_beaver', status: 'completed', result: `${totalMessagesDrafted} message${totalMessagesDrafted !== 1 ? 's' : ''} drafted (1 message per lead, best channel)` },
+      { step: 3, agent: 'ranger', status: 'completed', result: `${totalApproved} approved${totalRejected > 0 ? `, ${totalRejected} rejected by server gates` : ''}` },
+      { step: 4, agent: 'director', status: targetFulfilled ? 'completed' : 'blocked', result: [
+        totalApproved > 0 ? `${totalApproved} new outreach in approval queue` : 'All new outreach failed Ranger QA',
         followupsPending > 0 ? `${followupsPending} follow-up${followupsPending !== 1 ? 's' : ''} awaiting review` : null,
+        !targetFulfilled ? `${targetShortfall} short of requested ${campaignRequested}` : null,
       ].filter(Boolean).join(' + ') || 'Nothing in queue' },
     ],
   };

@@ -17,13 +17,19 @@ function selectChannel(lead, options = {}) {
   if (hasVerifiedEmail) {
     return { channel: 'email', status: 'pending_ranger', reason: `Verified email (${lead.email_source || 'known'})` };
   }
+  if (lead.linkedin_url && linkedinAlreadyTried) {
+    return { channel: 'linkedin', status: 'channel_exhausted', reason: 'LinkedIn already tried and no verified email found' };
+  }
   if (isLinkedinOnlyLead && !linkedinAlreadyTried) {
     return { channel: 'linkedin', status: 'pending_ranger', reason: 'Tier B linkedin-only lead' };
+  }
+  if (lead.linkedin_url && !linkedinAlreadyTried) {
+    return { channel: 'linkedin', status: 'pending_ranger', reason: 'No verified email — LinkedIn fallback (lead has linkedin_url)' };
   }
   return {
     channel: 'email',
     status: 'blocked_no_email',
-    reason: 'No verified email and no linkedin_url — holding for enrichment',
+    reason: 'No verified email and no usable linkedin_url — holding for enrichment',
   };
 }
 
@@ -60,7 +66,8 @@ describe('Pipeline Flow Integration', () => {
 
     it('does not route to linkedin if already tried', () => {
       const result = selectChannel(leads[1], { linkedinAlreadyTried: true });
-      expect(result.status).toBe('blocked_no_email');
+      expect(result.status).toBe('channel_exhausted');
+      expect(result.reason).toContain('already tried');
     });
 
     it('email-first when verified even if linkedin_url present', () => {

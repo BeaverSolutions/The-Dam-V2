@@ -117,6 +117,32 @@ const replyNoFalseMeeting = replyHandler.includes("positive: 'qualifying'")
 check('Positive reply does not mark meeting_booked', replyNoFalseMeeting,
   replyNoFalseMeeting ? 'positive reply maps to qualifying' : 'positive reply may count as booked meeting');
 
+// 13. User-requested campaign counts must be output-driven, not activity-driven.
+const campaignOutputDriven = agents.includes('campaign_target_unfulfilled')
+  && agents.includes('campaign_completion_retry')
+  && agents.includes('target_fulfilled')
+  && agents.includes('targetLimit - dbApprovedCount')
+  && !agents.includes('actualDrafted >= targetLimit');
+check('Campaign target counts approval-ready output', campaignOutputDriven,
+  campaignOutputDriven ? 'requested count tied to approved output + retry/unfulfilled logs' : 'campaign may count enrolled/drafted leads as success');
+
+// 14. Fresh sourcing must not recycle exhausted old leads.
+const captainBeaver = readFile('services/captainBeaver.js');
+const noRecycledDbLeads = agents.includes("m.status <> 'deleted'")
+  && captainBeaver.includes("m.status <> 'deleted'")
+  && agents.includes("status: 'channel_exhausted'");
+check('Fresh campaign excludes prior outreach attempts', noRecycledDbLeads,
+  noRecycledDbLeads ? 'DB-first + Captain search exclude any non-deleted prior message' : 'old contacted/exhausted leads may re-enter find-N campaigns');
+
+// 15. Research fanout must be capped per run and adjustable by remaining provider capacity.
+const researchSource = readFile('services/research.js');
+const researchFanoutCap = researchSource.includes('RESEARCH_MAX_PAID_QUERIES_PER_RUN')
+  && researchSource.includes('maxPaidQueries')
+  && agents.includes('remainingPaidQueries')
+  && agents.includes('paid_search_capacity_exhausted');
+check('Research paid-query fanout capped by remaining capacity', researchFanoutCap,
+  researchFanoutCap ? 'research receives maxPaidQueries and blocks when paid capacity is exhausted' : 'research may fan out after caps are exhausted');
+
 // ── Summary ──
 const failures = results.filter(r => !r.pass);
 console.log(`\n${results.length} checks: ${results.length - failures.length} passed, ${failures.length} failed`);

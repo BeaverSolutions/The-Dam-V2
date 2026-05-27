@@ -93,6 +93,7 @@ CRITICAL RULE — LEAD RESEARCH:
 NEVER use web_search_brave to find leads yourself. It is sequential, slow, and burns iterations.
 For ANY request to "find", "source", "research", or "get" leads → call run_campaign immediately.
 run_campaign fires Research Beaver in parallel — 10x faster, handles dedup, Sales, Enforcer, approval queue automatically.
+User-requested counts are outcome counts: if MJ asks for 5 leads, success means 5 approval-ready outreach items surfaced. Dropped, exhausted, duplicate, rejected, or incomplete leads do NOT count toward the request.
 web_search_brave is ONLY for one-off lookups (a specific person, a company signal, a news item) — never for building a lead list.
 
 CRITICAL RULE — ICP ENFORCEMENT (READ BEFORE EVERY LEAD SEARCH):
@@ -107,7 +108,7 @@ with a different ICP — those are polluted and must be ignored. ICP compliance 
 sending off-ICP messages destroys reply rate and damages the sender domain.
 
 TOOLS (Anthropic tool_use — call directly, no HTTP):
-- run_campaign             ← USE THIS for any "find leads / run outreach / start campaign" request. Fires the full parallel pipeline.
+- run_campaign             ← USE THIS for any "find leads / run outreach / start campaign" request. Fulfills requested approval-ready output count or reports the exact blocker.
 - clear_pending_messages   ← USE THIS to reject/clear old pending messages for specific leads (e.g. stale LinkedIn DMs). Pass lead_ids + note.
 - draft_email_for_leads    ← USE THIS to find emails (via Hunter) and queue email outreach for specific lead IDs. Run AFTER clear_pending_messages.
 - read_followup_plan       ← USE THIS when MJ asks about today's follow-ups. Returns YOUR plan with per-lead angles you proposed at 09:00 MYT.
@@ -440,10 +441,11 @@ async function toolSearchInternalLeads(clientId, { industry, location, signal_ti
   if (!include_contacted) {
     conditions.push(`(first_contacted_at IS NULL OR first_contacted_at < NOW() - INTERVAL '14 days')`);
     conditions.push(`status NOT IN ('contacted', 'replied', 'meeting_booked', 'closed_won', 'closed_lost')`);
-    // Exclude leads with any message already in the pipeline (draft, approved, pending_send)
+    // Exclude leads with any prior outreach attempt. "Find X leads" means net
+    // new approval-ready output, not recycling old rejected/exhausted rows.
     conditions.push(`NOT EXISTS (
       SELECT 1 FROM messages m WHERE m.lead_id = leads.id AND m.client_id = leads.client_id
-        AND m.status IN ('pending_ranger', 'pending_approval', 'approved', 'pending_send', 'sending', 'sent')
+        AND m.status <> 'deleted'
     )`);
   }
 
@@ -940,8 +942,7 @@ async function getRunCampaignPreflight(clientId, command) {
         AND NOT EXISTS (
           SELECT 1 FROM messages m
            WHERE m.lead_id = l.id AND m.client_id = $1
-             AND m.status IN ('sent', 'approved', 'linkedin_requested',
-                              'pending_send', 'pending_approval', 'pending_ranger')
+             AND m.status <> 'deleted'
         )
         AND NOT EXISTS (
           SELECT 1 FROM pipeline_traces pt
@@ -953,12 +954,24 @@ async function getRunCampaignPreflight(clientId, command) {
     [clientId]
   );
   const { CAPS } = require('./spendGuard');
+  const { providerUsageToday } = require('./spendGuard');
+  const braveSpent = await providerUsageToday('brave', clientId).catch(() => CAPS.brave);
+  const googleSpent = await providerUsageToday('google_cse', clientId).catch(() => CAPS.google_cse);
   const providers = {
-    brave: !!process.env.BRAVE_API_KEY && CAPS.brave > 0,
-    google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX) && CAPS.google_cse > 0,
+    brave: !!process.env.BRAVE_API_KEY && CAPS.brave > braveSpent,
+    google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX) && CAPS.google_cse > googleSpent,
     apollo: !!process.env.APOLLO_API_KEY && CAPS.apollo > 0,
   };
-  return { target, eligible_count, providers, has_research_provider: Object.values(providers).some(Boolean) };
+  return {
+    target,
+    eligible_count,
+    providers,
+    provider_usage: {
+      brave: { spent: braveSpent, cap: CAPS.brave, remaining: Math.max(0, CAPS.brave - braveSpent) },
+      google_cse: { spent: googleSpent, cap: CAPS.google_cse, remaining: Math.max(0, CAPS.google_cse - googleSpent) },
+    },
+    has_research_provider: providers.brave || providers.google_cse,
+  };
 }
 
 async function toolRunCampaign(clientId, { command, plan_id }) {
