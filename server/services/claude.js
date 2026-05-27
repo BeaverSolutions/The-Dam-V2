@@ -60,6 +60,13 @@ function pickFallbackModel(model) {
   return null;
 }
 
+function selectedLLMProvider() {
+  const explicit = (process.env.LLM_PROVIDER || '').trim().toLowerCase();
+  if (explicit) return explicit;
+  if (process.env.OPENAI_API_KEY) return 'openai';
+  return 'anthropic';
+}
+
 function allowUnattributedLLM() {
   return process.env.ALLOW_UNATTRIBUTED_LLM === 'true' || process.env.NODE_ENV === 'test';
 }
@@ -102,10 +109,10 @@ IMPORTANT RULES:
  * @returns parsed JSON object or `{ raw: string }` on parse failure
  */
 async function callAgent(agentKey, userMessage, context = {}) {
-  // LLM provider switch (2026-05-16): LLM_PROVIDER=openai routes to the OpenAI
-  // adapter. Default/unset → the Anthropic path below runs unchanged. Lazy
-  // require so the OpenAI SDK only loads when the provider is actually OpenAI.
-  if ((process.env.LLM_PROVIDER || 'anthropic').toLowerCase() === 'openai') {
+  // LLM provider switch: explicit LLM_PROVIDER wins; otherwise OPENAI_API_KEY
+  // selects the OpenAI adapter. Lazy require so the OpenAI SDK only loads when
+  // the provider is actually OpenAI.
+  if (selectedLLMProvider() === 'openai') {
     return require('./llm/openai').callAgentOpenAI(agentKey, userMessage, context);
   }
   if (!client) throw new Error('Anthropic client not initialised');
@@ -240,9 +247,8 @@ async function callAgent(agentKey, userMessage, context = {}) {
  * @returns {Promise<{ text: string, toolCalls: Array, iterations: number }>}
  */
 async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, context = {}) {
-  // LLM provider switch (2026-05-16): see callAgent. OpenAI adapter owns its
-  // own tool loop; Anthropic path below is unchanged.
-  if ((process.env.LLM_PROVIDER || 'anthropic').toLowerCase() === 'openai') {
+  // LLM provider switch: see callAgent. OpenAI adapter owns its own tool loop.
+  if (selectedLLMProvider() === 'openai') {
     return require('./llm/openai').callAgentWithToolsOpenAI(agentKey, userMessage, tools, toolHandler, context);
   }
   if (!client) throw new Error('Anthropic client not initialised');

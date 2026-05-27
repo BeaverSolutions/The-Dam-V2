@@ -30,9 +30,10 @@ const jobHealth = require('./jobHealth');
 const pipelineTrace = require('./pipelineTrace');
 
 function getLLMHealth() {
-  const provider = (process.env.LLM_PROVIDER || 'anthropic').toLowerCase();
+  const explicitProvider = (process.env.LLM_PROVIDER || '').trim().toLowerCase();
   const anthropicSet = !!process.env.ANTHROPIC_API_KEY;
   const openaiSet = !!process.env.OPENAI_API_KEY;
+  const provider = explicitProvider || (openaiSet ? 'openai' : 'anthropic');
 
   return {
     provider,

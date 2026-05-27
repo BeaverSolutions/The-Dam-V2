@@ -91,12 +91,15 @@ describe('P0 stabilization contracts', () => {
   it('LLM calls require client attribution before provider spend', () => {
     expect(service('services/claude.js')).toContain('LLM_CLIENT_ID_REQUIRED');
     expect(service('services/claude.js')).toContain('allowUnattributedLLM');
+    expect(service('services/claude.js')).toContain('function selectedLLMProvider()');
+    expect(service('services/claude.js')).toContain("if (process.env.OPENAI_API_KEY) return 'openai'");
     expect(service('services/llm/openai.js')).toContain('LLM_CLIENT_ID_REQUIRED');
     expect(service('services/captainBeaver.js')).toContain('runWithClientContext(clientId');
-    expect(service('../.env.example')).toContain('LLM_PROVIDER=anthropic');
+    expect(service('../.env.example')).toContain('LLM_PROVIDER=openai');
     expect(service('../.env.example')).toContain('OPENAI_API_KEY=');
-    expect(service('../.env.production.example')).toContain('LLM_PROVIDER=anthropic');
+    expect(service('../.env.production.example')).toContain('LLM_PROVIDER=openai');
     expect(service('services/captainOrchestrator.js')).toContain('selected_key_set');
+    expect(service('services/captainOrchestrator.js')).toContain("openaiSet ? 'openai' : 'anthropic'");
   });
 
   it('meetings are outcome tracking, not a fixed KPI target', () => {

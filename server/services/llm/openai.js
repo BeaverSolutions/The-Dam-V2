@@ -7,10 +7,9 @@
  * One vendor = one point of failure (the Emplifive "Empy" incident proved it).
  * This adapter lets the 4 beavers run on OpenAI instead, selected at runtime.
  *
- * Activated by `LLM_PROVIDER=openai`. Default is unset → Anthropic path in
- * claude.js runs untouched. claude.js branches to these functions at the very
- * top of callAgent / callAgentWithTools when the flag is set — so the proven
- * Anthropic code is never modified.
+ * Activated by `LLM_PROVIDER=openai`, or by `OPENAI_API_KEY` when no provider
+ * is explicit. claude.js branches to these functions at the very top of
+ * callAgent / callAgentWithTools when OpenAI is selected.
  *
  * Interface mirrors claude.js exactly:
  *   callAgentOpenAI(agentKey, userMessage, context)            → parsed JSON | {raw}
