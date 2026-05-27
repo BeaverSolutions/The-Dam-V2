@@ -516,14 +516,20 @@ async function buildDirectorMemoryBrief(clientId) {
  * RESEARCH BEAVER
  * =========================
  */
-async function researchSearch(clientId, { query, filters = {} }) {
+async function researchSearch(clientId, { query, command = null, filters = {} }) {
   const batchIndex = filters.batchIndex || 0;
 
   await logsService.createLog(clientId, {
     agent: 'research_beaver',
     action: 'research_search',
     target_type: 'search',
-    metadata: { query, filters, batchIndex },
+    metadata: {
+      query,
+      command: command ? String(command).slice(0, 200) : null,
+      query_mode: query ? 'explicit_query' : 'icp_memory',
+      filters,
+      batchIndex,
+    },
   });
 
   // Load ICP memory upfront — used by both search query builder and Claude fallback
@@ -592,7 +598,9 @@ async function researchSearch(clientId, { query, filters = {} }) {
     action: 'research_no_results',
     target_type: 'system',
     metadata: {
-      query: query?.substring?.(0, 200),
+      query: researchResult?.queriesUsed?.[0] || query?.substring?.(0, 200) || '[icp_memory]',
+      command: command ? String(command).slice(0, 200) : null,
+      queries_preview: researchResult?.queriesUsed?.slice?.(0, 10) || [],
       source: 'multi',
       note: 'All sources returned 0 results',
       // diagnostics — read these first when self-sourcing yields 0
@@ -1550,6 +1558,10 @@ async function surfaceUnrewrittenDraft(clientId, { messageId, body, subject, rea
        VALUES ($1, $2, 'enforcer_rewrite_failed', 'pending')`,
       [clientId, messageId]
     );
+    await writeApprovalAuditForMessage(clientId, messageId, {
+      decision: 'manual_pending',
+      reason: reason || 'enforcer_rewrite_failed',
+    });
     await logsService.createLog(clientId, {
       agent: 'enforcer_beaver', action: 'lead_surfaced_unrewritten',
       target_type: 'message', target_id: messageId,
@@ -1559,6 +1571,37 @@ async function surfaceUnrewrittenDraft(clientId, { messageId, body, subject, rea
   } catch (err) {
     console.warn('[never-burn] surfaceUnrewrittenDraft failed:', err.message);
     return false;
+  }
+}
+
+async function writeApprovalAuditForMessage(clientId, messageId, {
+  decision = 'manual_pending',
+  reason = null,
+  model = process.env.MODEL_SONNET || 'claude-sonnet-4-20250514',
+} = {}) {
+  if (!clientId || !messageId) return;
+  try {
+    const { rows: [msg] } = await pool.query(
+      `SELECT lead_id, channel, ranger_score FROM messages WHERE client_id = $1 AND id = $2 LIMIT 1`,
+      [clientId, messageId]
+    );
+    if (!msg) return;
+    await pool.query(
+      `INSERT INTO approval_audit (client_id, message_id, lead_id, decision, score, reasons, model, channel)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        clientId,
+        messageId,
+        msg.lead_id,
+        decision,
+        msg.ranger_score ?? null,
+        JSON.stringify({ method: 'fallback_approval', reason }),
+        model,
+        msg.channel,
+      ]
+    );
+  } catch (err) {
+    console.warn('[approval_audit] fallback write failed:', err.message);
   }
 }
 
@@ -1968,11 +2011,8 @@ Return JSON only: {"body":"fixed message body including greeting and sign-off","
  * Returns a summary compatible with directorExecute.
  */
 async function processExistingLeadsPipeline(clientId, plan_id, leads) {
-  await logsService.createLog(clientId, {
-    agent: 'director',
-    action: 'signal_pipeline_executing',
-    metadata: { plan_id, lead_count: leads.length },
-  });
+  const originalLeadCount = Array.isArray(leads) ? leads.length : 0;
+  leads = Array.isArray(leads) ? leads : [];
 
   // ── Same-day enrolled dedup (MYT calendar day) ──────────────────────────
   // Once enrolled today, never re-enrolled today. Prevents the 75× pattern.
@@ -1984,10 +2024,58 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
   ).catch(() => ({ rows: [] }));
   const recentEnrolledSet = new Set(recentEnrolled.map(r => r.lead_id));
   const dedupedLeads = leads.filter(l => !recentEnrolledSet.has(l.id));
+  const skippedSameDay = leads.length - dedupedLeads.length;
   if (dedupedLeads.length < leads.length) {
-    console.log(`[signal-pipeline] Same-day dedup: skipped ${leads.length - dedupedLeads.length}/${leads.length} already-enrolled leads`);
+    console.log(`[signal-pipeline] Same-day dedup: skipped ${skippedSameDay}/${leads.length} already-enrolled leads`);
   }
   leads = dedupedLeads;
+
+  await logsService.createLog(clientId, {
+    agent: 'director',
+    action: 'signal_pipeline_executing',
+    metadata: { plan_id, lead_count: leads.length, original_lead_count: originalLeadCount, skipped_same_day: skippedSameDay },
+  });
+
+  if (leads.length === 0) {
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'signal_pipeline_skipped',
+      metadata: {
+        plan_id,
+        reason: skippedSameDay > 0 ? 'same_day_enrolled_dedupe' : 'no_leads_provided',
+        original_lead_count: originalLeadCount,
+        skipped_same_day: skippedSameDay,
+      },
+    });
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'signal_pipeline_completed',
+      metadata: { plan_id, leads: 0, drafted: 0, approved: 0, rejected: 0, skipped_same_day: skippedSameDay },
+    });
+    pipelineTrace.traceStage(clientId, {
+      kickoff_id: plan_id,
+      stage: 'enrolled',
+      status: 'kickoff_summary',
+      agent: 'director',
+      pipeline_path: 'signal_pipeline',
+      metadata: {
+        total_leads: 0,
+        original_lead_count: originalLeadCount,
+        skipped_same_day: skippedSameDay,
+        drafted: 0,
+        approved: 0,
+        rejected: 0,
+        silent_drop_count: 0,
+      },
+    }).catch(() => {});
+    return {
+      plan_id,
+      status: 'completed',
+      leads: 0,
+      summary: { leads_found: 0, messages_drafted: 0, approved: 0, rejected: 0, skipped_same_day: skippedSameDay },
+      source: 'signal_hunt',
+    };
+  }
 
   // ── Phase 1 (2026-05-08): pipeline_traces — emit enrolled for every lead ─
   for (const lead of leads) {
@@ -2459,6 +2547,10 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
               `INSERT INTO approvals (client_id, message_id, requested_by, status) VALUES ($1, $2, 'enforcer_fallback', 'pending')`,
               [clientId, enfMsg.id]
             );
+            await writeApprovalAuditForMessage(clientId, enfMsg.id, {
+              decision: 'manual_pending',
+              reason: 'enforcer_fallback',
+            });
             await logsService.createLog(clientId, {
               agent: 'enforcer_beaver', action: 'enforcer_drafted_fallback',
               target_type: 'message', target_id: enfMsg.id,
@@ -2528,7 +2620,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
   await logsService.createLog(clientId, {
     agent: 'director',
     action: 'signal_pipeline_completed',
-    metadata: { plan_id, leads: leads.length, drafted: messagesDrafted, approved: approvedCount, rejected: rejectedCount },
+    metadata: { plan_id, leads: leads.length, drafted: messagesDrafted, approved: approvedCount, rejected: rejectedCount, original_lead_count: originalLeadCount, skipped_same_day: skippedSameDay },
   });
 
   // ── Phase 1 (2026-05-08): emit pipeline_traces summary so funnel survival rate
@@ -2546,6 +2638,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       approved: approvedCount,
       rejected: rejectedCount,
       icp_audit_rejected: icpAuditRejected,
+      skipped_same_day: skippedSameDay,
       silent_drop_count: leads.length - messagesDrafted - rejectedCount,
     },
   }).catch(() => {});
@@ -2870,13 +2963,20 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
          AND l.deleted_at IS NULL
          AND l.status = 'new'
          AND (l.email IS NOT NULL OR l.linkedin_url IS NOT NULL)
-         AND NOT EXISTS (
-           SELECT 1 FROM messages m
-           WHERE m.lead_id = l.id AND m.client_id = $1
-             AND m.status IN ('sent', 'approved', 'linkedin_requested',
-                              'pending_send', 'pending_approval', 'pending_ranger')
-         )
-       ORDER BY
+          AND NOT EXISTS (
+            SELECT 1 FROM messages m
+            WHERE m.lead_id = l.id AND m.client_id = $1
+              AND m.status IN ('sent', 'approved', 'linkedin_requested',
+                               'pending_send', 'pending_approval', 'pending_ranger')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM pipeline_traces pt
+            WHERE pt.client_id = $1 AND pt.lead_id = l.id
+              AND pt.stage = 'enrolled'
+              AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date =
+                  (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date
+          )
+        ORDER BY
          CASE l.signal_tier WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
          l.created_at DESC
        LIMIT $2`,
@@ -2947,6 +3047,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     // Captain daily-brief paragraph into Brave's q= parameter and returned 0.
     const researchResult = await researchSearch(clientId, {
       query: '',
+      command,
       filters: { batchIndex: currentBatchIndex, limit: targetLimit },
     });
 
@@ -3939,6 +4040,10 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
                   `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'enforcer_fallback')`,
                   [clientId, msg.id]
                 );
+                await writeApprovalAuditForMessage(clientId, msg.id, {
+                  decision: 'manual_pending',
+                  reason: 'enforcer_fallback',
+                });
                 await logsService.createLog(clientId, {
                   agent: 'enforcer_beaver', action: 'enforcer_fallback_draft',
                   target_type: 'message', target_id: msg.id,
@@ -4001,6 +4106,10 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
             `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'enforcer_fallback')`,
             [clientId, msg.id]
           );
+          await writeApprovalAuditForMessage(clientId, msg.id, {
+            decision: 'manual_pending',
+            reason: 'enforcer_fallback',
+          });
           await logsService.createLog(clientId, {
             agent: 'enforcer_beaver', action: 'enforcer_fallback_draft',
             target_type: 'message', target_id: msg.id,

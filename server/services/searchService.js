@@ -17,6 +17,7 @@ try {
 const GOOGLE_CSE_URL = 'https://www.googleapis.com/customsearch/v1';
 const DDG_URL        = 'https://api.duckduckgo.com/';
 const spendGuard = require('./spendGuard');
+const pool = require('../db/pool');
 const { getCurrentClientId } = require('../middleware/clientContext');
 
 function currentClientId() {
@@ -29,6 +30,34 @@ function providerBlockedError(provider, guard) {
   err.provider = provider;
   err.guard = guard;
   return err;
+}
+
+function providerFailureCode(err) {
+  if (err?.code === 'PROVIDER_SPEND_BLOCKED') return 'spend_guard_blocked';
+  if (/not set|not configured/i.test(String(err?.message || ''))) return 'missing_config';
+  if (err?.response?.status === 429) return 'rate_limited';
+  if (err?.response?.status) return `http_${err.response.status}`;
+  return err?.code || err?.name || 'provider_error';
+}
+
+async function logProviderError(provider, err, metadata = {}) {
+  const clientId = currentClientId();
+  if (!clientId || !provider) return;
+  try {
+    await pool.query(
+      `INSERT INTO logs (client_id, agent, action, target_type, metadata)
+       VALUES ($1, 'system', 'provider_error', 'provider', $2)`,
+      [clientId, JSON.stringify({
+        provider,
+        reason: providerFailureCode(err),
+        message: String(err?.message || '').slice(0, 300),
+        status: err?.response?.status || null,
+        ...metadata,
+      })]
+    );
+  } catch (logErr) {
+    console.warn(`[search] provider_error log failed for ${provider}:`, logErr.message);
+  }
 }
 
 function envInt(name, fallback) {
@@ -287,6 +316,7 @@ async function withFallback(label, searchQuery, num, parseItems) {
     const items = await callBrave(searchQuery, num);
     if (items.length > 0) return parseItems(items);
   } catch (err) {
+    await logProviderError('brave', err, { mode: label, query_preview: String(searchQuery).slice(0, 160) });
     console.warn(`[search] Brave failed: ${err.message}, falling back to Google CSE`);
   }
 
@@ -296,6 +326,7 @@ async function withFallback(label, searchQuery, num, parseItems) {
     console.log('[search] Using fallback: Google CSE');
     return parseItems(items);
   } catch (err) {
+    await logProviderError('google_cse', err, { mode: label, query_preview: String(searchQuery).slice(0, 160) });
     const status = err.response?.status ? ` (${err.response.status})` : '';
     const body   = err.response?.data;
     const detail = body
@@ -339,6 +370,7 @@ async function runAllBraveQueries(queries) {
         results.push(...parseProfileItems(items, 'brave'));
       }
     } catch (err) {
+      await logProviderError('brave', err, { mode: 'parallel_profiles', query_preview: String(q).slice(0, 160) });
       console.warn(`[search] Brave query failed for "${q}": ${err.message}`);
     }
   }
@@ -363,6 +395,7 @@ async function runAllCSEQueries(queries) {
       const items = await callGoogleCSE(q, 10);
       results.push(...parseProfileItems(items, 'cse'));
     } catch (err) {
+      await logProviderError('google_cse', err, { mode: 'parallel_profiles', query_preview: String(q).slice(0, 160) });
       console.warn(`[search] CSE query failed for "${q}": ${err.message}`);
     }
   }
@@ -508,6 +541,7 @@ async function searchOpenWeb(query, limit = 5) {
       }));
     }
   } catch (err) {
+    await logProviderError('brave', err, { mode: 'open_web', query_preview: String(query).slice(0, 160) });
     console.warn(`[search] Brave open web failed: ${err.message}`);
   }
 
@@ -539,6 +573,7 @@ async function searchOpenWeb(query, limit = 5) {
       type: 'organic',
     })).slice(0, limit);
   } catch (err) {
+    await logProviderError('google_cse', err, { mode: 'open_web', query_preview: String(query).slice(0, 160) });
     console.warn(`[search] Google CSE open web failed: ${err.message}`);
   }
 

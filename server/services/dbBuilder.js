@@ -733,7 +733,7 @@ async function runDbBuilder() {
 //     no email to retrieve.
 //   - applyIcpV2Filter runs on every prospect BEFORE enrichment — credits are
 //     never spent on a lead that would be rejected.
-//   - enrich-prospects requests CONTACTS ONLY (~3cr) — never the full report.
+//   - enrich-prospects requests CONTACTS ONLY (~5cr observed) — never the full report.
 //   - Hard daily cap is enforced by spendGuard and VP_DAILY_CREDIT_CAP.
 //
 // EMAIL CHANNEL ONLY. VP exists to get verified emails. LinkedIn sourcing
@@ -748,7 +748,7 @@ async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
   }
 
   // Hard daily credit cap via central spend guard.
-  const vpGuard = await spendGuard.checkProvider('vp', { clientId, estimatedUnits: 3 });
+  const vpGuard = await spendGuard.checkProvider('vp', { clientId, estimatedUnits: 5 });
   if (!vpGuard.allowed) {
     logger.info({ msg: '[db-builder] VP spend guard blocked sourcing', reason: vpGuard.reason, spentToday: vpGuard.spentToday, cap: vpGuard.cap });
     return { saved: 0, credits: 0, reason: vpGuard.reason || 'daily_credit_cap', spentToday: vpGuard.spentToday };
@@ -861,7 +861,7 @@ async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
   // Trim the enrichment batch to what today's remaining VP budget affords;
   // refuse entirely if the daily cap is already spent.
   const spendGuard = require('./spendGuard');
-  const vpBudget = await spendGuard.checkVP(0);
+  const vpBudget = await spendGuard.checkVP(0, { clientId });
   if (vpBudget.affordableLeads <= 0) {
     console.warn(`[db-builder] spendGuard: VP daily cap reached (${vpBudget.spentToday}/${vpBudget.cap}) — enrichment skipped`);
     return { saved: 0, credits: 0, reason: 'vp_daily_cap_reached', cap: vpBudget.cap, spent_today: vpBudget.spentToday };

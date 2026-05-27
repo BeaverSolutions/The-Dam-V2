@@ -914,22 +914,97 @@ async function toolQueryLogs(clientId, { agent, action, hours, limit } = {}) {
   return { count: rows.length, hours_back: lookback, entries: rows };
 }
 
+function campaignTargetFromCommand(command) {
+  const match = String(command || '').match(/\b(\d{1,3})\b/);
+  const target = match ? parseInt(match[1], 10) : 50;
+  return Math.max(1, Math.min(target, 50));
+}
+
+async function getRunCampaignPreflight(clientId, command) {
+  const target = campaignTargetFromCommand(command);
+  const { rows: [{ eligible_count }] } = await pool.query(
+    `SELECT COUNT(*)::int AS eligible_count
+       FROM leads l
+      WHERE l.client_id = $1
+        AND l.deleted_at IS NULL
+        AND l.status = 'new'
+        AND (l.email IS NOT NULL OR l.linkedin_url IS NOT NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM messages m
+           WHERE m.lead_id = l.id AND m.client_id = $1
+             AND m.status IN ('sent', 'approved', 'linkedin_requested',
+                              'pending_send', 'pending_approval', 'pending_ranger')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM pipeline_traces pt
+           WHERE pt.client_id = $1 AND pt.lead_id = l.id
+             AND pt.stage = 'enrolled'
+             AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date =
+                 (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date
+        )`,
+    [clientId]
+  );
+  const { CAPS } = require('./spendGuard');
+  const providers = {
+    brave: !!process.env.BRAVE_API_KEY && CAPS.brave > 0,
+    google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX) && CAPS.google_cse > 0,
+    apollo: !!process.env.APOLLO_API_KEY && CAPS.apollo > 0,
+  };
+  return { target, eligible_count, providers, has_research_provider: Object.values(providers).some(Boolean) };
+}
+
 async function toolRunCampaign(clientId, { command, plan_id }) {
   const { v4: uuidV4 } = require('uuid');
   const { runWithClientContext } = require('../middleware/clientContext');
   const planId = plan_id || uuidV4();
+  const preflight = await getRunCampaignPreflight(clientId, command);
+  if (preflight.eligible_count === 0 && !preflight.has_research_provider) {
+    await logsService.createLog(clientId, {
+      agent: 'captain_beaver',
+      action: 'campaign_blocked',
+      target_type: 'system',
+      metadata: { plan_id: planId, command, preflight, reason: 'no_eligible_db_leads_and_no_research_provider' },
+    }).catch(() => {});
+    return {
+      ok: false,
+      status: 'blocked',
+      reason: 'no_eligible_db_leads_and_no_research_provider',
+      message: 'Campaign blocked: no eligible fresh DB leads and no capped research provider is enabled.',
+    };
+  }
+
+  await logsService.createLog(clientId, {
+    agent: 'captain_beaver',
+    action: 'campaign_started',
+    target_type: 'system',
+    metadata: { plan_id: planId, command, preflight },
+  }).catch(() => {});
+
   // Fire-and-forget — directorExecute can take minutes, don't block the chat turn
   try {
     const { directorExecute } = require('./agents');
-    runWithClientContext(clientId, () => directorExecute(clientId, { plan_id: planId, command })).catch(err => {
+    runWithClientContext(clientId, () => directorExecute(clientId, { plan_id: planId, command, limit: preflight.target })).catch(err => {
       console.error(`[captainBeaver:run_campaign] directorExecute failed: ${err.message}`);
+      logsService.createLog(clientId, {
+        agent: 'captain_beaver',
+        action: 'campaign_background_failed',
+        target_type: 'system',
+        metadata: { plan_id: planId, command, error: err.message, stack_head: err.stack?.split('\n').slice(0, 3) },
+      }).catch(() => {});
     });
   } catch (err) {
+    await logsService.createLog(clientId, {
+      agent: 'captain_beaver',
+      action: 'campaign_start_failed',
+      target_type: 'system',
+      metadata: { plan_id: planId, command, error: err.message },
+    }).catch(() => {});
     return { ok: false, error: err.message };
   }
   return {
     ok: true,
     status: 'running',
+    preflight,
     message: 'Campaign fired. Research → Sales → Enforcer pipeline running in background. Check approvals in a few minutes.',
   };
 }

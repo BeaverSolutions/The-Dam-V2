@@ -1076,6 +1076,8 @@ async function start() {
     // already running, and cooldown has passed, fires another kickoff.
     // Guards: max 6 kickoffs/day, 25-min cooldown, working hours only.
     async function runKpiGapKickoff() {
+      if (process.env.CAPTAIN_KPI_GAP_KICKOFF_ENABLED !== 'true') return;
+
       const now = new Date();
       const utcHour = now.getUTCHours();
       // 02:00-09:59 UTC = 10:00-17:59 MYT. Starts at 02:00 (not 01:00) so it

@@ -50,6 +50,8 @@ describe('P0 stabilization contracts', () => {
 
   it('paid provider calls are guarded through spendGuard', () => {
     expect(service('services/searchService.js')).toMatch(/checkProvider\('brave'[\s\S]+checkProvider\('google_cse'/);
+    expect(service('services/searchService.js')).toContain('provider_error');
+    expect(service('services/searchService.js')).toContain('logProviderError');
     expect(service('services/marketSensing.js')).toContain("checkProvider('brave'");
     expect(service('services/hunter.js')).toContain("checkProvider('hunter'");
     expect(service('services/emailEnrichment.js')).toContain("checkProvider('millionverifier'");
@@ -61,6 +63,29 @@ describe('P0 stabilization contracts', () => {
     expect(service('services/searchService.js')).toContain('SEARCH_MAX_PAID_QUERIES_PER_OPERATION');
     expect(service('services/searchService.js')).toContain('splitPaidQueryBudget');
     expect(service('services/spendGuard.js')).toContain('provider_blocked');
+  });
+
+  it('campaigns cannot silently claim output after zero-useful-lead paths', () => {
+    const captain = service('services/captainBeaver.js');
+    const agents = service('services/agents.js');
+    const index = service('index.js');
+
+    expect(index).toContain('CAPTAIN_KPI_GAP_KICKOFF_ENABLED');
+    expect(captain).toContain('getRunCampaignPreflight');
+    expect(captain).toContain('campaign_background_failed');
+    expect(captain).toContain('campaign_blocked');
+    expect(agents).toContain('original_lead_count');
+    expect(agents).toContain('skipped_same_day');
+    expect(agents).toContain('signal_pipeline_skipped');
+    expect(agents).toContain('same_day_enrolled_dedupe');
+  });
+
+  it('VP spend ledger records paid contact enrichment immediately', () => {
+    expect(service('services/spendGuard.js')).toContain("metadata->>'provider' = 'vp'");
+    expect(service('services/spendGuard.js')).toContain("VP_CREDITS_PER_LEAD = envNumber('VP_CREDITS_PER_LEAD', 5)");
+    expect(service('services/vibeProspecting.js')).toContain("logProviderUsage('vp'");
+    expect(service('services/dbBuilder.js')).toContain("checkProvider('vp', { clientId, estimatedUnits: 5 })");
+    expect(service('services/dbBuilder.js')).toContain('checkVP(0, { clientId })');
   });
 
   it('LLM calls require client attribution before provider spend', () => {

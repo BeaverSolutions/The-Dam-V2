@@ -293,6 +293,13 @@ async function enrichProspectContacts(clientId, prospect_id) {
   const credits = result.payload?.credit_usage_breakdown
     ?.filter(c => c.operation_type === 'Contacts')
     ?.reduce((sum, c) => sum + (c.total_credits || 0), 0) ?? 0;
+  if (credits > 0) {
+    await spendGuard.logProviderUsage('vp', {
+      clientId,
+      units: credits,
+      metadata: { operation: 'enrichProspectContacts', prospect_id },
+    });
+  }
 
   if (!data) return { ok: true, email: null, credits };
   return {

@@ -46,10 +46,12 @@ const signalEnforcer = agents.includes('rangerResult') && agents.includes('range
 check('Enforcer gate exists in pipeline', signalEnforcer,
   signalEnforcer ? 'rangerResult + ranger_score found' : 'MISSING enforcer call in agents.js');
 
-// 2. Borderline 60-79 surfaced — both paths must check score range
-const borderlineCheck = (agents.match(/rangerScore >= 60 && rangerScore < 80/g) || []).length;
-check('Borderline 60-79 detection (both paths)', borderlineCheck >= 2,
-  `${borderlineCheck} site(s) found, need >= 2`);
+// 2. Borderline 60-79 surfaced — shared approval logic must own the range,
+// and both runtime paths must call that shared function.
+const borderlineCheck = (pipeline.match(/rangerScore >= 60 && rangerScore < 80/g) || []).length;
+const approvalCallSites = (agents.match(/applyEnforcerDecision/g) || []).length;
+check('Borderline 60-79 detection (shared + both paths)', borderlineCheck >= 1 && approvalCallSites >= 2,
+  `${borderlineCheck} shared site(s), ${approvalCallSites} agents.js call site(s)`);
 
 // 3. BANNED_PHRASES defined and non-empty
 const bannedMatch = agents.match(/BANNED_PHRASES\s*=\s*\[/);
@@ -58,10 +60,12 @@ const coldMatch = agents.match(/COLD_TELL_PHRASES\s*=\s*\[/);
 check('BANNED_PHRASES defined (split into VENDOR_SPEAK + COLD_TELL)', !!(bannedMatch && vendorMatch && coldMatch),
   bannedMatch ? 'all three arrays found' : 'MISSING banned phrase arrays');
 
-// 4. approval_audit write at both pipeline sites
-const auditWrites = (agents.match(/INSERT INTO approval_audit/g) || []).length;
-check('approval_audit wired at both pipeline paths', auditWrites >= 2,
-  `${auditWrites} INSERT site(s) found`);
+// 4. approval_audit write at shared decision path and fallback approval paths.
+const auditWrites = (pipeline.match(/INSERT INTO approval_audit/g) || []).length
+  + (agents.match(/INSERT INTO approval_audit/g) || []).length;
+const fallbackAuditHelper = agents.includes('writeApprovalAuditForMessage') && agents.includes('fallback_approval');
+check('approval_audit wired at shared and fallback paths', auditWrites >= 2 && fallbackAuditHelper,
+  `${auditWrites} INSERT site(s) found, fallback helper=${fallbackAuditHelper}`);
 
 // 5. pipeline_traces at key stages
 const traceStages = ['enrolled', 'drafted', 'draft_failed', 'reviewed', 'approved', 'sent', 'send_failed'];
@@ -82,7 +86,7 @@ check('VP sources email channel only', vpEmailOnly,
   vpEmailOnly ? 'channel guard found' : 'VP may source LinkedIn leads (credit waste)');
 
 // 8. Enforcer model is Sonnet (not Haiku)
-const enforcerModel = agents.match(/MODEL_SONNET|claude-sonnet/);
+const enforcerModel = readFile('config/agents.js').match(/ranger:\s*\{[\s\S]*model:\s*MODELS\.SONNET/);
 check('Enforcer uses Sonnet model', !!enforcerModel,
   enforcerModel ? 'Sonnet reference found' : 'Enforcer may be using wrong model');
 

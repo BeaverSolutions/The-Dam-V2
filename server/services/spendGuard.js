@@ -28,7 +28,7 @@ const CAPS = {
   apollo: envNumber('APOLLO_DAILY_QUERY_CAP', 0),
 };
 
-const VP_CREDITS_PER_LEAD = envNumber('VP_CREDITS_PER_LEAD', 3);
+const VP_CREDITS_PER_LEAD = envNumber('VP_CREDITS_PER_LEAD', 5);
 const klDateExpr = `(NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date`;
 
 function allowUnattributedMeteredCalls() {
@@ -61,11 +61,26 @@ async function vpSpentToday(clientId = null) {
       clientPredicate = `AND client_id = $${params.length}`;
     }
     const { rows } = await pool.query(
-      `SELECT COALESCE(SUM(NULLIF(metadata->>'credits_spent','')::int), 0) AS spent
-         FROM logs
-        WHERE action = 'vp_sourcing_complete'
-          ${clientPredicate}
-          AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = ${klDateExpr}`,
+      `WITH provider_ledger AS (
+         SELECT COALESCE(SUM(COALESCE(NULLIF(metadata->>'units','')::int, 0)), 0)::int AS spent
+           FROM logs
+          WHERE action = 'provider_usage'
+            AND metadata->>'provider' = 'vp'
+            ${clientPredicate}
+            AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = ${klDateExpr}
+       ),
+       legacy_ledger AS (
+         SELECT COALESCE(SUM(NULLIF(metadata->>'credits_spent','')::int), 0)::int AS spent
+           FROM logs
+          WHERE action = 'vp_sourcing_complete'
+            ${clientPredicate}
+            AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = ${klDateExpr}
+       )
+       SELECT CASE
+                WHEN provider_ledger.spent > 0 THEN provider_ledger.spent
+                ELSE legacy_ledger.spent
+              END AS spent
+         FROM provider_ledger, legacy_ledger`,
       params
     );
     return parseInt(rows[0]?.spent || 0, 10);
@@ -129,6 +144,16 @@ async function checkProvider(provider, { clientId = null, estimatedUnits = 1 } =
 
   if (provider === 'vp') {
     const vp = await checkVP(estimatedUnits, { clientId });
+    if (!vp.allowed) {
+      await logProviderBlocked(provider, {
+        clientId,
+        reason: 'daily_cap_reached',
+        estimatedUnits,
+        spentToday: vp.spentToday,
+        cap: vp.cap,
+        remaining: vp.remaining,
+      });
+    }
     return { ...vp, reason: vp.allowed ? null : 'daily_cap_reached' };
   }
 
