@@ -1045,7 +1045,9 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     const safePick = Math.min(pickCount, combined.length);
     const offset = safePick > 0 ? (batchIndex * safePick) % safeLength : 0;
     const rotated = [...combined.slice(offset), ...combined.slice(0, offset)];
-    const picked  = rotated.slice(0, Math.min(safePick, paidQueryCap));
+    let paidQueriesRemaining = paidQueryCap;
+    const picked  = rotated.slice(0, Math.min(safePick, paidQueriesRemaining));
+    paidQueriesRemaining -= picked.length;
     if (safePick > picked.length) {
       console.log(`[research] Capping paid query fanout from ${safePick} to ${picked.length} for this run`);
     }
@@ -1232,6 +1234,12 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       const freshSeen = new Set(usedSet);
       const freshUnused = freshPool.filter(q => !freshSeen.has(q.query));
 
+      if (paidQueriesRemaining <= 0) {
+        circuitBreakerTripped = `paid query cap (${paidQueryCap}) reached`;
+        console.warn(`[research] CIRCUIT BREAKER: ${circuitBreakerTripped} — stopping paid search`);
+        break;
+      }
+
       // If the current expansion level has no unused queries, escalate
       if (freshUnused.length === 0 && expansionLevel < 4) {
         expansionLevel++;
@@ -1241,7 +1249,8 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       }
 
       // Pick next batch of unused queries
-      const actualPicked = freshUnused.slice(0, Math.min(pickCount, freshUnused.length, paidQueryCap));
+      const actualPicked = freshUnused.slice(0, Math.min(pickCount, freshUnused.length, paidQueriesRemaining));
+      paidQueriesRemaining -= actualPicked.length;
 
       const retryDirectQueries = actualPicked.filter(q => q.strategy === 'direct');
       const retrySignalQueries = actualPicked.filter(q =>

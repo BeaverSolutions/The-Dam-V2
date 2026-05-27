@@ -62,6 +62,8 @@ describe('P0 stabilization contracts', () => {
     expect(service('services/spendGuard.js')).toContain("brave: envNumber('BRAVE_DAILY_QUERY_CAP', 50)");
     expect(service('services/searchService.js')).toContain('SEARCH_MAX_PAID_QUERIES_PER_OPERATION');
     expect(service('services/searchService.js')).toContain('splitPaidQueryBudget');
+    expect(service('services/research.js')).toContain('paidQueriesRemaining');
+    expect(service('services/research.js')).toContain("paid query cap (${paidQueryCap}) reached");
     expect(service('services/spendGuard.js')).toContain('provider_blocked');
   });
 
