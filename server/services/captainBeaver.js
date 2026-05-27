@@ -916,11 +916,12 @@ async function toolQueryLogs(clientId, { agent, action, hours, limit } = {}) {
 
 async function toolRunCampaign(clientId, { command, plan_id }) {
   const { v4: uuidV4 } = require('uuid');
+  const { runWithClientContext } = require('../middleware/clientContext');
   const planId = plan_id || uuidV4();
   // Fire-and-forget — directorExecute can take minutes, don't block the chat turn
   try {
     const { directorExecute } = require('./agents');
-    directorExecute(clientId, { plan_id: planId, command }).catch(err => {
+    runWithClientContext(clientId, () => directorExecute(clientId, { plan_id: planId, command })).catch(err => {
       console.error(`[captainBeaver:run_campaign] directorExecute failed: ${err.message}`);
     });
   } catch (err) {

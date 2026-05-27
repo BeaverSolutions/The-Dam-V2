@@ -39,6 +39,19 @@ function providerCap(provider) {
   return CAPS[provider] ?? 0;
 }
 
+async function logProviderBlocked(provider, { clientId, reason, estimatedUnits = 1, spentToday = 0, cap = 0, remaining = 0 } = {}) {
+  if (!clientId || !provider) return;
+  try {
+    await pool.query(
+      `INSERT INTO logs (client_id, agent, action, target_type, metadata)
+       VALUES ($1, 'system', 'provider_blocked', 'provider', $2)`,
+      [clientId, JSON.stringify({ provider, reason, estimatedUnits, spentToday, cap, remaining })]
+    );
+  } catch (err) {
+    console.warn(`[spendGuard] ${provider} block log failed:`, err.message);
+  }
+}
+
 async function vpSpentToday(clientId = null) {
   try {
     const params = [];
@@ -122,6 +135,7 @@ async function checkProvider(provider, { clientId = null, estimatedUnits = 1 } =
   const cap = providerCap(provider);
   if (cap <= 0) {
     console.warn(`[spendGuard] ${provider} BLOCKED - cap is ${cap}. Set provider cap env to allow usage.`);
+    await logProviderBlocked(provider, { clientId, reason: 'provider_cap_zero', estimatedUnits, cap, remaining: 0 });
     return { allowed: false, reason: 'provider_cap_zero', spentToday: 0, cap, remaining: 0 };
   }
 
@@ -130,6 +144,7 @@ async function checkProvider(provider, { clientId = null, estimatedUnits = 1 } =
   const allowed = spentToday + estimatedUnits <= cap;
   if (!allowed) {
     console.warn(`[spendGuard] ${provider} BLOCKED - spent ${spentToday} + requested ${estimatedUnits} exceeds cap ${cap}`);
+    await logProviderBlocked(provider, { clientId, reason: 'daily_cap_reached', estimatedUnits, spentToday, cap, remaining });
   }
   return { allowed, reason: allowed ? null : 'daily_cap_reached', spentToday, cap, remaining };
 }
@@ -152,6 +167,7 @@ module.exports = {
   vpSpentToday,
   checkProvider,
   logProviderUsage,
+  logProviderBlocked,
   providerUsageToday,
   CAPS,
   VP_CREDITS_PER_LEAD,

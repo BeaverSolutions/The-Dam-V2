@@ -60,12 +60,14 @@ describe('P0 stabilization contracts', () => {
     expect(service('services/spendGuard.js')).toContain("brave: envNumber('BRAVE_DAILY_QUERY_CAP', 0)");
     expect(service('services/searchService.js')).toContain('SEARCH_MAX_PAID_QUERIES_PER_OPERATION');
     expect(service('services/searchService.js')).toContain('splitPaidQueryBudget');
+    expect(service('services/spendGuard.js')).toContain('provider_blocked');
   });
 
   it('LLM calls require client attribution before provider spend', () => {
     expect(service('services/claude.js')).toContain('LLM_CLIENT_ID_REQUIRED');
     expect(service('services/claude.js')).toContain('allowUnattributedLLM');
     expect(service('services/llm/openai.js')).toContain('LLM_CLIENT_ID_REQUIRED');
+    expect(service('services/captainBeaver.js')).toContain('runWithClientContext(clientId');
     expect(service('../.env.example')).toContain('LLM_PROVIDER=anthropic');
     expect(service('../.env.example')).toContain('OPENAI_API_KEY=');
     expect(service('../.env.production.example')).toContain('LLM_PROVIDER=anthropic');
