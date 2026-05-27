@@ -1076,7 +1076,7 @@ async function start() {
     // already running, and cooldown has passed, fires another kickoff.
     // Guards: max 6 kickoffs/day, 25-min cooldown, working hours only.
     async function runKpiGapKickoff() {
-      if (process.env.CAPTAIN_KPI_GAP_KICKOFF_ENABLED !== 'true') return;
+      if (process.env.CAPTAIN_KPI_GAP_KICKOFF_ENABLED !== 'true') return { disabled: true };
 
       const now = new Date();
       const utcHour = now.getUTCHours();
@@ -1355,7 +1355,7 @@ async function start() {
         .then(() => { jobHealth.markRun('captain_directive_sweep'); })
         .catch(err => { logger.warn({ msg: 'Captain directive sweep error', err: err.message }); jobHealth.markError('captain_directive_sweep', err.message); });
       runKpiGapKickoff()
-        .then(() => { jobHealth.markRun('kpi_gap_kickoff'); })
+        .then(result => { if (!result?.disabled) jobHealth.markRun('kpi_gap_kickoff'); })
         .catch(err => { logger.warn({ msg: 'KPI gap kickoff poll error', err: err.message }); jobHealth.markError('kpi_gap_kickoff', err.message); });
     }, 10 * 60 * 1000);
     logger.info({ msg: 'Captain Beaver cron jobs registered (10min poll: 9am brief, 7pm EOD brief, hourly stuck-state monitor 9am-7pm, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, 30min KPI gap kickoff, all MYT)' });
