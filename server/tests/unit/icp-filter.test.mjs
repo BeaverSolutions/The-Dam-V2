@@ -5,8 +5,8 @@ const { leads } = require('../fixtures/synthetic-leads');
 // Inline the ICP logic for unit testing without loading the full agents.js dependency tree
 // (agents.js has heavy side effects: pool, claude, etc.)
 const ICP_ALLOWED_COUNTRIES = new Set([
-  'malaysia','singapore','australia','united states','united kingdom',
-  'my','sg','au','us','usa','uk','gb',
+  'malaysia','singapore','united states',
+  'my','sg','us','usa',
 ]);
 
 const ICP_SENIOR_STANDALONE = /\b(founder|co-?founder|ceo|chief executive|\bcro\b|chief revenue|coo|cfo|cto|managing director|managing partner|president|owner|principal|proprietor|\bmd\b|chairman|chairwoman)\b/i;
@@ -124,6 +124,12 @@ describe('ICP v2 Filter', () => {
     it('passes United States founder', () => {
       const result = applyIcpV2Filter(leads[5]); // John Smith, US
       expect(result.pass).toBe(true);
+    });
+
+    it('rejects Australia unless tenant ICP is expanded', () => {
+      const result = applyIcpV2Filter({ name: 'Ava Smith', company: 'Growth Ops Pty Ltd', title: 'Founder', country: 'Australia', score: 80 });
+      expect(result.pass).toBe(false);
+      expect(result.status).toBe('rejected_country');
     });
 
     it('rejects empty/unresolved country', () => {

@@ -72,8 +72,12 @@ describe('P0 stabilization contracts', () => {
 
     expect(index).toContain('CAPTAIN_KPI_GAP_KICKOFF_ENABLED');
     expect(captain).toContain('getRunCampaignPreflight');
+    expect(captain).toContain('buildCampaignCommandFromClientConfig');
+    expect(captain).toContain('isLeadCampaignRequest');
     expect(captain).toContain('campaign_background_failed');
     expect(captain).toContain('campaign_blocked');
+    expect(captain).toContain("NULLIF(BTRIM(l.company), '') IS NOT NULL");
+    expect(agents).toContain("NULLIF(BTRIM(l.company), '') IS NOT NULL");
     expect(agents).toContain('original_lead_count');
     expect(agents).toContain('skipped_same_day');
     expect(agents).toContain('signal_pipeline_skipped');
@@ -130,6 +134,14 @@ describe('P0 stabilization contracts', () => {
     expect(agents).not.toContain("lead.email_source === 'apollo'");
     expect(service('services/apollo.js')).toContain("checkProvider('apollo'");
     expect(service('services/apollo.js')).toContain("logProviderUsage('apollo'");
+  });
+
+  it('research company-first strategy cannot spend outside the paid query picker', () => {
+    const research = service('services/research.js');
+    expect(research).toContain('const companyQueries = picked.filter');
+    expect(research).toContain('queryItems');
+    expect(research).toContain('maxFallbackProfileQueries');
+    expect(research).toContain('fallbackProfileBudget > 0');
   });
 
   it('autonomous routes require the internal key at router level', () => {

@@ -846,15 +846,22 @@ async function strategyDirectPeople(queryItem, limit) {
  * Step 2 — For each company: Hunter domainSearch to find decision-makers.
  * Returns leads with real emails where Hunter finds them.
  */
-async function strategyCompanyFirst(clientId, icpMemory, limit) {
+async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
   const leads = [];
 
   try {
-    // Pull company queries from the query pool
-    const queryPool = buildQueryPool(icpMemory);
-    const companyQueries = queryPool
-      .filter(q => q.strategy === 'company')
-      .slice(0, 3); // cap at 3 company queries to limit API spend
+    const suppliedQueries = Array.isArray(options.queryItems) ? options.queryItems.filter(Boolean) : null;
+    const maxCompanyQueries = Number.isFinite(Number(options.maxCompanyQueries))
+      ? Math.max(0, Number(options.maxCompanyQueries))
+      : 3;
+    let fallbackProfileBudget = Number.isFinite(Number(options.maxFallbackProfileQueries))
+      ? Math.max(0, Number(options.maxFallbackProfileQueries))
+      : 0;
+
+    // Pull company queries from the paid-query picker. When suppliedQueries is
+    // present, the caller already counted each item against maxPaidQueries.
+    const queryPool = suppliedQueries || buildQueryPool(icpMemory).filter(q => q.strategy === 'company');
+    const companyQueries = queryPool.slice(0, suppliedQueries ? suppliedQueries.length : maxCompanyQueries);
 
     for (const item of companyQueries) {
       try {
@@ -911,9 +918,10 @@ async function strategyCompanyFirst(clientId, icpMemory, limit) {
                 data_source:    'hunter_domain',
               }));
             }
-          } else if (companyName) {
+          } else if (companyName && fallbackProfileBudget > 0) {
             // Fallback: Brave people search scoped to this company
             try {
+              fallbackProfileBudget--;
               const fallbackQuery = `site:linkedin.com/in "${companyName}" CEO OR Founder`;
               const fallbackResults = await searchService.searchLinkedInProfiles(fallbackQuery, 3, { country: item.country || 'MY' });
               for (const r of fallbackResults) {
@@ -1048,7 +1056,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     const signalJobsQueries  = picked.filter(q => q.strategy === 'signal_jobs');
     const signalNewsQueries  = picked.filter(q => q.strategy === 'signal_news');
     const signalGrowthQueries = picked.filter(q => q.strategy === 'signal_growth');
-    // Company queries are handled inside strategyCompanyFirst via buildQueryPool
+    const companyQueries = picked.filter(q => q.strategy === 'company');
 
     // 5 & 6. Run all strategies in parallel
     const allSignalCount = signalQueries.length + signalJobsQueries.length + signalNewsQueries.length + signalGrowthQueries.length;
@@ -1100,7 +1108,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     );
 
     const signalGrowthPromises = signalGrowthQueries.map(q =>
-      strategyCompanyFirst(clientId, { ...icpMemory, industries: q.industry }, 3)
+      strategyCompanyFirst(clientId, { ...icpMemory, industries: q.industry }, 3, { queryItems: [q], maxFallbackProfileQueries: 0 })
         .then(leads => leads.map(l => ({
           ...l,
           signal: l.signal || `Growth signal: ${q.industry} company in ${q.location} showing employee growth`,
@@ -1113,11 +1121,13 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         })
     );
 
-    const companyPromise = strategyCompanyFirst(clientId, icpMemory, targetCount)
-      .catch(err => {
-        console.warn('[research] Company-first strategy failed:', err.message);
-        return [];
-      });
+    const companyPromise = companyQueries.length > 0
+      ? strategyCompanyFirst(clientId, icpMemory, targetCount, { queryItems: companyQueries, maxFallbackProfileQueries: 0 })
+        .catch(err => {
+          console.warn('[research] Company-first strategy failed:', err.message);
+          return [];
+        })
+      : Promise.resolve([]);
 
     const [directResults, signalResults, signalJobsResults, signalNewsResults, signalGrowthResults, companyLeads] = await Promise.all([
       Promise.all(directPromises).then(arrays => arrays.flat()),

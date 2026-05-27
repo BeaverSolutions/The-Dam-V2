@@ -31,6 +31,7 @@ const pool = require('../db/pool');
 const logsService = require('./logs');
 const { callAgentWithTools } = require('./claude');
 const { searchOpenWeb } = require('./searchService');
+const { getLegacyIcpForClient } = require('./tenantContext');
 const {
   processExistingLeadsPipeline,
   autoFixMessage,
@@ -434,7 +435,15 @@ const TOOLS = [
 // ─── Tool handler implementations ──────────────────────────────────────────
 
 async function toolSearchInternalLeads(clientId, { industry, location, signal_tier, limit, include_contacted }) {
-  const conditions = ['client_id = $1', 'deleted_at IS NULL'];
+  const conditions = [
+    'client_id = $1',
+    'deleted_at IS NULL',
+    "pipeline_stage = 'prospecting'",
+    "status = 'new'",
+    "NULLIF(BTRIM(name), '') IS NOT NULL",
+    "NULLIF(BTRIM(company), '') IS NOT NULL",
+    "LOWER(BTRIM(company)) NOT IN ('unknown', 'unknown company', 'independent', 'self-employed', 'self employed', 'stealth', 'confidential')",
+  ];
   const params = [clientId];
 
   // By default, exclude recently contacted leads and leads with pending outreach
@@ -707,10 +716,14 @@ async function toolWebSearchBrave(clientId, { query, count }) {
 }
 
 async function toolGetClientConfig(clientId) {
-  const [icp, persona] = await Promise.all([
+  const [memoryIcp, persona] = await Promise.all([
     directorGetICP(clientId).catch(() => null),
     getClientPersona(clientId).catch(() => null),
   ]);
+  const icp = await getLegacyIcpForClient(clientId, {
+    source: 'captain_beaver',
+    fallback: memoryIcp,
+  }).catch(() => memoryIcp);
   return { icp, persona };
 }
 
@@ -930,6 +943,44 @@ function campaignTargetFromCommand(command) {
   return Math.max(1, Math.min(target, 50));
 }
 
+function listFromIcp(value) {
+  if (Array.isArray(value)) return value.map(v => String(v || '').trim()).filter(Boolean);
+  if (typeof value !== 'string') return [];
+  return value.split(',').map(v => v.trim()).filter(Boolean);
+}
+
+async function authoritativeIcp(clientId) {
+  const fallback = await directorGetICP(clientId).catch(() => null);
+  return getLegacyIcpForClient(clientId, {
+    source: 'captain_beaver',
+    fallback,
+  }).catch(() => fallback || {});
+}
+
+async function buildCampaignCommandFromClientConfig(clientId, rawCommand) {
+  const target = campaignTargetFromCommand(rawCommand);
+  const icp = await authoritativeIcp(clientId);
+  const geographies = listFromIcp(icp?.geographies || icp?.geography || icp?.location);
+  const industries = listFromIcp(icp?.industries).slice(0, 12);
+  const titles = listFromIcp(icp?.job_titles || icp?.who).slice(0, 12);
+
+  return [
+    `Find ${target} approval-ready new leads matching the current tenant ICP.`,
+    `Target geographies: ${geographies.length ? geographies.join(', ') : 'current tenant ICP geography'}.`,
+    industries.length ? `Target industries: ${industries.join(', ')}.` : null,
+    titles.length ? `Target titles: ${titles.join(', ')}.` : null,
+    'Exclude prior outreach, duplicates, incomplete profiles, MNCs/global agencies, freelancers, academic/government leads, and companies outside the current ICP.',
+    `Original user request: "${String(rawCommand || '').replace(/\s+/g, ' ').trim().slice(0, 240)}".`,
+  ].filter(Boolean).join(' ');
+}
+
+function isLeadCampaignRequest(command) {
+  const cmd = String(command || '');
+  if (REFERENTIAL_WORDS.test(cmd)) return false;
+  return /\b(find|source|get|research|run|start|kickoff)\b/i.test(cmd)
+    && /\b(leads?|companies|prospects?|outreach|campaign|kickoff)\b/i.test(cmd);
+}
+
 async function getRunCampaignPreflight(clientId, command) {
   const target = campaignTargetFromCommand(command);
   const { rows: [{ eligible_count }] } = await pool.query(
@@ -938,6 +989,10 @@ async function getRunCampaignPreflight(clientId, command) {
       WHERE l.client_id = $1
         AND l.deleted_at IS NULL
         AND l.status = 'new'
+        AND l.pipeline_stage = 'prospecting'
+        AND NULLIF(BTRIM(l.name), '') IS NOT NULL
+        AND NULLIF(BTRIM(l.company), '') IS NOT NULL
+        AND LOWER(BTRIM(l.company)) NOT IN ('unknown', 'unknown company', 'independent', 'self-employed', 'self employed', 'stealth', 'confidential')
         AND (l.email IS NOT NULL OR l.linkedin_url IS NOT NULL)
         AND NOT EXISTS (
           SELECT 1 FROM messages m
@@ -978,13 +1033,15 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
   const { v4: uuidV4 } = require('uuid');
   const { runWithClientContext } = require('../middleware/clientContext');
   const planId = plan_id || uuidV4();
-  const preflight = await getRunCampaignPreflight(clientId, command);
+  const originalCommand = command || '';
+  const campaignCommand = await buildCampaignCommandFromClientConfig(clientId, originalCommand);
+  const preflight = await getRunCampaignPreflight(clientId, campaignCommand);
   if (preflight.eligible_count === 0 && !preflight.has_research_provider) {
     await logsService.createLog(clientId, {
       agent: 'captain_beaver',
       action: 'campaign_blocked',
       target_type: 'system',
-      metadata: { plan_id: planId, command, preflight, reason: 'no_eligible_db_leads_and_no_research_provider' },
+      metadata: { plan_id: planId, command: campaignCommand, original_command: originalCommand, preflight, reason: 'no_eligible_db_leads_and_no_research_provider' },
     }).catch(() => {});
     return {
       ok: false,
@@ -998,19 +1055,19 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
     agent: 'captain_beaver',
     action: 'campaign_started',
     target_type: 'system',
-    metadata: { plan_id: planId, command, preflight },
+    metadata: { plan_id: planId, command: campaignCommand, original_command: originalCommand, preflight },
   }).catch(() => {});
 
   // Fire-and-forget — directorExecute can take minutes, don't block the chat turn
   try {
     const { directorExecute } = require('./agents');
-    runWithClientContext(clientId, () => directorExecute(clientId, { plan_id: planId, command, limit: preflight.target })).catch(err => {
+    runWithClientContext(clientId, () => directorExecute(clientId, { plan_id: planId, command: campaignCommand, limit: preflight.target })).catch(err => {
       console.error(`[captainBeaver:run_campaign] directorExecute failed: ${err.message}`);
       logsService.createLog(clientId, {
         agent: 'captain_beaver',
         action: 'campaign_background_failed',
         target_type: 'system',
-        metadata: { plan_id: planId, command, error: err.message, stack_head: err.stack?.split('\n').slice(0, 3) },
+        metadata: { plan_id: planId, command: campaignCommand, original_command: originalCommand, error: err.message, stack_head: err.stack?.split('\n').slice(0, 3) },
       }).catch(() => {});
     });
   } catch (err) {
@@ -1018,7 +1075,7 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
       agent: 'captain_beaver',
       action: 'campaign_start_failed',
       target_type: 'system',
-      metadata: { plan_id: planId, command, error: err.message },
+      metadata: { plan_id: planId, command: campaignCommand, original_command: originalCommand, error: err.message },
     }).catch(() => {});
     return { ok: false, error: err.message };
   }
@@ -1026,7 +1083,7 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
     ok: true,
     status: 'queued_unproven',
     preflight,
-    message: 'Campaign queued; output is not proven yet. Research, Sales, and Enforcer are running in background.',
+    message: `Campaign queued; output is not proven yet. Current ICP geographies are ${campaignCommand.match(/Target geographies: ([^.]+)/)?.[1] || 'from tenant config'}. Research, Sales, and Enforcer are running in background.`,
   };
 }
 
@@ -1444,6 +1501,18 @@ async function handleChat(clientId, command, options = {}) {
     const fastResult = await handleSimpleReadQuery(clientId, command);
     if (fastResult) return fastResult;
     // If fast-path produced nothing, fall through to full Sonnet path
+  }
+
+  // Lead-finding commands should not rely on the chat LLM to rewrite the ICP.
+  // The campaign tool builds an authoritative brief from tenant config, then
+  // runs the async Research -> Sales -> Enforcer flow.
+  if (isLeadCampaignRequest(command)) {
+    const campaignResult = await toolRunCampaign(clientId, { command });
+    return formatResponse(campaignResult.message || 'Campaign queued; output is not proven yet.', {
+      fast_path: true,
+      tool: 'run_campaign',
+      status: campaignResult.status,
+    });
   }
 
   // ── Memory injection: prepend recent learnings so Captain has context ─────

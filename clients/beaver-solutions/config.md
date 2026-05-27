@@ -150,7 +150,7 @@ Allocate 20% of outreach to these verticals. Do not scale until conversion data 
 
 **Signal over job title:** A founder actively posting about scaling beats a CEO with no visible LinkedIn activity.
 **Ticket size filter:** Minimum RM 3,000/month or RM 15,000 per project across all ICPs.
-**Malaysia first:** Phase 1 is Malaysia only
+**Target geography:** Malaysia, Singapore, and United States. Do not narrow to Malaysia-only or MY/SG-only unless MJ explicitly asks for a narrower run.
 **Priority split:** ICP 1: 50% / ICP 2: 30% / ICP 3: 20%
 **Angle selection order:** Pipeline inconsistency → Founder doing all sales → Failed alternatives (ads/hiring) → Scaling without a system
 **Solo founder rule:** ICP 2 requires at least one visible buying signal before outreach. No cold-targeting founders with zero LinkedIn presence.
@@ -167,7 +167,7 @@ Allocate 20% of outreach to these verticals. Do not scale until conversion data 
 We build an AI-powered sales crew that finds your ideal clients, writes personalised outreach, and follows up automatically — so you get consistent meetings without hiring a sales team.
 
 **Key differentiator:**
-The only outbound solution built specifically for Malaysian B2B founders — we understand local business culture, relationships, and how decisions are actually made here.
+The outbound operating system built for founder-led B2B companies that need consistent meetings without hiring a sales team.
 
 **Social proof:**
 Running our own pipeline on BeavrDam — generating 80+ outreach per day autonomously. We eat our own cooking.

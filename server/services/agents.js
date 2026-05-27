@@ -28,9 +28,9 @@ const CHANNEL_HINTS = {
 };
 
 // ICP+channel patches per MJ direction 2026-04-29
-// ─── ICP v2: Beaver Solutions tenant — MY+SG, sales/BD/revenue persona ──────
-// 2026-05-14: narrowed scope per MJ direction.
-// - Geo: MY+SG only (Phase 1). ID/PH/TH/VN re-enable when Phase 2 expansion runs.
+// ─── ICP v2: Beaver Solutions tenant — MY+SG+US, sales/BD/revenue persona ───
+// 2026-05-28: locked to current tenant ICP geography. Do not use stale MY/SG-only
+// logic, and do not admit AU/UK unless the tenant ICP is deliberately expanded.
 // - Persona: sales/BD/revenue/commercial only. Marketing/growth/brand/comms/
 //   partnerships/operations REMOVED — BeavrDam's buyer is the head of OUTBOUND
 //   (CRO / Head of Sales / VP BD / Founder doing outbound at SMB level), not
@@ -38,12 +38,10 @@ const CHANNEL_HINTS = {
 // - CMO removed from standalone — was a Beaver-irrelevant exception slipping leads.
 // When Emplifive onboards as a BeavrDam tenant, these constants split per-tenant.
 const ICP_ALLOWED_COUNTRIES = new Set([
-  // SEA-2 (Beaver Solutions home)
   'malaysia','singapore',
   'my','sg',
-  // 2026-05-23: expanded per MJ — AU/US/UK added for global SMB B2B founder ICP
-  'australia','united states','united kingdom',
-  'au','us','usa','uk','gb',
+  'united states',
+  'us','usa',
 ]);
 
 // 2026-05-23: explicit deny list — fires BEFORE the allow check. Defensive
@@ -3031,6 +3029,10 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
        WHERE l.client_id = $1
          AND l.deleted_at IS NULL
          AND l.status = 'new'
+         AND l.pipeline_stage = 'prospecting'
+         AND NULLIF(BTRIM(l.name), '') IS NOT NULL
+         AND NULLIF(BTRIM(l.company), '') IS NOT NULL
+         AND LOWER(BTRIM(l.company)) NOT IN ('unknown', 'unknown company', 'independent', 'self-employed', 'self employed', 'stealth', 'confidential')
          AND (l.email IS NOT NULL OR l.linkedin_url IS NOT NULL)
           AND NOT EXISTS (
             SELECT 1 FROM messages m
