@@ -1029,6 +1029,32 @@ async function getRunCampaignPreflight(clientId, command) {
   };
 }
 
+async function findRecentRunningExecution(clientId) {
+  const { rows } = await pool.query(
+    `SELECT key, updated_at
+       FROM agent_memory
+      WHERE client_id = $1
+        AND agent = 'director'
+        AND key LIKE 'exec_%'
+        AND content->>'status' = 'executing'
+        AND updated_at >= NOW() - INTERVAL '10 minutes'
+      ORDER BY updated_at DESC
+      LIMIT 1`,
+    [clientId]
+  );
+  return rows[0] || null;
+}
+
+async function persistExecTerminalStatus(clientId, planId, content) {
+  await pool.query(
+    `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
+     VALUES ($1, 'director', $2, $3::jsonb, 'config', NOW())
+     ON CONFLICT (client_id, agent, key)
+     DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
+    [clientId, `exec_${planId}`, JSON.stringify(content)]
+  );
+}
+
 async function toolRunCampaign(clientId, { command, plan_id }) {
   const { v4: uuidV4 } = require('uuid');
   const { runWithClientContext } = require('../middleware/clientContext');
@@ -1036,6 +1062,23 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
   const originalCommand = command || '';
   const campaignCommand = await buildCampaignCommandFromClientConfig(clientId, originalCommand);
   const preflight = await getRunCampaignPreflight(clientId, campaignCommand);
+  const running = await findRecentRunningExecution(clientId).catch(() => null);
+  if (running) {
+    const runningPlanId = String(running.key || '').replace(/^exec_/, '');
+    await logsService.createLog(clientId, {
+      agent: 'captain_beaver',
+      action: 'campaign_blocked',
+      target_type: 'system',
+      metadata: { plan_id: planId, existing_plan_id: runningPlanId, command: campaignCommand, original_command: originalCommand, preflight, reason: 'campaign_already_running' },
+    }).catch(() => {});
+    return {
+      ok: false,
+      status: 'busy',
+      plan_id: runningPlanId,
+      preflight,
+      message: 'Campaign not started: another lead campaign is already running. Wait for that run to finish before starting another one.',
+    };
+  }
   if (preflight.eligible_count === 0 && !preflight.has_research_provider) {
     await logsService.createLog(clientId, {
       agent: 'captain_beaver',
@@ -1046,6 +1089,8 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
     return {
       ok: false,
       status: 'blocked',
+      plan_id: planId,
+      preflight,
       reason: 'no_eligible_db_leads_and_no_research_provider',
       message: 'Campaign blocked: no eligible fresh DB leads and no capped research provider is enabled.',
     };
@@ -1061,13 +1106,24 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
   // Fire-and-forget — directorExecute can take minutes, don't block the chat turn
   try {
     const { directorExecute } = require('./agents');
-    runWithClientContext(clientId, () => directorExecute(clientId, { plan_id: planId, command: campaignCommand, limit: preflight.target })).catch(err => {
+    runWithClientContext(clientId, () => directorExecute(clientId, { plan_id: planId, command: campaignCommand, limit: preflight.target })).then(result => {
+      return persistExecTerminalStatus(clientId, planId, {
+        status: 'completed',
+        result,
+        completed_at: new Date().toISOString(),
+      });
+    }).catch(err => {
       console.error(`[captainBeaver:run_campaign] directorExecute failed: ${err.message}`);
       logsService.createLog(clientId, {
         agent: 'captain_beaver',
         action: 'campaign_background_failed',
         target_type: 'system',
         metadata: { plan_id: planId, command: campaignCommand, original_command: originalCommand, error: err.message, stack_head: err.stack?.split('\n').slice(0, 3) },
+      }).catch(() => {});
+      persistExecTerminalStatus(clientId, planId, {
+        status: 'failed',
+        error: err.message,
+        failed_at: new Date().toISOString(),
       }).catch(() => {});
     });
   } catch (err) {
@@ -1077,11 +1133,12 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
       target_type: 'system',
       metadata: { plan_id: planId, command: campaignCommand, original_command: originalCommand, error: err.message },
     }).catch(() => {});
-    return { ok: false, error: err.message };
+    return { ok: false, status: 'failed', plan_id: planId, preflight, error: err.message };
   }
   return {
     ok: true,
     status: 'queued_unproven',
+    plan_id: planId,
     preflight,
     message: `Campaign queued; output is not proven yet. Current ICP geographies are ${campaignCommand.match(/Target geographies: ([^.]+)/)?.[1] || 'from tenant config'}. Research, Sales, and Enforcer are running in background.`,
   };
@@ -1402,13 +1459,14 @@ function buildToolHandler(clientId) {
 // Frontend expects { plan_id, status: 'captain_response', source, message }
 
 function formatResponse(content, meta = {}) {
-  return {
+  const response = {
     plan_id: uuidv4(),
-    status: 'captain_response',
     source: 'captain_beaver',
     message: content,
     ...meta,
   };
+  response.status = 'captain_response';
+  return response;
 }
 
 // ─── Fast-path helpers (avoid Sonnet for simple read queries) ────────────────
@@ -1511,7 +1569,9 @@ async function handleChat(clientId, command, options = {}) {
     return formatResponse(campaignResult.message || 'Campaign queued; output is not proven yet.', {
       fast_path: true,
       tool: 'run_campaign',
-      status: campaignResult.status,
+      plan_id: campaignResult.plan_id,
+      campaign_status: campaignResult.status,
+      preflight: campaignResult.preflight,
     });
   }
 

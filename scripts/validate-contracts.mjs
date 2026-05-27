@@ -144,6 +144,25 @@ check('Research paid-query fanout capped by remaining capacity', researchFanoutC
   researchFanoutCap ? 'research receives maxPaidQueries and blocks when paid capacity is exhausted' : 'research may fan out after caps are exhausted');
 
 // ── Summary ──
+// 16. Captain chat campaigns must not create duplicate UI executions, and hidden
+// Captain executions must finalize exec state after directorExecute resolves.
+const captainNoDuplicateRun = captainBeaver.includes("response.status = 'captain_response'")
+  && captainBeaver.includes('campaign_status: campaignResult.status')
+  && !captainBeaver.includes('\n      status: campaignResult.status,')
+  && captainBeaver.includes('findRecentRunningExecution')
+  && captainBeaver.includes('persistExecTerminalStatus');
+check('Captain campaign launch is single-run and terminal-state safe', captainNoDuplicateRun,
+  captainNoDuplicateRun ? 'Captain response cannot become a frontend plan + hidden runs finalize exec state' : 'Captain chat may double-run or leave exec state stuck');
+
+// 17. Zero-output diagnostics must distinguish provider/parser candidates from
+// Research-verified leads so "raw_count=0" cannot hide upstream rejection.
+const researchDiagnosticTruth = agents.includes('provider_candidates')
+  && agents.includes('research_verified')
+  && agents.includes('Provider/search parser returned 0 usable candidates')
+  && agents.includes('Research verification rejected all');
+check('Research zero-output diagnostics separate provider candidates from verified leads', researchDiagnosticTruth,
+  researchDiagnosticTruth ? 'provider_candidates + research_verified are logged' : 'zero-output diagnostics still collapse provider/parser/verification layers');
+
 const failures = results.filter(r => !r.pass);
 console.log(`\n${results.length} checks: ${results.length - failures.length} passed, ${failures.length} failed`);
 

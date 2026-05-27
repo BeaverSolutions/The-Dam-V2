@@ -117,12 +117,17 @@ function SummaryCard({ summary, diagnostics, onGoToApprovals }) {
           <div style={{ fontSize: '0.7rem', color: 'var(--text)', lineHeight: 1.8 }}>
             {diagnostics.research_source && <div>Source: <span style={{ color: 'var(--blue)' }}>{diagnostics.research_source}</span></div>}
             {diagnostics.search_query && <div>Query: <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>"{diagnostics.search_query}"</span></div>}
-            <div>Raw results: <b>{diagnostics.raw_from_research ?? '?'}</b>
+            {diagnostics.provider_candidates != null && (
+              <div>Provider candidates: <b>{diagnostics.provider_candidates}</b></div>
+            )}
+            <div>Research verified: <b>{diagnostics.research_verified ?? diagnostics.raw_from_research ?? '?'}</b>
               {diagnostics.after_title_filter != null && <> → Title filter: <b>{diagnostics.after_title_filter}</b></>}
               {diagnostics.after_verification_gate != null && <> → Verified: <b>{diagnostics.after_verification_gate}</b></>}
               {diagnostics.after_dedup != null && <> → After dedup: <b>{diagnostics.after_dedup}</b></>}
               {diagnostics.saved != null && <> → Saved: <b>{diagnostics.saved}</b></>}
             </div>
+            {diagnostics.research_rejected != null && <div>Research rejected: <b>{diagnostics.research_rejected}</b></div>}
+            {diagnostics.research_circuit_breaker && <div>Circuit breaker: <span style={{ color: 'var(--orange)' }}>{diagnostics.research_circuit_breaker}</span></div>}
             {messages_failed > 0 && <div style={{ color: 'var(--danger)' }}>Draft failures: {messages_failed}</div>}
             {diagnostics.reason && <div style={{ color: 'var(--orange)', marginTop: '0.25rem' }}>{diagnostics.reason}</div>}
           </div>

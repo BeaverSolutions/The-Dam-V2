@@ -220,6 +220,9 @@ async function callBrave(searchQuery, num, country = 'MY') {
   const clientId = currentClientId();
   const guard = await spendGuard.checkProvider('brave', { clientId, estimatedUnits: 1 });
   if (!guard.allowed) throw providerBlockedError('brave', guard);
+  // Brave's web-search country enum is limited; SG requests returned 422 in prod.
+  // Keep the query SG-specific ("Pte Ltd") but use a supported regional bias.
+  const braveCountry = String(country).toUpperCase() === 'SG' ? 'MY' : String(country).toUpperCase();
 
   // 2026-05-23: country now caller-controllable. Default MY for backward
   // compat with existing call sites (LinkedIn search, signal search). New
@@ -229,7 +232,7 @@ async function callBrave(searchQuery, num, country = 'MY') {
     params: {
       q: searchQuery,
       count: Math.min(num, 20),
-      country: String(country).toUpperCase(),
+      country: braveCountry,
       search_lang: 'en',
       safesearch: 'moderate',
     },
@@ -243,7 +246,7 @@ async function callBrave(searchQuery, num, country = 'MY') {
   await spendGuard.logProviderUsage('brave', {
     clientId,
     units: 1,
-    metadata: { query_preview: String(searchQuery).slice(0, 160), country: String(country).toUpperCase(), count: Math.min(num, 20) },
+    metadata: { query_preview: String(searchQuery).slice(0, 160), country: braveCountry, requested_country: String(country).toUpperCase(), count: Math.min(num, 20) },
   });
 
   const results = resp.data?.web?.results || [];
@@ -315,7 +318,11 @@ async function withFallback(label, searchQuery, num, parseItems, options = {}) {
   // 1. Brave (primary)
   try {
     const items = await callBrave(searchQuery, num, country);
-    if (items.length > 0) return parseItems(items);
+    if (items.length > 0) {
+      const parsed = parseItems(items);
+      if (parsed.length > 0) return parsed;
+      console.warn(`[search] Brave returned ${items.length} ${label} item(s), parser extracted 0 usable result(s); falling back to Google CSE`);
+    }
   } catch (err) {
     await logProviderError('brave', err, { mode: label, query_preview: String(searchQuery).slice(0, 160) });
     console.warn(`[search] Brave failed: ${err.message}, falling back to Google CSE`);

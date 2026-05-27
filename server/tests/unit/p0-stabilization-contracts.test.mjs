@@ -78,8 +78,17 @@ describe('P0 stabilization contracts', () => {
     expect(captain).toContain('isLeadCampaignRequest');
     expect(captain).toContain('campaign_background_failed');
     expect(captain).toContain('campaign_blocked');
+    expect(captain).toContain('findRecentRunningExecution');
+    expect(captain).toContain('persistExecTerminalStatus');
+    expect(captain).toContain("response.status = 'captain_response'");
+    expect(captain).toContain('campaign_status: campaignResult.status');
+    expect(captain).not.toContain('\n      status: campaignResult.status,');
     expect(captain).toContain("NULLIF(BTRIM(l.company), '') IS NOT NULL");
     expect(agents).toContain("NULLIF(BTRIM(l.company), '') IS NOT NULL");
+    expect(agents).toContain('Provider/search parser returned 0 usable candidates');
+    expect(agents).toContain("status: 'completed'");
+    expect(agents).toContain('research_verified');
+    expect(agents).toContain('provider_candidates');
     expect(agents).toContain('original_lead_count');
     expect(agents).toContain('skipped_same_day');
     expect(agents).toContain('signal_pipeline_skipped');

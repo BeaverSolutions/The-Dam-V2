@@ -554,10 +554,23 @@ async function researchSearch(clientId, { query, command = null, filters = {} })
     const multiLeads = researchResult.leads || [];
     console.log(`[research_beaver] Multi-source returned ${multiLeads.length} leads via ${researchResult.queriesUsed?.length || 0} queries`);
 
+    const researchDiagnostics = {
+      pool_stats: researchResult.pool_stats || null,
+      verification_stats: researchResult.verification_stats || null,
+      scoring_stats: researchResult.scoring_stats || null,
+      layer1_candidates: researchResult.verification_stats?.candidates ?? null,
+      candidates_total: researchResult.verification_stats?.candidates_total ?? null,
+      queries_total: researchResult.verification_stats?.queries_total ?? null,
+      rounds_ran: researchResult.verification_stats?.rounds_ran ?? null,
+      circuit_breaker_tripped: researchResult.verification_stats?.circuit_breaker_tripped ?? null,
+      layer2_verified: researchResult.verification_stats?.verified ?? null,
+      layer2_rejected: researchResult.verification_stats?.rejected ?? null,
+    };
+
     if (multiLeads.length > 0) {
       return {
         success: true,
-        data: { leads: multiLeads, query: researchResult.queriesUsed?.join(' | ') || query, filters, source: 'multi' },
+        data: { leads: multiLeads, query: researchResult.queriesUsed?.join(' | ') || query, filters, source: 'multi', diagnostics: researchDiagnostics },
       };
     }
 
@@ -594,6 +607,18 @@ async function researchSearch(clientId, { query, command = null, filters = {} })
   if (!providers.brave) missingKeys.push('BRAVE_API_KEY');
   if (!providers.google_cse) missingKeys.push('GOOGLE_CSE_API_KEY/CX');
   const noProviderConfigured = !providers.brave && !providers.google_cse && !providers.apollo;
+  const verificationStats = researchResult?.verification_stats || {};
+  const candidatesTotal = verificationStats.candidates_total ?? verificationStats.candidates ?? null;
+  const noResultsNote = noProviderConfigured
+    ? 'No configured research provider is usable'
+    : (Number(candidatesTotal) > 0
+        ? 'Provider/parser produced candidates, but Research verification rejected all'
+        : 'Provider/parser returned 0 usable candidates');
+  const likelyCause = noProviderConfigured
+    ? 'NO_SEARCH_PROVIDER — Brave, Google CSE, and Apollo all unconfigured'
+    : (Number(candidatesTotal) > 0
+        ? 'VERIFICATION_REJECTED_ALL — provider/parser produced candidates but Layer 2 rejected every one'
+        : 'PROVIDER_OR_PARSER_ZERO — provider returned no usable candidates, parser dropped all items, or query was too narrow');
 
   await logsService.createLog(clientId, {
     agent: 'research_beaver',
@@ -604,28 +629,24 @@ async function researchSearch(clientId, { query, command = null, filters = {} })
       command: command ? String(command).slice(0, 200) : null,
       queries_preview: researchResult?.queriesUsed?.slice?.(0, 10) || [],
       source: 'multi',
-      note: 'All sources returned 0 results',
+      note: noResultsNote,
       // diagnostics — read these first when self-sourcing yields 0
       providers_configured: providers,
       multi_error: multiError || null,
       // Initial-pass scope (legacy fields — kept for back-compat with prior log readers)
-      layer1_candidates: researchResult?.verification_stats?.candidates ?? null,
-      layer2_verified: researchResult?.verification_stats?.verified ?? null,
-      layer2_rejected: researchResult?.verification_stats?.rejected ?? null,
+      layer1_candidates: verificationStats.candidates ?? null,
+      layer2_verified: verificationStats.verified ?? null,
+      layer2_rejected: verificationStats.rejected ?? null,
       queries_run: researchResult?.queriesUsed?.length ?? null,
       pool_exhaustion_pct: researchResult?.pool_stats?.exhaustion_pct ?? null,
       // Full-pipeline scope (2026-05-22 — incoherent-metric fix). The legacy
       // fields above are INITIAL PASS ONLY; these are the TOTAL across the
       // entire retry+expansion ladder. Use these for any "0 leads" diagnosis.
-      candidates_total: researchResult?.verification_stats?.candidates_total ?? null,
-      queries_total: researchResult?.verification_stats?.queries_total ?? null,
-      rounds_ran: researchResult?.verification_stats?.rounds_ran ?? null,
-      circuit_breaker_tripped: researchResult?.verification_stats?.circuit_breaker_tripped ?? null,
-      likely_cause: noProviderConfigured
-        ? 'NO_SEARCH_PROVIDER — Brave, Google CSE, and Apollo all unconfigured'
-        : (researchResult?.verification_stats?.candidates > 0
-            ? 'VERIFICATION_REJECTED_ALL — providers returned candidates but Layer 2 rejected every one'
-            : 'PROVIDERS_RETURNED_ZERO — configured providers reachable but yielded no candidates (quota exhausted or query too narrow)'),
+      candidates_total: verificationStats.candidates_total ?? null,
+      queries_total: verificationStats.queries_total ?? null,
+      rounds_ran: verificationStats.rounds_ran ?? null,
+      circuit_breaker_tripped: verificationStats.circuit_breaker_tripped ?? null,
+      likely_cause: likelyCause,
     },
   });
   const keyDiagnostic = missingKeys.length > 0
@@ -3191,6 +3212,19 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     const roundLeads = researchResult?.data?.leads || [];
     if (researchResult?.data?.query) allSearchQueries.push(researchResult.data.query);
     diagnostics.research_source = researchResult?.data?.source || 'unknown';
+    const researchDiagnostics = researchResult?.data?.diagnostics || {};
+    const verificationStats = researchDiagnostics.verification_stats || {};
+    const candidatesTotal = verificationStats.candidates_total ?? researchDiagnostics.candidates_total;
+    if (candidatesTotal != null) diagnostics.provider_candidates = Number(candidatesTotal) || 0;
+    if (verificationStats.candidates != null || researchDiagnostics.layer1_candidates != null) {
+      diagnostics.layer1_candidates = Number(verificationStats.candidates ?? researchDiagnostics.layer1_candidates) || 0;
+    }
+    if (verificationStats.rejected != null || researchDiagnostics.layer2_rejected != null) {
+      diagnostics.research_rejected = Number(verificationStats.rejected ?? researchDiagnostics.layer2_rejected) || 0;
+    }
+    if (verificationStats.circuit_breaker_tripped || researchDiagnostics.circuit_breaker_tripped) {
+      diagnostics.research_circuit_breaker = verificationStats.circuit_breaker_tripped || researchDiagnostics.circuit_breaker_tripped;
+    }
 
     // Deduplicate against leads already collected in previous rounds
     const existingUrls = new Set(rawLeads.map(l => l.linkedin_url).filter(Boolean));
@@ -3214,6 +3248,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   }
 
   diagnostics.raw_from_research = rawLeads.length;
+  diagnostics.research_verified = rawLeads.length;
   diagnostics.research_rounds = Math.min(currentBatchIndex - batchIndex + 1, MAX_RESEARCH_ROUNDS);
   diagnostics.search_query = allSearchQueries.join(' | ') || null;
 
@@ -3604,23 +3639,42 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
 
   // Early exit — if all leads were filtered out, log why and return cleanly
   if (savedLeads.length === 0) {
+    const providerCandidates = Number(diagnostics.provider_candidates) || 0;
     const dupReason = dupCount > 0
       ? `${dupCount} leads already in pipeline (try different keywords). ${diagnostics.after_dedup - dupCount} filtered by ICP/verification.`
-      : 'All leads filtered by ICP title, LinkedIn verification, or dedup';
+      : (rawLeads.length === 0 && providerCandidates > 0
+          ? `Research verification rejected all ${providerCandidates} provider/parser candidates.`
+          : (rawLeads.length === 0
+              ? 'Provider/search parser returned 0 usable candidates.'
+              : 'All Research-verified leads were filtered by ICP, contact gate, quality, or dedup.'));
 
     await logsService.createLog(clientId, {
       agent: 'director',
       action: 'plan_zero_leads',
-      metadata: { plan_id, raw_count: rawLeads.length, dup_count: dupCount, reason: dupReason },
+      metadata: {
+        plan_id,
+        raw_count: rawLeads.length,
+        provider_candidates: providerCandidates,
+        research_verified: rawLeads.length,
+        research_rejected: diagnostics.research_rejected ?? null,
+        dup_count: dupCount,
+        reason: dupReason,
+      },
     });
     diagnostics.reason = dupReason;
-    return {
-      plan_id, status: 'completed',
+    const zeroResult = {
+      plan_id, status: 'blocked',
       leads_found: 0, messages_drafted: 0,
       messages_failed: 0,
-      summary: `0 new leads (raw: ${rawLeads.length}, already in pipeline: ${dupCount}). ${dupCount > rawLeads.length * 0.5 ? 'Most results are duplicates — try different keywords or a new industry.' : 'Check ICP config and data source.'}`,
+      summary: `0 new leads (provider candidates: ${providerCandidates}, research verified: ${rawLeads.length}, already in pipeline: ${dupCount}). ${dupCount > rawLeads.length * 0.5 ? 'Most results are duplicates — try different keywords or a new industry.' : 'Check ICP config and data source.'}`,
       diagnostics,
     };
+    await updateExecStatus(clientId, plan_id, {
+      status: 'completed',
+      result: zeroResult,
+      completed_at: new Date().toISOString(),
+    });
+    return zeroResult;
   }
 
   // ── Step 3 + 4: Sales Beaver + Ranger — streaming parallel handoff ─────────
