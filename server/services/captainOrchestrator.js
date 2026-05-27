@@ -29,6 +29,19 @@ const tenantConfig = require('./tenantConfig');
 const jobHealth = require('./jobHealth');
 const pipelineTrace = require('./pipelineTrace');
 
+function getLLMHealth() {
+  const provider = (process.env.LLM_PROVIDER || 'anthropic').toLowerCase();
+  const anthropicSet = !!process.env.ANTHROPIC_API_KEY;
+  const openaiSet = !!process.env.OPENAI_API_KEY;
+
+  return {
+    provider,
+    anthropic_set: anthropicSet,
+    openai_set: openaiSet,
+    selected_key_set: provider === 'openai' ? openaiSet : anthropicSet,
+  };
+}
+
 /* ─── KPI snapshot collector ──────────────────────────────────────── */
 
 /**
@@ -300,7 +313,7 @@ async function collectTeamKPIs(clientId) {
     dam_health: {
       db_ok: dbOk,
       encryption_key_ok: !!process.env.ENCRYPTION_KEY,
-      anthropic_set: !!process.env.ANTHROPIC_API_KEY,
+      ...getLLMHealth(),
       brave_set: !!process.env.BRAVE_API_KEY,
       vp_set: !!process.env.VIBE_PROSPECTING_API_KEY,
       gmail_oauth_set: !!process.env.GMAIL_CLIENT_ID,
@@ -526,7 +539,7 @@ PRE-INTERPRETED STATUS (use these labels — do NOT re-interpret raw numbers bel
 
 <b>SYSTEM HEALTH</b>
 DB: ${kpis.dam_health.db_ok ? 'connected' : 'UNREACHABLE'} · Encryption: ${kpis.dam_health.encryption_key_ok ? 'valid' : 'MISSING'}
-API keys: anthropic ${kpis.dam_health.anthropic_set ? 'set' : 'MISSING'}, brave ${kpis.dam_health.brave_set ? 'set' : 'MISSING'}, vp ${kpis.dam_health.vp_set ? 'set' : 'MISSING'}, gmail-oauth ${kpis.dam_health.gmail_oauth_set ? 'set' : 'MISSING'}
+API keys: llm ${kpis.dam_health.provider} ${kpis.dam_health.selected_key_set ? 'set' : 'MISSING'}, anthropic ${kpis.dam_health.anthropic_set ? 'set' : 'MISSING'}, openai ${kpis.dam_health.openai_set ? 'set' : 'MISSING'}, brave ${kpis.dam_health.brave_set ? 'set' : 'MISSING'}, vp ${kpis.dam_health.vp_set ? 'set' : 'MISSING'}, gmail-oauth ${kpis.dam_health.gmail_oauth_set ? 'set' : 'MISSING'}
 Stale crons: ${kpis.dam_health.stale_jobs.length === 0 ? 'none — all firing' : kpis.dam_health.stale_jobs.join(', ')}
 LLM spend: $${kpis.cost.llm_spend_today_usd.toFixed(4)} today · $${kpis.cost.llm_spend_mtd_usd.toFixed(2)} mtd / $${kpis.cost.llm_monthly_budget_usd.toFixed(2)} monthly cap${kpis.cost.llm_spend_mtd_usd >= kpis.cost.llm_monthly_budget_usd ? ' — OVER BUDGET' : kpis.cost.llm_spend_mtd_usd >= kpis.cost.llm_monthly_budget_usd * 0.8 ? ' — 80%+ of cap' : ''}${kpis.cost.llm_max_day_usd >= kpis.cost.llm_monthly_budget_usd * 0.2 ? ` · worst day $${kpis.cost.llm_max_day_usd.toFixed(2)} (SPIKE)` : ''}
 VP: ${vpStatus}

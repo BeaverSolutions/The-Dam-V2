@@ -66,6 +66,10 @@ describe('P0 stabilization contracts', () => {
     expect(service('services/claude.js')).toContain('LLM_CLIENT_ID_REQUIRED');
     expect(service('services/claude.js')).toContain('allowUnattributedLLM');
     expect(service('services/llm/openai.js')).toContain('LLM_CLIENT_ID_REQUIRED');
+    expect(service('../.env.example')).toContain('LLM_PROVIDER=anthropic');
+    expect(service('../.env.example')).toContain('OPENAI_API_KEY=');
+    expect(service('../.env.production.example')).toContain('LLM_PROVIDER=anthropic');
+    expect(service('services/captainOrchestrator.js')).toContain('selected_key_set');
   });
 
   it('meetings are outcome tracking, not a fixed KPI target', () => {

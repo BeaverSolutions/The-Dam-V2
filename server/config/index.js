@@ -14,6 +14,11 @@ const config = {
   encryption: {
     key: process.env.ENCRYPTION_KEY,
   },
+  llm: {
+    provider: (process.env.LLM_PROVIDER || 'anthropic').toLowerCase(),
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    openaiApiKey: process.env.OPENAI_API_KEY,
+  },
   anthropicApiKey: process.env.ANTHROPIC_API_KEY,
   gmail: {
     clientId: process.env.GMAIL_CLIENT_ID,

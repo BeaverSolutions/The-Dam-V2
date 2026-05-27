@@ -9,6 +9,7 @@ function safeStringify(data) {
 }
 
 const logger = {
+  debug: (data) => console.debug(safeStringify({ level: 'debug', timestamp: new Date().toISOString(), ...data })),
   info: (data) => console.log(safeStringify({ level: 'info', timestamp: new Date().toISOString(), ...data })),
   error: (data) => console.error(safeStringify({ level: 'error', timestamp: new Date().toISOString(), ...data })),
   warn: (data) => console.warn(safeStringify({ level: 'warn', timestamp: new Date().toISOString(), ...data })),
