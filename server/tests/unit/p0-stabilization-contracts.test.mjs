@@ -59,7 +59,7 @@ describe('P0 stabilization contracts', () => {
     expect(service('services/spendGuard.js')).toContain("apollo: envNumber('APOLLO_DAILY_QUERY_CAP', 0)");
     expect(service('services/spendGuard.js')).toContain('providerUsageToday(provider, clientId)');
     expect(service('services/vibeProspecting.js')).toContain('ALLOW_VP_PAID_ENRICHMENT');
-    expect(service('services/spendGuard.js')).toContain("brave: envNumber('BRAVE_DAILY_QUERY_CAP', 50)");
+    expect(service('services/spendGuard.js')).toContain("brave: envNumber('BRAVE_DAILY_QUERY_CAP', 60)");
     expect(service('services/searchService.js')).toContain('SEARCH_MAX_PAID_QUERIES_PER_OPERATION');
     expect(service('services/searchService.js')).toContain('splitPaidQueryBudget');
     expect(service('services/research.js')).toContain('paidQueriesRemaining');
