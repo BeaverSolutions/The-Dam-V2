@@ -22,7 +22,7 @@ function envNumber(name, fallback) {
 // missing; higher-volume enrichment/search providers remain opt-in.
 const CAPS = {
   vp: envNumber('VP_DAILY_CREDIT_CAP', 60),
-  brave: envNumber('BRAVE_DAILY_QUERY_CAP', 10),
+  brave: envNumber('BRAVE_DAILY_QUERY_CAP', 20),
   google_cse: envNumber('GOOGLE_CSE_DAILY_QUERY_CAP', 0),
   hunter: envNumber('HUNTER_DAILY_QUERY_CAP', 0),
   millionverifier: envNumber('MILLIONVERIFIER_DAILY_VERIFY_CAP', envNumber('MILLION_VERIFIER_DAILY_CAP', 0)),
