@@ -110,6 +110,17 @@ function normaliseLead(partial) {
     verified:       false,  // NEVER true from search — must pass Layer 2 verification
     data_source:    partial.data_source    || 'brave',
     snippet:        partial.snippet        || '',
+    country:        partial.country        || '',
+    location:       partial.location       || '',
+    domain:         partial.domain         || '',
+    linkedin_company_url: partial.linkedin_company_url || '',
+    signal:         partial.signal         || '',
+    angle:          partial.angle          || '',
+    friction:       partial.friction       || '',
+    why_now:        partial.why_now        || '',
+    notes:          partial.notes          || '',
+    short_description: partial.short_description || '',
+    metadata:       partial.metadata       || {},
   };
 }
 
@@ -141,11 +152,22 @@ const INDUSTRY_SEARCH_PHRASES = {
   'software':     ['"software company"', '"software development"'],
   'seo':          ['"SEO agency"', '"search engine"'],
   'advertising':  ['"advertising agency"', '"ad agency"'],
+  'training':     ['"corporate training"', '"professional training"', '"training provider"', '"learning and development"'],
+  'corporate training': ['"corporate training"', '"training company"', '"professional development"'],
+  'professional training': ['"professional training"', '"training provider"', '"skills development"'],
+  'l&d providers': ['"learning and development"', '"L&D provider"', '"corporate training"'],
+  'coaching':     ['"executive coaching"', '"sales coaching"', '"business coaching"'],
+  'professional services': ['"professional services"', '"consulting firm"', '"business services"'],
+  'creative':     ['"creative agency"', '"creative studio"', '"content studio"'],
+  'pr':           ['"PR agency"', '"public relations"', '"communications agency"'],
 };
 
 function expandIndustry(industry) {
   const key = industry.toLowerCase().trim();
-  return INDUSTRY_SEARCH_PHRASES[key] || [`"${industry}"`];
+  if (INDUSTRY_SEARCH_PHRASES[key]) return INDUSTRY_SEARCH_PHRASES[key];
+  const matchedKey = Object.keys(INDUSTRY_SEARCH_PHRASES)
+    .find(k => key.includes(k) || k.includes(key));
+  return matchedKey ? INDUSTRY_SEARCH_PHRASES[matchedKey] : [`"${industry}"`];
 }
 
 /**
@@ -537,9 +559,9 @@ function buildQueryPool(icpMemory) {
     signal_news: 1,
     signal_growth: 2,
     signal: 3,
-    direct: 4,
-    company: 5,
-    email_derivable: 6,
+    company: 4,
+    email_derivable: 5,
+    direct: 6,
   };
 
   // Deduplicate by query string, then run signal-led strategies first.
@@ -846,17 +868,33 @@ async function strategyDirectPeople(queryItem, limit) {
  * Step 2 — For each company: Hunter domainSearch to find decision-makers.
  * Returns leads with real emails where Hunter finds them.
  */
+function titleHintsFromIcp(icpMemory) {
+  const titles = parseCsvField(icpMemory?.job_titles || icpMemory?.who);
+  const preferred = titles.length > 0 ? titles : DEFAULT_TITLES;
+  const clean = preferred
+    .slice(0, 5)
+    .map(t => String(t || '').trim())
+    .filter(Boolean);
+  return clean.length > 0
+    ? clean.map(t => /\s/.test(t) ? `"${t}"` : t).join(' OR ')
+    : 'Founder OR CEO OR "Managing Director"';
+}
+
 async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
   const leads = [];
 
   try {
     const suppliedQueries = Array.isArray(options.queryItems) ? options.queryItems.filter(Boolean) : null;
+    const stats = options.stats || null;
+    if (stats && !Array.isArray(stats.fallbackQueriesUsed)) stats.fallbackQueriesUsed = [];
     const maxCompanyQueries = Number.isFinite(Number(options.maxCompanyQueries))
       ? Math.max(0, Number(options.maxCompanyQueries))
       : 3;
     let fallbackProfileBudget = Number.isFinite(Number(options.maxFallbackProfileQueries))
       ? Math.max(0, Number(options.maxFallbackProfileQueries))
       : 0;
+    const hunterEnabled = Number(require('./spendGuard').CAPS.hunter || 0) > 0;
+    const titleHints = titleHintsFromIcp(icpMemory);
 
     // Pull company queries from the paid-query picker. When suppliedQueries is
     // present, the caller already counted each item against maxPaidQueries.
@@ -883,16 +921,18 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
 
           if (!companyName && !domain) continue;
 
-          // Step 2: Hunter domain search
+          // Step 2: Hunter domain search when explicitly capped on.
           let hunterLeads = [];
-          try {
-            hunterLeads = await hunterService.domainSearch(clientId, {
-              company: companyName,
-              domain:  domain || undefined,
-              limit:   3,
-            });
-          } catch (hErr) {
-            console.warn('[research] Hunter domainSearch error:', hErr.message);
+          if (hunterEnabled) {
+            try {
+              hunterLeads = await hunterService.domainSearch(clientId, {
+                company: companyName,
+                domain:  domain || undefined,
+                limit:   3,
+              });
+            } catch (hErr) {
+              console.warn('[research] Hunter domainSearch error:', hErr.message);
+            }
           }
 
           // Filter Hunter results by ICP-relevant titles (exact match, not substring)
@@ -916,20 +956,43 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
                 email_verified: h.confidence >= 70,
                 email_source:   h.email ? 'hunter_domain' : '',
                 data_source:    'hunter_domain',
+                domain:         domain || h.domain || '',
+                linkedin_company_url: c.linkedin_company_url || '',
+                signal:         `Company-first match: ${companyName} matches ${item.industry || 'the tenant ICP'}`,
+                why_now:        `Company discovered through ${item.industry || 'ICP'} company search in the target geography.`,
+                snippet:        [h.snippet, c.snippet].filter(Boolean).join(' '),
+                metadata:       {
+                  source_strategy: 'company_first',
+                  company_discovery_query: item.query,
+                  company_discovery_snippet: c.snippet || '',
+                  linkedin_company_url: c.linkedin_company_url || '',
+                },
               }));
             }
           } else if (companyName && fallbackProfileBudget > 0) {
             // Fallback: Brave people search scoped to this company
             try {
               fallbackProfileBudget--;
-              const fallbackQuery = `site:linkedin.com/in "${companyName}" CEO OR Founder`;
+              const fallbackQuery = `"${companyName}" (${titleHints})`;
+              if (stats) stats.fallbackQueriesUsed.push(fallbackQuery);
               const fallbackResults = await searchService.searchLinkedInProfiles(fallbackQuery, 3, { country: item.country || 'MY' });
               for (const r of fallbackResults) {
                 leads.push(normaliseLead({
                   ...r,
-                  company:     companyName || r.company,
-                  data_source: 'brave_company',
-                  email_source: r.email ? 'brave' : '',
+                  company:        companyName || r.company,
+                  domain:         domain || '',
+                  linkedin_company_url: c.linkedin_company_url || '',
+                  data_source:    'brave_company',
+                  email_source:   r.email ? 'brave' : '',
+                  signal:         `Company-first match: ${companyName} matches ${item.industry || 'the tenant ICP'}`,
+                  why_now:        `Company discovered through ${item.industry || 'ICP'} company search in the target geography.`,
+                  snippet:        [r.snippet, c.snippet].filter(Boolean).join(' '),
+                  metadata:       {
+                    source_strategy: 'company_first',
+                    company_discovery_query: item.query,
+                    company_discovery_snippet: c.snippet || '',
+                    linkedin_company_url: c.linkedin_company_url || '',
+                  },
                 }));
               }
             } catch (fbErr) {
@@ -1013,7 +1076,9 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     // create_lead tool / /inject, not through this path.
     const queryPool = buildQueryPool(icpMemory);
 
-    // 3. Pick next N unused queries (N = targetCount * 2, min 6)
+    // 3. Pick the next discovery queries. Signal-first is the product rule:
+    // find active buying intent first, use company/direct searches only as
+    // support when signal queries cannot fill the paid-query budget.
     const pickCount = Math.max(targetCount * 2, 6);
 
     // Separate unused from used
@@ -1046,7 +1111,34 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     const offset = safePick > 0 ? (batchIndex * safePick) % safeLength : 0;
     const rotated = [...combined.slice(offset), ...combined.slice(0, offset)];
     let paidQueriesRemaining = paidQueryCap;
-    const picked  = rotated.slice(0, Math.min(safePick, paidQueriesRemaining));
+    const initialQueryBudget = Math.min(safePick, paidQueriesRemaining, Math.max(1, Math.min(targetCount, 5)));
+    const pickedKeys = new Set();
+    const picked = [];
+    const signalStrategies = new Set(['signal_jobs', 'signal_news', 'signal_growth', 'signal']);
+    const rotatedSignal = rotated.filter(q => signalStrategies.has(q.strategy));
+    for (const q of rotatedSignal.slice(0, initialQueryBudget)) {
+      picked.push(q);
+      pickedKeys.add(q.query);
+    }
+    const rotatedCompany = rotated.filter(q => q.strategy === 'company');
+    for (const q of rotatedCompany) {
+      if (picked.length >= initialQueryBudget) break;
+      if (pickedKeys.has(q.query)) continue;
+      picked.push(q);
+      pickedKeys.add(q.query);
+    }
+    for (const q of rotated) {
+      if (picked.length >= initialQueryBudget) break;
+      if (pickedKeys.has(q.query) || q.strategy === 'direct') continue;
+      picked.push(q);
+      pickedKeys.add(q.query);
+    }
+    for (const q of rotated) {
+      if (picked.length >= initialQueryBudget) break;
+      if (pickedKeys.has(q.query)) continue;
+      picked.push(q);
+      pickedKeys.add(q.query);
+    }
     paidQueriesRemaining -= picked.length;
     if (safePick > picked.length) {
       console.log(`[research] Capping paid query fanout from ${safePick} to ${picked.length} for this run`);
@@ -1059,6 +1151,11 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     const signalNewsQueries  = picked.filter(q => q.strategy === 'signal_news');
     const signalGrowthQueries = picked.filter(q => q.strategy === 'signal_growth');
     const companyQueries = picked.filter(q => q.strategy === 'company');
+    const companyFallbackBudget = companyQueries.length > 0
+      ? Math.min(paidQueriesRemaining, Math.max(targetCount * 2, 1))
+      : 0;
+    paidQueriesRemaining -= companyFallbackBudget;
+    const companyFirstStats = { fallbackQueriesUsed: [] };
 
     // 5 & 6. Run all strategies in parallel
     const allSignalCount = signalQueries.length + signalJobsQueries.length + signalNewsQueries.length + signalGrowthQueries.length;
@@ -1124,7 +1221,11 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     );
 
     const companyPromise = companyQueries.length > 0
-      ? strategyCompanyFirst(clientId, icpMemory, targetCount, { queryItems: companyQueries, maxFallbackProfileQueries: 0 })
+      ? strategyCompanyFirst(clientId, icpMemory, targetCount * 2, {
+        queryItems: companyQueries,
+        maxFallbackProfileQueries: companyFallbackBudget,
+        stats: companyFirstStats,
+      })
         .catch(err => {
           console.warn('[research] Company-first strategy failed:', err.message);
           return [];
@@ -1182,7 +1283,10 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
 
     // 10. LAYER 2: Verify candidates before returning
     // Retry up to 2 more times if we haven't hit targetCount yet (each retry fetches fresh queries)
-    const queriesUsed = picked.map(q => q.query);
+    const queriesUsed = [
+      ...picked.map(q => q.query),
+      ...companyFirstStats.fallbackQueriesUsed,
+    ];
     console.log(`[research] Layer 1 complete: ${preFiltered.length} candidates (from ${deduped.length} raw). Starting Layer 2 verification...`);
 
     const icp = icpMemory || {};
@@ -1198,7 +1302,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     // retry rounds had fired. Fix: track candidates / queries / rounds
     // across the entire pipeline so a single log entry is self-consistent.
     let candidatesVerifiedTotal = preFiltered.length;
-    let queriesUsedTotal = picked.length;
+    let queriesUsedTotal = queriesUsed.length;
     let roundsRan = 1; // the initial Layer 2 pass counts as round 1
 
     // ── Phase B3: Retry + expansion ladder ──
@@ -1222,8 +1326,12 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     let retryCount = 0;
     let expansionLevel = 0;
     const allVerifiedUrls = new Set(verified.map(l => l.linkedin_url).filter(Boolean));
+    if (verified.length === 0 && preFiltered.length >= Math.max(targetCount, 3)) {
+      circuitBreakerTripped = `initial verification rejected all ${preFiltered.length} candidates`;
+      console.warn(`[research] CIRCUIT BREAKER: ${circuitBreakerTripped} — stopping paid search`);
+    }
 
-    while (verified.length < targetCount && retryCount < MAX_RETRIES) {
+    while (!circuitBreakerTripped && verified.length < targetCount && retryCount < MAX_RETRIES) {
       retryCount++;
       const shortfall = targetCount - verified.length;
       console.log(`[research] Retry ${retryCount}/${MAX_RETRIES}: need ${shortfall} more verified leads (expansion level ${expansionLevel})`);
@@ -1251,11 +1359,18 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       // Pick next batch of unused queries
       const actualPicked = freshUnused.slice(0, Math.min(pickCount, freshUnused.length, paidQueriesRemaining));
       paidQueriesRemaining -= actualPicked.length;
+      queriesUsed.push(...actualPicked.map(q => q.query));
 
       const retryDirectQueries = actualPicked.filter(q => q.strategy === 'direct');
       const retrySignalQueries = actualPicked.filter(q =>
-        q.strategy === 'signal' || q.strategy === 'signal_jobs' || q.strategy === 'signal_news' || q.strategy === 'signal_growth'
+        q.strategy === 'signal' || q.strategy === 'signal_jobs' || q.strategy === 'signal_news'
       );
+      const retryCompanyQueries = actualPicked.filter(q => q.strategy === 'company' || q.strategy === 'signal_growth');
+      const retryCompanyStats = { fallbackQueriesUsed: [] };
+      const retryCompanyFallbackBudget = retryCompanyQueries.length > 0
+        ? Math.min(paidQueriesRemaining, Math.max(shortfall * 2, 1))
+        : 0;
+      paidQueriesRemaining -= retryCompanyFallbackBudget;
 
       // CIRCUIT BREAKER: stop before spending if the paid-search round cap is hit
       if (searchRounds >= MAX_SEARCH_ROUNDS) {
@@ -1269,7 +1384,16 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       const retryResults = await Promise.all([
         ...retryDirectQueries.map(q => strategyDirectPeople(q, perQueryLimit).catch(() => [])),
         ...retrySignalQueries.map(q => strategySignalBased(q, perQueryLimit).catch(() => [])),
+        retryCompanyQueries.length > 0
+          ? strategyCompanyFirst(clientId, currentIcp, shortfall * 2, {
+            queryItems: retryCompanyQueries,
+            maxFallbackProfileQueries: retryCompanyFallbackBudget,
+            stats: retryCompanyStats,
+          }).catch(() => [])
+          : Promise.resolve([]),
       ]);
+      queriesUsedTotal += retryCompanyStats.fallbackQueriesUsed.length;
+      queriesUsed.push(...retryCompanyStats.fallbackQueriesUsed);
 
       const retryCandidates = retryResults.flat()
         .filter(l => l.linkedin_url && !allVerifiedUrls.has(l.linkedin_url));

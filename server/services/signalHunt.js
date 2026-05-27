@@ -300,16 +300,31 @@ async function findDecisionMaker(companyName, icpTitles = [], country = 'MY') {
  * @param {object} options.icp - ICP memory for seniority ranking
  * @returns {Promise<Array<Lead>>}
  */
-async function runSignalHunt(clientId, { maxLeads = 20, icp = {} } = {}) {
+async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries = null } = {}) {
   console.log(`[signalHunt] Starting signal hunt for client ${clientId} (target: ${maxLeads})`);
 
   const config = await loadSignalConfig(clientId, icp);
   const allSignals = [];
   const leads = [];
+  let paidQueriesRemaining = Number.isFinite(Number(maxPaidQueries))
+    ? Math.max(0, Number(maxPaidQueries))
+    : null;
+  const consumePaidQuery = (units = 1) => {
+    if (paidQueriesRemaining === null) return true;
+    const needed = Math.max(1, Number(units) || 1);
+    if (paidQueriesRemaining < needed) return false;
+    paidQueriesRemaining -= needed;
+    return true;
+  };
 
   // Step 1: Run all signal queries in sequence (cost control)
   for (const q of config.queries) {
     if (allSignals.length >= maxLeads * 2) break; // 2x buffer — some will fail contact lookup
+
+    if (!consumePaidQuery(2)) {
+      console.log('[signalHunt] Paid-query budget exhausted before open-web signal search');
+      break;
+    }
 
     console.log(`[signalHunt] Running query: ${q.query}`);
     try {
@@ -361,6 +376,11 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {} } = {}) {
   for (const signal of uniqueSignals.slice(0, maxLeads * 2)) {
     if (leads.length >= maxLeads) break;
 
+    if (!consumePaidQuery(2)) {
+      console.log('[signalHunt] Paid-query budget exhausted before decision-maker lookup');
+      break;
+    }
+
     const country = signal.country || countryCodeFromText(signal.raw_snippet || signal.signal_summary || '') || 'MY';
     const countryName = countryNameFromCode(country);
     const person = await findDecisionMaker(signal.company, icpTitles, country);
@@ -387,22 +407,25 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {} } = {}) {
     let email = null;
     let email_source = null;
     let email_verified = false;
-    try {
-      const nameParts = (person.name || '').trim().split(/\s+/);
-      const firstName = nameParts[0] || '';
-      const lastName = nameParts.slice(1).join(' ') || '';
-      const hunter = await hunterService.findEmail(clientId, {
-        firstName,
-        lastName,
-        company: signal.company,
-      });
-      if (hunter?.email) {
-        email = hunter.email;
-        email_source = 'hunter';
-        email_verified = !!hunter.verified;
+    const hunterEnabled = Number(require('./spendGuard').CAPS.hunter || 0) > 0;
+    if (hunterEnabled) {
+      try {
+        const nameParts = (person.name || '').trim().split(/\s+/);
+        const firstName = nameParts[0] || '';
+        const lastName = nameParts.slice(1).join(' ') || '';
+        const hunter = await hunterService.findEmail(clientId, {
+          firstName,
+          lastName,
+          company: signal.company,
+        });
+        if (hunter?.email) {
+          email = hunter.email;
+          email_source = 'hunter';
+          email_verified = !!hunter.verified;
+        }
+      } catch (err) {
+        console.warn(`[signalHunt] Hunter enrichment failed for ${person.name}:`, err.message);
       }
-    } catch (err) {
-      console.warn(`[signalHunt] Hunter enrichment failed for ${person.name}:`, err.message);
     }
 
     leads.push({

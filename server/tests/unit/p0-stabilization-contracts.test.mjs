@@ -79,14 +79,23 @@ describe('P0 stabilization contracts', () => {
     expect(captain).toContain('campaign_background_failed');
     expect(captain).toContain('campaign_blocked');
     expect(captain).toContain('findRecentRunningExecution');
+    expect(captain).toContain('expireStaleRunningExecutions');
     expect(captain).toContain('persistExecTerminalStatus');
+    expect(captain).toContain('has_sufficient_research_capacity');
+    expect(captain).toContain('required_paid_queries');
+    expect(captain).toContain('insufficient_paid_search_capacity');
+    expect(captain).toContain("status: result?.status || 'completed'");
     expect(captain).toContain("response.status = 'captain_response'");
     expect(captain).toContain('campaign_status: campaignResult.status');
     expect(captain).not.toContain('\n      status: campaignResult.status,');
     expect(captain).toContain("NULLIF(BTRIM(l.company), '') IS NOT NULL");
     expect(agents).toContain("NULLIF(BTRIM(l.company), '') IS NOT NULL");
     expect(agents).toContain('Provider/search parser returned 0 usable candidates');
-    expect(agents).toContain("status: 'completed'");
+    expect(agents).toContain('status: zeroResult.status');
+    expect(agents).toContain('paid_search_capacity_insufficient');
+    expect(agents).toContain('required_paid_queries');
+    expect(agents).toContain('signal_first_started');
+    expect(agents).toContain('runSignalHunt');
     expect(agents).toContain('research_verified');
     expect(agents).toContain('provider_candidates');
     expect(agents).toContain('original_lead_count');
@@ -147,12 +156,18 @@ describe('P0 stabilization contracts', () => {
     expect(service('services/apollo.js')).toContain("logProviderUsage('apollo'");
   });
 
-  it('research company-first strategy cannot spend outside the paid query picker', () => {
+  it('research stays signal-first while company support stays inside the paid query picker', () => {
     const research = service('services/research.js');
+    expect(research).toContain('signal_jobs: 0');
+    expect(research).toContain('signalStrategies');
+    expect(research).toContain("q.strategy === 'direct'");
     expect(research).toContain('const companyQueries = picked.filter');
     expect(research).toContain('queryItems');
     expect(research).toContain('maxFallbackProfileQueries');
+    expect(research).toContain('fallbackQueriesUsed');
     expect(research).toContain('fallbackProfileBudget > 0');
+    expect(research).toContain('initial verification rejected all');
+    expect(research).toContain('retryCompanyQueries');
   });
 
   it('autonomous routes require the internal key at router level', () => {

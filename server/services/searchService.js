@@ -40,6 +40,13 @@ function providerFailureCode(err) {
   return err?.code || err?.name || 'provider_error';
 }
 
+function braveCountryFor(country) {
+  const code = String(country || 'MY').toUpperCase();
+  // Brave's web-search country enum rejected SG in production. Keep the query
+  // SG-specific and use a nearby supported bias.
+  return code === 'SG' ? 'MY' : code;
+}
+
 async function logProviderError(provider, err, metadata = {}) {
   const clientId = currentClientId();
   if (!clientId || !provider) return;
@@ -220,9 +227,7 @@ async function callBrave(searchQuery, num, country = 'MY') {
   const clientId = currentClientId();
   const guard = await spendGuard.checkProvider('brave', { clientId, estimatedUnits: 1 });
   if (!guard.allowed) throw providerBlockedError('brave', guard);
-  // Brave's web-search country enum is limited; SG requests returned 422 in prod.
-  // Keep the query SG-specific ("Pte Ltd") but use a supported regional bias.
-  const braveCountry = String(country).toUpperCase() === 'SG' ? 'MY' : String(country).toUpperCase();
+  const braveCountry = braveCountryFor(country);
 
   // 2026-05-23: country now caller-controllable. Default MY for backward
   // compat with existing call sites (LinkedIn search, signal search). New
@@ -266,9 +271,12 @@ async function callGoogleCSE(searchQuery, num, country = 'MY') {
   const guard = await spendGuard.checkProvider('google_cse', { clientId, estimatedUnits: 1 });
   if (!guard.allowed) throw providerBlockedError('google_cse', guard);
 
-  // CSE is domain-restricted to linkedin.com — strip any existing site: operator and force linkedin.com/in
+  // CSE is domain-restricted to linkedin.com. Preserve /company when the caller
+  // is doing company-first discovery; forcing /in breaks company parsing.
+  const siteMatch = String(searchQuery || '').match(/\bsite:(linkedin\.com\/(?:in|company))\b/i);
+  const site = siteMatch ? siteMatch[1].toLowerCase() : 'linkedin.com/in';
   const strippedQuery = searchQuery.replace(/\bsite:\S+\s*/gi, '').trim();
-  const cseQuery = `site:linkedin.com/in ${strippedQuery}`;
+  const cseQuery = `site:${site} ${strippedQuery}`;
 
   console.log('[google-cse] Query:', cseQuery);
 
@@ -288,9 +296,11 @@ async function callGoogleCSE(searchQuery, num, country = 'MY') {
 async function callDuckDuckGo(searchQuery) {
   // DuckDuckGo's Instant Answer API — no key needed, but results are sparse for LinkedIn searches.
   // It won't return lists of profiles, but it will never crash the pipeline.
-  // Strip any existing site: operator and force linkedin.com/in (same as CSE)
+  // Strip any existing site: operator and preserve /company for company-first search.
+  const siteMatch = String(searchQuery || '').match(/\bsite:(linkedin\.com\/(?:in|company))\b/i);
+  const site = siteMatch ? siteMatch[1].toLowerCase() : 'linkedin.com/in';
   const strippedQuery = searchQuery.replace(/\bsite:\S+\s*/gi, '').trim();
-  const ddgQuery = `site:linkedin.com/in ${strippedQuery}`;
+  const ddgQuery = `site:${site} ${strippedQuery}`;
   console.log('[duckduckgo] Query:', ddgQuery);
 
   const resp = await axios.get(DDG_URL, {
@@ -516,11 +526,12 @@ async function searchOpenWeb(query, limit = 5, options = {}) {
     const guard = await spendGuard.checkProvider('brave', { clientId, estimatedUnits: 1 });
     if (!guard.allowed) throw providerBlockedError('brave', guard);
 
+    const braveCountry = braveCountryFor(country);
     const resp = await axios.get('https://api.search.brave.com/res/v1/web/search', {
       params: {
         q: query,
         count: Math.min(limit, 20),
-        country: String(country).toUpperCase(),
+        country: braveCountry,
         search_lang: 'en',
         safesearch: 'moderate',
       },
@@ -534,7 +545,7 @@ async function searchOpenWeb(query, limit = 5, options = {}) {
     await spendGuard.logProviderUsage('brave', {
       clientId,
       units: 1,
-      metadata: { query_preview: String(query).slice(0, 160), country: String(country).toUpperCase(), count: Math.min(limit, 20), mode: 'open_web' },
+      metadata: { query_preview: String(query).slice(0, 160), country: braveCountry, requested_country: String(country).toUpperCase(), count: Math.min(limit, 20), mode: 'open_web' },
     });
 
     const results = resp.data?.web?.results || [];

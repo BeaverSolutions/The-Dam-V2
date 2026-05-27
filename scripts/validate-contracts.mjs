@@ -41,6 +41,7 @@ const pipeline = readFile('services/pipeline.js');
 const pipelineTrace = readFile('services/pipelineTrace.js');
 const signalHunt = readFile('services/signalHunt.js');
 const replyHandler = readFile('services/replyHandler.js');
+const searchService = readFile('services/searchService.js');
 const index = readFile('index.js');
 const allSources = [agents, dbBuilder, sendQueue, pipeline];
 
@@ -139,7 +140,8 @@ const researchSource = readFile('services/research.js');
 const researchFanoutCap = researchSource.includes('RESEARCH_MAX_PAID_QUERIES_PER_RUN')
   && researchSource.includes('maxPaidQueries')
   && agents.includes('remainingPaidQueries')
-  && agents.includes('paid_search_capacity_exhausted');
+  && agents.includes('paid_search_capacity_exhausted')
+  && agents.includes('paid_search_capacity_insufficient');
 check('Research paid-query fanout capped by remaining capacity', researchFanoutCap,
   researchFanoutCap ? 'research receives maxPaidQueries and blocks when paid capacity is exhausted' : 'research may fan out after caps are exhausted');
 
@@ -150,7 +152,8 @@ const captainNoDuplicateRun = captainBeaver.includes("response.status = 'captain
   && captainBeaver.includes('campaign_status: campaignResult.status')
   && !captainBeaver.includes('\n      status: campaignResult.status,')
   && captainBeaver.includes('findRecentRunningExecution')
-  && captainBeaver.includes('persistExecTerminalStatus');
+  && captainBeaver.includes('persistExecTerminalStatus')
+  && captainBeaver.includes("status: result?.status || 'completed'");
 check('Captain campaign launch is single-run and terminal-state safe', captainNoDuplicateRun,
   captainNoDuplicateRun ? 'Captain response cannot become a frontend plan + hidden runs finalize exec state' : 'Captain chat may double-run or leave exec state stuck');
 
@@ -162,6 +165,43 @@ const researchDiagnosticTruth = agents.includes('provider_candidates')
   && agents.includes('Research verification rejected all');
 check('Research zero-output diagnostics separate provider candidates from verified leads', researchDiagnosticTruth,
   researchDiagnosticTruth ? 'provider_candidates + research_verified are logged' : 'zero-output diagnostics still collapse provider/parser/verification layers');
+
+// 18. Manual campaigns must run signal-first before generic profile research.
+const signalFirstManualCampaign = agents.includes('signal_first_started')
+  && agents.includes('runSignalHunt')
+  && agents.includes('saveSignalLeads')
+  && agents.includes("run_kind: signalLeadsCount > 0 ? 'signal_first'")
+  && signalHunt.includes('maxPaidQueries')
+  && signalHunt.includes('consumePaidQuery');
+check('Manual campaign sourcing is signal-first and budgeted', signalFirstManualCampaign,
+  signalFirstManualCampaign ? 'Director runs bounded signal hunt before generic research' : 'manual run_campaign may skip signal-first or spend unbounded signal queries');
+
+// 19. Research fallback may use companies, but the paid-query picker remains signal-led.
+const researchSignalFirst = researchSource.includes('signal_jobs: 0')
+  && researchSource.includes('signalStrategies')
+  && researchSource.includes("q.strategy === 'direct'")
+  && researchSource.includes('fallbackQueriesUsed')
+  && researchSource.includes('retryCompanyQueries')
+  && researchSource.includes('initial verification rejected all');
+check('Research picker is signal-first with bounded company support', researchSignalFirst,
+  researchSignalFirst ? 'signal strategies sort first, direct profiles last, company fallback budget tracked' : 'research picker may burn generic profile queries before signals');
+
+// 20. Captain preflight blocks campaigns that cannot afford the requested output.
+const captainCapacityTruth = captainBeaver.includes('has_sufficient_research_capacity')
+  && captainBeaver.includes('required_paid_queries')
+  && captainBeaver.includes('remaining_paid_queries')
+  && captainBeaver.includes('insufficient_paid_search_capacity')
+  && captainBeaver.includes('expireStaleRunningExecutions');
+check('Captain preflight blocks unaffordable campaigns and expires stale runs', captainCapacityTruth,
+  captainCapacityTruth ? 'capacity shortfall and stale exec guards found' : 'Captain can still queue underfunded or stale-blocked campaigns');
+
+// 21. Search fallback must preserve LinkedIn company searches.
+const companySearchFallback = searchService.includes('(?:in|company)')
+  && searchService.includes('site:${site}')
+  && searchService.includes('braveCountryFor')
+  && searchService.includes('requested_country');
+check('Search fallback preserves company discovery and SG-safe Brave country', companySearchFallback,
+  companySearchFallback ? 'CSE/DDG preserve /company and Brave maps unsupported country safely' : 'company-first fallback may still force /in or Brave SG 422');
 
 const failures = results.filter(r => !r.pass);
 console.log(`\n${results.length} checks: ${results.length - failures.length} passed, ${failures.length} failed`);

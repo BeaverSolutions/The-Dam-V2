@@ -943,6 +943,11 @@ function campaignTargetFromCommand(command) {
   return Math.max(1, Math.min(target, 50));
 }
 
+function minPaidQueriesForExternalTarget(target) {
+  const n = Math.max(1, Number(target) || 1);
+  return Math.max(4, n * 4);
+}
+
 function listFromIcp(value) {
   if (Array.isArray(value)) return value.map(v => String(v || '').trim()).filter(Boolean);
   if (typeof value !== 'string') return [];
@@ -1012,20 +1017,32 @@ async function getRunCampaignPreflight(clientId, command) {
   const { providerUsageToday } = require('./spendGuard');
   const braveSpent = await providerUsageToday('brave', clientId).catch(() => CAPS.brave);
   const googleSpent = await providerUsageToday('google_cse', clientId).catch(() => CAPS.google_cse);
+  const braveRemaining = Math.max(0, CAPS.brave - braveSpent);
+  const googleRemaining = Math.max(0, CAPS.google_cse - googleSpent);
+  const remainingPaidQueries = braveRemaining + googleRemaining;
+  const externalShortfall = Math.max(0, target - Math.min(target, eligible_count));
+  const requiredPaidQueries = externalShortfall > 0
+    ? minPaidQueriesForExternalTarget(externalShortfall)
+    : 0;
   const providers = {
-    brave: !!process.env.BRAVE_API_KEY && CAPS.brave > braveSpent,
-    google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX) && CAPS.google_cse > googleSpent,
+    brave: !!process.env.BRAVE_API_KEY && braveRemaining > 0,
+    google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX) && googleRemaining > 0,
     apollo: !!process.env.APOLLO_API_KEY && CAPS.apollo > 0,
   };
   return {
     target,
     eligible_count,
+    external_shortfall: externalShortfall,
     providers,
     provider_usage: {
-      brave: { spent: braveSpent, cap: CAPS.brave, remaining: Math.max(0, CAPS.brave - braveSpent) },
-      google_cse: { spent: googleSpent, cap: CAPS.google_cse, remaining: Math.max(0, CAPS.google_cse - googleSpent) },
+      brave: { spent: braveSpent, cap: CAPS.brave, remaining: braveRemaining },
+      google_cse: { spent: googleSpent, cap: CAPS.google_cse, remaining: googleRemaining },
     },
     has_research_provider: providers.brave || providers.google_cse,
+    remaining_paid_queries: remainingPaidQueries,
+    required_paid_queries: requiredPaidQueries,
+    has_sufficient_research_capacity: externalShortfall === 0
+      || ((providers.brave || providers.google_cse) && remainingPaidQueries >= requiredPaidQueries),
   };
 }
 
@@ -1045,6 +1062,33 @@ async function findRecentRunningExecution(clientId) {
   return rows[0] || null;
 }
 
+async function expireStaleRunningExecutions(clientId) {
+  const { rows } = await pool.query(
+    `UPDATE agent_memory
+        SET content = jsonb_set(
+              jsonb_set(content, '{status}', '"expired"'::jsonb, true),
+              '{expired_reason}', '"stale_execution_timeout"'::jsonb, true
+            ) || jsonb_build_object('expired_at', NOW()),
+            updated_at = NOW()
+      WHERE client_id = $1
+        AND agent = 'director'
+        AND key LIKE 'exec_%'
+        AND content->>'status' = 'executing'
+        AND updated_at < NOW() - INTERVAL '30 minutes'
+      RETURNING key`,
+    [clientId]
+  );
+  if (rows.length > 0) {
+    await logsService.createLog(clientId, {
+      agent: 'captain_beaver',
+      action: 'stale_campaign_expired',
+      target_type: 'system',
+      metadata: { expired_count: rows.length, execution_keys: rows.map(r => r.key) },
+    }).catch(() => {});
+  }
+  return rows.length;
+}
+
 async function persistExecTerminalStatus(clientId, planId, content) {
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
@@ -1062,6 +1106,7 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
   const originalCommand = command || '';
   const campaignCommand = await buildCampaignCommandFromClientConfig(clientId, originalCommand);
   const preflight = await getRunCampaignPreflight(clientId, campaignCommand);
+  await expireStaleRunningExecutions(clientId).catch(() => 0);
   const running = await findRecentRunningExecution(clientId).catch(() => null);
   if (running) {
     const runningPlanId = String(running.key || '').replace(/^exec_/, '');
@@ -1095,6 +1140,22 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
       message: 'Campaign blocked: no eligible fresh DB leads and no capped research provider is enabled.',
     };
   }
+  if (!preflight.has_sufficient_research_capacity) {
+    await logsService.createLog(clientId, {
+      agent: 'captain_beaver',
+      action: 'campaign_blocked',
+      target_type: 'system',
+      metadata: { plan_id: planId, command: campaignCommand, original_command: originalCommand, preflight, reason: 'insufficient_paid_search_capacity' },
+    }).catch(() => {});
+    return {
+      ok: false,
+      status: 'blocked',
+      plan_id: planId,
+      preflight,
+      reason: 'insufficient_paid_search_capacity',
+      message: `Campaign blocked: needs about ${preflight.required_paid_queries} paid search queries for ${preflight.external_shortfall} external leads, but only ${preflight.remaining_paid_queries} remain today.`,
+    };
+  }
 
   await logsService.createLog(clientId, {
     agent: 'captain_beaver',
@@ -1108,7 +1169,7 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
     const { directorExecute } = require('./agents');
     runWithClientContext(clientId, () => directorExecute(clientId, { plan_id: planId, command: campaignCommand, limit: preflight.target })).then(result => {
       return persistExecTerminalStatus(clientId, planId, {
-        status: 'completed',
+        status: result?.status || 'completed',
         result,
         completed_at: new Date().toISOString(),
       });
