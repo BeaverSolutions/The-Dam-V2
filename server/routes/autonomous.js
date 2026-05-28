@@ -9,6 +9,7 @@ const { directorExecute, rangerReview } = agentsService;
 const { runWithClientContext } = require('../middleware/clientContext');
 const pipelineTrace = require('../services/pipelineTrace');
 const logger = require('../utils/logger');
+const { leadSelectionFeedbackExclusionSql } = require('../services/founderFeedbackSignals');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
@@ -1656,7 +1657,8 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
        WHERE client_id = $1
          AND pipeline_stage = 'prospecting'
          AND status = 'new'
-         AND deleted_at IS NULL`,
+         AND deleted_at IS NULL
+         ${leadSelectionFeedbackExclusionSql('leads')}`,
       [clientId]
     );
     const poolEmailReady   = parseInt(poolCounts[0].email_ready) || 0;
@@ -1749,6 +1751,7 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
            AND pipeline_stage = 'prospecting'
            AND status = 'new'
            AND deleted_at IS NULL
+           ${leadSelectionFeedbackExclusionSql('leads')}
            -- 2026-05-18: never re-draw a lead that already has a message.
            -- processExistingLeadsPipeline does not advance lead state after a
            -- draft, so a drafted lead stays pipeline_stage='prospecting'/

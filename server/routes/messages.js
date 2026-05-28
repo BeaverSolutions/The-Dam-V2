@@ -5,6 +5,7 @@ const { body, param } = require('express-validator');
 const validate = require('../middleware/validate');
 const messagesService = require('../services/messages');
 const pool = require('../db/pool');
+const { isLeadSelectionFeedback } = require('../services/founderFeedbackSignals');
 
 router.get('/', async (req, res, next) => {
   try {
@@ -249,18 +250,19 @@ router.post('/:id/founder-note',
       const msg = await loadBorderlineMessage(req.clientId, req.params.id);
       if (!msg) return res.status(404).json({ error: 'Message not found', code: 'NOT_FOUND' });
 
+      const note = req.body.note.trim();
       await writeFounderFeedback(req.clientId, {
         lead_id: msg.lead_id,
         message_id: msg.id,
         original_body: msg.body,
         edited_body: null,
-        rejection_reason: req.body.note.trim(),
+        rejection_reason: note,
         feedback_type: 'founder_note',
         channel: msg.channel,
         lead_context: { name: msg.lead_name, company: msg.lead_company, title: msg.lead_title },
       }, { required: true });
 
-      res.json({ data: { id: msg.id, captured: true } });
+      res.json({ data: { id: msg.id, captured: true, lead_selection_feedback: isLeadSelectionFeedback(note) } });
     } catch (err) { next(err); }
   }
 );

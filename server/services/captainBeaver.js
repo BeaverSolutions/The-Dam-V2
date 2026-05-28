@@ -45,6 +45,7 @@ const {
   injectMemoryContext,
   postSessionLearning,
 } = require('./learningEngine');
+const { leadSelectionFeedbackExclusionSql } = require('./founderFeedbackSignals');
 
 // ─── Persona loader ────────────────────────────────────────────────────────
 // Loads the same files Jarvis loads: IDENTITY, SOUL, USER, AGENTS, MEMORY, TOOLS.
@@ -460,6 +461,7 @@ async function toolSearchInternalLeads(clientId, { industry, location, signal_ti
           'linkedin_requested', 'awaiting_accept'
         )
     )`);
+    conditions.push(leadSelectionFeedbackExclusionSql('leads').replace(/^AND\s+/, ''));
   }
 
   if (industry) {
@@ -1018,7 +1020,8 @@ async function getRunCampaignPreflight(clientId, command) {
              AND pt.stage = 'enrolled'
              AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date =
                  (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date
-        )`,
+        )
+        ${leadSelectionFeedbackExclusionSql('l')}`,
     [clientId]
   );
   const { CAPS } = require('./spendGuard');

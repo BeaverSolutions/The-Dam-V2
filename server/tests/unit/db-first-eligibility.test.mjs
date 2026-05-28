@@ -32,6 +32,10 @@ describe('director DB-first eligibility', () => {
     expect(dbFirstSql).toContain("pt.stage = 'enrolled'");
     expect(dbFirstSql).toContain("Asia/Kuala_Lumpur");
   });
+
+  it('excludes explicit founder lead-selection rejections from DB-first reuse', () => {
+    expect(dbFirstSql).toContain("leadSelectionFeedbackExclusionSql('l')");
+  });
 });
 
 describe('Captain campaign preflight eligibility', () => {
@@ -52,5 +56,9 @@ describe('Captain campaign preflight eligibility', () => {
     expect(preflightSql).toContain("'awaiting_accept'");
     expect(preflightSql).not.toContain("m.status <> 'deleted'");
     expect(preflightSql).not.toContain("'ranger_rejected'");
+  });
+
+  it('does not count wrong-geo/ICP founder feedback as eligible campaign capacity', () => {
+    expect(preflightSql).toContain("leadSelectionFeedbackExclusionSql('l')");
   });
 });

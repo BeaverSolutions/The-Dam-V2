@@ -15,6 +15,7 @@ const researchModule = require('./research');
 const { getClientConfig, buildClientContext } = require('./clientConfig');
 const { evaluateLeadQuality } = require('../utils/leadQuality');
 const { recordOutcome, attributionFromLead } = require('./outcomeTracker');
+const { LEAD_SELECTION_REJECTION_SQL, leadSelectionFeedbackExclusionSql } = require('./founderFeedbackSignals');
 
 // Channel-specific drafting instructions injected into the Sales Beaver prompt.
 // Module scope (2026-05-16, Jules F-03): was a local const inside
@@ -481,12 +482,13 @@ async function getFounderFeedback(clientId) {
  */
 async function buildDirectorMemoryBrief(clientId) {
   try {
-    const [icp, weeklyLearnings, rangerPatterns, salesMistakes, researchMistakes] = await Promise.all([
+    const [icp, weeklyLearnings, rangerPatterns, salesMistakes, researchMistakes, leadSelectionDirectives] = await Promise.all([
       getMemory(clientId, 'director', 'icp'),
       getMemory(clientId, 'director', 'weekly_learnings'),
       getRangerRejectionPatterns(clientId),
       getMemory(clientId, 'sales_beaver', 'mistakes'),
       getMemory(clientId, 'research_beaver', 'mistakes'),
+      getFounderLeadSelectionDirectives(clientId),
     ]);
 
     const parts = [];
@@ -504,6 +506,9 @@ async function buildDirectorMemoryBrief(clientId) {
     }
     if (Array.isArray(researchMistakes) && researchMistakes.length > 0) {
       parts.push(`Research Beaver past mistakes: ${JSON.stringify(researchMistakes.slice(0, 3))}`);
+    }
+    if (leadSelectionDirectives) {
+      parts.push(`Founder lead-selection feedback (Research/Captain must obey; do not select similar off-ICP leads):\n${leadSelectionDirectives}`);
     }
 
     return parts.length > 0 ? `\n\nSHARED MEMORY BRIEF (read before acting):\n${parts.join('\n\n')}` : '';
@@ -1607,6 +1612,28 @@ async function surfaceUnrewrittenDraft(clientId, { messageId, body, subject, rea
   } catch (err) {
     console.warn('[never-burn] surfaceUnrewrittenDraft failed:', err.message);
     return false;
+  }
+}
+
+async function getFounderLeadSelectionDirectives(clientId) {
+  try {
+    const res = await pool.query(
+      `SELECT rejection_reason, lead_context
+       FROM founder_feedback
+       WHERE client_id = $1
+         AND feedback_type IN ('rejection', 'founder_note', 'borderline_skip')
+         AND COALESCE(rejection_reason, '') ~* $2
+       ORDER BY created_at DESC
+       LIMIT 10`,
+      [clientId, LEAD_SELECTION_REJECTION_SQL]
+    );
+    if (res.rows.length === 0) return null;
+    return res.rows.map(row => {
+      const ctx = row.lead_context || {};
+      return `- ${ctx.name || 'Unknown'} at ${ctx.company || 'Unknown'}: ${row.rejection_reason}`;
+    }).join('\n');
+  } catch {
+    return null;
   }
 }
 
@@ -3189,6 +3216,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
               AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date =
                   (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date
           )
+          ${leadSelectionFeedbackExclusionSql('l')}
         ORDER BY
          CASE l.signal_tier WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
          l.created_at DESC
