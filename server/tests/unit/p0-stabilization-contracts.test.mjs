@@ -13,11 +13,13 @@ function fnBody(source, marker, endMarker) {
 }
 
 describe('P0 stabilization contracts', () => {
-  it('Vibe CSV import is source-specific, trusted, tiered, and deduped beyond email', () => {
+  it('trusted CSV imports are source-specific, trusted, tiered, and deduped beyond email', () => {
     const src = service('routes/import.js');
     expect(src).toContain('vibe_csv');
-    expect(src).toContain("meta.email_verification = email ? 'trusted_from_vibe_csv' : 'not_present'");
-    expect(src).toContain("emailSource = emailVerified ? 'vibe_csv' : null");
+    expect(src).toContain('apollo_csv');
+    expect(src).toContain('const isTrustedEmailCsv = isVibeCsv || isApolloCsv');
+    expect(src).toContain('meta.email_verification = email ? `trusted_from_${importSource}` : \'not_present\'');
+    expect(src).toContain('emailSource = emailVerified ? importSource : null');
     expect(src).toContain("email ? 'A' : normalizedLinkedIn ? 'B' : null");
     expect(src).toContain('LOWER(TRIM(email))');
     expect(src).toContain("SPLIT_PART(linkedin_url, '?', 1)");

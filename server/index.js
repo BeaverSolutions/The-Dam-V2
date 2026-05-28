@@ -462,6 +462,36 @@ async function start() {
     // setTimeout(() => { processFollowUps().catch(() => {}); }, 2 * 60 * 1000);
     logger.info({ msg: 'Follow-up scheduler DISABLED — Captain-led daily planning replaces 30-min cron' });
 
+    if (process.env.AUTO_APPROVAL_RECOVERY_ENABLED !== 'false') {
+      const { recoverMissedAutoApprovals } = require('./services/autoApprovalRecovery');
+      let _autoApprovalRecoveryRunning = false;
+
+      async function runAutoApprovalRecovery() {
+        if (_autoApprovalRecoveryRunning) return;
+        _autoApprovalRecoveryRunning = true;
+        try {
+          const { rows: clients } = await pool.query(
+            `SELECT id FROM clients WHERE is_active = true AND onboarding_completed = true`
+          );
+          for (const client of clients) {
+            await runWithClientContext(client.id, () =>
+              recoverMissedAutoApprovals(client.id, { limit: 25, maxAgeDays: 7 })
+            ).catch(err => console.warn('[auto-approval-recovery] client failed:', err.message));
+          }
+        } catch (err) {
+          console.warn('[auto-approval-recovery] sweep failed:', err.message);
+        } finally {
+          _autoApprovalRecoveryRunning = false;
+        }
+      }
+
+      setTimeout(() => { runAutoApprovalRecovery().catch(() => {}); }, 90 * 1000);
+      setInterval(() => { runAutoApprovalRecovery().catch(() => {}); }, 15 * 60 * 1000);
+      logger.info({ msg: 'Auto-approval recovery started (15min sweep, 7-day window)' });
+    } else {
+      logger.info({ msg: 'Auto-approval recovery DISABLED by AUTO_APPROVAL_RECOVERY_ENABLED=false' });
+    }
+
     // DB Builder — Research Beaver maintains lead pool health
     // 2026-05-14: changed from every-15-min to 2x daily (08:30 + 13:00 MYT).
     // Per MJ direction + PER-BEAVER-KPI-ARCHITECTURE.md: Research Beaver fires

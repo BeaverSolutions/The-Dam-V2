@@ -42,6 +42,7 @@ const pipelineTrace = readFile('services/pipelineTrace.js');
 const signalHunt = readFile('services/signalHunt.js');
 const replyHandler = readFile('services/replyHandler.js');
 const searchService = readFile('services/searchService.js');
+const autoApprovalRecovery = readFile('services/autoApprovalRecovery.js');
 const index = readFile('index.js');
 const allSources = [agents, dbBuilder, sendQueue, pipeline];
 
@@ -127,13 +128,20 @@ const campaignOutputDriven = agents.includes('campaign_target_unfulfilled')
 check('Campaign target counts approval-ready output', campaignOutputDriven,
   campaignOutputDriven ? 'requested count tied to approved output + retry/unfulfilled logs' : 'campaign may count enrolled/drafted leads as success');
 
-// 14. Fresh sourcing must not recycle exhausted old leads.
+// 14. Fresh sourcing must not recycle active/sent outreach, but old rejected
+// drafts must not permanently starve DB-first recovery.
 const captainBeaver = readFile('services/captainBeaver.js');
-const noRecycledDbLeads = agents.includes("m.status <> 'deleted'")
-  && captainBeaver.includes("m.status <> 'deleted'")
+const activeOutreachDedupe = agents.includes("m.status IN (")
+  && agents.includes("'pending_ranger', 'pending_approval', 'approved'")
+  && agents.includes("'pending_send', 'sending', 'sent', 'delivered'")
+  && agents.includes("'linkedin_requested', 'awaiting_accept'")
+  && captainBeaver.includes("m.status IN (")
+  && captainBeaver.includes("'pending_ranger', 'pending_approval', 'approved'")
+  && captainBeaver.includes("'pending_send', 'sending', 'sent', 'delivered'")
+  && captainBeaver.includes("'linkedin_requested', 'awaiting_accept'")
   && agents.includes("status: 'channel_exhausted'");
-check('Fresh campaign excludes prior outreach attempts', noRecycledDbLeads,
-  noRecycledDbLeads ? 'DB-first + Captain search exclude any non-deleted prior message' : 'old contacted/exhausted leads may re-enter find-N campaigns');
+check('Fresh campaign excludes active outreach without starving rejected drafts', activeOutreachDedupe,
+  activeOutreachDedupe ? 'DB-first + Captain search block active/sent outreach states while rejected drafts can recover' : 'old rejected drafts may still starve DB-first or active outreach may recycle');
 
 // 15. Research fanout must be capped per run and adjustable by remaining provider capacity.
 const researchSource = readFile('services/research.js');
@@ -202,6 +210,21 @@ const companySearchFallback = searchService.includes('(?:in|company)')
   && searchService.includes('requested_country');
 check('Search fallback preserves company discovery and SG-safe Brave country', companySearchFallback,
   companySearchFallback ? 'CSE/DDG preserve /company and Brave maps unsupported country safely' : 'company-first fallback may still force /in or Brave SG 422');
+
+// 22. Missed auto-approval recovery must preserve Enforcer gates and send safety.
+const autoApprovalRecoveryGuarded = autoApprovalRecovery.includes("AUTO_APPROVE_ENABLED === 'false'")
+  && autoApprovalRecovery.includes('score < threshold')
+  && autoApprovalRecovery.includes('client_is_seasoned')
+  && autoApprovalRecovery.includes('recent_sent_count')
+  && autoApprovalRecovery.includes("COALESCE(la.reasons->>'borderline', 'false') <> 'true'")
+  && autoApprovalRecovery.includes("la.reasons->>'gate_fail'")
+  && autoApprovalRecovery.includes("m.channel IN ('email', 'linkedin')")
+  && autoApprovalRecovery.includes("row.channel === 'email' ? 'pending_send' : 'linkedin_requested'")
+  && autoApprovalRecovery.includes('enqueueMessage(clientId, row.message_id)')
+  && autoApprovalRecovery.includes("INSERT INTO approval_audit")
+  && autoApprovalRecovery.includes("'auto_approval_recovery'");
+check('Auto-approval recovery keeps gates before enqueue', autoApprovalRecoveryGuarded,
+  autoApprovalRecoveryGuarded ? 'threshold/seasoning/recent-send/gate-fail/channel/audit/enqueue guards found' : 'recovery may bypass approval or send safety gates');
 
 const failures = results.filter(r => !r.pass);
 console.log(`\n${results.length} checks: ${results.length - failures.length} passed, ${failures.length} failed`);

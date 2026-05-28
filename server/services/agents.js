@@ -599,10 +599,11 @@ async function researchSearch(clientId, { query, command = null, filters = {} })
   // Provider config snapshot — turns a silent "0 results" into a one-query diagnosis.
   // Self-sourcing needs ONE working search provider: Brave (primary), Google CSE
   // (fallback), or Apollo. DuckDuckGo is a crash-guard, not a real source.
+  const apolloKey = await apolloService.getApiKey(clientId).catch(() => null);
   const providers = {
     brave:      !!process.env.BRAVE_API_KEY,
     google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX),
-    apollo:     !!process.env.APOLLO_API_KEY && Number(process.env.APOLLO_DAILY_QUERY_CAP || 0) > 0,
+    apollo:     !!apolloKey && Number(process.env.APOLLO_DAILY_QUERY_CAP || 0) > 0,
   };
   const missingKeys = [];
   if (!providers.brave) missingKeys.push('BRAVE_API_KEY');
@@ -1862,7 +1863,11 @@ async function directorPlan(clientId, { command, source }) {
          AND NOT EXISTS (
            SELECT 1 FROM messages m
             WHERE m.lead_id = l.id AND m.client_id = $1
-              AND m.status <> 'deleted'
+              AND m.status IN (
+                'pending_ranger', 'pending_approval', 'approved',
+                'pending_send', 'sending', 'sent', 'delivered',
+                'linkedin_requested', 'awaiting_accept'
+              )
          )`,
       [clientId]
     );
@@ -3080,7 +3085,11 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           AND NOT EXISTS (
             SELECT 1 FROM messages m
             WHERE m.lead_id = l.id AND m.client_id = $1
-              AND m.status <> 'deleted'
+              AND m.status IN (
+                'pending_ranger', 'pending_approval', 'approved',
+                'pending_send', 'sending', 'sent', 'delivered',
+                'linkedin_requested', 'awaiting_accept'
+              )
           )
           AND NOT EXISTS (
             SELECT 1 FROM pipeline_traces pt

@@ -26,6 +26,11 @@ const IMPORT_SOURCES = [
     description: 'User-prompted Vibe export. Emails are trusted and skip MillionVerifier.',
   },
   {
+    key: 'apollo_csv',
+    title: 'Apollo CSV',
+    description: 'Apollo export from your account. Emails are trusted as Apollo-sourced.',
+  },
+  {
     key: 'csv_import',
     title: 'Standard CSV',
     description: 'Generic lead list from Apollo, LinkedIn, WaveLeads, or another source.',
@@ -221,7 +226,7 @@ export default function Import() {
         <>
         <div className="card" style={{ marginBottom: '1rem' }}>
           <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Import source</div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0.75rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem' }}>
             {IMPORT_SOURCES.map(option => {
               const active = importSource === option.key;
               return (

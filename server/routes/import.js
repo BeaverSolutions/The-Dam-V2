@@ -4,7 +4,7 @@ const router = require('express').Router();
 const pool = require('../db/pool');
 const logger = require('../utils/logger');
 
-const IMPORT_SOURCES = new Set(['csv_import', 'vibe_csv']);
+const IMPORT_SOURCES = new Set(['csv_import', 'vibe_csv', 'apollo_csv']);
 
 function normalizeImportSource(raw) {
   return IMPORT_SOURCES.has(raw) ? raw : 'csv_import';
@@ -29,13 +29,15 @@ function normalizeNameCompany(value) {
 }
 
 // POST /api/import/leads
-// Body: { rows: [...], source?: 'csv_import'|'vibe_csv', mapping: { name, email, company, title, linkedin_url, website, industry, company_size, signal, notes } }
+// Body: { rows: [...], source?: 'csv_import'|'vibe_csv'|'apollo_csv', mapping: { name, email, company, title, linkedin_url, website, industry, company_size, signal, notes } }
 router.post('/leads', async (req, res, next) => {
   try {
     const clientId = req.clientId;
     const { rows, mapping } = req.body;
     const importSource = normalizeImportSource(req.body.source || req.body.sourceType);
     const isVibeCsv = importSource === 'vibe_csv';
+    const isApolloCsv = importSource === 'apollo_csv';
+    const isTrustedEmailCsv = isVibeCsv || isApolloCsv;
 
     if (!Array.isArray(rows) || rows.length === 0) {
       return res.status(400).json({ error: 'No rows provided', code: 'NO_ROWS' });
@@ -118,19 +120,19 @@ router.post('/leads', async (req, res, next) => {
       meta.source = importSource;
       meta.data_source = importSource;
       meta.verified = true; // user-curated data is trusted by default
-      if (isVibeCsv) {
-        meta.email_source = email ? 'vibe_csv' : null;
-        meta.import_mode = 'vibe_csv';
-        meta.email_verification = email ? 'trusted_from_vibe_csv' : 'not_present';
+      if (isTrustedEmailCsv) {
+        meta.email_source = email ? importSource : null;
+        meta.import_mode = importSource;
+        meta.email_verification = email ? `trusted_from_${importSource}` : 'not_present';
       }
 
       // Optional signal_tier from CSV — default P2 for imported leads (mid-priority).
       // P1 = active signal, P2 = some signal, P3 = no signal. Captain's gates use this.
       const tierRaw = (get(row, mapping.signal_tier) || '').toUpperCase();
       const signalTier = ['P1', 'P2', 'P3'].includes(tierRaw) ? tierRaw : 'P2';
-      const emailVerified = isVibeCsv && !!email;
-      const emailSource = emailVerified ? 'vibe_csv' : null;
-      const leadTier = isVibeCsv
+      const emailVerified = isTrustedEmailCsv && !!email;
+      const emailSource = emailVerified ? importSource : null;
+      const leadTier = isTrustedEmailCsv
         ? (email ? 'A' : normalizedLinkedIn ? 'B' : null)
         : null;
 

@@ -315,15 +315,21 @@ router.get('/clients/:id/credentials',
   [param('id').isUUID(), validate],
   async (req, res, next) => {
     try {
+      const secretKeys = ['apollo_api_key', 'hunter_api_key', 'gmail_tokens'];
       const result = await pool.query(
-        `SELECT key, updated_at FROM credentials WHERE client_id = $1`,
-        [req.params.id]
+        `SELECT key, updated_at FROM agent_memory
+          WHERE client_id = $1
+            AND agent = 'system'
+            AND memory_type = 'secret'
+            AND key = ANY($2::text[])`,
+        [req.params.id, secretKeys]
       );
 
       // Return key names + last updated — never expose values
       const configured = {};
       for (const row of result.rows) {
-        configured[row.key] = { configured: true, updated_at: row.updated_at };
+        const publicKey = row.key === 'gmail_tokens' ? 'gmail_refresh_token' : row.key;
+        configured[publicKey] = { configured: true, updated_at: row.updated_at };
       }
 
       const expected = ['apollo_api_key', 'hunter_api_key', 'gmail_refresh_token'];

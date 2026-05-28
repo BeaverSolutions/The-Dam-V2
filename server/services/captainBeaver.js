@@ -450,11 +450,15 @@ async function toolSearchInternalLeads(clientId, { industry, location, signal_ti
   if (!include_contacted) {
     conditions.push(`(first_contacted_at IS NULL OR first_contacted_at < NOW() - INTERVAL '14 days')`);
     conditions.push(`status NOT IN ('contacted', 'replied', 'meeting_booked', 'closed_won', 'closed_lost')`);
-    // Exclude leads with any prior outreach attempt. "Find X leads" means net
-    // new approval-ready output, not recycling old rejected/exhausted rows.
+    // Exclude leads with active or already-sent outreach. Old rejected drafts
+    // should not permanently starve DB-first recovery.
     conditions.push(`NOT EXISTS (
       SELECT 1 FROM messages m WHERE m.lead_id = leads.id AND m.client_id = leads.client_id
-        AND m.status <> 'deleted'
+        AND m.status IN (
+          'pending_ranger', 'pending_approval', 'approved',
+          'pending_send', 'sending', 'sent', 'delivered',
+          'linkedin_requested', 'awaiting_accept'
+        )
     )`);
   }
 
@@ -1002,7 +1006,11 @@ async function getRunCampaignPreflight(clientId, command) {
         AND NOT EXISTS (
           SELECT 1 FROM messages m
            WHERE m.lead_id = l.id AND m.client_id = $1
-             AND m.status <> 'deleted'
+             AND m.status IN (
+               'pending_ranger', 'pending_approval', 'approved',
+               'pending_send', 'sending', 'sent', 'delivered',
+               'linkedin_requested', 'awaiting_accept'
+             )
         )
         AND NOT EXISTS (
           SELECT 1 FROM pipeline_traces pt
@@ -1017,17 +1025,20 @@ async function getRunCampaignPreflight(clientId, command) {
   const { providerUsageToday } = require('./spendGuard');
   const braveSpent = await providerUsageToday('brave', clientId).catch(() => CAPS.brave);
   const googleSpent = await providerUsageToday('google_cse', clientId).catch(() => CAPS.google_cse);
+  const apolloSpent = await providerUsageToday('apollo', clientId).catch(() => CAPS.apollo);
   const braveRemaining = Math.max(0, CAPS.brave - braveSpent);
   const googleRemaining = Math.max(0, CAPS.google_cse - googleSpent);
-  const remainingPaidQueries = braveRemaining + googleRemaining;
+  const apolloRemaining = Math.max(0, CAPS.apollo - apolloSpent);
+  const remainingPaidQueries = braveRemaining + googleRemaining + apolloRemaining;
   const externalShortfall = Math.max(0, target - Math.min(target, eligible_count));
   const requiredPaidQueries = externalShortfall > 0
     ? minPaidQueriesForExternalTarget(externalShortfall)
     : 0;
+  const apolloKey = await require('./apollo').getApiKey(clientId).catch(() => null);
   const providers = {
     brave: !!process.env.BRAVE_API_KEY && braveRemaining > 0,
     google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX) && googleRemaining > 0,
-    apollo: !!process.env.APOLLO_API_KEY && CAPS.apollo > 0,
+    apollo: !!apolloKey && apolloRemaining > 0,
   };
   return {
     target,
@@ -1037,12 +1048,13 @@ async function getRunCampaignPreflight(clientId, command) {
     provider_usage: {
       brave: { spent: braveSpent, cap: CAPS.brave, remaining: braveRemaining },
       google_cse: { spent: googleSpent, cap: CAPS.google_cse, remaining: googleRemaining },
+      apollo: { spent: apolloSpent, cap: CAPS.apollo, remaining: apolloRemaining },
     },
-    has_research_provider: providers.brave || providers.google_cse,
+    has_research_provider: providers.brave || providers.google_cse || providers.apollo,
     remaining_paid_queries: remainingPaidQueries,
     required_paid_queries: requiredPaidQueries,
     has_sufficient_research_capacity: externalShortfall === 0
-      || ((providers.brave || providers.google_cse) && remainingPaidQueries >= requiredPaidQueries),
+      || ((providers.brave || providers.google_cse || providers.apollo) && remainingPaidQueries >= requiredPaidQueries),
   };
 }
 
