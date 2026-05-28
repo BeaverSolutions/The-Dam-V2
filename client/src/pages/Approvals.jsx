@@ -82,7 +82,8 @@ function ApprovalCard({ approval, onResolve, onSend, onEdit, onError, onConnecti
     if (acting) return; // prevent double-click
     setActing(true);
     try {
-      await onResolve(approval.id, 'rejected');
+      await onResolve(approval.id, 'rejected', noteText.trim() || undefined);
+      setNoteText('');
     } finally {
       setActing(false);
     }
@@ -528,10 +529,10 @@ export default function Approvals() {
     }).catch(() => {});
   }, []);
 
-  const handleResolve = async (id, status) => {
+  const handleResolve = async (id, status, notes) => {
     setActionError(null);
     try {
-      await request(`/approvals/${id}`, { method: 'PUT', body: JSON.stringify({ status }) });
+      await request(`/approvals/${id}`, { method: 'PUT', body: JSON.stringify({ status, ...(notes ? { notes } : {}) }) });
       setApprovals(prev => prev.filter(a => a.id !== id));
       setCounts(prev => ({
         ...prev,
@@ -539,6 +540,11 @@ export default function Approvals() {
         [status]: (prev[status] || 0) + 1,
       }));
     } catch (err) {
+      if (err?.code === 'ALREADY_RESOLVED') {
+        setApprovals(prev => prev.filter(a => a.id !== id));
+        await load(tab);
+        return;
+      }
       setActionError(err?.message || 'Action failed — please try again');
     }
   };

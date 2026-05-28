@@ -422,7 +422,7 @@ async function getFounderFeedback(clientId) {
       `SELECT feedback_type, original_body, edited_body, rejection_reason, channel, lead_context
        FROM founder_feedback
        WHERE client_id = $1
-       ORDER BY created_at DESC LIMIT 10`,
+       ORDER BY created_at DESC LIMIT 30`,
       [clientId]
     );
     if (res.rows.length === 0) return null;

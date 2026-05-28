@@ -67,19 +67,22 @@ router.put('/:id',
 
 async function loadBorderlineMessage(clientId, messageId) {
   const { rows } = await pool.query(
-    `SELECT id, lead_id, channel, body, subject, status FROM messages
-     WHERE id = $1 AND client_id = $2`,
+    `SELECT m.id, m.lead_id, m.channel, m.body, m.subject, m.status,
+            l.name AS lead_name, l.company AS lead_company, l.title AS lead_title
+       FROM messages m
+       LEFT JOIN leads l ON l.id = m.lead_id AND l.client_id = m.client_id
+      WHERE m.id = $1 AND m.client_id = $2`,
     [messageId, clientId]
   );
   return rows[0] || null;
 }
 
-async function writeFounderFeedback(clientId, payload) {
+async function writeFounderFeedback(clientId, payload, { required = false } = {}) {
   try {
     await pool.query(
       `INSERT INTO founder_feedback
-        (client_id, lead_id, message_id, original_body, edited_body, rejection_reason, feedback_type, channel)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        (client_id, lead_id, message_id, original_body, edited_body, rejection_reason, feedback_type, channel, lead_context)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
       [
         clientId,
         payload.lead_id,
@@ -89,11 +92,16 @@ async function writeFounderFeedback(clientId, payload) {
         payload.rejection_reason || null,
         payload.feedback_type,
         payload.channel,
+        JSON.stringify(payload.lead_context || {}),
       ]
     );
+    return true;
   } catch (err) {
     // Non-fatal — capture is observability, not a blocker for the user action.
+    if (required) throw err;
+    // Non-fatal for approve/reject flows; explicit Teach notes require capture.
     console.warn(`[messages] founder_feedback capture failed for ${payload.message_id}:`, err.message);
+    return false;
   }
 }
 
@@ -133,6 +141,7 @@ router.post('/:id/apply-suggestion',
         edited_body: newBody,
         feedback_type: 'borderline_apply_suggestion',
         channel: msg.channel,
+        lead_context: { name: msg.lead_name, company: msg.lead_company, title: msg.lead_title },
       });
 
       res.json({ data: { id: msg.id, status: nextStatus } });
@@ -174,6 +183,7 @@ router.post('/:id/edit-borderline',
         edited_body: newBody,
         feedback_type: 'borderline_edit_apply',
         channel: msg.channel,
+        lead_context: { name: msg.lead_name, company: msg.lead_company, title: msg.lead_title },
       });
 
       res.json({ data: { id: msg.id, status: nextStatus } });
@@ -214,6 +224,7 @@ router.post('/:id/skip-borderline',
         rejection_reason: reason,
         feedback_type: 'borderline_skip',
         channel: msg.channel,
+        lead_context: { name: msg.lead_name, company: msg.lead_company, title: msg.lead_title },
       });
 
       res.json({ data: { id: msg.id, status: 'ranger_rejected' } });
@@ -246,7 +257,8 @@ router.post('/:id/founder-note',
         rejection_reason: req.body.note.trim(),
         feedback_type: 'founder_note',
         channel: msg.channel,
-      });
+        lead_context: { name: msg.lead_name, company: msg.lead_company, title: msg.lead_title },
+      }, { required: true });
 
       res.json({ data: { id: msg.id, captured: true } });
     } catch (err) { next(err); }
