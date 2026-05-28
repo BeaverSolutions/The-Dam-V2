@@ -211,7 +211,17 @@ const companySearchFallback = searchService.includes('(?:in|company)')
 check('Search fallback preserves company discovery and SG-safe Brave country', companySearchFallback,
   companySearchFallback ? 'CSE/DDG preserve /company and Brave maps unsupported country safely' : 'company-first fallback may still force /in or Brave SG 422');
 
-// 22. Missed auto-approval recovery must preserve Enforcer gates and send safety.
+// 22. Signal-sourced good leads get rewrite attempts before manual fallback.
+const signalRetryBeforeFallback = agents.includes('MAX_SIGNAL_RANGER_RETRIES = 2')
+  && agents.includes('Signal redraft ${retryAttempt + 1}')
+  && agents.includes('approved_after_redraft')
+  && agents.includes('rejected_after_redraft')
+  && agents.includes('Do NOT repeat the same product-pitch structure')
+  && agents.includes("'enforcer_fallback', 'pending'");
+check('Signal pipeline retries rejected drafts before fallback', signalRetryBeforeFallback,
+  signalRetryBeforeFallback ? 'signal path has bounded Sales redrafts before Enforcer fallback' : 'signal path may skip straight from rejection to fallback');
+
+// 23. Missed auto-approval recovery must preserve Enforcer gates and send safety.
 const autoApprovalRecoveryGuarded = autoApprovalRecovery.includes("AUTO_APPROVE_ENABLED === 'false'")
   && autoApprovalRecovery.includes('score < threshold')
   && autoApprovalRecovery.includes('client_is_seasoned')

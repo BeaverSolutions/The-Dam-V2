@@ -18,9 +18,22 @@ async function getMessages(clientId, filters = {}, pagination = {}) {
   );
 
   const result = await pool.query(
-    `SELECT m.*, l.name as lead_name, l.company as lead_company
+    `SELECT m.*,
+            l.name as lead_name,
+            l.company as lead_company,
+            COALESCE(sibling_pending.pending_approval_count, 0)::int AS sibling_pending_approval_count,
+            sibling_pending.latest_pending_approval_id
      FROM messages m
      LEFT JOIN leads l ON l.id = m.lead_id
+     LEFT JOIN LATERAL (
+       SELECT COUNT(*)::int AS pending_approval_count,
+              (ARRAY_AGG(id ORDER BY created_at DESC))[1] AS latest_pending_approval_id
+         FROM messages sibling
+        WHERE sibling.client_id = m.client_id
+          AND sibling.lead_id = m.lead_id
+          AND sibling.id <> m.id
+          AND sibling.status = 'pending_approval'
+     ) sibling_pending ON true
      WHERE m.client_id = $1
        AND ($2::text IS NULL OR m.status = $2)
        AND ($3::uuid IS NULL OR m.lead_id = $3)

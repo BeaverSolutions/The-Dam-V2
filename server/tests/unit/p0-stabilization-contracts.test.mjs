@@ -106,6 +106,28 @@ describe('P0 stabilization contracts', () => {
     expect(agents).toContain('same_day_enrolled_dedupe');
   });
 
+  it('signal pipeline retries rejected signal drafts before manual fallback', () => {
+    const agents = service('services/agents.js');
+
+    expect(agents).toContain('MAX_SIGNAL_RANGER_RETRIES = 2');
+    expect(agents).toContain('Signal redraft ${retryAttempt + 1}');
+    expect(agents).toContain('approved_after_redraft');
+    expect(agents).toContain('rejected_after_redraft');
+    expect(agents).toContain('Do NOT repeat the same product-pitch structure');
+    expect(agents).toContain("requested_by, status) VALUES ($1, $2, 'enforcer_fallback', 'pending')");
+  });
+
+  it('message UI separates rejected drafts from live leads with replacement drafts', () => {
+    const serviceSrc = service('services/messages.js');
+    const pageSrc = service('../client/src/pages/Messages.jsx');
+
+    expect(serviceSrc).toContain('sibling_pending_approval_count');
+    expect(serviceSrc).toContain('latest_pending_approval_id');
+    expect(pageSrc).toContain("ranger_rejected: { label: 'Draft Rejected'");
+    expect(pageSrc).toContain('Replacement Pending');
+    expect(pageSrc).toContain('Replacement draft is waiting in approvals for this same lead.');
+  });
+
   it('VP spend ledger records paid contact enrichment immediately', () => {
     expect(service('services/spendGuard.js')).toContain("metadata->>'provider' = 'vp'");
     expect(service('services/spendGuard.js')).toContain("VP_CREDITS_PER_LEAD = envNumber('VP_CREDITS_PER_LEAD', 5)");

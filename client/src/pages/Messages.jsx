@@ -7,7 +7,7 @@ import FilterTabs from '../components/FilterTabs';
 const STATUS_MAP = {
   draft: { label: 'Draft', cls: 'badge-muted' },
   pending_ranger: { label: 'Enforcer Review', cls: 'badge-police-blue' },
-  ranger_rejected: { label: 'Rejected', cls: 'badge-orange' },
+  ranger_rejected: { label: 'Draft Rejected', cls: 'badge-orange' },
   pending_approval: { label: 'Needs Approval', cls: 'badge-blue' },
   approved: { label: 'Approved', cls: 'badge-lime' },
   sent: { label: 'Sent', cls: 'badge-lime' },
@@ -20,6 +20,7 @@ function MessageRow({ msg }) {
   const [expanded, setExpanded] = useState(false);
   const StatusInfo = STATUS_MAP[msg.status] || { label: msg.status, cls: 'badge-muted' };
   const ChannelIcon = CHANNEL_ICONS[msg.channel] || Mail;
+  const hasReplacementPending = msg.status === 'ranger_rejected' && Number(msg.sibling_pending_approval_count || 0) > 0;
 
   return (
     <div style={{ borderBottom: '1px solid var(--border)' }}>
@@ -37,6 +38,9 @@ function MessageRow({ msg }) {
           </div>
         </div>
         <span className={`badge ${StatusInfo.cls}`}>{StatusInfo.label}</span>
+        {hasReplacementPending && (
+          <span className="badge badge-blue">Replacement Pending</span>
+        )}
         {msg.reply_detected_at && (
           <span style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--lime)', background: 'rgba(200,255,0,0.12)', padding: '0.15rem 0.45rem', borderRadius: 100, display: 'flex', alignItems: 'center', gap: '0.2rem', flexShrink: 0 }}>
             <CornerDownLeft size={10} /> replied
@@ -51,7 +55,12 @@ function MessageRow({ msg }) {
           <pre style={{ fontSize: '0.85rem', whiteSpace: 'pre-wrap', fontFamily: 'inherit', color: 'var(--text)' }}>{msg.body}</pre>
           {msg.ranger_notes && (
             <div style={{ marginTop: '0.75rem', padding: '0.5rem', background: 'rgba(255,140,0,0.1)', borderRadius: 'var(--radius)', fontSize: '0.8rem', color: 'var(--orange)' }}>
-              Ranger notes: {msg.ranger_notes}
+              Draft notes: {msg.ranger_notes}
+            </div>
+          )}
+          {hasReplacementPending && (
+            <div style={{ marginTop: '0.75rem', padding: '0.5rem', background: 'rgba(0,128,255,0.1)', borderRadius: 'var(--radius)', fontSize: '0.8rem', color: 'var(--blue)' }}>
+              Replacement draft is waiting in approvals for this same lead.
             </div>
           )}
           {msg.reply_snippet && (
@@ -99,6 +108,7 @@ export default function Messages() {
           { value: 'pending_approval', label: 'Needs Approval' },
           { value: 'approved', label: 'Approved' },
           { value: 'sent', label: 'Sent' },
+          { value: 'ranger_rejected', label: 'Draft Rejected' },
         ]}
         active={statusFilter}
         onChange={setStatusFilter}

@@ -2567,7 +2567,8 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         metadata: { channel, fail_closed: rangerFailedClosed },
       }).catch(() => {});
 
-      const finalBody = rangerResult?.body || fixed.body;
+      let finalBody = rangerResult?.body || fixed.body;
+      let finalSubject = draftSubject;
 
       if (rangerResult?.approved) {
         // ── Enforcer approved → auto-approve / borderline / manual decision ──
@@ -2578,13 +2579,103 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           lead,
           rangerResult,
           finalBody,
-          subject: draftSubject,
+          subject: finalSubject,
           kickoffId: plan_id,
           pipelinePath: 'signal_pipeline',
           source: 'signal_pipeline',
         });
         approvedCount++;
       } else {
+        const MAX_SIGNAL_RANGER_RETRIES = 2;
+        for (let retryAttempt = 0; retryAttempt < MAX_SIGNAL_RANGER_RETRIES && !rangerResult?.approved; retryAttempt++) {
+          const rejectionFeedback = rangerResult?.reject_reason || rangerResult?.notes || 'Message did not pass quality gates';
+          const feedbackContext = [
+            contextParts.join('\n'),
+            '',
+            `PREVIOUS ATTEMPT REJECTED: ${rejectionFeedback}`,
+            `Previous message that was rejected:\n${finalBody}`,
+            '',
+            'Rewrite the message fixing the issue above. Do NOT repeat the same product-pitch structure.',
+            'CRITICAL: Day 0 email body 50-60 words MAX. Lead with the real buying signal, then one pain-led question.',
+          ].join('\n');
+
+          let redraft = null;
+          try {
+            redraft = await salesGenerate(clientId, { lead_id: lead.id, channel, context: feedbackContext });
+          } catch (redraftErr) {
+            console.warn(`[signal-pipeline] Sales redraft ${retryAttempt + 1} failed for ${lead.name}:`, redraftErr.message);
+          }
+          if (!redraft?.body) break;
+
+          const redraftBody = typeof stripEmDashes === 'function' ? stripEmDashes(redraft.body) : redraft.body;
+          const retryFixed = autoFixMessage(redraftBody, { touchNumber: 0, maxWords: 80 });
+          finalBody = retryFixed.body;
+          finalSubject = redraft.subject || finalSubject;
+          await pool.query(
+            `UPDATE messages
+                SET body = $1,
+                    subject = $2,
+                    ranger_attempt_count = $3,
+                    ranger_notes = $4,
+                    status = 'pending_ranger',
+                    updated_at = NOW()
+              WHERE id = $5 AND client_id = $6`,
+            [
+              finalBody,
+              finalSubject,
+              retryAttempt + 1,
+              `Signal redraft ${retryAttempt + 1}: fixing - ${rejectionFeedback}`,
+              msg.id,
+              clientId,
+            ]
+          );
+          rangerResult = await rangerReview(clientId, {
+            message_id: msg.id,
+            message_body: finalBody,
+            lead_context: {
+              name: lead.name, company: lead.company, title: lead.title,
+              email: lead.email, lead_id: lead.id,
+              signal: meta.signal, angle: meta.angle, why_now: meta.why_now,
+            },
+          });
+          pipelineTrace.traceStage(clientId, {
+            lead_id: lead.id,
+            message_id: msg.id,
+            kickoff_id: plan_id,
+            stage: 'reviewed',
+            status: rangerResult?.approved ? 'approved_after_redraft' : 'rejected_after_redraft',
+            agent: 'enforcer_beaver',
+            score: rangerResult?.score ?? null,
+            reason: rangerResult?.notes || null,
+            pipeline_path: 'signal_pipeline',
+            metadata: { channel, redraft_attempt: retryAttempt + 1 },
+          }).catch(() => {});
+          const beaverStateService = require('./beaverState');
+          if (beaverStateService && typeof beaverStateService.recordImprovementAfterFeedback === 'function') {
+            beaverStateService.recordImprovementAfterFeedback(clientId, {
+              lead_id: lead.id,
+              original_message_id: msg.id,
+              retry_message_id: msg.id,
+              original_reject_reason: rejectionFeedback,
+              retry_passed: rangerResult?.approved === true,
+            }).catch(() => {});
+          }
+        }
+
+        if (rangerResult?.approved) {
+          await pipeline.applyEnforcerDecision(clientId, {
+            msg,
+            lead,
+            rangerResult,
+            finalBody: rangerResult?.body || finalBody,
+            subject: finalSubject,
+            kickoffId: plan_id,
+            pipelinePath: 'signal_pipeline',
+            source: 'signal_pipeline',
+          });
+          approvedCount++;
+          continue;
+        }
         // Enforcer rejected — try once more with Enforcer writing it himself
         console.warn(`[signal-pipeline] Enforcer rejected ${lead.name}: ${rangerResult?.notes || 'unknown'} — Enforcer drafting fallback`);
         await pool.query(
