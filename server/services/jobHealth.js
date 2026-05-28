@@ -22,14 +22,15 @@ const DB_BUILDER_WINDOWS_UTC = [
 ];
 const DB_BUILDER_GRACE_MS = 20 * MINUTE;
 
-function markRun(jobName) {
-  if (!jobs[jobName]) jobs[jobName] = { runs: 0, errors: 0, lastRunAt: null, lastErrorAt: null, lastError: null };
+function markRun(jobName, metadata = null) {
+  if (!jobs[jobName]) jobs[jobName] = { runs: 0, errors: 0, lastRunAt: null, lastErrorAt: null, lastError: null, lastMeta: null };
   jobs[jobName].runs++;
   jobs[jobName].lastRunAt = new Date().toISOString();
+  jobs[jobName].lastMeta = metadata;
 }
 
 function markError(jobName, errMsg) {
-  if (!jobs[jobName]) jobs[jobName] = { runs: 0, errors: 0, lastRunAt: null, lastErrorAt: null, lastError: null };
+  if (!jobs[jobName]) jobs[jobName] = { runs: 0, errors: 0, lastRunAt: null, lastErrorAt: null, lastError: null, lastMeta: null };
   jobs[jobName].errors++;
   jobs[jobName].lastErrorAt = new Date().toISOString();
   jobs[jobName].lastError = String(errMsg).slice(0, 200);
@@ -90,6 +91,7 @@ function getStatus() {
     daily_kickoff: 25 * HOUR,         // daily, stale after 25h
     morning_brief: 25 * HOUR,
     linkedin_sweep: 13 * HOUR,        // 6h interval, stale after 13h
+    auto_approval_recovery: 35 * MINUTE, // 15min interval, stale after 35min
   };
 
   const now = Date.now();
@@ -108,6 +110,7 @@ function getStatus() {
       errors: data.errors,
       lastRunAt: data.lastRunAt,
       lastError: data.lastError,
+      lastMeta: data.lastMeta,
     };
   }
 

@@ -222,9 +222,11 @@ const autoApprovalRecoveryGuarded = autoApprovalRecovery.includes("AUTO_APPROVE_
   && autoApprovalRecovery.includes("row.channel === 'email' ? 'pending_send' : 'linkedin_requested'")
   && autoApprovalRecovery.includes('enqueueMessage(clientId, row.message_id)')
   && autoApprovalRecovery.includes("INSERT INTO approval_audit")
-  && autoApprovalRecovery.includes("'auto_approval_recovery'");
+  && autoApprovalRecovery.includes("'auto_approval_recovery'")
+  && index.includes("jobHealth.markRun('auto_approval_recovery'")
+  && index.includes("jobHealth.markError('auto_approval_recovery'");
 check('Auto-approval recovery keeps gates before enqueue', autoApprovalRecoveryGuarded,
-  autoApprovalRecoveryGuarded ? 'threshold/seasoning/recent-send/gate-fail/channel/audit/enqueue guards found' : 'recovery may bypass approval or send safety gates');
+  autoApprovalRecoveryGuarded ? 'threshold/seasoning/recent-send/gate-fail/channel/audit/enqueue/health guards found' : 'recovery may bypass approval or send safety gates');
 
 const failures = results.filter(r => !r.pass);
 console.log(`\n${results.length} checks: ${results.length - failures.length} passed, ${failures.length} failed`);

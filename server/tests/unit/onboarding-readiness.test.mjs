@@ -59,7 +59,8 @@ describe('auto-approval recovery contracts', () => {
     expect(recoverySource).toContain("AUTO_APPROVE_ENABLED === 'false'");
     expect(recoverySource).toContain("prior.status = 'sent'");
     expect(recoverySource).toContain('enqueueMessage(clientId, row.message_id)');
-    expect(indexSource).toContain('AUTO_APPROVAL_RECOVERY_ENABLED');
+    expect(indexSource).toContain("jobHealth.markRun('auto_approval_recovery'");
+    expect(indexSource).toContain("jobHealth.markError('auto_approval_recovery'");
     expect(indexSource).toContain('recoverMissedAutoApprovals');
   });
 });
