@@ -470,14 +470,22 @@ async function start() {
       _autoApprovalRecoveryRunning = true;
       try {
         const { rows: clients } = await pool.query(
-          `SELECT id FROM clients WHERE is_active = true AND onboarding_completed = true`
+          `SELECT id, auto_approve_threshold, created_at
+             FROM clients
+            WHERE is_active = true
+              AND onboarding_completed = true`
         );
         let recovered = 0;
         let skipped = 0;
         let scanned = 0;
         for (const client of clients) {
           const result = await runWithClientContext(client.id, () =>
-            recoverMissedAutoApprovals(client.id, { limit: 25, maxAgeDays: 7 })
+            recoverMissedAutoApprovals(client.id, {
+              limit: 25,
+              maxAgeDays: 7,
+              autoApproveThreshold: client.auto_approve_threshold,
+              clientCreatedAt: client.created_at,
+            })
           ).catch(err => {
             console.warn('[auto-approval-recovery] client failed:', err.message);
             jobHealth.markError('auto_approval_recovery', err.message);

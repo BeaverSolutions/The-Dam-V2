@@ -215,6 +215,8 @@ check('Search fallback preserves company discovery and SG-safe Brave country', c
 const autoApprovalRecoveryGuarded = autoApprovalRecovery.includes("AUTO_APPROVE_ENABLED === 'false'")
   && autoApprovalRecovery.includes('score < threshold')
   && autoApprovalRecovery.includes('client_is_seasoned')
+  && autoApprovalRecovery.includes('autoApproveThreshold')
+  && !autoApprovalRecovery.includes('JOIN clients c')
   && autoApprovalRecovery.includes('recent_sent_count')
   && autoApprovalRecovery.includes("COALESCE(la.reasons->>'borderline', 'false') <> 'true'")
   && autoApprovalRecovery.includes("la.reasons->>'gate_fail'")
@@ -226,7 +228,7 @@ const autoApprovalRecoveryGuarded = autoApprovalRecovery.includes("AUTO_APPROVE_
   && index.includes("jobHealth.markRun('auto_approval_recovery'")
   && index.includes("jobHealth.markError('auto_approval_recovery'");
 check('Auto-approval recovery keeps gates before enqueue', autoApprovalRecoveryGuarded,
-  autoApprovalRecoveryGuarded ? 'threshold/seasoning/recent-send/gate-fail/channel/audit/enqueue/health guards found' : 'recovery may bypass approval or send safety gates');
+  autoApprovalRecoveryGuarded ? 'threshold/seasoning/recent-send/gate-fail/channel/audit/enqueue/health/RLS guards found' : 'recovery may bypass approval or send safety gates');
 
 const failures = results.filter(r => !r.pass);
 console.log(`\n${results.length} checks: ${results.length - failures.length} passed, ${failures.length} failed`);

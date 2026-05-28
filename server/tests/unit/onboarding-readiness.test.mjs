@@ -50,7 +50,10 @@ describe('auto-approval recovery contracts', () => {
     const indexSource = readFileSync(resolve(__dirname, '../../index.js'), 'utf-8');
 
     expect(recoverySource).toContain("m.status = 'pending_approval'");
-    expect(recoverySource).toContain('m.ranger_score >= c.auto_approve_threshold');
+    expect(recoverySource).toContain('m.ranger_score >= $4::int');
+    expect(recoverySource).not.toContain('JOIN clients c');
+    expect(indexSource).toContain('autoApproveThreshold: client.auto_approve_threshold');
+    expect(indexSource).toContain('clientCreatedAt: client.created_at');
     expect(recoverySource).toContain("COALESCE(la.decision, 'manual_pending') = 'manual_pending'");
     expect(recoverySource).toContain("COALESCE(la.reasons->>'borderline', 'false') <> 'true'");
     expect(recoverySource).toContain("l.status = 'new'");

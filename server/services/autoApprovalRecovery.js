@@ -37,9 +37,14 @@ async function gatePendingMessage(row) {
   return { pass: true, reason: null };
 }
 
-async function recoverMissedAutoApprovals(clientId, { limit = 25, maxAgeDays = 7 } = {}) {
+async function recoverMissedAutoApprovals(clientId, { limit = 25, maxAgeDays = 7, autoApproveThreshold = null, clientCreatedAt = null } = {}) {
   const cap = Math.max(1, Math.min(Number(limit) || 25, 100));
   const ageDays = Math.max(1, Math.min(Number(maxAgeDays) || 7, 30));
+  const threshold = autoApproveThreshold === null || autoApproveThreshold === undefined
+    ? null
+    : Number(autoApproveThreshold);
+  const createdAt = clientCreatedAt ? new Date(clientCreatedAt) : null;
+  const clientCreatedAtIso = createdAt && Number.isFinite(createdAt.getTime()) ? createdAt.toISOString() : null;
 
   const { rows } = await pool.query(
     `WITH latest_audit AS (
@@ -59,14 +64,13 @@ async function recoverMissedAutoApprovals(clientId, { limit = 25, maxAgeDays = 7
             l.status AS lead_status,
             l.pipeline_stage,
             l.first_contacted_at,
-            c.auto_approve_threshold,
-            (NOW() - c.created_at) > INTERVAL '7 days' AS client_is_seasoned,
+            $4::int AS auto_approve_threshold,
+            (NOW() - $5::timestamptz) > INTERVAL '7 days' AS client_is_seasoned,
             la.decision AS audit_decision,
             la.reasons->>'gate_fail' AS audit_gate_fail,
             COALESCE(sent.recent, 0)::int AS recent_sent_count
        FROM messages m
        JOIN leads l ON l.id = m.lead_id AND l.client_id = m.client_id
-       JOIN clients c ON c.id = m.client_id
        LEFT JOIN latest_audit la ON la.message_id = m.id
        LEFT JOIN LATERAL (
          SELECT COUNT(*)::int AS recent
@@ -82,8 +86,9 @@ async function recoverMissedAutoApprovals(clientId, { limit = 25, maxAgeDays = 7
         AND m.status = 'pending_approval'
         AND m.ranger_score IS NOT NULL
         AND m.created_at >= NOW() - ($2::int * INTERVAL '1 day')
-        AND c.auto_approve_threshold IS NOT NULL
-        AND m.ranger_score >= c.auto_approve_threshold
+        AND $4::int IS NOT NULL
+        AND $5::timestamptz IS NOT NULL
+        AND m.ranger_score >= $4::int
         AND COALESCE(la.decision, 'manual_pending') = 'manual_pending'
         AND COALESCE(la.reasons->>'borderline', 'false') <> 'true'
         AND (la.reasons->>'gate_fail' IS NULL OR la.reasons->>'gate_fail' = '')
@@ -94,7 +99,7 @@ async function recoverMissedAutoApprovals(clientId, { limit = 25, maxAgeDays = 7
         AND m.channel IN ('email', 'linkedin')
       ORDER BY m.ranger_score DESC, m.created_at ASC
       LIMIT $3`,
-    [clientId, ageDays, cap]
+    [clientId, ageDays, cap, threshold, clientCreatedAtIso]
   );
 
   let recovered = 0;
