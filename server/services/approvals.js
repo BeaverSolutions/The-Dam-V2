@@ -6,6 +6,8 @@ const logsService = require('./logs');
 const { enqueueMessage } = require('./sendQueueWorker');
 const { trackEvent, upsertDealSummary } = require('./conversionTracker');
 
+const GEO_REJECT_NOTE = /\b(india|wrong\s+country|wrong\s+geograph|outside\s+(the\s+)?(geo|geography|country|icp)|not\s+in\s+(my|sg|us|malaysia|singapore|united\s+states)|out\s+of\s+geo)\b/i;
+
 // Push approval notification to MyClaw so it doesn't have to poll
 async function notifyMyClaw(approvalId, messageId, clientId) {
   const hookUrl = process.env.MYCLAW_WEBHOOK_URL;
@@ -174,6 +176,17 @@ async function resolveApproval(clientId, approvalId, { status, notes, userId, ed
           [clientId, msg.id, msg.lead_id, msg.body, notes || 'Rejected without reason', msg.channel,
            JSON.stringify({ name: lead?.name, company: lead?.company, title: lead?.title })]
         );
+        if (notes && GEO_REJECT_NOTE.test(notes)) {
+          await pool.query(
+            `UPDATE leads
+                SET status = 'rejected_country',
+                    deleted_at = COALESCE(deleted_at, NOW()),
+                    metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
+                    updated_at = NOW()
+              WHERE id = $2 AND client_id = $3`,
+            [JSON.stringify({ founder_reject_reason: notes, founder_rejected_at: new Date().toISOString() }), msg.lead_id, clientId]
+          );
+        }
       }
     }
   } catch (feedbackErr) {

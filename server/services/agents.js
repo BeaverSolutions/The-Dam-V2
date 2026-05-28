@@ -159,7 +159,7 @@ function applyIcpV2Filter(lead) {
   }
   // 2026-05-23: explicit deny check fires before the allow check.
   if (ICP_DENIED_COUNTRIES.has(rawCountry)) {
-    return { pass: false, status: 'rejected_country_denied', reason: `country "${rawCountry}" is explicitly excluded from ICP` };
+    return { pass: false, status: 'rejected_country', reason: `country "${rawCountry}" is explicitly excluded from ICP` };
   }
   if (!ICP_ALLOWED_COUNTRIES.has(rawCountry)) {
     return { pass: false, status: 'rejected_country', reason: `country "${rawCountry}" is outside target ICP geographies` };
