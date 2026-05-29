@@ -120,6 +120,17 @@ function validateSystemHealth(checks, data) {
     fail(checks, 'system-health reports kickoff disabled', kickoffState);
   }
 
+  const kpi = target.kpi || {};
+  if (Number.isFinite(Number(kpi.target)) && Number(kpi.target) > 0) {
+    pass(checks, 'system-health exposes daily KPI target', String(kpi.target));
+  } else {
+    fail(checks, 'system-health exposes daily KPI target', `target=${kpi.target ?? 'missing'}`);
+  }
+  for (const key of ['outreach_sent', 'outreach_email', 'outreach_linkedin']) {
+    if (Number.isFinite(Number(kpi[key]))) pass(checks, `system-health exposes KPI ${key}`, String(kpi[key]));
+    else fail(checks, `system-health exposes KPI ${key}`, 'missing/non-numeric');
+  }
+
   const aq = target.approval_queue || {};
   for (const key of ['reviewable', 'linkedin_awaiting_accept', 'stale_orphan_rows']) {
     if (Number.isFinite(Number(aq[key]))) pass(checks, `approval queue exposes ${key}`, String(aq[key]));
@@ -135,6 +146,12 @@ function validateSystemHealth(checks, data) {
   const stale = Number(aq.stale_orphan_rows || 0);
   if (stale > 0) {
     checks.push({ name: 'stale approval rows reported', ok: true, detail: `${stale} stale rows; cleanup required but not hidden` });
+  }
+
+  const fq = target.followup_queue || {};
+  for (const key of ['pending', 'due_today', 'orphaned_sent_leads']) {
+    if (Number.isFinite(Number(fq[key]))) pass(checks, `follow-up queue exposes ${key}`, String(fq[key]));
+    else fail(checks, `follow-up queue exposes ${key}`, 'missing/non-numeric');
   }
 }
 

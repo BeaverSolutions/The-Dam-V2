@@ -329,7 +329,10 @@ describe('P0 stabilization contracts', () => {
     expect(postDeployCheck).toContain('EXPECT_KPI_GAP_KICKOFF_ENABLED');
     expect(postDeployCheck).toContain("jobStatus(lastHealth, 'kpi_gap_kickoff')");
     expect(postDeployCheck).toContain('WAIT_FOR_JOBS_SECONDS');
+    expect(postDeployCheck).toContain('system-health exposes daily KPI target');
+    expect(postDeployCheck).toContain("['outreach_sent', 'outreach_email', 'outreach_linkedin']");
     expect(postDeployCheck).toContain('reviewable approvals under cap');
+    expect(postDeployCheck).toContain("['pending', 'due_today', 'orphaned_sent_leads']");
     expect(postDeployCheck).not.toContain("method: 'POST'");
     expect(postDeployCheck).not.toContain('/kickoff');
     expect(postDeployWorkflow).toContain('workflow_dispatch');
