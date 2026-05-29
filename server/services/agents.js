@@ -3486,6 +3486,99 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     };
   }
 
+  if (Number(diagnostics.signal_first_budget_reserved || 0) > 0) {
+    const delivered = deliveredSoFar + dbApprovedCount + signalApprovedCount;
+    const drafted = draftedSoFar + dbDraftedCount + signalDraftedCount;
+    const rejected = rejectedSoFar + dbRejectedCount + signalRejectedCount;
+    const leadsFound = leadsFoundSoFar + dbLeadsCount + signalLeadsCount;
+    const shortfall = Math.max(0, campaignRequested - delivered);
+    const blocker = diagnostics.signal_first_error ? 'signal_first_failed' : 'signal_first_unfulfilled';
+    diagnostics.campaign_search_budget_remaining = campaignSearchBudgetRemaining;
+    diagnostics.no_generic_fallback = true;
+
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'signal_first_terminal_block',
+      metadata: {
+        plan_id,
+        blocker,
+        requested: campaignRequested,
+        delivered,
+        shortfall,
+        signal_first_raw: diagnostics.signal_first_raw || 0,
+        signal_first_saved: signalLeadsCount,
+        signal_first_approved: signalApprovedCount,
+        signal_first_budget_reserved: diagnostics.signal_first_budget_reserved,
+        remaining_paid_queries_not_spent_on_fallback: campaignSearchBudgetRemaining,
+      },
+    }).catch(() => {});
+
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'campaign_target_unfulfilled',
+      metadata: {
+        plan_id,
+        requested: campaignRequested,
+        delivered,
+        shortfall,
+        blocker,
+        source: 'signal_first',
+        signal_first_raw: diagnostics.signal_first_raw || 0,
+        signal_first_saved: signalLeadsCount,
+        signal_first_approved: signalApprovedCount,
+        remaining_paid_queries_not_spent_on_fallback: campaignSearchBudgetRemaining,
+      },
+    }).catch(() => {});
+
+    const result = {
+      plan_id,
+      status: shortfall > 0 ? 'blocked' : 'completed',
+      leads_found: leadsFound,
+      messages_drafted: drafted,
+      messages_failed: 0,
+      summary: {
+        requested: campaignRequested,
+        delivered,
+        shortfall,
+        target_fulfilled: shortfall === 0,
+        blocker,
+        leads_found: leadsFound,
+        messages_drafted: drafted,
+        approved: delivered,
+        rejected,
+        db_leads_processed: dbLeadsCount,
+        signal_leads_processed: signalLeadsCount,
+        signal_approved: signalApprovedCount,
+        generic_research_saved: 0,
+        reason: `Signal-first sourcing did not fulfill the request (${delivered}/${campaignRequested} approval-ready). Generic paid fallback was blocked to prevent spend without output.`,
+      },
+      diagnostics,
+      results: [
+        ...(dbLeadsCount > 0 ? [{ step: 0, agent: 'research_beaver', status: 'completed', result: `${dbLeadsCount} existing DB lead${dbLeadsCount !== 1 ? 's' : ''} processed` }] : []),
+        { step: 1, agent: 'signal_hunt', status: shortfall > 0 ? 'blocked' : 'completed', result: `${signalLeadsCount} signal lead${signalLeadsCount !== 1 ? 's' : ''} processed; ${signalApprovedCount} approved` },
+        { step: 2, agent: 'director', status: shortfall > 0 ? 'blocked' : 'completed', result: 'Generic paid research fallback blocked by no-burn rule' },
+      ],
+    };
+
+    await updateExecStatus(clientId, plan_id, {
+      status: result.status,
+      phase: 'captain',
+      beavers: {
+        research: { status: shortfall > 0 ? 'blocked' : 'done', task: `Signal-first produced ${signalApprovedCount}/${campaignRequested} approval-ready`, found: leadsFound, passed: signalLeadsCount },
+        sales:    { status: drafted > 0 ? 'done' : 'idle', task: `${drafted} messages drafted`, drafted, approved: delivered },
+        enforcer: { status: drafted > 0 ? 'done' : 'idle', task: `${delivered} approved, ${rejected} rejected`, reviewed: drafted, rejected },
+        captain:  { status: shortfall > 0 ? 'blocked' : 'done', task: `${delivered}/${campaignRequested} requested outputs delivered`, approved: delivered },
+      },
+      progress: { total: campaignRequested, complete: Math.min(campaignRequested, delivered) },
+      started_at: new Date().toISOString(),
+      blocker,
+      result,
+      completed_at: new Date().toISOString(),
+    });
+
+    return result;
+  }
+
   const MAX_RESEARCH_ROUNDS = 3;
   let rawLeads = [];
   let currentBatchIndex = batchIndex;

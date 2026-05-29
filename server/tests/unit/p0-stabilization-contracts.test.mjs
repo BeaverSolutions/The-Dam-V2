@@ -108,6 +108,11 @@ describe('P0 stabilization contracts', () => {
     expect(agents).toContain('required_paid_queries');
     expect(agents).toContain('signal_first_started');
     expect(agents).toContain('runSignalHunt');
+    expect(agents).toContain('signal_first_terminal_block');
+    expect(agents).toContain("const blocker = diagnostics.signal_first_error ? 'signal_first_failed' : 'signal_first_unfulfilled'");
+    expect(agents.indexOf('signal_first_terminal_block')).toBeLessThan(
+      agents.indexOf('const MAX_RESEARCH_ROUNDS = 3')
+    );
     expect(agents).toContain('research_verified');
     expect(agents).toContain('provider_candidates');
     expect(agents).toContain('original_lead_count');

@@ -202,15 +202,19 @@ const researchDiagnosticTruth = agents.includes('provider_candidates')
 check('Research zero-output diagnostics separate provider candidates from verified leads', researchDiagnosticTruth,
   researchDiagnosticTruth ? 'provider_candidates + research_verified are logged' : 'zero-output diagnostics still collapse provider/parser/verification layers');
 
-// 18. Manual campaigns must run signal-first before generic profile research.
+// 18. Manual campaigns must run signal-first and stop there if signal sourcing
+// cannot produce the requested approval-ready output. Generic research remains
+// available for other paths, but it must not auto-rescue a paid Captain campaign.
 const signalFirstManualCampaign = agents.includes('signal_first_started')
   && agents.includes('runSignalHunt')
   && agents.includes('saveSignalLeads')
+  && agents.includes('signal_first_terminal_block')
+  && agents.indexOf('signal_first_terminal_block') < agents.indexOf('const MAX_RESEARCH_ROUNDS = 3')
   && agents.includes("run_kind: signalLeadsCount > 0 ? 'signal_first'")
   && signalHunt.includes('maxPaidQueries')
   && signalHunt.includes('consumePaidQuery');
 check('Manual campaign sourcing is signal-first and budgeted', signalFirstManualCampaign,
-  signalFirstManualCampaign ? 'Director runs bounded signal hunt before generic research' : 'manual run_campaign may skip signal-first or spend unbounded signal queries');
+  signalFirstManualCampaign ? 'Director runs bounded signal hunt and blocks before generic fallback spend' : 'manual run_campaign may skip signal-first or auto-spend generic fallback');
 
 // 19. Research fallback may use companies, but the paid-query picker remains signal-led.
 const researchSignalFirst = researchSource.includes('signal_jobs: 0')
