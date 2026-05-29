@@ -60,6 +60,11 @@ function getLLMHealth() {
  *   vp:              { credits_used_today, credits_budget, credits_remaining_today },
  * }
  */
+// Per-beaver KPI scorecard (Phase 3, 2026-05-29) lives in its own pure,
+// dependency-free module so it is unit-testable without captainOrchestrator's
+// dependency tree. See server/services/beaverScorecard.js.
+const { buildBeaverScorecard } = require('./beaverScorecard');
+
 async function collectTeamKPIs(clientId) {
   const cfg = await tenantConfig.getTenantConfig(clientId);
   if (!cfg) throw new Error(`No tenant for client_id=${clientId}`);
@@ -327,14 +332,30 @@ async function collectTeamKPIs(clientId) {
 
   const funnelPromise = pipelineTrace.getTodayFunnel(clientId).catch(() => []);
 
+  // Phase 3 (2026-05-29): MYT-business-day per-beaver counts for the scorecard.
+  // Separate from the rolling-24h research/sales/enforcer queries above (which
+  // feed the existing brief lines) so those are left untouched.
+  const scorecardPromise = pool.query(
+    `SELECT
+       (SELECT COUNT(*) FROM leads WHERE client_id = $1 AND deleted_at IS NULL AND created_at >= ${klTodayStart}) AS research_sourced_today,
+       (SELECT COUNT(*) FROM leads WHERE client_id = $1 AND deleted_at IS NULL AND email_verified IS TRUE AND tiered_at >= ${klTodayStart}) AS research_verified_email_today,
+       (SELECT COUNT(*) FROM messages WHERE client_id = $1 AND created_at >= ${klTodayStart}) AS sales_drafted_today,
+       (SELECT COUNT(*) FROM messages WHERE client_id = $1 AND created_at >= ${klTodayStart} AND ranger_score >= 75 AND COALESCE(ranger_attempt_count, 0) <= 1) AS sales_first_pass_today,
+       (SELECT COUNT(*) FROM messages WHERE client_id = $1 AND created_at >= ${klTodayStart} AND COALESCE(ranger_attempt_count, 0) <= 1) AS sales_first_attempt_today,
+       (SELECT COUNT(*) FROM messages WHERE client_id = $1 AND created_at >= ${klTodayStart} AND ranger_score IS NOT NULL) AS enforcer_reviewed_today,
+       (SELECT COUNT(*) FROM messages WHERE client_id = $1 AND created_at >= ${klTodayStart} AND ranger_score >= 75) AS enforcer_approved_today,
+       (SELECT COUNT(*) FROM logs WHERE client_id = $1 AND created_at >= ${klTodayStart} AND action = 'autonomous_kickoff') AS captain_kickoffs_today`,
+    [clientId]
+  ).catch(() => ({ rows: [{}] }));
+
   const [research, sales, enforcer, rejectReasons, pipeline,
           dbOk, cronHealth,
           spendToday, spendMtd, meetingsWeek, meetingsMtd,
-          channelMix, targets, spendMaxDay, businessTruth, funnelRows] = await Promise.all([
+          channelMix, targets, spendMaxDay, businessTruth, funnelRows, scorecardRes] = await Promise.all([
     researchPromise, salesPromise, enforcerPromise, rejectReasonsPromise, pipelinePromise,
     dbCheckPromise, cronHealthPromise,
     spendTodayPromise, spendMtdPromise, meetingsThisWeekPromise, meetingsMtdPromise,
-    channelMixPromise, targetsPromise, spendMaxDayPromise, businessTruthPromise, funnelPromise,
+    channelMixPromise, targetsPromise, spendMaxDayPromise, businessTruthPromise, funnelPromise, scorecardPromise,
   ]);
 
   // Stale jobs derived from cronHealth — jobs in 'stale' state
@@ -469,6 +490,11 @@ async function collectTeamKPIs(clientId) {
       stale_orphan_approval_rows: Number(cm.stale_orphan_approval_rows) || 0,
     },
     funnel: buildFunnelSnapshot(funnelRows),
+    // ─── PER-BEAVER SCORECARD (Phase 3): targets + hit/miss + recommended action ──
+    scorecard: buildBeaverScorecard(scorecardRes.rows[0] || {}, {
+      researchFloor: cfg.daily_quality_lead_floor,
+      poolSize: Number(r.pool_size) || 0,
+    }),
   };
 }
 
@@ -743,6 +769,20 @@ function renderPlainBrief(k) {
     ? `1. ${k.pipeline.pending_approvals} reviewable approvals waiting in the app. clear those; LinkedIn-awaiting-accept is not counted as review queue.`
     : 'nothing needs your call right now. approval review queue is 0.';
 
+  // Phase 3: per-beaver scorecard block (additive). recommended_action shows the
+  // fix for each miss; execution is gated behind the autonomy flags (Phase 4).
+  const sc = k.scorecard;
+  const fmtHit = (h) => h === true ? 'HIT' : h === false ? 'MISS' : 'n/a';
+  const scAction = (a) => a ? ` -> ${a}` : '';
+  const scorecardLines = sc ? [
+    `<b>BEAVER SCORECARD (today, MYT)</b>`,
+    `research ${fmtHit(sc.research.hit)}: sourced ${sc.research.sourced_today}/${sc.research.target}, +${sc.research.verified_email_today} verified-email, pool ${sc.research.pool_size}.${scAction(sc.research.recommended_action)}`,
+    `sales ${fmtHit(sc.sales.hit)}: ${sc.sales.drafts_today}/${sc.sales.target} drafts, first-pass ${sc.sales.first_pass_rate_pct ?? 'n/a'}%/${sc.sales.first_pass_target_pct}%.${scAction(sc.sales.recommended_action)}`,
+    `enforcer ${fmtHit(sc.enforcer.hit)}: reviewed ${sc.enforcer.reviewed_today}, approve ${sc.enforcer.approve_rate_pct ?? 'n/a'}% (band ${sc.enforcer.healthy_band.min}-${sc.enforcer.healthy_band.max}).${scAction(sc.enforcer.recommended_action)}`,
+    `captain ${fmtHit(sc.captain.hit)}: ${sc.captain.kickoffs_today}/${sc.captain.target} kickoff.${scAction(sc.captain.recommended_action)}`,
+    ``,
+  ] : [];
+
   const lines = [
     `morning. dam ${health}. ${kickoffLine}.`,
     ``,
@@ -761,6 +801,7 @@ function renderPlainBrief(k) {
     `funnel: ${funnelLine}.`,
     `meetings outcome: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd. tracked as outcome, not fixed daily target.`,
     ``,
+    ...scorecardLines,
     `<b>ORDERS OF THE DAY</b>`,
     `TASKS: verify daily kickoff is armed, drain real approval queue only, keep research signal-first and gated by pool/capacity truth.`,
     `ACTIONS TAKEN: ${kickoffLine}; ${marketLine}.`,
