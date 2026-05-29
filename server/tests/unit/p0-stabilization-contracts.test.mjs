@@ -284,6 +284,10 @@ describe('P0 stabilization contracts', () => {
     expect(research).toContain('maxFallbackProfileQueries');
     expect(research).toContain('fallbackQueriesUsed');
     expect(research).toContain('fallbackProfileBudget > 0');
+    expect(research).toContain('function companyDiscoveryMatchesQuery');
+    expect(research).toContain('companyDiscoveryMatchesQuery(item, c)');
+    expect(research).toContain('companyFilteredOut');
+    expect(research).toContain('seenCompanyKeys');
     expect(research).toContain('initial verification rejected all');
     expect(research).toContain('rejection_summary');
     expect(research).toContain('rejection_samples');
@@ -297,6 +301,11 @@ describe('P0 stabilization contracts', () => {
     expect(signalHunt).toContain('const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : []');
     expect(signalHunt).toContain('const fallbackQueries = icpQueries.length > 0');
     expect(signalHunt).toContain('...icpQueries, ...configuredQueries');
+    expect(signalHunt).toContain('for (const industry of industries)');
+    expect(signalHunt).toContain('for (const country of countries)');
+    expect(signalHunt.indexOf('for (const industry of industries)')).toBeLessThan(
+      signalHunt.indexOf('for (const country of countries)')
+    );
     expect(signalHunt).toContain('consumePaidQuery(1)');
     expect(signalHunt).not.toContain('consumePaidQuery(2)');
     expect(signalHunt).toContain('signal_hunt_complete');

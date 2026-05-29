@@ -953,6 +953,44 @@ function companyDiscoveryContext(item, companyName) {
   };
 }
 
+const COMPANY_DISCOVERY_STOPWORDS = new Set([
+  'and', 'the', 'for', 'with', 'from', 'company', 'companies', 'provider', 'providers',
+  'sdn', 'bhd', 'berhad', 'pte', 'ltd', 'pty', 'inc', 'llc', 'limited', 'united',
+  'states', 'malaysia', 'singapore', 'australia', 'hiring', 'sales', 'raised',
+  'launched', 'growth', 'founder', 'ceo', 'site', 'linkedin', 'com',
+  'first', 'person', 'manager', 'startup', 'clients', 'team',
+]);
+
+function companyDiscoveryTokens(value) {
+  return String(value || '')
+    .replace(/l\s*&\s*d/ig, 'learning development')
+    .replace(/[^a-z0-9]+/ig, ' ')
+    .toLowerCase()
+    .split(/\s+/)
+    .map(t => t.trim())
+    .filter(t => t.length >= 3 && !COMPANY_DISCOVERY_STOPWORDS.has(t) && !/^\d+$/.test(t));
+}
+
+function companyDiscoveryMatchesQuery(item, company) {
+  const strategy = String(item?.strategy || '');
+  if (strategy === 'signal_growth') return true;
+
+  const preferredScope = item?.industry && item.industry !== 'growth_signal'
+    ? item.industry
+    : item?.query;
+  const tokens = [...new Set(companyDiscoveryTokens(preferredScope))];
+  if (tokens.length === 0) return true;
+
+  const text = [
+    company?.company,
+    company?.name,
+    company?.title,
+    company?.snippet,
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  return tokens.some(token => text.includes(token));
+}
+
 async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
   const leads = [];
 
@@ -960,6 +998,7 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
     const suppliedQueries = Array.isArray(options.queryItems) ? options.queryItems.filter(Boolean) : null;
     const stats = options.stats || null;
     if (stats && !Array.isArray(stats.fallbackQueriesUsed)) stats.fallbackQueriesUsed = [];
+    if (stats && !Number.isFinite(Number(stats.companyFilteredOut))) stats.companyFilteredOut = 0;
     const maxCompanyQueries = Number.isFinite(Number(options.maxCompanyQueries))
       ? Math.max(0, Number(options.maxCompanyQueries))
       : 3;
@@ -973,6 +1012,7 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
     // present, the caller already counted each item against maxPaidQueries.
     const queryPool = suppliedQueries || buildQueryPool(icpMemory).filter(q => q.strategy === 'company');
     const companyQueries = queryPool.slice(0, suppliedQueries ? suppliedQueries.length : maxCompanyQueries);
+    const seenCompanyKeys = new Set();
 
     for (const item of companyQueries) {
       try {
@@ -993,6 +1033,17 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
           const domain = c.website || c.domain || '';
 
           if (!companyName && !domain) continue;
+          const companyKey = String(companyName || domain)
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ')
+            .trim();
+
+          if (!companyDiscoveryMatchesQuery(item, c)) {
+            if (stats) stats.companyFilteredOut++;
+            continue;
+          }
+          if (companyKey && seenCompanyKeys.has(companyKey)) continue;
+          if (companyKey) seenCompanyKeys.add(companyKey);
 
           // Step 2: Hunter domain search when explicitly capped on.
           let hunterLeads = [];
@@ -1328,6 +1379,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
 
     const icp = icpMemory || {};
     let { verified, rejected } = await verifyBatch(preFiltered, icp, clientId);
+    let companyFilteredOutTotal = companyFirstStats.companyFilteredOut || 0;
 
     console.log(`[research] Layer 2 complete: ${verified.length} verified, ${rejected.length} rejected`);
 
@@ -1434,6 +1486,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       ]);
       queriesUsedTotal += retryCompanyStats.fallbackQueriesUsed.length;
       queriesUsed.push(...retryCompanyStats.fallbackQueriesUsed);
+      companyFilteredOutTotal += retryCompanyStats.companyFilteredOut || 0;
 
       const retryCandidates = retryResults.flat()
         .filter(l => l.linkedin_url && !allVerifiedUrls.has(l.linkedin_url));
@@ -1578,6 +1631,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         retries: retryCount,
         search_rounds: searchRounds,
         circuit_breaker: circuitBreakerTripped,
+        company_filtered_out: companyFilteredOutTotal,
       },
       scoring_stats: scoringStats,
     };

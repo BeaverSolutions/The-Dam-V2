@@ -211,6 +211,7 @@ function parseCompanyItems(items) {
       const website = websiteMatch ? websiteMatch[0].replace(/^www\./, '') : null;
       return {
         company,
+        title: raw,
         website,
         linkedin_company_url: (r.link || '').split('?')[0].replace(/\/$/, ''),
         snippet: r.snippet || '',

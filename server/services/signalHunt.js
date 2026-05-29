@@ -129,8 +129,8 @@ function buildSignalQueriesFromIcp(icp = {}) {
   const countries = countriesFromIcp(icp);
   const industries = industriesFromIcp(icp);
   const queries = [];
-  for (const country of countries) {
-    for (const industry of industries) {
+  for (const industry of industries) {
+    for (const country of countries) {
       queries.push({
         query: `"${industry}" "${country.name}" "hiring" "sales"`,
         signal_type: 'hiring_sales',
