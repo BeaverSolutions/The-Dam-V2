@@ -39,5 +39,7 @@ jobs:
           EXPECT_DAILY_KICKOFF_ENABLED: ${{ github.event.inputs.expect_daily_kickoff_enabled || 'false' }}
           EXPECT_KPI_GAP_KICKOFF_ENABLED: ${{ github.event.inputs.expect_kpi_gap_kickoff_enabled || 'false' }}
           EXPECT_MARKET_SENSING_ENABLED: ${{ github.event.inputs.expect_market_sensing_enabled || 'false' }}
+          WAIT_FOR_DEPLOY_SECONDS: ${{ github.event_name == 'push' && '720' || '0' }}
+          FRESH_UPTIME_SECONDS: '180'
           WAIT_FOR_JOBS_SECONDS: '720'
         run: node scripts/post-deploy-autonomy-check.mjs

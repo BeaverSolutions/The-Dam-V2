@@ -11,6 +11,8 @@ const EXPECT_KPI_GAP_KICKOFF_ENABLED = process.env.EXPECT_KPI_GAP_KICKOFF_ENABLE
 const EXPECT_MARKET_SENSING_ENABLED = process.env.EXPECT_MARKET_SENSING_ENABLED === 'true';
 const MAX_REVIEWABLE = Number(process.env.MAX_REVIEWABLE_APPROVALS || 20);
 const WAIT_FOR_JOBS_SECONDS = Number(process.env.WAIT_FOR_JOBS_SECONDS || 0);
+const WAIT_FOR_DEPLOY_SECONDS = Number(process.env.WAIT_FOR_DEPLOY_SECONDS || 0);
+const FRESH_UPTIME_SECONDS = Number(process.env.FRESH_UPTIME_SECONDS || 180);
 
 if (!API_KEY) {
   console.error('Missing env: BEAVRDAM_INTERNAL_API_KEY');
@@ -38,6 +40,45 @@ function pass(checks, name, detail = '') {
 
 function fail(checks, name, detail = '') {
   checks.push({ name, ok: false, detail });
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function uptimeSeconds(health) {
+  const n = Number(health?.uptime_seconds);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function waitForFreshDeploy() {
+  let health = await getJson('/health');
+  const initialUptime = uptimeSeconds(health);
+  if (!WAIT_FOR_DEPLOY_SECONDS) return health;
+  if (initialUptime !== null && initialUptime <= FRESH_UPTIME_SECONDS) {
+    console.log(`[INFO] fresh deploy already visible: uptime=${initialUptime}s`);
+    return health;
+  }
+
+  const deadline = Date.now() + WAIT_FOR_DEPLOY_SECONDS * 1000;
+  for (;;) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Deployment freshness not observed within ${WAIT_FOR_DEPLOY_SECONDS}s; initial uptime=${initialUptime ?? 'unknown'}, last uptime=${uptimeSeconds(health) ?? 'unknown'}`);
+    }
+    await sleep(15000);
+    health = await getJson('/health');
+    const currentUptime = uptimeSeconds(health);
+    if (
+      currentUptime !== null
+      && (
+        currentUptime <= FRESH_UPTIME_SECONDS
+        || (initialUptime !== null && currentUptime < initialUptime - 30)
+      )
+    ) {
+      console.log(`[INFO] fresh deploy observed: initial uptime=${initialUptime ?? 'unknown'}s, current uptime=${currentUptime}s`);
+      return health;
+    }
+  }
 }
 
 function validateHealth(checks, health) {
@@ -155,25 +196,25 @@ function validateSystemHealth(checks, data) {
   }
 }
 
-async function readHealthWithJobs() {
+async function readHealthWithJobs(initialHealth = null) {
   const deadline = Date.now() + Math.max(0, WAIT_FOR_JOBS_SECONDS) * 1000;
-  let lastHealth = null;
+  let lastHealth = initialHealth;
   for (;;) {
-    lastHealth = await getJson('/health');
+    if (!lastHealth) lastHealth = await getJson('/health');
     if (jobStatus(lastHealth, 'daily_kickoff') && jobStatus(lastHealth, 'kpi_gap_kickoff') && jobStatus(lastHealth, 'market_sensing')) {
       return lastHealth;
     }
     if (Date.now() >= deadline) return lastHealth;
-    await new Promise(resolve => setTimeout(resolve, 15000));
+    await sleep(15000);
+    lastHealth = null;
   }
 }
 
 async function main() {
   const checks = [];
-  const [health, systemHealth] = await Promise.all([
-    readHealthWithJobs(),
-    getJson('/api/autonomous/system-health', { 'x-internal-key': API_KEY }),
-  ]);
+  const freshHealth = await waitForFreshDeploy();
+  const health = await readHealthWithJobs(freshHealth);
+  const systemHealth = await getJson('/api/autonomous/system-health', { 'x-internal-key': API_KEY });
 
   validateHealth(checks, health);
   validateSystemHealth(checks, systemHealth.data || {});

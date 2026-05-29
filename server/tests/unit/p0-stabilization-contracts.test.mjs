@@ -328,7 +328,10 @@ describe('P0 stabilization contracts', () => {
     expect(postDeployCheck).toContain('EXPECT_DAILY_KICKOFF_ENABLED');
     expect(postDeployCheck).toContain('EXPECT_KPI_GAP_KICKOFF_ENABLED');
     expect(postDeployCheck).toContain("jobStatus(lastHealth, 'kpi_gap_kickoff')");
+    expect(postDeployCheck).toContain('WAIT_FOR_DEPLOY_SECONDS');
+    expect(postDeployCheck).toContain('waitForFreshDeploy');
     expect(postDeployCheck).toContain('WAIT_FOR_JOBS_SECONDS');
+    expect(postDeployCheck).not.toContain('Promise.all');
     expect(postDeployCheck).toContain('system-health exposes daily KPI target');
     expect(postDeployCheck).toContain("['outreach_sent', 'outreach_email', 'outreach_linkedin']");
     expect(postDeployCheck).toContain('reviewable approvals under cap');
@@ -339,6 +342,7 @@ describe('P0 stabilization contracts', () => {
     expect(postDeployWorkflow).toContain('BEAVRDAM_INTERNAL_API_KEY');
     expect(postDeployWorkflow).toContain('expect_daily_kickoff_enabled');
     expect(postDeployWorkflow).toContain('expect_kpi_gap_kickoff_enabled');
+    expect(postDeployWorkflow).toContain('WAIT_FOR_DEPLOY_SECONDS');
     expect(postDeployWorkflow).toContain('WAIT_FOR_JOBS_SECONDS');
     expect(packageJson).toContain('"check:post-deploy"');
   });

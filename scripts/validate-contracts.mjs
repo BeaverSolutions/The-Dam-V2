@@ -376,7 +376,10 @@ const postDeployNoMoneyCheck = postDeployAutonomyCheck.includes("getJson('/healt
   && postDeployAutonomyCheck.includes('EXPECT_KPI_GAP_KICKOFF_ENABLED')
   && postDeployAutonomyCheck.includes('EXPECT_MARKET_SENSING_ENABLED')
   && postDeployAutonomyCheck.includes("jobStatus(lastHealth, 'kpi_gap_kickoff')")
+  && postDeployAutonomyCheck.includes('WAIT_FOR_DEPLOY_SECONDS')
+  && postDeployAutonomyCheck.includes('waitForFreshDeploy')
   && postDeployAutonomyCheck.includes('WAIT_FOR_JOBS_SECONDS')
+  && !postDeployAutonomyCheck.includes('Promise.all')
   && postDeployAutonomyCheck.includes('system-health exposes daily KPI target')
   && postDeployAutonomyCheck.includes("['outreach_sent', 'outreach_email', 'outreach_linkedin']")
   && postDeployAutonomyCheck.includes('reviewable approvals under cap')
@@ -386,6 +389,7 @@ const postDeployNoMoneyCheck = postDeployAutonomyCheck.includes("getJson('/healt
   && !postDeployAutonomyCheck.includes('provider_usage')
   && postDeployAutonomyWorkflow.includes('workflow_dispatch')
   && postDeployAutonomyWorkflow.includes('BEAVRDAM_INTERNAL_API_KEY')
+  && postDeployAutonomyWorkflow.includes('WAIT_FOR_DEPLOY_SECONDS')
   && postDeployAutonomyWorkflow.includes('WAIT_FOR_JOBS_SECONDS')
   && postDeployAutonomyWorkflow.includes('expect_daily_kickoff_enabled')
   && postDeployAutonomyWorkflow.includes('expect_kpi_gap_kickoff_enabled');
