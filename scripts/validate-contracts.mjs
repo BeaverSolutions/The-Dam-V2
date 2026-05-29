@@ -315,7 +315,12 @@ check('Manual kickoff trigger is single-tenant and no-force', singleTenantKickof
 const systemHealthTruth = autonomousRoute.includes("Asia/Kuala_Lumpur")
   && autonomousRoute.includes('kl_minutes_now')
   && autonomousRoute.includes('memory_written')
+  && autonomousRoute.includes('kickoffWorkProof')
+  && autonomousRoute.includes('kickoffMemoryOnlyStarted')
+  && autonomousRoute.includes('memory_only_started')
   && autonomousRoute.includes('trace_count')
+  && autonomousRoute.includes("pt.pipeline_path IN ('kickoff_pipeline', 'signal_pipeline')")
+  && autonomousRoute.includes('captain_kpi_gap_kickoff_enabled')
   && autonomousRoute.includes('approval_queue')
   && autonomousRoute.includes('linkedin_awaiting_accept')
   && dailyHealthPack.includes("state === 'missed'")
@@ -355,7 +360,9 @@ check('Hourly report uses system-health queue/kickoff truth', hourlyReportTruth,
 const postDeployNoMoneyCheck = postDeployAutonomyCheck.includes("getJson('/health')")
   && postDeployAutonomyCheck.includes("getJson('/api/autonomous/system-health'")
   && postDeployAutonomyCheck.includes('EXPECT_DAILY_KICKOFF_ENABLED')
+  && postDeployAutonomyCheck.includes('EXPECT_KPI_GAP_KICKOFF_ENABLED')
   && postDeployAutonomyCheck.includes('EXPECT_MARKET_SENSING_ENABLED')
+  && postDeployAutonomyCheck.includes("jobStatus(lastHealth, 'kpi_gap_kickoff')")
   && postDeployAutonomyCheck.includes('WAIT_FOR_JOBS_SECONDS')
   && postDeployAutonomyCheck.includes('reviewable approvals under cap')
   && !postDeployAutonomyCheck.includes("method: 'POST'")
@@ -364,7 +371,8 @@ const postDeployNoMoneyCheck = postDeployAutonomyCheck.includes("getJson('/healt
   && postDeployAutonomyWorkflow.includes('workflow_dispatch')
   && postDeployAutonomyWorkflow.includes('BEAVRDAM_INTERNAL_API_KEY')
   && postDeployAutonomyWorkflow.includes('WAIT_FOR_JOBS_SECONDS')
-  && postDeployAutonomyWorkflow.includes('expect_daily_kickoff_enabled');
+  && postDeployAutonomyWorkflow.includes('expect_daily_kickoff_enabled')
+  && postDeployAutonomyWorkflow.includes('expect_kpi_gap_kickoff_enabled');
 check('Post-deploy autonomy check is read-only/no-money', postDeployNoMoneyCheck,
   postDeployNoMoneyCheck ? 'checker uses /health + /system-health only' : 'checker can mutate, trigger kickoff, or rely on provider data');
 

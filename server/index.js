@@ -863,9 +863,10 @@ async function start() {
         ).catch(() => {});
 
         logger.info({ msg: `[daily-kickoff] Starting for ${client.slug}` });
-        runWithClientContext(client.id, () =>
+        await runWithClientContext(client.id, () =>
           runAutonomousKickoff(client.id).catch(err => {
             logger.error({ msg: `[daily-kickoff] Failed for ${client.slug}`, err: err.message });
+            throw err;
           })
         );
         result.fired++;
@@ -1180,7 +1181,12 @@ async function start() {
     // already running, and cooldown has passed, fires another kickoff.
     // Guards: max 6 kickoffs/day, 25-min cooldown, working hours only.
     async function runKpiGapKickoff() {
-      if (process.env.CAPTAIN_KPI_GAP_KICKOFF_ENABLED !== 'true') return { disabled: true };
+      if (process.env.CAPTAIN_KPI_GAP_KICKOFF_ENABLED !== 'true') {
+        return { disabled: true, reason: 'CAPTAIN_KPI_GAP_KICKOFF_ENABLED disabled' };
+      }
+      if (process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true') {
+        return { disabled: true, reason: 'CAPTAIN_DAILY_KICKOFF_ENABLED disabled; refusing KPI-gap kickoff' };
+      }
 
       const now = new Date();
       const utcHour = now.getUTCHours();
@@ -1188,7 +1194,7 @@ async function start() {
       // never overlaps the 01:30 daily kickoff window — A4-6: at 01:30 the daily
       // kickoff has fired but sent is still 0, so kpi-gap would see an unmet KPI
       // and fire a SECOND kickoff before the first registers a cooldown log.
-      if (utcHour < 2 || utcHour >= 10) return;
+      if (utcHour < 2 || utcHour >= 10) return { waiting: true, reason: 'outside 10:00-17:59 MYT KPI-gap window' };
 
       // 2026-05-12: relaxed minute window 0-9 → 0-29. With 10-min poll cadence,
       // the old window only landed if poll happened to align with :00-:09 of an
@@ -1196,7 +1202,7 @@ async function start() {
       // ensures every hourly poll has a chance to fire (still gated by hourly
       // dedupe so we never fire more than once per hour).
       const m = now.getUTCMinutes();
-      if (m >= 30) return;
+      if (m >= 30) return { waiting: true, reason: 'outside first 30 minutes of hourly KPI-gap window' };
 
       // Hourly dedupe
       const dedupeKey = `kpi_gap_kickoff_${now.toISOString().slice(0, 13)}`;
@@ -1206,13 +1212,13 @@ async function start() {
       );
       if (already.length > 0) {
         logger.debug({ msg: `[kpi-gap] hourly dedupe hit for ${dedupeKey}` });
-        return;
+        return { alreadyDone: true, reason: 'hourly KPI-gap dedupe row present' };
       }
 
       const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
       if (enabledSlugs.length === 0) {
         logger.warn({ msg: '[kpi-gap] AUTONOMOUS_ENABLED_CLIENTS is empty — cron is no-op' });
-        return;
+        return { disabled: true, reason: 'AUTONOMOUS_ENABLED_CLIENTS empty' };
       }
 
       const { rows: clients } = await pool.query(
@@ -1220,6 +1226,7 @@ async function start() {
         [enabledSlugs]
       );
 
+      let fired = 0;
       for (const client of clients) {
         try {
           const today = now.toISOString().split('T')[0];
@@ -1380,10 +1387,12 @@ async function start() {
               logger.error({ msg: `[kpi-gap] kickoff failed for ${client.slug}`, err: err.message });
             })
           );
+          fired++;
         } catch (err) {
           logger.warn({ msg: `[kpi-gap] check failed for ${client.slug}`, err: err.message });
         }
       }
+      return fired > 0 ? { fired: true, fired } : { skipped: true, reason: 'no KPI-gap kickoff fired' };
     }
 
     // ── Captain directive sweep (Wave 1, 2026-05-03; cadence fix Wave 3) ───
@@ -1465,7 +1474,10 @@ async function start() {
         .then(() => { jobHealth.markRun('captain_directive_sweep'); })
         .catch(err => { logger.warn({ msg: 'Captain directive sweep error', err: err.message }); jobHealth.markError('captain_directive_sweep', err.message); });
       runKpiGapKickoff()
-        .then(result => { if (!result?.disabled) jobHealth.markRun('kpi_gap_kickoff'); })
+        .then(result => {
+          if (result?.fired || result?.alreadyDone) jobHealth.markRun('kpi_gap_kickoff', result);
+          else if (result?.disabled || result?.skipped || result?.waiting) jobHealth.markSkipped('kpi_gap_kickoff', result?.reason || 'KPI-gap kickoff skipped', result);
+        })
         .catch(err => { logger.warn({ msg: 'KPI gap kickoff poll error', err: err.message }); jobHealth.markError('kpi_gap_kickoff', err.message); });
     }, 10 * 60 * 1000);
     logger.info({ msg: 'Captain Beaver cron jobs registered (10min poll: 9am brief, 7pm EOD brief, hourly stuck-state monitor 9am-7pm, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, 30min KPI gap kickoff, all MYT)' });

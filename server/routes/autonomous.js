@@ -2346,6 +2346,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
              (SELECT COUNT(*)::int
                 FROM pipeline_traces pt, bounds b
                WHERE pt.client_id = $1
+                 AND pt.pipeline_path IN ('kickoff_pipeline', 'signal_pipeline')
                  AND pt.created_at >= b.start_at AND pt.created_at < b.end_at) AS trace_count,
              EXISTS (
                SELECT 1
@@ -2433,25 +2434,29 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
 
       const i = integrations.rows[0];
       const evidence = kickoffEvidence.rows[0] || {};
-      const kickoffFired = !!(evidence.last_log_at || evidence.memory_written || Number(evidence.trace_count) > 0);
+      const kickoffWorkProof = !!(evidence.last_log_at || Number(evidence.trace_count) > 0);
+      const kickoffMemoryOnlyStarted = !!evidence.memory_written && !kickoffWorkProof;
       const kickoffState = process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'
         ? 'disabled'
-        : kickoffFired
+        : kickoffWorkProof
           ? 'fired'
-          : klMinutesNow < (9 * 60 + 30)
-            ? 'waiting'
-            : klMinutesNow > (9 * 60 + 40)
-              ? 'missed'
-              : 'window_open';
+          : kickoffMemoryOnlyStarted
+            ? 'started'
+            : klMinutesNow < (9 * 60 + 30)
+              ? 'waiting'
+              : klMinutesNow > (9 * 60 + 40)
+                ? 'missed'
+                : 'window_open';
       tenants.push({
         client_id: c.id,
         slug: c.slug,
         name: c.name,
         kickoff_today: {
-          fired: kickoffFired,
+          fired: kickoffWorkProof,
           state: kickoffState,
           at: evidence.last_log_at || null,
           memory_written: !!evidence.memory_written,
+          memory_only_started: kickoffMemoryOnlyStarted,
           trace_count: Number(evidence.trace_count) || 0,
         },
         kpi: kpi.rows[0] || null,
@@ -2477,6 +2482,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
         kl_minutes_now: klMinutesNow,
         enabled_slugs: enabledSlugs,
         captain_daily_kickoff_enabled: process.env.CAPTAIN_DAILY_KICKOFF_ENABLED === 'true',
+        captain_kpi_gap_kickoff_enabled: process.env.CAPTAIN_KPI_GAP_KICKOFF_ENABLED === 'true',
         market_sensing_enabled: process.env.MARKET_SENSING_ENABLED === 'true',
         telegram_chat_id_present: !!process.env.TELEGRAM_CHAT_ID,
         telegram_bot_token_present: !!process.env.TELEGRAM_BOT_TOKEN,

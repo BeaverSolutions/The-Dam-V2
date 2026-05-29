@@ -11,6 +11,10 @@ on:
         description: 'Set true only after MJ approves scheduled autonomy spend'
         required: true
         default: 'false'
+      expect_kpi_gap_kickoff_enabled:
+        description: 'Set true only after MJ approves hourly KPI-gap kickoff spend'
+        required: true
+        default: 'false'
       expect_market_sensing_enabled:
         description: 'Set true only after MJ approves market-sensing spend'
         required: true
@@ -33,6 +37,7 @@ jobs:
           BEAVRDAM_INTERNAL_API_KEY: ${{ secrets.BEAVRDAM_INTERNAL_API_KEY }}
           CLIENT_SLUG: ${{ github.event.inputs.client_slug || 'beaver-solutions' }}
           EXPECT_DAILY_KICKOFF_ENABLED: ${{ github.event.inputs.expect_daily_kickoff_enabled || 'false' }}
+          EXPECT_KPI_GAP_KICKOFF_ENABLED: ${{ github.event.inputs.expect_kpi_gap_kickoff_enabled || 'false' }}
           EXPECT_MARKET_SENSING_ENABLED: ${{ github.event.inputs.expect_market_sensing_enabled || 'false' }}
           WAIT_FOR_JOBS_SECONDS: '720'
         run: node scripts/post-deploy-autonomy-check.mjs

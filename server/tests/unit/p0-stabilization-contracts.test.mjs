@@ -191,10 +191,15 @@ describe('P0 stabilization contracts', () => {
     const captain = service('services/captainOrchestrator.js');
 
     expect(index).toContain("CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'");
+    expect(index).toContain("CAPTAIN_KPI_GAP_KICKOFF_ENABLED !== 'true'");
+    expect(index).toContain('CAPTAIN_DAILY_KICKOFF_ENABLED disabled; refusing KPI-gap kickoff');
     expect(index).toContain("MARKET_SENSING_ENABLED !== 'true'");
+    expect(service('../.env.example')).toContain('CAPTAIN_KPI_GAP_KICKOFF_ENABLED=false');
     expect(service('../.env.example')).toContain('MARKET_SENSING_ENABLED=false');
+    expect(service('../.env.production.example')).toContain('CAPTAIN_KPI_GAP_KICKOFF_ENABLED=false');
     expect(service('../.env.production.example')).toContain('MARKET_SENSING_ENABLED=false');
     expect(index).toContain("jobHealth.markSkipped('daily_kickoff'");
+    expect(index).toContain("jobHealth.markSkipped('kpi_gap_kickoff'");
     expect(index).toContain("jobHealth.markSkipped('market_sensing'");
     expect(index).toContain('daily kickoff window passed without all tenant dedupe rows');
     expect(jobHealth).toContain('function markSkipped');
@@ -280,9 +285,14 @@ describe('P0 stabilization contracts', () => {
     expect(autonomous).toContain("Asia/Kuala_Lumpur");
     expect(autonomous).toContain('kl_minutes_now');
     expect(autonomous).toContain('memory_written');
+    expect(autonomous).toContain('kickoffWorkProof');
+    expect(autonomous).toContain('kickoffMemoryOnlyStarted');
+    expect(autonomous).toContain("state: kickoffState");
+    expect(autonomous).toContain('memory_only_started');
     expect(autonomous).toContain('trace_count');
     expect(autonomous).toContain('approval_queue');
     expect(autonomous).toContain('linkedin_awaiting_accept');
+    expect(autonomous).toContain('captain_kpi_gap_kickoff_enabled');
     expect(healthPack).toContain("state === 'missed'");
     expect(healthPack).toContain('waiting for 09:30 MYT');
     expect(healthPack).toContain('Approval queue:');
@@ -303,6 +313,8 @@ describe('P0 stabilization contracts', () => {
     expect(postDeployCheck).toContain("getJson('/health')");
     expect(postDeployCheck).toContain("getJson('/api/autonomous/system-health'");
     expect(postDeployCheck).toContain('EXPECT_DAILY_KICKOFF_ENABLED');
+    expect(postDeployCheck).toContain('EXPECT_KPI_GAP_KICKOFF_ENABLED');
+    expect(postDeployCheck).toContain("jobStatus(lastHealth, 'kpi_gap_kickoff')");
     expect(postDeployCheck).toContain('WAIT_FOR_JOBS_SECONDS');
     expect(postDeployCheck).toContain('reviewable approvals under cap');
     expect(postDeployCheck).not.toContain("method: 'POST'");
@@ -310,6 +322,7 @@ describe('P0 stabilization contracts', () => {
     expect(postDeployWorkflow).toContain('workflow_dispatch');
     expect(postDeployWorkflow).toContain('BEAVRDAM_INTERNAL_API_KEY');
     expect(postDeployWorkflow).toContain('expect_daily_kickoff_enabled');
+    expect(postDeployWorkflow).toContain('expect_kpi_gap_kickoff_enabled');
     expect(postDeployWorkflow).toContain('WAIT_FOR_JOBS_SECONDS');
     expect(packageJson).toContain('"check:post-deploy"');
   });

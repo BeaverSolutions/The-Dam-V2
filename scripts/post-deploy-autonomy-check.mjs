@@ -7,6 +7,7 @@ const API_URL = process.env.BEAVRDAM_API_URL || 'https://app.beaver.solutions';
 const API_KEY = process.env.BEAVRDAM_INTERNAL_API_KEY;
 const CLIENT_SLUG = (process.env.CLIENT_SLUG || 'beaver-solutions').trim();
 const EXPECT_DAILY_KICKOFF_ENABLED = process.env.EXPECT_DAILY_KICKOFF_ENABLED === 'true';
+const EXPECT_KPI_GAP_KICKOFF_ENABLED = process.env.EXPECT_KPI_GAP_KICKOFF_ENABLED === 'true';
 const EXPECT_MARKET_SENSING_ENABLED = process.env.EXPECT_MARKET_SENSING_ENABLED === 'true';
 const MAX_REVIEWABLE = Number(process.env.MAX_REVIEWABLE_APPROVALS || 20);
 const WAIT_FOR_JOBS_SECONDS = Number(process.env.WAIT_FOR_JOBS_SECONDS || 0);
@@ -64,6 +65,21 @@ function validateHealth(checks, health) {
     fail(checks, 'daily kickoff safely disabled', `status=${daily.status}, reason=${daily.lastSkipReason || 'none'}`);
   }
 
+  const kpiGap = jobStatus(health, 'kpi_gap_kickoff');
+  if (!kpiGap) {
+    fail(checks, 'KPI-gap kickoff job visible', 'job missing from /health');
+  } else if (EXPECT_KPI_GAP_KICKOFF_ENABLED) {
+    if (kpiGap.status === 'disabled') fail(checks, 'KPI-gap kickoff enabled', kpiGap.lastSkipReason || 'disabled');
+    else pass(checks, 'KPI-gap kickoff enabled', `status=${kpiGap.status}`);
+  } else if (
+    kpiGap.status === 'disabled'
+    && /CAPTAIN_(KPI_GAP|DAILY)_KICKOFF_ENABLED disabled/.test(kpiGap.lastSkipReason || '')
+  ) {
+    pass(checks, 'KPI-gap kickoff safely disabled', kpiGap.lastSkipReason);
+  } else {
+    fail(checks, 'KPI-gap kickoff safely disabled', `status=${kpiGap.status}, reason=${kpiGap.lastSkipReason || 'none'}`);
+  }
+
   const market = jobStatus(health, 'market_sensing');
   if (!market) {
     fail(checks, 'market sensing job visible', 'job missing from /health');
@@ -93,10 +109,10 @@ function validateSystemHealth(checks, data) {
 
   const kickoffState = target.kickoff_today?.state || 'missing';
   if (EXPECT_DAILY_KICKOFF_ENABLED) {
-    if (['disabled', 'missed', 'missing'].includes(kickoffState)) {
-      fail(checks, 'kickoff state not disabled/missed', kickoffState);
+    if (['disabled', 'missed', 'missing', 'started'].includes(kickoffState)) {
+      fail(checks, 'kickoff state has work proof', kickoffState);
     } else {
-      pass(checks, 'kickoff state not disabled/missed', kickoffState);
+      pass(checks, 'kickoff state has work proof', kickoffState);
     }
   } else if (kickoffState === 'disabled') {
     pass(checks, 'system-health reports kickoff disabled', kickoffState);
@@ -127,7 +143,7 @@ async function readHealthWithJobs() {
   let lastHealth = null;
   for (;;) {
     lastHealth = await getJson('/health');
-    if (jobStatus(lastHealth, 'daily_kickoff') && jobStatus(lastHealth, 'market_sensing')) {
+    if (jobStatus(lastHealth, 'daily_kickoff') && jobStatus(lastHealth, 'kpi_gap_kickoff') && jobStatus(lastHealth, 'market_sensing')) {
       return lastHealth;
     }
     if (Date.now() >= deadline) return lastHealth;
