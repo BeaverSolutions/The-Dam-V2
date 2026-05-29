@@ -994,36 +994,54 @@ function isLeadCampaignRequest(command) {
 
 async function getRunCampaignPreflight(clientId, command) {
   const target = campaignTargetFromCommand(command);
-  const { rows: [{ eligible_count }] } = await pool.query(
-    `SELECT COUNT(*)::int AS eligible_count
-       FROM leads l
-      WHERE l.client_id = $1
-        AND l.deleted_at IS NULL
-        AND l.status = 'new'
-        AND l.pipeline_stage = 'prospecting'
-        AND NULLIF(BTRIM(l.name), '') IS NOT NULL
-        AND NULLIF(BTRIM(l.company), '') IS NOT NULL
-        AND LOWER(BTRIM(l.company)) NOT IN ('unknown', 'unknown company', 'independent', 'self-employed', 'self employed', 'stealth', 'confidential')
-        AND (l.email IS NOT NULL OR l.linkedin_url IS NOT NULL)
-        AND NOT EXISTS (
-          SELECT 1 FROM messages m
-           WHERE m.lead_id = l.id AND m.client_id = $1
-             AND m.status IN (
-               'pending_ranger', 'pending_approval', 'approved',
-               'pending_send', 'sending', 'sent', 'delivered',
-               'linkedin_requested', 'awaiting_accept'
-             )
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM pipeline_traces pt
-           WHERE pt.client_id = $1 AND pt.lead_id = l.id
-             AND pt.stage = 'enrolled'
-             AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date =
-                 (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date
-        )
-        ${leadSelectionFeedbackExclusionSql('l')}`,
+  const { rows: [capacity] } = await pool.query(
+    `WITH selectable AS (
+       SELECT l.*,
+              (l.email IS NOT NULL AND (l.email_verified IS TRUE OR l.email_source = 'hunter')) AS has_verified_email,
+              (l.linkedin_url IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM messages ml
+                 WHERE ml.client_id = $1
+                   AND ml.lead_id = l.id
+                   AND ml.channel = 'linkedin'
+                   AND ml.status NOT IN ('deleted')
+              )) AS has_usable_linkedin
+         FROM leads l
+        WHERE l.client_id = $1
+          AND l.deleted_at IS NULL
+          AND l.status = 'new'
+          AND l.pipeline_stage = 'prospecting'
+          AND NULLIF(BTRIM(l.name), '') IS NOT NULL
+          AND NULLIF(BTRIM(l.company), '') IS NOT NULL
+          AND LOWER(BTRIM(l.company)) NOT IN ('unknown', 'unknown company', 'independent', 'self-employed', 'self employed', 'stealth', 'confidential')
+          AND (l.email IS NOT NULL OR l.linkedin_url IS NOT NULL)
+          AND NOT EXISTS (
+            SELECT 1 FROM messages m
+             WHERE m.lead_id = l.id AND m.client_id = $1
+               AND m.status IN (
+                 'pending_ranger', 'pending_approval', 'approved',
+                 'pending_send', 'sending', 'sent', 'delivered',
+                 'linkedin_requested', 'awaiting_accept'
+               )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM pipeline_traces pt
+             WHERE pt.client_id = $1 AND pt.lead_id = l.id
+               AND pt.stage = 'enrolled'
+               AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date =
+                   (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date
+          )
+          ${leadSelectionFeedbackExclusionSql('l')}
+     )
+     SELECT COUNT(*)::int AS raw_eligible_count,
+            COUNT(*) FILTER (WHERE has_verified_email OR has_usable_linkedin)::int AS channel_ready_count,
+            COUNT(*) FILTER (WHERE has_verified_email)::int AS verified_email_count,
+            COUNT(*) FILTER (WHERE has_usable_linkedin AND NOT has_verified_email)::int AS usable_linkedin_count,
+            COUNT(*) FILTER (WHERE NOT has_verified_email AND linkedin_url IS NOT NULL AND NOT has_usable_linkedin)::int AS channel_exhausted_count
+       FROM selectable`,
     [clientId]
   );
+  const rawEligibleCount = Number(capacity?.raw_eligible_count) || 0;
+  const eligibleCount = Number(capacity?.channel_ready_count) || 0;
   const { CAPS } = require('./spendGuard');
   const { providerUsageToday } = require('./spendGuard');
   const braveSpent = await providerUsageToday('brave', clientId).catch(() => CAPS.brave);
@@ -1033,7 +1051,7 @@ async function getRunCampaignPreflight(clientId, command) {
   const googleRemaining = Math.max(0, CAPS.google_cse - googleSpent);
   const apolloRemaining = Math.max(0, CAPS.apollo - apolloSpent);
   const remainingPaidQueries = braveRemaining + googleRemaining + apolloRemaining;
-  const externalShortfall = Math.max(0, target - Math.min(target, eligible_count));
+  const externalShortfall = Math.max(0, target - Math.min(target, eligibleCount));
   const requiredPaidQueries = externalShortfall > 0
     ? minPaidQueriesForExternalTarget(externalShortfall)
     : 0;
@@ -1045,7 +1063,12 @@ async function getRunCampaignPreflight(clientId, command) {
   };
   return {
     target,
-    eligible_count,
+    eligible_count: eligibleCount,
+    raw_eligible_count: rawEligibleCount,
+    channel_ready_count: eligibleCount,
+    verified_email_count: Number(capacity?.verified_email_count) || 0,
+    usable_linkedin_count: Number(capacity?.usable_linkedin_count) || 0,
+    channel_exhausted_count: Number(capacity?.channel_exhausted_count) || 0,
     external_shortfall: externalShortfall,
     providers,
     provider_usage: {

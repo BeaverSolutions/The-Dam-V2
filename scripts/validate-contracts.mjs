@@ -226,10 +226,20 @@ check('Research picker is signal-first with bounded company support', researchSi
 const captainCapacityTruth = captainBeaver.includes('has_sufficient_research_capacity')
   && captainBeaver.includes('required_paid_queries')
   && captainBeaver.includes('remaining_paid_queries')
+  && captainBeaver.includes('raw_eligible_count')
+  && captainBeaver.includes('channel_ready_count')
+  && captainBeaver.includes('channel_exhausted_count')
+  && captainBeaver.includes("ml.channel = 'linkedin'")
   && captainBeaver.includes('insufficient_paid_search_capacity')
   && captainBeaver.includes('expireStaleRunningExecutions');
 check('Captain preflight blocks unaffordable campaigns and expires stale runs', captainCapacityTruth,
-  captainCapacityTruth ? 'capacity shortfall and stale exec guards found' : 'Captain can still queue underfunded or stale-blocked campaigns');
+  captainCapacityTruth ? 'channel-ready capacity, paid shortfall, and stale exec guards found' : 'Captain can still queue underfunded, stale-blocked, or channel-exhausted campaigns');
+
+const dbFirstChannelReadyTruth = agents.includes("ml.channel = 'linkedin'")
+  && agents.includes("l.email_verified IS TRUE OR l.email_source = 'hunter'")
+  && agents.includes('channel_exhausted');
+check('DB-first campaign selector excludes channel-exhausted leads', dbFirstChannelReadyTruth,
+  dbFirstChannelReadyTruth ? 'DB-first selector uses channel-ready email/linkedin truth' : 'DB-first selector can still spend on exhausted LinkedIn-only leads');
 
 // 21. Search fallback must preserve LinkedIn company searches.
 const companySearchFallback = searchService.includes('(?:in|company)')

@@ -3200,6 +3200,19 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
          AND NULLIF(BTRIM(l.company), '') IS NOT NULL
          AND LOWER(BTRIM(l.company)) NOT IN ('unknown', 'unknown company', 'independent', 'self-employed', 'self employed', 'stealth', 'confidential')
          AND (l.email IS NOT NULL OR l.linkedin_url IS NOT NULL)
+         AND (
+           (l.email IS NOT NULL AND (l.email_verified IS TRUE OR l.email_source = 'hunter'))
+           OR (
+             l.linkedin_url IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM messages ml
+                WHERE ml.client_id = $1
+                  AND ml.lead_id = l.id
+                  AND ml.channel = 'linkedin'
+                  AND ml.status NOT IN ('deleted')
+             )
+           )
+         )
           AND NOT EXISTS (
             SELECT 1 FROM messages m
             WHERE m.lead_id = l.id AND m.client_id = $1
@@ -3218,6 +3231,10 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           )
           ${leadSelectionFeedbackExclusionSql('l')}
         ORDER BY
+         CASE
+           WHEN l.email IS NOT NULL AND (l.email_verified IS TRUE OR l.email_source = 'hunter') THEN 0
+           ELSE 1
+         END,
          CASE l.signal_tier WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
          l.created_at DESC
        LIMIT $2`,
