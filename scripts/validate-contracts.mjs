@@ -58,6 +58,7 @@ const triggerKickoff = readFileSync(resolve(SERVER, '..', 'scripts', 'trigger-ki
 const kickoffWatchdog = readFileSync(resolve(SERVER, '..', 'scripts', 'kickoff-watchdog.mjs'), 'utf8');
 const dailyHealthPack = readFileSync(resolve(SERVER, '..', 'scripts', 'daily-health-pack.mjs'), 'utf8');
 const platformHealth = readFileSync(resolve(SERVER, '..', 'scripts', 'platform-health.mjs'), 'utf8');
+const postDeployAutonomyCheck = readFileSync(resolve(SERVER, '..', 'scripts', 'post-deploy-autonomy-check.mjs'), 'utf8');
 const triggerKickoffWorkflow = readFileSync(resolve(SERVER, '..', '.github', 'workflows', 'trigger-kickoff.yml'), 'utf8');
 const envExample = readFileSync(resolve(SERVER, '..', '.env.example'), 'utf8');
 const prodEnvExample = readFileSync(resolve(SERVER, '..', '.env.production.example'), 'utf8');
@@ -334,7 +335,19 @@ const platformHealthTruth = platformHealth.includes("api('/api/autonomous/system
 check('Platform Health uses system-health kickoff/queue truth', platformHealthTruth,
   platformHealthTruth ? 'platform-health no longer uses hourly-stats/50-target framing' : 'platform-health can still report stale target or queue truth');
 
-// 29. EOD must use the same factual-reporting discipline as morning. The LLM
+// 29. Post-deploy verification must stay read-only and no-money.
+const postDeployNoMoneyCheck = postDeployAutonomyCheck.includes("getJson('/health')")
+  && postDeployAutonomyCheck.includes("getJson('/api/autonomous/system-health'")
+  && postDeployAutonomyCheck.includes('EXPECT_DAILY_KICKOFF_ENABLED')
+  && postDeployAutonomyCheck.includes('EXPECT_MARKET_SENSING_ENABLED')
+  && postDeployAutonomyCheck.includes('reviewable approvals under cap')
+  && !postDeployAutonomyCheck.includes("method: 'POST'")
+  && !postDeployAutonomyCheck.includes('/kickoff')
+  && !postDeployAutonomyCheck.includes('provider_usage');
+check('Post-deploy autonomy check is read-only/no-money', postDeployNoMoneyCheck,
+  postDeployNoMoneyCheck ? 'checker uses /health + /system-health only' : 'checker can mutate, trigger kickoff, or rely on provider data');
+
+// 30. EOD must use the same factual-reporting discipline as morning. The LLM
 // can analyze elsewhere, but it must not compose KPI truth from stale self-reports.
 const eodBody = section(captainOrchestrator, 'async function generateEodBrief', 'function renderPlainEodBrief');
 const eodDeterministic = eodBody.includes('const summary = renderPlainEodBrief(kpis, todaysActions);')

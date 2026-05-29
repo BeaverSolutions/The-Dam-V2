@@ -272,6 +272,8 @@ describe('P0 stabilization contracts', () => {
     const healthPack = service('../scripts/daily-health-pack.mjs');
     const watchdog = service('../scripts/kickoff-watchdog.mjs');
     const platformHealth = service('../scripts/platform-health.mjs');
+    const postDeployCheck = service('../scripts/post-deploy-autonomy-check.mjs');
+    const packageJson = service('../package.json');
 
     expect(autonomous).toContain("Asia/Kuala_Lumpur");
     expect(autonomous).toContain('kl_minutes_now');
@@ -289,5 +291,12 @@ describe('P0 stabilization contracts', () => {
     expect(platformHealth).not.toContain('Sent: ${sentToday}/50');
     expect(platformHealth).toContain('LI-awaiting');
     expect(platformHealth).toContain('pipeline produced no approval-ready output');
+    expect(postDeployCheck).toContain("getJson('/health')");
+    expect(postDeployCheck).toContain("getJson('/api/autonomous/system-health'");
+    expect(postDeployCheck).toContain('EXPECT_DAILY_KICKOFF_ENABLED');
+    expect(postDeployCheck).toContain('reviewable approvals under cap');
+    expect(postDeployCheck).not.toContain("method: 'POST'");
+    expect(postDeployCheck).not.toContain('/kickoff');
+    expect(packageJson).toContain('"check:post-deploy"');
   });
 });

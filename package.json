@@ -9,6 +9,7 @@
     "install:all": "cd client && npm install && cd ../server && npm install",
     "dev:server": "cd server && node index.js",
     "dev:client": "cd client && npm run dev",
+    "check:post-deploy": "node scripts/post-deploy-autonomy-check.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
