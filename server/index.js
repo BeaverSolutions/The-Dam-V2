@@ -516,6 +516,65 @@ async function start() {
     setInterval(() => { runAutoApprovalRecovery().catch(() => {}); }, 15 * 60 * 1000);
     logger.info({ msg: 'Auto-approval recovery scheduled but disabled unless AUTO_APPROVAL_RECOVERY_ENABLED=true' });
 
+    // ── Pool email enrichment (Tier-B → Tier-A) — 2026-05-29 supply fix ──────
+    // Promotes LinkedIn-only pool leads to verified-email (auto-sendable) supply
+    // via researchEnrichment.runPoolEmailEnrichment → emailEnrichment.findEmail.
+    // This is the Tier-B graduation worker contactGate.js documented but that
+    // never existed. SPENDS Brave (1 query/lead) + MillionVerifier (<=3/lead,
+    // spend-guarded), so it stays OFF behind POOL_EMAIL_ENRICHMENT_ENABLED until
+    // the money-approved proof. Fires once/day at 08:45-08:55 MYT (00:45-00:55
+    // UTC) — after signal enrichment + DB builder, before the 09:30 kickoff —
+    // so freshly-promoted email leads are draftable in the same cycle.
+    let _poolEmailEnrichmentRunning = false;
+    async function runPoolEmailEnrichmentCron() {
+      if (_poolEmailEnrichmentRunning) return;
+      if (process.env.POOL_EMAIL_ENRICHMENT_ENABLED !== 'true') {
+        jobHealth.markSkipped('pool_email_enrichment', 'POOL_EMAIL_ENRICHMENT_ENABLED not true; no enrichment, no spend', { disabled: true });
+        return;
+      }
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+      const utcMin = now.getUTCMinutes();
+      if (utcHour !== 0 || utcMin < 45 || utcMin > 55) return; // 08:45-08:55 MYT
+      _poolEmailEnrichmentRunning = true;
+      try {
+        const dedupeKey = `pool_email_enrichment_fired_${now.toISOString().slice(0, 10)}`;
+        const { rows: clients } = await pool.query(
+          `SELECT id FROM clients WHERE is_active = true AND onboarding_completed = true`
+        );
+        const { runPoolEmailEnrichment } = require('./services/researchEnrichment');
+        let promoted = 0, processed = 0, firedClients = 0;
+        for (const client of clients) {
+          const { rows: already } = await pool.query(
+            `SELECT 1 FROM agent_memory WHERE client_id = $1 AND agent = 'research_beaver' AND key = $2 LIMIT 1`,
+            [client.id, dedupeKey]
+          );
+          if (already.length > 0) continue;
+          // Mark fired BEFORE running so a restart mid-pass cannot double-spend.
+          await pool.query(
+            `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+             VALUES ($1, 'research_beaver', $2, '"fired"'::jsonb, 'config')
+             ON CONFLICT (client_id, agent, key) DO NOTHING`,
+            [client.id, dedupeKey]
+          ).catch(() => {});
+          const result = await runWithClientContext(client.id, () =>
+            runPoolEmailEnrichment(client.id, { limit: 30 })
+          ).catch(err => { jobHealth.markError('pool_email_enrichment', err.message); return null; });
+          promoted += Number(result?.promoted || 0);
+          processed += Number(result?.processed || 0);
+          firedClients++;
+        }
+        jobHealth.markRun('pool_email_enrichment', { promoted, processed, clients: firedClients });
+      } catch (err) {
+        console.warn('[pool-email-enrich] sweep failed:', err.message);
+        jobHealth.markError('pool_email_enrichment', err.message);
+      } finally {
+        _poolEmailEnrichmentRunning = false;
+      }
+    }
+    setInterval(() => { runPoolEmailEnrichmentCron().catch(() => {}); }, 5 * 60 * 1000);
+    logger.info({ msg: 'Pool email enrichment scheduled but disabled unless POOL_EMAIL_ENRICHMENT_ENABLED=true' });
+
     // DB Builder — Research Beaver maintains lead pool health
     // 2026-05-14: changed from every-15-min to 2x daily (08:30 + 13:00 MYT).
     // Per MJ direction + PER-BEAVER-KPI-ARCHITECTURE.md: Research Beaver fires

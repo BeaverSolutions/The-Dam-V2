@@ -583,6 +583,131 @@ async function ensureLeadAngle(clientId, leadId) {
   }
 }
 
+/**
+ * Tier-B → Tier-A EMAIL enrichment worker (2026-05-29 supply fix).
+ *
+ * The missing graduation mechanism. contactGate.js documents a "Tier B retry
+ * worker (server/index.js cron) will run ... up to 3x over 14 days" — but no
+ * such worker existed. emailEnrichment.findEmail() (Brave domain discovery +
+ * /contact scrape + 8-pattern gen + MillionVerifier consensus) was built and
+ * wired into pipeline.enrichEmail, but that only fires INSIDE the draft
+ * pipeline for leads that already passed the DB-first selector — which
+ * excludes Tier-B (no verified email) leads. Result: LinkedIn-only pool leads
+ * never became email-draftable, and only email auto-sends. This worker closes
+ * that loop: it proactively enriches pool Tier-B leads and promotes the
+ * deliverable ones to Tier A so they become auto-sendable email supply.
+ *
+ * SPEND: findEmail spends Brave (1 query/lead) + MillionVerifier (<=3/lead,
+ * spend-guarded). This worker therefore stays OFF behind
+ * POOL_EMAIL_ENRICHMENT_ENABLED in index.js until the money-approved proof.
+ * dryRun=true returns the candidate selection WITHOUT calling findEmail — a
+ * free way to verify the selector before any spend.
+ *
+ * @param {string} clientId
+ * @param {object} opts — { limit?: 1..50 (default 20), dryRun?: bool }
+ */
+async function runPoolEmailEnrichment(clientId, opts = {}) {
+  const cap = Math.min(Math.max(1, parseInt(opts.limit, 10) || 20), 50);
+  const dryRun = opts.dryRun === true;
+
+  // Select Tier-B pool leads that are missing a verified email but HAVE a
+  // usable company (required for domain discovery) and a LinkedIn URL, and
+  // were not attempted in the last 7 days. Junk-company list mirrors the
+  // DB-first selector + contactGate so the three agree.
+  const { rows: leads } = await pool.query(
+    `SELECT id, name, company, title, linkedin_url, email, email_verified, lead_tier, metadata
+       FROM leads
+      WHERE client_id = $1
+        AND deleted_at IS NULL
+        AND status = 'new'
+        AND pipeline_stage = 'prospecting'
+        AND lead_tier = 'B'
+        AND (email IS NULL OR email_verified IS NOT TRUE)
+        AND linkedin_url IS NOT NULL
+        AND NULLIF(BTRIM(company), '') IS NOT NULL
+        AND LOWER(BTRIM(company)) NOT IN ('unknown','unknown company','independent','self-employed','self employed','stealth','confidential')
+        AND (
+          (metadata->>'email_enrich_attempted_at') IS NULL
+          OR (metadata->>'email_enrich_attempted_at')::timestamptz < NOW() - INTERVAL '7 days'
+        )
+      ORDER BY CASE signal_tier WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END, created_at DESC
+      LIMIT $2`,
+    [clientId, cap]
+  );
+
+  if (dryRun) {
+    return {
+      dry_run: true,
+      candidates: leads.length,
+      sample: leads.slice(0, 10).map(l => ({ name: l.name, company: l.company })),
+      message: `[dry-run] ${leads.length} Tier-B leads would be email-enriched (no findEmail called, no spend).`,
+    };
+  }
+
+  if (leads.length === 0) {
+    return { processed: 0, promoted: 0, no_email: 0, errors: 0, message: 'No Tier-B leads eligible for email enrichment.' };
+  }
+
+  const { findEmail } = require('./emailEnrichment');
+  let promoted = 0, noEmail = 0, errors = 0;
+  const nowIso = new Date().toISOString();
+
+  for (const lead of leads) {
+    try {
+      const result = await findEmail({ name: lead.name, company: lead.company });
+      if (result?.email && result.status === 'deliverable') {
+        await pool.query(
+          `UPDATE leads
+              SET email = $1, email_verified = TRUE, email_source = $2,
+                  lead_tier = 'A', tiered_at = NOW(),
+                  metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                    'email_enrich_attempted_at', $3::text,
+                    'email_confidence', $4::int,
+                    'email_is_catch_all', $5::boolean,
+                    'promoted_to_a_by', 'pool_email_enrichment'
+                  ),
+                  updated_at = NOW()
+            WHERE id = $6 AND client_id = $7`,
+          [result.email, result.email_source || 'findemail', nowIso,
+           Math.round(Number(result.confidence) || 0), !!result.isCatchAll, lead.id, clientId]
+        );
+        promoted++;
+      } else {
+        // No deliverable email (or risky/catch-all). Keep Tier B, mark attempted
+        // so we don't re-spend on this lead for 7 days.
+        await pool.query(
+          `UPDATE leads
+              SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('email_enrich_attempted_at', $1::text),
+                  updated_at = NOW()
+            WHERE id = $2 AND client_id = $3`,
+          [nowIso, lead.id, clientId]
+        );
+        noEmail++;
+      }
+    } catch (err) {
+      errors++;
+      logger.warn({ msg: '[pool-email-enrich] enrich error', leadId: lead.id, err: err.message });
+    }
+  }
+
+  try {
+    const dayKey = nowIso.split('T')[0];
+    await pool.query(
+      `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
+       VALUES ($1, 'research_beaver', $2, $3::jsonb, 'journal', NOW())
+       ON CONFLICT (client_id, agent, key) DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
+      [clientId, `pool_email_enrichment_${dayKey}`, JSON.stringify({
+        ran_at: nowIso, processed: leads.length, promoted, no_email: noEmail, errors,
+      })]
+    );
+  } catch { /* non-critical */ }
+
+  return {
+    processed: leads.length, promoted, no_email: noEmail, errors,
+    message: `Promoted ${promoted}/${leads.length} Tier-B leads to Tier-A (verified email). ${noEmail} had no deliverable email, ${errors} errors.`,
+  };
+}
+
 module.exports = {
   enrichLeadForFollowUp,
   runDailyEnrichmentPass,
@@ -592,4 +717,5 @@ module.exports = {
   enrichColdLeadSignal,
   ensureLeadAngle,
   runColdPoolSignalEnrichment,
+  runPoolEmailEnrichment,
 };
