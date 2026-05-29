@@ -20,6 +20,7 @@
  *   - write_memory            write learnings back to agent_memory
  *   - web_search_brave        external web search (Brave → CSE → DuckDuckGo fallback)
  *   - get_client_config       read the client's ICP + persona
+ *   - export_database         provide an authenticated tenant data export
  *
  * Added 2026-04-12. Replaces services/myClawChat.js as the web chat brain.
  */
@@ -29,6 +30,7 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../db/pool');
 const logsService = require('./logs');
+const { getDatabaseExportSummary } = require('./databaseExport');
 const { callAgentWithTools } = require('./claude');
 const { searchOpenWeb } = require('./searchService');
 const { getLegacyIcpForClient } = require('./tenantContext');
@@ -115,6 +117,7 @@ TOOLS (Anthropic tool_use — call directly, no HTTP):
 - draft_email_for_leads    ← USE THIS to find emails (via Hunter) and queue email outreach for specific lead IDs. Run AFTER clear_pending_messages.
 - read_followup_plan       ← USE THIS when MJ asks about today's follow-ups. Returns YOUR plan with per-lead angles you proposed at 09:00 MYT.
 - execute_followup_plan    ← USE THIS when MJ approves follow-ups ("approve all", "approve except XYZ", "go with these angles"). Drafts via Sales Beaver with YOUR angle directive, runs Enforcer, queues for send.
+- export_database          ← USE THIS when the user asks to download/export their BeavrDam data/database. Returns an authenticated Excel download link. No provider spend.
 - search_internal_leads    check the DB for existing leads (call this before run_campaign to show what's already there)
 - get_pipeline_status      live KPIs: sent today, pending approval, leads today, rejected today
 - get_approvals_pending    list messages awaiting approval with Enforcer notes
@@ -297,6 +300,11 @@ const TOOLS = [
   {
     name: 'get_client_config',
     description: 'Read the client\'s ICP (industries, geographies, job titles, excluded roles) and persona (tone, value prop). Call this at the start of any new request so you understand who you\'re targeting.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'export_database',
+    description: 'Generate an authenticated Excel export link for this tenant\'s BeavrDam database. Use when the user asks to download, export, or back up their leads/messages/approval/KPI data. This does not call paid providers and does not expose secret memory rows.',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -731,6 +739,14 @@ async function toolGetClientConfig(clientId) {
     fallback: memoryIcp,
   }).catch(() => memoryIcp);
   return { icp, persona };
+}
+
+async function toolExportDatabase(clientId) {
+  const summary = await getDatabaseExportSummary(clientId);
+  return {
+    ...summary,
+    message: `Database export ready.\nDownload: ${summary.download_url}\nRows: ${summary.counts.leads} leads, ${summary.counts.messages} messages, ${summary.counts.approvals} approvals.`,
+  };
 }
 
 async function toolReprocessMessage(clientId, { message_id }) {
@@ -1543,6 +1559,7 @@ function buildToolHandler(clientId) {
         case 'write_memory':          return await toolWriteMemory(clientId, input || {});
         case 'web_search_brave':      return await toolWebSearchBrave(clientId, input || {});
         case 'get_client_config':     return await toolGetClientConfig(clientId);
+        case 'export_database':       return await toolExportDatabase(clientId);
         case 'reprocess_message':       return await toolReprocessMessage(clientId, input || {});
         case 'query_messages':          return await toolQueryMessages(clientId, input || {});
         case 'query_rejection_history': return await toolQueryRejectionHistory(clientId, input || {});
@@ -1587,12 +1604,18 @@ const COMPLEX_KEYWORDS = /\b(create|find|search|run|send|start|kickoff|outreach|
 // route through the full Sonnet+history path instead.
 const REFERENTIAL_WORDS = /\b(that|those|it|them|same|again|previous|last one|back to|earlier|above|before)\b/i;
 
+const DATABASE_EXPORT_REQUEST = /\b(download|export|backup|back up)\b[\s\S]{0,80}\b(database|data|lead database|leads database|crm|contacts?|leads?)\b|\b(database|data|crm|contacts?|leads?)\b[\s\S]{0,80}\b(download|export|backup|back up|xlsx|csv|spreadsheet|file)\b/i;
+
 // Returns true if the command is a simple status read that doesn't need Sonnet
 function isSimpleReadQuery(cmd) {
   if (cmd.length > 200) return false;              // Long messages = complex
   if (COMPLEX_KEYWORDS.test(cmd)) return false;    // Action verb = needs reasoning
   if (REFERENTIAL_WORDS.test(cmd)) return false;   // Needs history context
   return /\b(pending|approvals?|pipeline|status|how many|leads?|today|kpi|numbers?|stats?|summary|what.s|show me|tell me|give me|count|replies|responses)\b/i.test(cmd);
+}
+
+function isDatabaseExportRequest(cmd) {
+  return DATABASE_EXPORT_REQUEST.test(cmd);
 }
 
 // Lightweight Haiku-powered handler for simple reads
@@ -1656,6 +1679,17 @@ async function handleChat(clientId, command, options = {}) {
       history_turns: history.length,
     },
   }).catch(() => {});
+
+  if (isDatabaseExportRequest(command)) {
+    const exportResult = await toolExportDatabase(clientId);
+    return formatResponse(exportResult.message, {
+      fast_path: true,
+      tool: 'export_database',
+      export_download_url: exportResult.download_url,
+      export_filename: exportResult.filename,
+      export_counts: exportResult.counts,
+    });
+  }
 
   // ── Fast-path: simple read queries bypass Sonnet + full persona ──────────
   // "what's pending?", "pipeline status", "how many leads" etc. are pure DB

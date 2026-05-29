@@ -243,6 +243,27 @@ describe('P0 stabilization contracts', () => {
     expect(pipeline).toContain('metadata: { channel, draft_source, signal }');
   });
 
+  it('Captain can provide authenticated tenant-scoped database exports without leaking secrets', () => {
+    const captain = service('services/captainBeaver.js');
+    const index = service('index.js');
+    const route = service('routes/exports.js');
+    const exporter = service('services/databaseExport.js');
+
+    expect(captain).toContain("name: 'export_database'");
+    expect(captain).toContain('toolExportDatabase');
+    expect(captain).toContain("case 'export_database'");
+    expect(index).toContain("app.use('/api/exports'");
+    expect(index).toContain("authMiddleware, tenantScope, clientContext, require('./routes/exports')");
+    expect(route).toContain("router.get('/database.xlsx'");
+    expect(route).toContain('req.clientId');
+    expect(route).toContain('Content-Disposition');
+    expect(exporter).toContain('ExcelJS');
+    expect(exporter).toContain('WHERE client_id = $1');
+    expect(exporter).toContain("memory_type <> 'secret'");
+    expect(exporter).toContain('database_export_requested');
+    expect(exporter).not.toContain('express.static');
+  });
+
   it('Apollo is guarded and not trusted as a verified email source', () => {
     const agents = service('services/agents.js');
     expect(agents).not.toContain("lead.email_source === 'apollo'");

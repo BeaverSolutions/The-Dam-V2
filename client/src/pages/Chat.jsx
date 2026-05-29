@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Check, X, ChevronRight, Building2, User, ArrowRight } from 'lucide-react';
+import { Send, Check, X, ChevronRight, Building2, User, ArrowRight, Download } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import BeaverAvatar, { BEAVER_COLORS, BEAVER_LABELS } from '../components/BeaverAvatar';
 import BeaverStatusBoard from '../components/BeaverStatusBoard';
@@ -179,6 +179,16 @@ function Message({ msg }) {
           <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--purple)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.35rem' }}>Captain Beaver</div>
         )}
         <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+        {msg.downloadUrl && (
+          <a
+            className="btn btn-primary"
+            href={msg.downloadUrl}
+            download={msg.downloadFilename || true}
+            style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem', marginTop: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem', textDecoration: 'none' }}
+          >
+            <Download size={12} /> Download export
+          </a>
+        )}
 
         {/* Plan approval */}
         {msg.plan && !msg.plan.resolved && (
@@ -367,6 +377,8 @@ export default function Chat() {
             role: 'assistant',
             source: 'captain',
             content: plan.message,
+            downloadUrl: plan.export_download_url,
+            downloadFilename: plan.export_filename,
           }]);
           return;
         }

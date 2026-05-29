@@ -144,6 +144,7 @@ app.use('/api/agents',       authMiddleware, tenantScope, clientContext, require
 app.use('/api/integrations', authMiddleware, tenantScope, clientContext, require('./routes/integrations'));
 app.use('/api/dashboard',    authMiddleware, tenantScope, clientContext, require('./routes/dashboard'));
 app.use('/api/import',       authMiddleware, tenantScope, clientContext, require('./routes/import'));
+app.use('/api/exports',      authMiddleware, tenantScope, clientContext, require('./routes/exports'));
 
 // Autonomous routes — internal key auth (no JWT required).
 // Background tasks spawned by this router MUST wrap their work in
