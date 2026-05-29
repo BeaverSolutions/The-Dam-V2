@@ -67,6 +67,23 @@ function isFakeDomain(email) {
   return FAKE_EMAIL_DOMAINS.has(email.slice(at + 1).toLowerCase().trim());
 }
 
+// 2026-05-29 supply fix: a lead with no usable company name is un-actionable.
+// The kickoff/signal draft selectors require company NOT NULL + not-junk
+// (agents.js DB-first selector), and email enrichment (findEmail) needs a
+// company to discover a domain. Leads without one became permanent pool
+// corpses: channel-present yet never draftable and never enrichable. Reject
+// them at the gate so they never enter the pool as Tier A/B. The junk list
+// mirrors the DB-first selector exactly so the gate and the selector agree.
+const JUNK_COMPANY_NAMES = new Set([
+  'unknown', 'unknown company', 'independent', 'self-employed', 'self employed',
+  'stealth', 'confidential',
+]);
+
+function hasUsableCompany(company) {
+  const c = String(company || '').trim().toLowerCase();
+  return c.length > 0 && !JUNK_COMPANY_NAMES.has(c);
+}
+
 /**
  * Gate + classify a sourced lead.
  *
@@ -100,20 +117,27 @@ async function tryPersistSourcedLead(clientId, candidate, options = {}) {
   // quality-scored lead is silently treated as score 0 and fails the Tier B gate.
   const score = Number(candidate.score) || Number(candidate.quality_score) || 0;
 
+  // 2026-05-29 supply fix: usable company is a hard prerequisite for any tier.
+  // No company → undraftable (selector completeness gate) AND un-enrichable
+  // (findEmail needs a domain). Reject to Tier C instead of polluting the pool.
+  const usableCompany = hasUsableCompany(candidate.company);
+
   // Tier A — SMTP-verified email at sourcing.
-  if (hasUsableEmail && emailVerified) {
+  if (hasUsableEmail && emailVerified && usableCompany) {
     return { passed: true, tier: 'A', missReason: null };
   }
 
   // Tier B — high-fit lead with LinkedIn channel; retry enrichment.
   // Manual override (allowLinkedinOnly) lets through any score.
-  if (hasLinkedin && (score >= TIER_B_SCORE_THRESHOLD || allowLinkedinOnly)) {
+  if (hasLinkedin && usableCompany && (score >= TIER_B_SCORE_THRESHOLD || allowLinkedinOnly)) {
     return { passed: true, tier: 'B', missReason: null };
   }
 
   // Tier C — rejected at sourcing.
   let missReason;
-  if (!hasUsableEmail && !hasLinkedin) {
+  if (!usableCompany) {
+    missReason = 'no_usable_company';
+  } else if (!hasUsableEmail && !hasLinkedin) {
     missReason = 'no_channels';
   } else if (!hasUsableEmail && hasLinkedin && score < TIER_B_SCORE_THRESHOLD) {
     missReason = `linkedin_only_below_p1_score_${score}`;
@@ -194,6 +218,8 @@ module.exports = {
   gateBatch,
   missRateBy,
   isFakeDomain,
+  hasUsableCompany,
   FAKE_EMAIL_DOMAINS,
+  JUNK_COMPANY_NAMES,
   TIER_B_SCORE_THRESHOLD,
 };
