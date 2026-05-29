@@ -997,6 +997,13 @@ async function getRunCampaignPreflight(clientId, command) {
   const { rows: [capacity] } = await pool.query(
     `WITH selectable AS (
        SELECT l.*,
+              (
+                SELECT COUNT(*)::int
+                  FROM messages mr
+                 WHERE mr.client_id = $1
+                   AND mr.lead_id = l.id
+                   AND mr.status IN ('rejected', 'ranger_rejected')
+              ) AS prior_reject_count,
               (l.email IS NOT NULL AND (l.email_verified IS TRUE OR l.email_source = 'hunter')) AS has_verified_email,
               (l.linkedin_url IS NOT NULL AND NOT EXISTS (
                 SELECT 1 FROM messages ml
@@ -1033,10 +1040,11 @@ async function getRunCampaignPreflight(clientId, command) {
           ${leadSelectionFeedbackExclusionSql('l')}
      )
      SELECT COUNT(*)::int AS raw_eligible_count,
-            COUNT(*) FILTER (WHERE has_verified_email OR has_usable_linkedin)::int AS channel_ready_count,
+            COUNT(*) FILTER (WHERE prior_reject_count < 2 AND (has_verified_email OR has_usable_linkedin))::int AS channel_ready_count,
             COUNT(*) FILTER (WHERE has_verified_email)::int AS verified_email_count,
             COUNT(*) FILTER (WHERE has_usable_linkedin AND NOT has_verified_email)::int AS usable_linkedin_count,
-            COUNT(*) FILTER (WHERE NOT has_verified_email AND linkedin_url IS NOT NULL AND NOT has_usable_linkedin)::int AS channel_exhausted_count
+            COUNT(*) FILTER (WHERE NOT has_verified_email AND linkedin_url IS NOT NULL AND NOT has_usable_linkedin)::int AS channel_exhausted_count,
+            COUNT(*) FILTER (WHERE prior_reject_count >= 2)::int AS repeat_reject_count
        FROM selectable`,
     [clientId]
   );
@@ -1069,6 +1077,7 @@ async function getRunCampaignPreflight(clientId, command) {
     verified_email_count: Number(capacity?.verified_email_count) || 0,
     usable_linkedin_count: Number(capacity?.usable_linkedin_count) || 0,
     channel_exhausted_count: Number(capacity?.channel_exhausted_count) || 0,
+    repeat_reject_count: Number(capacity?.repeat_reject_count) || 0,
     external_shortfall: externalShortfall,
     providers,
     provider_usage: {

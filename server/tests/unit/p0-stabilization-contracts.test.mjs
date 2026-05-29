@@ -88,6 +88,8 @@ describe('P0 stabilization contracts', () => {
     expect(captain).toContain('raw_eligible_count');
     expect(captain).toContain('channel_ready_count');
     expect(captain).toContain('channel_exhausted_count');
+    expect(captain).toContain('repeat_reject_count');
+    expect(captain).toContain('prior_reject_count < 2');
     expect(captain).toContain("ml.channel = 'linkedin'");
     expect(captain).toContain('insufficient_paid_search_capacity');
     expect(captain).toContain("status: result?.status || 'completed'");
@@ -98,6 +100,8 @@ describe('P0 stabilization contracts', () => {
     expect(agents).toContain("NULLIF(BTRIM(l.company), '') IS NOT NULL");
     expect(agents).toContain("ml.channel = 'linkedin'");
     expect(agents).toContain("l.email_verified IS TRUE OR l.email_source = 'hunter'");
+    expect(agents).toContain("mr.status IN ('rejected', 'ranger_rejected')");
+    expect(agents).toContain(') < 2');
     expect(agents).toContain('Provider/search parser returned 0 usable candidates');
     expect(agents).toContain('status: zeroResult.status');
     expect(agents).toContain('paid_search_capacity_insufficient');

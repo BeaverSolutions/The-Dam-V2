@@ -229,6 +229,8 @@ const captainCapacityTruth = captainBeaver.includes('has_sufficient_research_cap
   && captainBeaver.includes('raw_eligible_count')
   && captainBeaver.includes('channel_ready_count')
   && captainBeaver.includes('channel_exhausted_count')
+  && captainBeaver.includes('repeat_reject_count')
+  && captainBeaver.includes('prior_reject_count < 2')
   && captainBeaver.includes("ml.channel = 'linkedin'")
   && captainBeaver.includes('insufficient_paid_search_capacity')
   && captainBeaver.includes('expireStaleRunningExecutions');
@@ -237,9 +239,11 @@ check('Captain preflight blocks unaffordable campaigns and expires stale runs', 
 
 const dbFirstChannelReadyTruth = agents.includes("ml.channel = 'linkedin'")
   && agents.includes("l.email_verified IS TRUE OR l.email_source = 'hunter'")
+  && agents.includes("mr.status IN ('rejected', 'ranger_rejected')")
+  && agents.includes(') < 2')
   && agents.includes('channel_exhausted');
 check('DB-first campaign selector excludes channel-exhausted leads', dbFirstChannelReadyTruth,
-  dbFirstChannelReadyTruth ? 'DB-first selector uses channel-ready email/linkedin truth' : 'DB-first selector can still spend on exhausted LinkedIn-only leads');
+  dbFirstChannelReadyTruth ? 'DB-first selector uses channel-ready and repeat-reject truth' : 'DB-first selector can still spend on exhausted or repeat-rejected leads');
 
 // 21. Search fallback must preserve LinkedIn company searches.
 const companySearchFallback = searchService.includes('(?:in|company)')

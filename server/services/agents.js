@@ -3213,6 +3213,13 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
              )
            )
          )
+         AND (
+           SELECT COUNT(*)::int
+             FROM messages mr
+            WHERE mr.client_id = $1
+              AND mr.lead_id = l.id
+              AND mr.status IN ('rejected', 'ranger_rejected')
+         ) < 2
           AND NOT EXISTS (
             SELECT 1 FROM messages m
             WHERE m.lead_id = l.id AND m.client_id = $1

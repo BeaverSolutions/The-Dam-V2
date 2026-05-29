@@ -11,7 +11,7 @@ describe('director DB-first eligibility', () => {
   const dbFirstEnd = agentsSource.indexOf('if (uncontactedLeads.length > 0)', dbFirstStart);
   const dbFirstSql = agentsSource.slice(dbFirstStart, dbFirstEnd);
 
-  it('blocks only active outreach states, not old rejected or deleted drafts', () => {
+  it('blocks active outreach states and only soft-blocks repeated rejects', () => {
     expect(dbFirstSql).toContain('m.status IN (');
     expect(dbFirstSql).toContain("'pending_ranger'");
     expect(dbFirstSql).toContain("'pending_approval'");
@@ -23,7 +23,8 @@ describe('director DB-first eligibility', () => {
     expect(dbFirstSql).toContain("'linkedin_requested'");
     expect(dbFirstSql).toContain("'awaiting_accept'");
     expect(dbFirstSql).not.toContain("m.status <> 'deleted'");
-    expect(dbFirstSql).not.toContain("'ranger_rejected'");
+    expect(dbFirstSql).toContain("mr.status IN ('rejected', 'ranger_rejected')");
+    expect(dbFirstSql).toContain(') < 2');
     expect(dbFirstSql).not.toContain("'blocked_no_email'");
   });
 
@@ -55,7 +56,8 @@ describe('Captain campaign preflight eligibility', () => {
     expect(preflightSql).toContain("'linkedin_requested'");
     expect(preflightSql).toContain("'awaiting_accept'");
     expect(preflightSql).not.toContain("m.status <> 'deleted'");
-    expect(preflightSql).not.toContain("'ranger_rejected'");
+    expect(preflightSql).toContain("mr.status IN ('rejected', 'ranger_rejected')");
+    expect(preflightSql).toContain('prior_reject_count < 2');
   });
 
   it('does not count wrong-geo/ICP founder feedback as eligible campaign capacity', () => {
