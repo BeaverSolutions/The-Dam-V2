@@ -310,6 +310,10 @@ describe('P0 stabilization contracts', () => {
     expect(hourlyReport).toContain('Follow-ups:');
     expect(hourlyReport).toContain('LinkedIn awaiting accept');
     expect(hourlyReport).toContain('Daily kickoff gate:');
+    expect(hourlyReport).toContain('<b>Action needed</b>');
+    expect(hourlyReport).toContain('KPI-gap:');
+    expect(hourlyReport).toContain('daily kickoff disabled');
+    expect(hourlyReport).toContain('sent leads missing follow-up rows');
     expect(hourlyReport).toContain('started marker only; no work proof');
     expect(hourlyReport).not.toContain('/api/autonomous/hourly-stats');
     expect(hourlyReport).not.toContain('Q2:');

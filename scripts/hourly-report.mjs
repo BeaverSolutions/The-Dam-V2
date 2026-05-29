@@ -74,6 +74,24 @@ async function main() {
   const reviewable = approvalQueue.reviewable ?? 0;
   const awaitingAccept = approvalQueue.linkedin_awaiting_accept ?? 0;
   const staleRows = approvalQueue.stale_orphan_rows ?? 0;
+  const dueFollowups = followupQueue.due_today ?? 0;
+  const pendingFollowups = followupQueue.pending ?? 0;
+  const orphanedSentLeads = followupQueue.orphaned_sent_leads ?? 0;
+  const sqStuck = sendQueue.sq_stuck ?? 0;
+  const sqFailed = sendQueue.sq_failed ?? 0;
+  const blockers = [];
+
+  if (tenant.kickoff_today?.state === 'disabled') blockers.push('daily kickoff disabled');
+  if (tenant.kickoff_today?.state === 'missed') blockers.push('daily kickoff MISSED');
+  if (tenant.kickoff_today?.state === 'started') blockers.push('kickoff start marker only; no work proof');
+  if (data.captain_kpi_gap_kickoff_enabled === false) blockers.push('KPI-gap kickoff disabled');
+  if (reviewable > 20) blockers.push(`${reviewable} reviewable approvals waiting`);
+  if (staleRows > 0) blockers.push(`${staleRows} stale approval rows`);
+  if (dueFollowups > 20) blockers.push(`${dueFollowups} follow-ups due today`);
+  if (orphanedSentLeads > 0) blockers.push(`${orphanedSentLeads} sent leads missing follow-up rows`);
+  if (sqStuck > 0) blockers.push(`${sqStuck} send-queue jobs stuck`);
+  if (sqFailed > 0) blockers.push(`${sqFailed} send-queue jobs failed`);
+  if (!integrations.gmail_connected && !integrations.agentmail_provisioned) blockers.push('no email provider configured');
 
   const lines = [
     `<b>[${String(mytHour).padStart(2, '0')}:00 MYT] BeavrDam Hourly</b>`,
@@ -82,13 +100,16 @@ async function main() {
     `Kickoff: ${kickoffLabel(tenant.kickoff_today)}`,
     `Sent today: ${sent}/${target}. Pending today: ${pendingToday}. Rejected today: ${rejectedToday}.`,
     `Approval queue: ${reviewable} reviewable, ${awaitingAccept} LinkedIn awaiting accept, ${staleRows} stale rows.`,
-    `Follow-ups: ${followupQueue.due_today ?? 0} due today, ${followupQueue.pending ?? 0} pending, ${followupQueue.orphaned_sent_leads ?? 0} orphaned sent leads.`,
+    `Follow-ups: ${dueFollowups} due today, ${pendingFollowups} pending, ${orphanedSentLeads} orphaned sent leads.`,
     `Approved unsent: ${approvedEmail} email, ${approvedLinkedIn} LinkedIn.`,
-    `Send queue: ${sendQueue.sq_pending ?? 0} pending, ${sendQueue.sq_stuck ?? 0} stuck, ${sendQueue.sq_failed ?? 0} failed.`,
+    `Send queue: ${sendQueue.sq_pending ?? 0} pending, ${sqStuck} stuck, ${sqFailed} failed.`,
     `Research: ${research.leads_saved_24h ?? 0} saved in 24h, ${research.no_results_24h ?? 0} no-result runs, pool ${tenant.lead_pool_remaining ?? '?'}.`,
     `Integrations: Gmail ${integrations.gmail_connected ? 'connected' : 'missing'}, AgentMail ${integrations.agentmail_provisioned ? 'ready' : 'missing'}.`,
     '',
-    `Daily kickoff gate: ${data.captain_daily_kickoff_enabled ? 'enabled' : 'disabled'}. Market sensing: ${data.market_sensing_enabled ? 'enabled' : 'disabled'}.`,
+    '<b>Action needed</b>',
+    ...(blockers.length ? blockers.map(item => `- ${item}`) : ['None']),
+    '',
+    `Daily kickoff gate: ${data.captain_daily_kickoff_enabled ? 'enabled' : 'disabled'}. KPI-gap: ${data.captain_kpi_gap_kickoff_enabled ? 'enabled' : 'disabled'}. Market sensing: ${data.market_sensing_enabled ? 'enabled' : 'disabled'}.`,
   ];
 
   const res = await tg('sendMessage', { chat_id: CHAT_ID, text: lines.join('\n'), parse_mode: 'HTML' });
