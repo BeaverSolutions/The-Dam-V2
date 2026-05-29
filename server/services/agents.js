@@ -1048,7 +1048,7 @@ function stripEmDashes(text) {
  * Only BRAND-SAFETY issues are left for the Enforcer to hard-reject.
  * Quality issues are auto-fixed here so the pipeline keeps flowing.
  */
-function autoFixMessage(body, { touchNumber = 0, maxWords = 80 } = {}) {
+function autoFixMessage(body, { touchNumber = 0, maxWords = 80, channel = null } = {}) {
   if (!body || typeof body !== 'string') {
     return { body: body || '', fixes: [], fatal: 'empty_body' };
   }
@@ -1176,6 +1176,29 @@ function autoFixMessage(body, { touchNumber = 0, maxWords = 80 } = {}) {
 
   // 10. Final whitespace cleanup
   fixed = fixed.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').trim();
+
+  // 11. LinkedIn channel: strip the email sign-off entirely (2026-05-29 Phase 5).
+  // Canonical rule: LinkedIn DMs end on the question with NO sign-off; email keeps
+  // "Regards, / Michael Jerry". Sales Beaver inconsistently appends the email
+  // sign-off to LinkedIn drafts, which the Enforcer then hard-rejects — by far the
+  // dominant pre-score reject class (the pool is LinkedIn-heavy). Deterministic
+  // stripping here means a good LinkedIn draft is no longer killed for it.
+  // The \n-anchor requires the closer to start its own line, so a mid-sentence
+  // "best"/"thanks" is never matched.
+  if (channel === 'linkedin') {
+    const before = fixed;
+    // A sign-off is a closer word starting its own line, optionally followed by a
+    // comma and/or the sender name, to end of message. Restricting the tail to
+    // (comma / name / newline) only means a mid-line "best way to reach you" or
+    // "thanks for the note" is never matched — only a true closing block is.
+    fixed = fixed.replace(
+      /\n+[ \t]*(regards|best regards|kind regards|warm regards|best|cheers|thanks|thank you|sincerely)\b[ \t]*,?[ \t]*(michael(?:\s+jerry)?|mj)?[ \t]*(\n[\s\S]*)?$/i,
+      ''
+    ).trim();
+    // Standalone bare-name sign-off (no closer word).
+    fixed = fixed.replace(/\n+[ \t]*(michael(?:\s+jerry)?|mj)[ \t]*$/i, '').trim();
+    if (fixed !== before) fixes.push('stripped_linkedin_signoff');
+  }
 
   return { body: fixed, fixes, fatal: null };
 }
@@ -1398,7 +1421,22 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
   // ── Phase A Step 2: Auto-fix quality issues ──
   const touchNumber = lead_context?.touch_number || 0;
   const maxWords = touchNumber > 0 ? 120 : 80;
-  const fixed = autoFixMessage(message_body, { touchNumber, maxWords });
+  // Channel-aware autofix (2026-05-29 Phase 5): LinkedIn DMs must not carry an
+  // email sign-off (the dominant hard-reject class). Derive the channel from
+  // lead_context or the message row so the sign-off is stripped BEFORE the code
+  // gates + the LLM Enforcer evaluate the body. All pipelines route review
+  // through rangerReview, so fixing it here covers every path + the final body.
+  let reviewChannel = lead_context?.channel || null;
+  if (!reviewChannel && message_id) {
+    try {
+      const { rows } = await pool.query(
+        `SELECT channel FROM messages WHERE id = $1 AND client_id = $2 LIMIT 1`,
+        [message_id, clientId]
+      );
+      reviewChannel = rows[0]?.channel || null;
+    } catch { /* non-fatal — fall back to channel-agnostic autofix */ }
+  }
+  const fixed = autoFixMessage(message_body, { touchNumber, maxWords, channel: reviewChannel });
   const fixedBody = fixed.body;
   const fixesApplied = fixed.fixes;
 
