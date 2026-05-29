@@ -17,14 +17,24 @@ const baseRow = {
 
 describe('auto approval recovery gates', () => {
   it('passes a seasoned high-score verified email with no recent send', async () => {
-    await expect(gatePendingMessage(baseRow)).resolves.toEqual({ pass: true, reason: null });
+    const prior = process.env.AUTO_APPROVE_ENABLED;
+    process.env.AUTO_APPROVE_ENABLED = 'true';
+    try {
+      await expect(gatePendingMessage(baseRow)).resolves.toEqual({ pass: true, reason: null });
+    } finally {
+      if (prior === undefined) delete process.env.AUTO_APPROVE_ENABLED;
+      else process.env.AUTO_APPROVE_ENABLED = prior;
+    }
   });
 
-  it('respects AUTO_APPROVE_ENABLED kill switch', async () => {
+  it('requires AUTO_APPROVE_ENABLED to be explicitly true', async () => {
     const prior = process.env.AUTO_APPROVE_ENABLED;
-    process.env.AUTO_APPROVE_ENABLED = 'false';
+    delete process.env.AUTO_APPROVE_ENABLED;
     try {
-      await expect(gatePendingMessage(baseRow)).resolves.toMatchObject({ pass: false });
+      await expect(gatePendingMessage(baseRow)).resolves.toEqual({
+        pass: false,
+        reason: 'AUTO_APPROVE_ENABLED not true (manual approval required)',
+      });
     } finally {
       if (prior === undefined) delete process.env.AUTO_APPROVE_ENABLED;
       else process.env.AUTO_APPROVE_ENABLED = prior;
@@ -32,18 +42,39 @@ describe('auto approval recovery gates', () => {
   });
 
   it('blocks below-threshold and fresh-client messages', async () => {
-    await expect(gatePendingMessage({ ...baseRow, ranger_score: 79 })).resolves.toMatchObject({ pass: false, reason: 'below_auto_approve_threshold' });
-    await expect(gatePendingMessage({ ...baseRow, client_is_seasoned: false })).resolves.toMatchObject({ pass: false, reason: 'client onboarded <7 days ago' });
+    const prior = process.env.AUTO_APPROVE_ENABLED;
+    process.env.AUTO_APPROVE_ENABLED = 'true';
+    try {
+      await expect(gatePendingMessage({ ...baseRow, ranger_score: 79 })).resolves.toMatchObject({ pass: false, reason: 'below_auto_approve_threshold' });
+      await expect(gatePendingMessage({ ...baseRow, client_is_seasoned: false })).resolves.toMatchObject({ pass: false, reason: 'client onboarded <7 days ago' });
+    } finally {
+      if (prior === undefined) delete process.env.AUTO_APPROVE_ENABLED;
+      else process.env.AUTO_APPROVE_ENABLED = prior;
+    }
   });
 
   it('blocks duplicate, gate-failed, unsupported, and unverified email sends', async () => {
-    await expect(gatePendingMessage({ ...baseRow, recent_sent_count: 1 })).resolves.toMatchObject({ pass: false });
-    await expect(gatePendingMessage({ ...baseRow, audit_gate_fail: 'manual gate' })).resolves.toMatchObject({ pass: false, reason: 'manual gate' });
-    await expect(gatePendingMessage({ ...baseRow, channel: 'sms' })).resolves.toMatchObject({ pass: false, reason: 'unsupported channel: sms' });
-    await expect(gatePendingMessage({ ...baseRow, email_verified: false, email_source: null })).resolves.toMatchObject({ pass: false, reason: 'email channel without verified email' });
+    const prior = process.env.AUTO_APPROVE_ENABLED;
+    process.env.AUTO_APPROVE_ENABLED = 'true';
+    try {
+      await expect(gatePendingMessage({ ...baseRow, recent_sent_count: 1 })).resolves.toMatchObject({ pass: false });
+      await expect(gatePendingMessage({ ...baseRow, audit_gate_fail: 'manual gate' })).resolves.toMatchObject({ pass: false, reason: 'manual gate' });
+      await expect(gatePendingMessage({ ...baseRow, channel: 'sms' })).resolves.toMatchObject({ pass: false, reason: 'unsupported channel: sms' });
+      await expect(gatePendingMessage({ ...baseRow, email_verified: false, email_source: null })).resolves.toMatchObject({ pass: false, reason: 'email channel without verified email' });
+    } finally {
+      if (prior === undefined) delete process.env.AUTO_APPROVE_ENABLED;
+      else process.env.AUTO_APPROVE_ENABLED = prior;
+    }
   });
 
   it('allows LinkedIn recovery without email but still through manual requested state', async () => {
-    await expect(gatePendingMessage({ ...baseRow, channel: 'linkedin', lead_email: null, email_verified: false, email_source: null })).resolves.toEqual({ pass: true, reason: null });
+    const prior = process.env.AUTO_APPROVE_ENABLED;
+    process.env.AUTO_APPROVE_ENABLED = 'true';
+    try {
+      await expect(gatePendingMessage({ ...baseRow, channel: 'linkedin', lead_email: null, email_verified: false, email_source: null })).resolves.toEqual({ pass: true, reason: null });
+    } finally {
+      if (prior === undefined) delete process.env.AUTO_APPROVE_ENABLED;
+      else process.env.AUTO_APPROVE_ENABLED = prior;
+    }
   });
 });

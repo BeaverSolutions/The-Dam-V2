@@ -4,11 +4,15 @@ const pool = require('../db/pool');
 const logsService = require('./logs');
 const { enqueueMessage } = require('./sendQueueWorker');
 
+function autoApprovalEnabled() {
+  return process.env.AUTO_APPROVE_ENABLED === 'true';
+}
+
 async function gatePendingMessage(row) {
   const score = Number(row.ranger_score) || 0;
   const threshold = row.auto_approve_threshold;
-  if (process.env.AUTO_APPROVE_ENABLED === 'false') {
-    return { pass: false, reason: 'AUTO_APPROVE_ENABLED=false (Railway kill-switch)' };
+  if (!autoApprovalEnabled()) {
+    return { pass: false, reason: 'AUTO_APPROVE_ENABLED not true (manual approval required)' };
   }
   if (threshold === null || threshold === undefined || score < threshold) {
     return { pass: false, reason: 'below_auto_approve_threshold' };
@@ -38,6 +42,10 @@ async function gatePendingMessage(row) {
 }
 
 async function recoverMissedAutoApprovals(clientId, { limit = 25, maxAgeDays = 7, autoApproveThreshold = null, clientCreatedAt = null } = {}) {
+  if (!autoApprovalEnabled()) {
+    return { recovered: 0, skipped: 0, scanned: 0, disabled: true, details: [] };
+  }
+
   const cap = Math.max(1, Math.min(Number(limit) || 25, 100));
   const ageDays = Math.max(1, Math.min(Number(maxAgeDays) || 7, 30));
   const threshold = autoApproveThreshold === null || autoApproveThreshold === undefined

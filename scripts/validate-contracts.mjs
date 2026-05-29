@@ -264,7 +264,9 @@ check('Signal pipeline retries rejected drafts before fallback', signalRetryBefo
   signalRetryBeforeFallback ? 'signal path has bounded Sales redrafts before Enforcer fallback' : 'signal path may skip straight from rejection to fallback');
 
 // 23. Missed auto-approval recovery must preserve Enforcer gates and send safety.
-const autoApprovalRecoveryGuarded = autoApprovalRecovery.includes("AUTO_APPROVE_ENABLED === 'false'")
+const autoApprovalRecoveryGuarded = autoApprovalRecovery.includes("AUTO_APPROVE_ENABLED === 'true'")
+  && index.includes("AUTO_APPROVE_ENABLED !== 'true'")
+  && index.includes("markSkipped('auto_approval_recovery'")
   && autoApprovalRecovery.includes('score < threshold')
   && autoApprovalRecovery.includes('client_is_seasoned')
   && autoApprovalRecovery.includes('autoApproveThreshold')
