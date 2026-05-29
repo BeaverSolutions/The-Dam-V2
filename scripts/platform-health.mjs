@@ -74,6 +74,8 @@ async function main() {
     const reviewable = t.approval_queue?.reviewable ?? 0;
     const awaitingAccept = t.approval_queue?.linkedin_awaiting_accept ?? 0;
     const staleApprovalRows = t.approval_queue?.stale_orphan_rows ?? 0;
+    const followupsDue = t.followup_queue?.due_today ?? 0;
+    const orphanedSentLeads = t.followup_queue?.orphaned_sent_leads ?? 0;
     const pool = t.lead_pool_remaining ?? null;
     const researchSaved = t.research_beaver?.leads_saved_24h ?? 0;
     const noResults = t.research_beaver?.no_results_24h ?? 0;
@@ -83,10 +85,12 @@ async function main() {
     const kickoffState = kickoff.state || 'unknown';
     const targetText = target === null ? sent : `${sent}/${target}`;
 
-    summary.push(`${t.name}: kickoff ${kickoffState}, sent ${targetText}, reviewable ${reviewable}, LI-awaiting ${awaitingAccept}, pool ${pool ?? '?'}`);
+    summary.push(`${t.name}: kickoff ${kickoffState}, sent ${targetText}, reviewable ${reviewable}, LI-awaiting ${awaitingAccept}, follow-ups due ${followupsDue}, pool ${pool ?? '?'}`);
 
     if (kickoffState === 'missed') {
       anomalies.push(`🔴 ${t.slug} daily kickoff missed — no memory/log/trace evidence`);
+    } else if (kickoffState === 'started') {
+      anomalies.push(`🔴 ${t.slug} kickoff has only a start marker, no work proof`);
     } else if (kickoffState === 'disabled') {
       anomalies.push(`🔴 ${t.slug} daily kickoff disabled`);
     }
@@ -99,6 +103,12 @@ async function main() {
 
     if (staleApprovalRows > 0) {
       anomalies.push(`🟡 ${t.slug} has ${staleApprovalRows} stale approval rows — cleanup/reporting risk`);
+    }
+    if (followupsDue > 20) {
+      anomalies.push(`🟡 ${t.slug} has ${followupsDue} follow-ups due today — follow-up plan/backlog risk`);
+    }
+    if (orphanedSentLeads > 0) {
+      anomalies.push(`🟡 ${t.slug} has ${orphanedSentLeads} sent leads missing follow-up rows`);
     }
 
     if (sent === 0 && reviewable === 0 && ['fired', 'missed'].includes(kickoffState)) {

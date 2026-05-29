@@ -2328,7 +2328,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
 
     const tenants = [];
     for (const c of clientRows) {
-      const [kickoffEvidence, kpi, msgs, queue, approvedUnsent, approvalQueue, leadPool, researchLog, integrations] = await Promise.all([
+      const [kickoffEvidence, kpi, msgs, queue, approvedUnsent, approvalQueue, leadPool, researchLog, integrations, followupHealth] = await Promise.all([
         pool.query(
           `WITH bounds AS (
              SELECT
@@ -2358,8 +2358,45 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
           [c.id]
         ),
         pool.query(
-          `SELECT target, outreach_sent, outreach_email, outreach_linkedin, leads_found, replies_received
-           FROM daily_kpi WHERE client_id = $1 AND date = $2`,
+          `WITH bounds AS (
+             SELECT
+               (date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') AS start_at,
+               ((date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') + INTERVAL '1 day') AS end_at
+           ),
+           source_truth AS (
+             SELECT
+               COUNT(*) FILTER (WHERE m.status = 'sent'
+                 AND COALESCE(m.sent_at, m.updated_at, m.created_at) >= b.start_at
+                 AND COALESCE(m.sent_at, m.updated_at, m.created_at) < b.end_at)::int AS outreach_sent,
+               COUNT(*) FILTER (WHERE m.status = 'sent' AND m.channel = 'email'
+                 AND COALESCE(m.sent_at, m.updated_at, m.created_at) >= b.start_at
+                 AND COALESCE(m.sent_at, m.updated_at, m.created_at) < b.end_at)::int AS outreach_email,
+               COUNT(*) FILTER (WHERE m.status = 'sent' AND m.channel = 'linkedin'
+                 AND COALESCE(m.sent_at, m.updated_at, m.created_at) >= b.start_at
+                 AND COALESCE(m.sent_at, m.updated_at, m.created_at) < b.end_at)::int AS outreach_linkedin,
+               COUNT(*) FILTER (WHERE m.reply_detected_at >= b.start_at AND m.reply_detected_at < b.end_at)::int AS replies_received
+             FROM messages m
+             CROSS JOIN bounds b
+             WHERE m.client_id = $1
+           ),
+           leads_truth AS (
+             SELECT COUNT(*)::int AS leads_found
+             FROM leads l, bounds b
+             WHERE l.client_id = $1
+               AND l.deleted_at IS NULL
+               AND l.created_at >= b.start_at AND l.created_at < b.end_at
+           )
+           SELECT
+             COALESCE(dk.target, 50) AS target,
+             st.outreach_sent,
+             st.outreach_email,
+             st.outreach_linkedin,
+             lt.leads_found,
+             st.replies_received,
+             (dk.client_id IS NOT NULL) AS daily_kpi_row_present
+           FROM source_truth st
+           CROSS JOIN leads_truth lt
+           LEFT JOIN daily_kpi dk ON dk.client_id = $1 AND dk.date = $2`,
           [c.id, today]
         ),
         pool.query(
@@ -2427,6 +2464,29 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
            FROM agent_memory WHERE client_id = $1 AND memory_type = 'secret'`,
           [c.id]
         ),
+        pool.query(
+          `SELECT
+             (SELECT COUNT(*) FILTER (WHERE status = 'pending')::int
+                FROM followup_queue
+               WHERE client_id = $1) AS pending,
+             (SELECT COUNT(*) FILTER (WHERE status = 'pending' AND scheduled_for <= CURRENT_DATE)::int
+                FROM followup_queue
+               WHERE client_id = $1) AS due_today,
+             (SELECT COUNT(*) FILTER (WHERE status = 'sent')::int
+                FROM followup_queue
+               WHERE client_id = $1) AS sent,
+             (SELECT COUNT(*) FILTER (WHERE status = 'cancelled')::int
+                FROM followup_queue
+               WHERE client_id = $1) AS cancelled,
+             (SELECT COUNT(DISTINCT m.lead_id)::int
+                FROM messages m
+                LEFT JOIN followup_queue fq ON fq.lead_id = m.lead_id AND fq.client_id = m.client_id
+               WHERE m.client_id = $1
+                 AND m.status = 'sent'
+                 AND m.sent_at IS NOT NULL
+                 AND fq.id IS NULL) AS orphaned_sent_leads`,
+          [c.id]
+        ),
       ]);
 
       const approvedUnsentByChannel = {};
@@ -2464,6 +2524,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
         send_queue: queue.rows[0],
         approved_unsent: approvedUnsentByChannel,
         approval_queue: approvalQueue.rows[0],
+        followup_queue: followupHealth.rows[0],
         lead_pool_remaining: leadPool.rows[0].n,
         research_beaver: researchLog.rows[0],
         integrations: {

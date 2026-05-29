@@ -36,6 +36,7 @@ function kickoffLabel(kickoff) {
   }
   if (state === 'waiting') return '⏳ waiting for 09:30 MYT';
   if (state === 'window_open') return '⏳ 09:30 window open';
+  if (state === 'started') return '⚠ started marker only; no work proof';
   if (state === 'disabled') return '🔴 disabled';
   if (state === 'missed') return '🔴 MISSED';
   return `⚠ ${state}`;
@@ -85,6 +86,8 @@ async function main() {
     lines.push(`Approved unsent: ${aue} email · ${auli} linkedin`);
     const aq = t.approval_queue || {};
     lines.push(`Approval queue: ${aq.reviewable ?? 0} reviewable · ${aq.linkedin_awaiting_accept ?? 0} LinkedIn awaiting accept · ${aq.stale_orphan_rows ?? 0} stale rows`);
+    const fq = t.followup_queue || {};
+    lines.push(`Follow-ups: ${fq.due_today ?? 0} due today · ${fq.pending ?? 0} pending · ${fq.orphaned_sent_leads ?? 0} orphaned sent leads`);
     const sq = t.send_queue || {};
     lines.push(`Send queue: ${sq.sq_pending ?? 0} pending · ${sq.sq_stuck ?? 0} stuck >1h · ${sq.sq_failed ?? 0} failed`);
     const rb = t.research_beaver || {};
@@ -104,6 +107,8 @@ async function main() {
   if ((t0?.send_queue?.sq_stuck ?? 0) > 0) verdict.push('⚠ send queue stuck');
   if ((t0?.approval_queue?.reviewable ?? 0) > 20) verdict.push(`⚠ ${t0.approval_queue.reviewable} reviewable approvals waiting`);
   if ((t0?.approval_queue?.stale_orphan_rows ?? 0) > 0) verdict.push(`⚠ ${t0.approval_queue.stale_orphan_rows} stale approval rows need cleanup`);
+  if ((t0?.followup_queue?.due_today ?? 0) > 20) verdict.push(`⚠ ${t0.followup_queue.due_today} follow-ups due today`);
+  if ((t0?.followup_queue?.orphaned_sent_leads ?? 0) > 0) verdict.push(`⚠ ${t0.followup_queue.orphaned_sent_leads} sent leads missing follow-up rows`);
   if (!data.gmail_oauth_configured && !data.agentmail_configured) verdict.push('❌ NO email provider configured');
 
   if (verdict.length) {

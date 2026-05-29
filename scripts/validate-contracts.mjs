@@ -319,13 +319,21 @@ const systemHealthTruth = autonomousRoute.includes("Asia/Kuala_Lumpur")
   && autonomousRoute.includes('kickoffMemoryOnlyStarted')
   && autonomousRoute.includes('memory_only_started')
   && autonomousRoute.includes('trace_count')
+  && autonomousRoute.includes('source_truth')
+  && autonomousRoute.includes('daily_kpi_row_present')
+  && autonomousRoute.includes('COALESCE(dk.target, 50)')
   && autonomousRoute.includes("pt.pipeline_path IN ('kickoff_pipeline', 'signal_pipeline')")
   && autonomousRoute.includes('captain_kpi_gap_kickoff_enabled')
   && autonomousRoute.includes('approval_queue')
+  && autonomousRoute.includes('followup_queue')
+  && autonomousRoute.includes('orphaned_sent_leads')
   && autonomousRoute.includes('linkedin_awaiting_accept')
   && dailyHealthPack.includes("state === 'missed'")
+  && dailyHealthPack.includes('started marker only; no work proof')
   && dailyHealthPack.includes('waiting for 09:30 MYT')
   && dailyHealthPack.includes('Approval queue:')
+  && dailyHealthPack.includes('Follow-ups:')
+  && dailyHealthPack.includes('sent leads missing follow-up rows')
   && dailyHealthPack.includes('research starved and lead pool thin')
   && kickoffWatchdog.includes("['missed', 'disabled'].includes");
 check('System health and watchdog use MYT kickoff/queue truth', systemHealthTruth,
@@ -338,6 +346,9 @@ const platformHealthTruth = platformHealth.includes("api('/api/autonomous/system
   && !platformHealth.includes("api('/api/autonomous/hourly-stats')")
   && !platformHealth.includes('Sent: ${sentToday}/50')
   && platformHealth.includes('LI-awaiting')
+  && platformHealth.includes('follow-ups due')
+  && platformHealth.includes('sent leads missing follow-up rows')
+  && platformHealth.includes('kickoff has only a start marker, no work proof')
   && platformHealth.includes('pipeline produced no approval-ready output');
 check('Platform Health uses system-health kickoff/queue truth', platformHealthTruth,
   platformHealthTruth ? 'platform-health no longer uses hourly-stats/50-target framing' : 'platform-health can still report stale target or queue truth');
@@ -346,8 +357,10 @@ check('Platform Health uses system-health kickoff/queue truth', platformHealthTr
 // must not keep old Emplifive/Q2 or raw hourly-stats framing.
 const hourlyReportTruth = hourlyReport.includes('/api/autonomous/system-health')
   && hourlyReport.includes('Approval queue:')
+  && hourlyReport.includes('Follow-ups:')
   && hourlyReport.includes('LinkedIn awaiting accept')
   && hourlyReport.includes('Daily kickoff gate:')
+  && hourlyReport.includes('started marker only; no work proof')
   && !hourlyReport.includes('/api/autonomous/hourly-stats')
   && !hourlyReport.includes('Q2:')
   && !hourlyReport.includes('Emplifive')

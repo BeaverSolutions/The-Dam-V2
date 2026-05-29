@@ -29,6 +29,7 @@ function kickoffLabel(kickoff) {
   if (state === 'fired') return `fired${kickoff.at ? ` (${new Date(kickoff.at).toLocaleTimeString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit' })} MYT)` : ''}`;
   if (state === 'waiting') return 'waiting for 09:30 MYT';
   if (state === 'window_open') return '09:30 window open';
+  if (state === 'started') return 'started marker only; no work proof';
   return state;
 }
 
@@ -60,6 +61,7 @@ async function main() {
   const kpi = tenant.kpi || {};
   const messages = tenant.messages || {};
   const approvalQueue = tenant.approval_queue || {};
+  const followupQueue = tenant.followup_queue || {};
   const sendQueue = tenant.send_queue || {};
   const research = tenant.research_beaver || {};
   const integrations = tenant.integrations || {};
@@ -80,6 +82,7 @@ async function main() {
     `Kickoff: ${kickoffLabel(tenant.kickoff_today)}`,
     `Sent today: ${sent}/${target}. Pending today: ${pendingToday}. Rejected today: ${rejectedToday}.`,
     `Approval queue: ${reviewable} reviewable, ${awaitingAccept} LinkedIn awaiting accept, ${staleRows} stale rows.`,
+    `Follow-ups: ${followupQueue.due_today ?? 0} due today, ${followupQueue.pending ?? 0} pending, ${followupQueue.orphaned_sent_leads ?? 0} orphaned sent leads.`,
     `Approved unsent: ${approvedEmail} email, ${approvedLinkedIn} LinkedIn.`,
     `Send queue: ${sendQueue.sq_pending ?? 0} pending, ${sendQueue.sq_stuck ?? 0} stuck, ${sendQueue.sq_failed ?? 0} failed.`,
     `Research: ${research.leads_saved_24h ?? 0} saved in 24h, ${research.no_results_24h ?? 0} no-result runs, pool ${tenant.lead_pool_remaining ?? '?'}.`,
