@@ -290,6 +290,19 @@ describe('P0 stabilization contracts', () => {
     expect(research).toContain('retryCompanyQueries');
   });
 
+  it('Signal Hunt uses current ICP before stale stored config and does not double-reserve query budget', () => {
+    const signalHunt = service('services/signalHunt.js');
+
+    expect(signalHunt).toContain('function hasIcpSearchScope');
+    expect(signalHunt).toContain('const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : []');
+    expect(signalHunt).toContain('const fallbackQueries = icpQueries.length > 0');
+    expect(signalHunt).toContain('...icpQueries, ...configuredQueries');
+    expect(signalHunt).toContain('consumePaidQuery(1)');
+    expect(signalHunt).not.toContain('consumePaidQuery(2)');
+    expect(signalHunt).toContain('signal_hunt_complete');
+    expect(signalHunt).toContain('query_source: config.query_source');
+  });
+
   it('autonomous routes require the internal key at router level', () => {
     const autonomous = service('routes/autonomous.js');
     expect(autonomous).toContain('router.use(requireInternalKey)');

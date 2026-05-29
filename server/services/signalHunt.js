@@ -112,6 +112,19 @@ function industriesFromIcp(icp = {}) {
     .slice(0, 3);
 }
 
+function hasIcpSearchScope(icp = {}) {
+  return [
+    ...listFrom(icp.industries),
+    ...listFrom(icp.verticals),
+    ...listFrom(icp.segments),
+    ...listFrom(icp.geographies),
+    ...listFrom(icp.geo),
+    ...listFrom(icp.countries),
+    ...listFrom(icp.locations),
+    ...listFrom(icp.target_markets),
+  ].length > 0;
+}
+
 function buildSignalQueriesFromIcp(icp = {}) {
   const countries = countriesFromIcp(icp);
   const industries = industriesFromIcp(icp);
@@ -184,19 +197,31 @@ async function loadSignalConfig(clientId, icp = {}) {
   }
 
   const configuredQueries = queriesFromConfigContent(content);
-  const fallbackQueries = configuredQueries.length > 0
-    ? configuredQueries
-    : (Object.keys(icp || {}).length > 0 ? buildSignalQueriesFromIcp(icp) : DEFAULT_SIGNAL_QUERIES);
+  const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : [];
+  const fallbackQueries = icpQueries.length > 0
+    ? [...icpQueries, ...configuredQueries]
+    : (configuredQueries.length > 0 ? configuredQueries : DEFAULT_SIGNAL_QUERIES);
+  const querySource = icpQueries.length > 0
+    ? (configuredQueries.length > 0 ? 'current_icp_then_config' : 'current_icp')
+    : (configuredQueries.length > 0 ? 'stored_config' : 'default');
+  const seenQueries = new Set();
   const fallbackCountry = countriesFromIcp(icp)[0]?.code || 'MY';
   const queries = fallbackQueries
     .map(q => normalizeSignalQuery(q, fallbackCountry))
     .filter(Boolean)
+    .filter(q => {
+      const key = q.query.toLowerCase();
+      if (seenQueries.has(key)) return false;
+      seenQueries.add(key);
+      return true;
+    })
     .slice(0, MAX_SIGNAL_QUERIES_PER_RUN);
   const requestedResults = Number(content?.max_results_per_query || MAX_SIGNAL_RESULTS_PER_QUERY);
 
   return {
     ...(content || {}),
     queries,
+    query_source: querySource,
     max_results_per_query: Number.isFinite(requestedResults) && requestedResults > 0
       ? Math.min(requestedResults, MAX_SIGNAL_RESULTS_PER_QUERY)
       : MAX_SIGNAL_RESULTS_PER_QUERY,
@@ -306,6 +331,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   const config = await loadSignalConfig(clientId, icp);
   const allSignals = [];
   const leads = [];
+  let queriesRun = 0;
   let paidQueriesRemaining = Number.isFinite(Number(maxPaidQueries))
     ? Math.max(0, Number(maxPaidQueries))
     : null;
@@ -321,12 +347,13 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   for (const q of config.queries) {
     if (allSignals.length >= maxLeads * 2) break; // 2x buffer — some will fail contact lookup
 
-    if (!consumePaidQuery(2)) {
+    if (!consumePaidQuery(1)) {
       console.log('[signalHunt] Paid-query budget exhausted before open-web signal search');
       break;
     }
 
     console.log(`[signalHunt] Running query: ${q.query}`);
+    queriesRun++;
     try {
       const country = q.country || 'MY';
       const geoText = countryNameFromCode(country);
@@ -352,6 +379,20 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   console.log(`[signalHunt] Total signals extracted: ${allSignals.length}`);
 
   if (allSignals.length === 0) {
+    await logsService.createLog(clientId, {
+      agent: 'research_beaver',
+      action: 'signal_hunt_complete',
+      metadata: {
+        query_source: config.query_source,
+        queries_run: queriesRun,
+        queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
+        paid_query_budget_remaining: paidQueriesRemaining,
+        total_signals: 0,
+        unique_companies: 0,
+        leads_with_contacts: 0,
+        tiers: {},
+      },
+    }).catch(() => {});
     return [];
   }
 
@@ -376,7 +417,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   for (const signal of uniqueSignals.slice(0, maxLeads * 2)) {
     if (leads.length >= maxLeads) break;
 
-    if (!consumePaidQuery(2)) {
+    if (!consumePaidQuery(1)) {
       console.log('[signalHunt] Paid-query budget exhausted before decision-maker lookup');
       break;
     }
@@ -458,6 +499,10 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     agent: 'research_beaver',
     action: 'signal_hunt_complete',
     metadata: {
+      query_source: config.query_source,
+      queries_run: queriesRun,
+      queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
+      paid_query_budget_remaining: paidQueriesRemaining,
       total_signals: allSignals.length,
       unique_companies: uniqueSignals.length,
       leads_with_contacts: leads.length,
