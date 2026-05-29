@@ -5,14 +5,14 @@ const logsService = require('./logs');
 const { enqueueMessage } = require('./sendQueueWorker');
 
 function autoApprovalEnabled() {
-  return process.env.AUTO_APPROVE_ENABLED === 'true';
+  return process.env.AUTO_APPROVAL_RECOVERY_ENABLED === 'true';
 }
 
 async function gatePendingMessage(row) {
   const score = Number(row.ranger_score) || 0;
   const threshold = row.auto_approve_threshold;
   if (!autoApprovalEnabled()) {
-    return { pass: false, reason: 'AUTO_APPROVE_ENABLED not true (manual approval required)' };
+    return { pass: false, reason: 'AUTO_APPROVAL_RECOVERY_ENABLED not true (manual approval required)' };
   }
   if (threshold === null || threshold === undefined || score < threshold) {
     return { pass: false, reason: 'below_auto_approve_threshold' };

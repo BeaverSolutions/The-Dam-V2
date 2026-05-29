@@ -469,8 +469,8 @@ async function start() {
       if (_autoApprovalRecoveryRunning) return;
       _autoApprovalRecoveryRunning = true;
       try {
-        if (process.env.AUTO_APPROVE_ENABLED !== 'true') {
-          jobHealth.markSkipped('auto_approval_recovery', 'AUTO_APPROVE_ENABLED not true; manual approval required', {
+        if (process.env.AUTO_APPROVAL_RECOVERY_ENABLED !== 'true') {
+          jobHealth.markSkipped('auto_approval_recovery', 'AUTO_APPROVAL_RECOVERY_ENABLED not true; manual approval required', {
             disabled: true,
           });
           return;
@@ -513,7 +513,7 @@ async function start() {
 
     setTimeout(() => { runAutoApprovalRecovery().catch(() => {}); }, 90 * 1000);
     setInterval(() => { runAutoApprovalRecovery().catch(() => {}); }, 15 * 60 * 1000);
-    logger.info({ msg: 'Auto-approval recovery scheduled but disabled unless AUTO_APPROVE_ENABLED=true' });
+    logger.info({ msg: 'Auto-approval recovery scheduled but disabled unless AUTO_APPROVAL_RECOVERY_ENABLED=true' });
 
     // DB Builder — Research Beaver maintains lead pool health
     // 2026-05-14: changed from every-15-min to 2x daily (08:30 + 13:00 MYT).
