@@ -1700,6 +1700,22 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         batch, emailGap, linkedinGap, poolEmailReady, poolLinkedinOnly,
       });
 
+      // 2026-05-29 no-burn boundary (Phase 2c): generic on-demand scraping is
+      // the low-yield path that produced off-ICP / null-company corpses. When
+      // GENERIC_SOURCING_ENABLED is off, the autonomous loop relies on signal
+      // hunt + the enriched pool + Vibe CSV, and never burns generic paid
+      // scraping for output it cannot use. This unifies the no-burn boundary
+      // with directorExecute's signal_first_terminal_block so enabling daily
+      // kickoff cannot generically burn.
+      if (process.env.GENERIC_SOURCING_ENABLED !== 'true') {
+        console.warn(`[Autonomous] Client ${clientId} batch ${batch}: pool dry + GENERIC_SOURCING_ENABLED off — not burning generic scraping. Stopping (rely on signal hunt + enriched pool + Vibe CSV).`);
+        await logAction(clientId, 'director', 'generic_sourcing_disabled_skip', 'system', null, {
+          batch, emailGap, linkedinGap, poolEmailReady, poolLinkedinOnly,
+          context: 'pool_dry_on_demand_research', boundary: 'no_generic_paid_fallback',
+        });
+        break;
+      }
+
       if (poolDryResearchAttempts >= MAX_POOL_DRY_RESEARCH) {
         console.warn(`[Autonomous] Already attempted ${MAX_POOL_DRY_RESEARCH} on-demand research runs this kickoff. Stopping.`);
         await logAction(clientId, 'director', 'on_demand_research_exhausted', 'system', null, {
@@ -1884,6 +1900,18 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         zeroStreak++;
         console.warn(`[Autonomous] Batch ${batch} added 0 leads (zero streak: ${zeroStreak}/3)`);
         if (zeroStreak >= 3) {
+          // 2026-05-29 no-burn boundary (Phase 2c): the zero-streak VP/generic
+          // rescue is generic paid scraping. Gated behind GENERIC_SOURCING_ENABLED
+          // so the autonomous loop does not burn generic sourcing for 0 output —
+          // same boundary as directorExecute's signal_first_terminal_block.
+          if (process.env.GENERIC_SOURCING_ENABLED !== 'true') {
+            console.warn(`[Autonomous] 3 zero-lead batches — GENERIC_SOURCING_ENABLED off, skipping generic rescue (no-burn boundary). Pool exhausted for this cycle.`);
+            await logAction(clientId, 'director', 'generic_sourcing_disabled_skip', 'system', null, {
+              batch, context: 'zero_streak_vp_rescue', boundary: 'no_generic_paid_fallback',
+            });
+            await logAction(clientId, 'director', 'research_pool_exhausted', 'system', null, { batch, liveSent, target });
+            break;
+          }
           console.warn(`[Autonomous] 3 consecutive zero-lead batches — trying VP sourcing before giving up.`);
 
           try {
