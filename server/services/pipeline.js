@@ -474,6 +474,8 @@ async function persistDraft(clientId, params) {
     source: draft_source,
     prompt_variant: prompt_variant || (draft_source === 'enforcer_fallback' ? 'enforcer_fallback' : null),
     signal,
+    kickoff_id,
+    pipeline_path,
     ...(status === 'blocked_no_email' ? { blocked_reason: 'awaiting_email_enrichment' } : {}),
     ...metadata,
   };

@@ -235,6 +235,14 @@ describe('P0 stabilization contracts', () => {
     expect(service('routes/leads.js')).toContain("body('pipeline_stage').optional().isIn(leadsService.PIPELINE_STAGE_INPUTS)");
   });
 
+  it('drafted messages preserve campaign provenance for end-to-end audits', () => {
+    const pipeline = service('services/pipeline.js');
+
+    expect(pipeline).toContain('kickoff_id,');
+    expect(pipeline).toContain('pipeline_path,');
+    expect(pipeline).toContain('metadata: { channel, draft_source, signal }');
+  });
+
   it('Apollo is guarded and not trusted as a verified email source', () => {
     const agents = service('services/agents.js');
     expect(agents).not.toContain("lead.email_source === 'apollo'");
