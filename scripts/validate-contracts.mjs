@@ -25,6 +25,13 @@ function readFile(relPath) {
   return readFileSync(resolve(SERVER, relPath), 'utf8');
 }
 
+function section(source, marker, endMarker) {
+  const start = source.indexOf(marker);
+  if (start < 0) return '';
+  const end = endMarker ? source.indexOf(endMarker, start) : -1;
+  return source.slice(start, end > start ? end : start + 5000);
+}
+
 const results = [];
 
 function check(name, pass, detail) {
@@ -43,7 +50,17 @@ const signalHunt = readFile('services/signalHunt.js');
 const replyHandler = readFile('services/replyHandler.js');
 const searchService = readFile('services/searchService.js');
 const autoApprovalRecovery = readFile('services/autoApprovalRecovery.js');
+const captainOrchestrator = readFile('services/captainOrchestrator.js');
+const jobHealth = readFile('services/jobHealth.js');
 const index = readFile('index.js');
+const autonomousRoute = readFile('routes/autonomous.js');
+const triggerKickoff = readFileSync(resolve(SERVER, '..', 'scripts', 'trigger-kickoff.mjs'), 'utf8');
+const kickoffWatchdog = readFileSync(resolve(SERVER, '..', 'scripts', 'kickoff-watchdog.mjs'), 'utf8');
+const dailyHealthPack = readFileSync(resolve(SERVER, '..', 'scripts', 'daily-health-pack.mjs'), 'utf8');
+const platformHealth = readFileSync(resolve(SERVER, '..', 'scripts', 'platform-health.mjs'), 'utf8');
+const triggerKickoffWorkflow = readFileSync(resolve(SERVER, '..', '.github', 'workflows', 'trigger-kickoff.yml'), 'utf8');
+const envExample = readFileSync(resolve(SERVER, '..', '.env.example'), 'utf8');
+const prodEnvExample = readFileSync(resolve(SERVER, '..', '.env.production.example'), 'utf8');
 const allSources = [agents, dbBuilder, sendQueue, pipeline];
 
 // 1. Enforcer gate: both pipeline paths must call runRanger / callAgent with enforcer
@@ -95,10 +112,18 @@ const enforcerModel = readFile('config/agents.js').match(/ranger:\s*\{[\s\S]*mod
 check('Enforcer uses Sonnet model', !!enforcerModel,
   enforcerModel ? 'Sonnet reference found' : 'Enforcer may be using wrong model');
 
-// 9. Daily kickoff is explicitly opt-in while sourcing/output paths are being repaired.
-const dailyKickoffBrake = index.includes("CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'");
-check('Daily kickoff opt-in brake', dailyKickoffBrake,
-  dailyKickoffBrake ? 'CAPTAIN_DAILY_KICKOFF_ENABLED guard found' : 'daily kickoff can run without explicit flag');
+// 9. Daily kickoff must be explicitly armed, and disabled/missed states must be
+// visible to Captain instead of being marked as green cron health.
+const dailyKickoffHealthTruth = index.includes("CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'")
+  && index.includes("markSkipped('daily_kickoff'")
+  && index.includes('daily kickoff window passed without all tenant dedupe rows')
+  && jobHealth.includes('markSkipped')
+  && jobHealth.includes("status: skippedStatus")
+  && captainOrchestrator.includes("CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'")
+  && captainOrchestrator.includes('AUTONOMOUS_ENABLED_CLIENTS empty')
+  && captainOrchestrator.includes("k.business_day.kickoff.state === 'disabled'");
+check('Daily kickoff disabled/missed state is visible', dailyKickoffHealthTruth,
+  dailyKickoffHealthTruth ? 'kickoff opt-in plus skipped/disabled health path found' : 'daily kickoff can still look green when disabled or missed');
 
 // 10. send_queue enqueue must report conflict truth, not claim duplicate rows enqueued.
 const enqueueConflictTruth = sendQueue.includes('RETURNING id')
@@ -239,6 +264,86 @@ const autoApprovalRecoveryGuarded = autoApprovalRecovery.includes("AUTO_APPROVE_
   && index.includes("jobHealth.markError('auto_approval_recovery'");
 check('Auto-approval recovery keeps gates before enqueue', autoApprovalRecoveryGuarded,
   autoApprovalRecoveryGuarded ? 'threshold/seasoning/recent-send/gate-fail/channel/audit/enqueue/health/RLS guards found' : 'recovery may bypass approval or send safety gates');
+
+// 24. Captain morning truth must separate real approval reviews from LinkedIn
+// awaiting-accept rows and stale orphan approval rows.
+const captainApprovalTruth = captainOrchestrator.includes("COALESCE(a.notes, '') <> 'linkedin_requested'")
+  && captainOrchestrator.includes("m.status = 'pending_approval'")
+  && captainOrchestrator.includes('linkedin_awaiting_accept')
+  && captainOrchestrator.includes('stale_orphan_approval_rows')
+  && captainOrchestrator.includes('yesterday_email_sent')
+  && captainOrchestrator.includes('yesterday_linkedin_sent')
+  && captainOrchestrator.includes('renderPlainBrief(kpis)')
+  && !captainOrchestrator.includes('quote verbatim where useful');
+check('Captain brief uses deterministic queue and channel truth', captainApprovalTruth,
+  captainApprovalTruth ? 'approval queue, LinkedIn awaiting, stale rows, yesterday channels, and deterministic renderer found' : 'Captain can still blend stale/raw approval truth');
+
+// 25. Market sensing is a spend-adjacent job and must not run unless explicitly
+// enabled; skipped/disabled state must be reported through job health.
+const marketSensingGate = index.includes("MARKET_SENSING_ENABLED !== 'true'")
+  && index.includes("markSkipped('market_sensing'")
+  && index.includes('market-sensing window passed without run')
+  && captainOrchestrator.includes("MARKET_SENSING_ENABLED !== 'true'")
+  && envExample.includes('MARKET_SENSING_ENABLED=false')
+  && prodEnvExample.includes('MARKET_SENSING_ENABLED=false');
+check('Market sensing has explicit spend gate and health truth', marketSensingGate,
+  marketSensingGate ? 'MARKET_SENSING_ENABLED and skipped health path found' : 'market sensing may still spend by default or look green when skipped');
+
+// 26. Manual production validation must stay single-tenant. The GitHub trigger
+// script previously used /kickoff-all?force=1, which can fan out and burn spend.
+const singleTenantKickoffTrigger = autonomousRoute.includes('client_id: c.id')
+  && autonomousRoute.includes("KICKOFF_ALL_ENABLED !== 'true'")
+  && autonomousRoute.includes("KICKOFF_FORCE_OVERRIDE_ENABLED !== 'true'")
+  && autonomousRoute.includes('KICKOFF_ALL_DISABLED')
+  && envExample.includes('KICKOFF_ALL_ENABLED=false')
+  && prodEnvExample.includes('KICKOFF_FORCE_OVERRIDE_ENABLED=false')
+  && triggerKickoff.includes('Missing env: CLIENT_SLUG. Refusing all-tenant kickoff.')
+  && triggerKickoff.includes('/api/autonomous/kickoff')
+  && !triggerKickoff.includes('/api/autonomous/kickoff-all')
+  && !triggerKickoff.includes('force=1')
+  && !triggerKickoff.includes('force: true')
+  && kickoffWatchdog.includes('Do not use /kickoff-all or force=1')
+  && triggerKickoffWorkflow.includes('required: true');
+check('Manual kickoff trigger is single-tenant and no-force', singleTenantKickoffTrigger,
+  singleTenantKickoffTrigger ? 'trigger script resolves one client_id and posts /kickoff only' : 'manual validation can still fan out or force bypass');
+
+// 27. Cloud health surfaces MYT kickoff state and real approval queue truth.
+// The 09:05 health pack must not call kickoff "missed" before the 09:30 window.
+const systemHealthTruth = autonomousRoute.includes("Asia/Kuala_Lumpur")
+  && autonomousRoute.includes('kl_minutes_now')
+  && autonomousRoute.includes('memory_written')
+  && autonomousRoute.includes('trace_count')
+  && autonomousRoute.includes('approval_queue')
+  && autonomousRoute.includes('linkedin_awaiting_accept')
+  && dailyHealthPack.includes("state === 'missed'")
+  && dailyHealthPack.includes('waiting for 09:30 MYT')
+  && dailyHealthPack.includes('Approval queue:')
+  && dailyHealthPack.includes('research starved and lead pool thin')
+  && kickoffWatchdog.includes("['missed', 'disabled'].includes");
+check('System health and watchdog use MYT kickoff/queue truth', systemHealthTruth,
+  systemHealthTruth ? 'system-health exposes state, traces, memory, and queue split' : 'health pack can still false-alarm or hide queue truth');
+
+// 28. Platform Health must not use the old hourly-stats/50-target report shape.
+// It should read system-health truth, report LinkedIn-awaiting separately, and
+// only call zero-output when no approval-ready output exists after kickoff.
+const platformHealthTruth = platformHealth.includes("api('/api/autonomous/system-health')")
+  && !platformHealth.includes("api('/api/autonomous/hourly-stats')")
+  && !platformHealth.includes('Sent: ${sentToday}/50')
+  && platformHealth.includes('LI-awaiting')
+  && platformHealth.includes('pipeline produced no approval-ready output');
+check('Platform Health uses system-health kickoff/queue truth', platformHealthTruth,
+  platformHealthTruth ? 'platform-health no longer uses hourly-stats/50-target framing' : 'platform-health can still report stale target or queue truth');
+
+// 29. EOD must use the same factual-reporting discipline as morning. The LLM
+// can analyze elsewhere, but it must not compose KPI truth from stale self-reports.
+const eodBody = section(captainOrchestrator, 'async function generateEodBrief', 'function renderPlainEodBrief');
+const eodDeterministic = eodBody.includes('const summary = renderPlainEodBrief(kpis, todaysActions);')
+  && !eodBody.includes("callAgent('captain_orchestrator'")
+  && captainOrchestrator.includes('meetings outcome:')
+  && !captainOrchestrator.includes('projecting ${kpis.meetings.mtd_pace_projected}')
+  && !captainOrchestrator.includes('projecting ${k.meetings.mtd_pace_projected}');
+check('Captain EOD brief uses deterministic KPI truth', eodDeterministic,
+  eodDeterministic ? 'EOD renderer owns factual KPI text with no LLM narration/projection' : 'EOD can still narrate stale/self-reported KPI truth');
 
 const failures = results.filter(r => !r.pass);
 console.log(`\n${results.length} checks: ${results.length - failures.length} passed, ${failures.length} failed`);

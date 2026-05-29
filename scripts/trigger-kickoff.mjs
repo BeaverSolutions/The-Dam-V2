@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Manual kickoff trigger. Hits the BeavrDam internal API to start a kickoff
-// run for either a specific client_slug or all autonomous-enabled clients.
-// Telegram fires on result so MJ sees what happened.
+// Manual single-tenant kickoff trigger.
+// Requires CLIENT_SLUG. Never uses /kickoff-all and never force-overrides
+// dedupe gates; both caused prior paid-provider burn incidents.
 
 const TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -11,6 +11,10 @@ const SLUG    = (process.env.CLIENT_SLUG || '').trim();
 
 if (!TOKEN || !CHAT_ID || !API_KEY) {
   console.error('Missing env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, BEAVRDAM_INTERNAL_API_KEY');
+  process.exit(1);
+}
+if (!SLUG) {
+  console.error('Missing env: CLIENT_SLUG. Refusing all-tenant kickoff.');
   process.exit(1);
 }
 
@@ -33,28 +37,28 @@ async function main() {
   }
   const { data } = await healthRes.json();
 
-  const targets = SLUG
-    ? data.tenants.filter(t => t.slug === SLUG)
-    : data.tenants;
+  const targets = data.tenants.filter(t => t.slug === SLUG);
 
   if (targets.length === 0) {
     await tg(`<b>Trigger Kickoff: no match</b>\nSlug "${SLUG}" not in AUTONOMOUS_ENABLED_CLIENTS (${data.enabled_slugs?.join(', ') || 'empty'})`);
     process.exit(1);
   }
+  if (targets.length > 1) {
+    await tg(`<b>Trigger Kickoff: unsafe target set</b>\nSlug "${SLUG}" resolved to ${targets.length} tenants. Refusing.`);
+    process.exit(1);
+  }
+  const target = targets[0];
+  if (!target.client_id) {
+    await tg(`<b>Trigger Kickoff: missing client_id</b>\n/system-health did not return a client_id for <code>${SLUG}</code>. Refusing fallback to kickoff-all.`);
+    process.exit(1);
+  }
 
-  // The kickoff endpoint expects a tenant context — get the client_id by
-  // querying system-health which returns tenants with their slugs but not ids.
-  // Workaround: hit /api/autonomous/kickoff-all which iterates enabled clients
-  // server-side. Or use the per-slug variant if exposed. For now, kickoff-all
-  // covers AUTONOMOUS_ENABLED_CLIENTS which is currently beaver-solutions only.
-  await tg(`<b>Manual Kickoff Triggered</b>\n\nTenant(s): <code>${targets.map(t => t.slug).join(', ')}</code>\nWatch for "Daily Kickoff Started" + "Completed" alerts.`);
+  await tg(`<b>Manual Kickoff Triggered</b>\n\nTenant: <code>${target.slug}</code>\nEndpoint: <code>/api/autonomous/kickoff</code>\nNo force override.`);
 
-  // Manual triggers always override the 60-min dedupe gate — that gate exists
-  // to stop runaway cron loops, not to block intentional validation runs.
-  const triggerRes = await fetch(`${API_URL}/api/autonomous/kickoff-all?force=1`, {
+  const triggerRes = await fetch(`${API_URL}/api/autonomous/kickoff`, {
     method: 'POST',
     headers: { 'x-internal-key': API_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ force: true }),
+    body: JSON.stringify({ client_id: target.client_id }),
   });
 
   const triggerJson = await triggerRes.json().catch(() => ({}));

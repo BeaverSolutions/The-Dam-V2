@@ -46,7 +46,7 @@ function getLLMHealth() {
 /* ─── KPI snapshot collector ──────────────────────────────────────── */
 
 /**
- * Pull a structured snapshot of the team's last 24h performance for one
+ * Pull a structured snapshot of the team's operational performance for one
  * tenant. Pure read — no side effects. Used by morning brief, EOD brief,
  * and stuck-state monitor.
  *
@@ -56,7 +56,7 @@ function getLLMHealth() {
  *   research_beaver: { sourced_24h, scored_avg, top_quality_score, pool_size, strategies_used },
  *   sales_beaver:    { drafts_24h, first_attempt_pass_rate, sent_24h, replies_24h },
  *   enforcer:        { reviews_24h, approve_rate, reject_rate, top_reject_reasons },
- *   pipeline:        { pending_approvals, approved_unsent_linkedin, approved_unsent_email, bounces_7d },
+ *   pipeline:        { pending_approvals, linkedin_awaiting_accept, stale_orphan_approval_rows, approved_unsent_email, bounces_7d },
  *   vp:              { credits_used_today, credits_budget, credits_remaining_today },
  * }
  */
@@ -66,6 +66,9 @@ async function collectTeamKPIs(clientId) {
 
   const since24h = `NOW() - INTERVAL '24 hours'`;
   const since7d = `NOW() - INTERVAL '7 days'`;
+  const klTodayStart = `(date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur')`;
+  const klYesterdayStart = `(${klTodayStart} - INTERVAL '1 day')`;
+  const klMonthStart = `(date_trunc('month', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur')`;
 
   // ─── Research Beaver ──
   const researchPromise = pool.query(
@@ -123,20 +126,27 @@ async function collectTeamKPIs(clientId) {
   // ─── Pipeline state ──
   const pipelinePromise = pool.query(
     `SELECT
-       (SELECT COUNT(*)
-          FROM approvals a
-          JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
+        (SELECT COUNT(*)
+           FROM approvals a
+           JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
+           WHERE a.client_id = $1
+             AND a.status IN ('pending', 'pending_approval')
+             AND COALESCE(a.notes, '') <> 'linkedin_requested'
+             AND m.status = 'pending_approval') AS pending_approvals,
+        (SELECT COUNT(*) FROM messages
+          WHERE client_id = $1 AND channel = 'linkedin' AND status = 'linkedin_requested' AND sent_at IS NULL) AS linkedin_awaiting_accept,
+        (SELECT COUNT(*)
+           FROM approvals a
+           JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
           WHERE a.client_id = $1
             AND a.status IN ('pending', 'pending_approval')
             AND (
-              (a.notes = 'linkedin_requested' AND m.status = 'linkedin_requested')
-              OR (COALESCE(a.notes, '') <> 'linkedin_requested' AND m.status = 'pending_approval')
-            )) AS pending_approvals,
-       (SELECT COUNT(*) FROM messages
-          WHERE client_id = $1 AND channel = 'linkedin' AND status IN ('approved', 'linkedin_requested') AND sent_at IS NULL) AS approved_unsent_linkedin,
-       (SELECT COUNT(*) FROM messages
+              (a.notes = 'linkedin_requested' AND m.status <> 'linkedin_requested')
+              OR (COALESCE(a.notes, '') <> 'linkedin_requested' AND m.status <> 'pending_approval')
+            )) AS stale_orphan_approval_rows,
+        (SELECT COUNT(*) FROM messages
           WHERE client_id = $1 AND channel = 'email' AND status = 'approved' AND sent_at IS NULL) AS approved_unsent_email,
-       (SELECT COUNT(*) FROM messages
+        (SELECT COUNT(*) FROM messages
           WHERE client_id = $1 AND status = 'bounced' AND updated_at > ${since7d}) AS bounces_7d`,
     [clientId]
   );
@@ -149,13 +159,13 @@ async function collectTeamKPIs(clientId) {
   const spendTodayPromise = pool.query(
     `SELECT COALESCE(SUM(cost_usd), 0)::numeric(10,4) AS spend
      FROM llm_usage
-     WHERE client_id = $1 AND created_at > date_trunc('day', NOW() AT TIME ZONE 'UTC')`,
+      WHERE client_id = $1 AND created_at >= ${klTodayStart}`,
     [clientId]
   );
   const spendMtdPromise = pool.query(
     `SELECT COALESCE(SUM(cost_usd), 0)::numeric(10,4) AS spend
      FROM llm_usage
-     WHERE client_id = $1 AND created_at > date_trunc('month', NOW() AT TIME ZONE 'UTC')`,
+      WHERE client_id = $1 AND created_at >= ${klMonthStart}`,
     [clientId]
   );
   // Worst single-day spend this month — surfaces a runaway day (e.g. the
@@ -163,11 +173,11 @@ async function collectTeamKPIs(clientId) {
   const spendMaxDayPromise = pool.query(
     `SELECT COALESCE(MAX(day_spend), 0)::numeric(10,4) AS max_day
        FROM (
-         SELECT SUM(cost_usd) AS day_spend
-           FROM llm_usage
-          WHERE client_id = $1 AND created_at > date_trunc('month', NOW() AT TIME ZONE 'UTC')
-          GROUP BY (created_at AT TIME ZONE 'UTC')::date
-       ) d`,
+          SELECT SUM(cost_usd) AS day_spend
+            FROM llm_usage
+           WHERE client_id = $1 AND created_at >= ${klMonthStart}
+           GROUP BY (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date
+        ) d`,
     [clientId]
   );
 
@@ -183,7 +193,7 @@ async function collectTeamKPIs(clientId) {
     `SELECT COUNT(*) AS n FROM leads
      WHERE client_id = $1 AND deleted_at IS NULL
        AND meeting_date IS NOT NULL
-       AND meeting_date > date_trunc('month', NOW() AT TIME ZONE 'UTC')`,
+       AND meeting_date >= ${klMonthStart}`,
     [clientId]
   );
 
@@ -194,15 +204,15 @@ async function collectTeamKPIs(clientId) {
   const channelMixPromise = pool.query(
     `WITH today_msgs AS (
        SELECT channel,
-              COUNT(*) FILTER (WHERE created_at::date = (NOW() AT TIME ZONE 'UTC')::date) AS drafted,
-              COUNT(*) FILTER (WHERE status = 'pending_approval' AND created_at::date = (NOW() AT TIME ZONE 'UTC')::date) AS pending_approval,
-              COUNT(*) FILTER (WHERE status = 'approved'         AND sent_at IS NULL) AS approved_unsent,
-              COUNT(*) FILTER (WHERE status = 'sent' AND COALESCE(sent_at, created_at)::date = (NOW() AT TIME ZONE 'UTC')::date) AS sent
-       FROM messages
-       WHERE client_id = $1
-         AND created_at >= (NOW() AT TIME ZONE 'UTC')::date - INTERVAL '1 day'
-       GROUP BY channel
-     ),
+               COUNT(*) FILTER (WHERE created_at >= ${klTodayStart}) AS drafted,
+               COUNT(*) FILTER (WHERE status = 'pending_approval' AND created_at >= ${klTodayStart}) AS pending_approval,
+               COUNT(*) FILTER (WHERE status = 'approved'         AND sent_at IS NULL) AS approved_unsent,
+               COUNT(*) FILTER (WHERE status = 'sent' AND COALESCE(sent_at, created_at) >= ${klTodayStart}) AS sent
+        FROM messages
+        WHERE client_id = $1
+          AND created_at >= ${klYesterdayStart}
+        GROUP BY channel
+      ),
      pool_email AS (
        SELECT COUNT(*) AS n FROM leads
        WHERE client_id = $1 AND deleted_at IS NULL
@@ -215,13 +225,33 @@ async function collectTeamKPIs(clientId) {
          AND pipeline_stage = 'prospecting' AND status = 'new'
          AND email IS NULL AND linkedin_url IS NOT NULL
      ),
-     stale_approvals AS (
-       SELECT
-         COUNT(*) AS pending_n,
-         EXTRACT(EPOCH FROM (NOW() - MIN(created_at))) / 3600.0 AS oldest_hours
-       FROM approvals
-       WHERE client_id = $1 AND status = 'pending'
-     )
+      stale_approvals AS (
+        SELECT
+          COUNT(*) AS pending_n,
+          EXTRACT(EPOCH FROM (NOW() - MIN(created_at))) / 3600.0 AS oldest_hours
+        FROM approvals a
+        JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
+        WHERE a.client_id = $1
+          AND a.status IN ('pending', 'pending_approval')
+          AND COALESCE(a.notes, '') <> 'linkedin_requested'
+          AND m.status = 'pending_approval'
+      ),
+      linkedin_waiting AS (
+        SELECT COUNT(*) AS n
+        FROM messages
+        WHERE client_id = $1 AND channel = 'linkedin' AND status = 'linkedin_requested' AND sent_at IS NULL
+      ),
+      orphan_approvals AS (
+        SELECT COUNT(*) AS n
+        FROM approvals a
+        JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
+        WHERE a.client_id = $1
+          AND a.status IN ('pending', 'pending_approval')
+          AND (
+            (a.notes = 'linkedin_requested' AND m.status <> 'linkedin_requested')
+            OR (COALESCE(a.notes, '') <> 'linkedin_requested' AND m.status <> 'pending_approval')
+          )
+      )
      SELECT
        COALESCE((SELECT drafted          FROM today_msgs WHERE channel = 'email'), 0)    AS email_drafted,
        COALESCE((SELECT pending_approval FROM today_msgs WHERE channel = 'email'), 0)    AS email_pending_approval,
@@ -232,9 +262,11 @@ async function collectTeamKPIs(clientId) {
        COALESCE((SELECT approved_unsent  FROM today_msgs WHERE channel = 'linkedin'), 0) AS linkedin_approved_unsent,
        COALESCE((SELECT sent             FROM today_msgs WHERE channel = 'linkedin'), 0) AS linkedin_sent,
        (SELECT n FROM pool_email)    AS pool_email_ready,
-       (SELECT n FROM pool_linkedin) AS pool_linkedin_only,
-       (SELECT pending_n    FROM stale_approvals) AS approvals_pending_n,
-       (SELECT oldest_hours FROM stale_approvals) AS approvals_oldest_hours`,
+        (SELECT n FROM pool_linkedin) AS pool_linkedin_only,
+        (SELECT pending_n    FROM stale_approvals) AS approvals_pending_n,
+        (SELECT oldest_hours FROM stale_approvals) AS approvals_oldest_hours,
+        (SELECT n FROM linkedin_waiting) AS linkedin_awaiting_accept,
+        (SELECT n FROM orphan_approvals) AS stale_orphan_approval_rows`,
     [clientId]
   );
 
@@ -243,19 +275,66 @@ async function collectTeamKPIs(clientId) {
             COALESCE(target_linkedin_sent, 20) AS tl,
             COALESCE(target, 50) AS total
      FROM daily_kpi
-     WHERE client_id = $1 AND date = (NOW() AT TIME ZONE 'UTC')::date
-     LIMIT 1`,
+      WHERE client_id = $1 AND date = (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date
+      LIMIT 1`,
     [clientId]
   );
 
+  const businessTruthPromise = pool.query(
+    `WITH bounds AS (
+       SELECT
+         ${klTodayStart} AS today_start,
+         ${klYesterdayStart} AS yesterday_start,
+         (${klTodayStart} + INTERVAL '1 day') AS tomorrow_start,
+         (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date AS today_kl,
+         ((EXTRACT(HOUR FROM NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::int * 60)
+           + EXTRACT(MINUTE FROM NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::int) AS kl_minutes_now,
+         ((NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date - INTERVAL '1 day')::date AS yesterday_kl,
+         (NOW() AT TIME ZONE 'UTC')::date AS utc_today
+     )
+     SELECT
+       (SELECT today_kl FROM bounds) AS today_kl,
+       (SELECT kl_minutes_now FROM bounds) AS kl_minutes_now,
+       (SELECT yesterday_kl FROM bounds) AS yesterday_kl,
+       (SELECT COUNT(*) FROM messages m, bounds b
+         WHERE m.client_id = $1 AND m.sent_at >= b.yesterday_start AND m.sent_at < b.today_start AND m.channel = 'email') AS yesterday_email_sent,
+       (SELECT COUNT(*) FROM messages m, bounds b
+         WHERE m.client_id = $1 AND m.sent_at >= b.yesterday_start AND m.sent_at < b.today_start AND m.channel = 'linkedin') AS yesterday_linkedin_sent,
+       (SELECT COUNT(*) FROM approvals a, bounds b
+         WHERE a.client_id = $1 AND a.status = 'approved' AND a.resolved_at >= b.yesterday_start AND a.resolved_at < b.today_start) AS yesterday_approvals_approved,
+       (SELECT COUNT(*) FROM approvals a, bounds b
+         WHERE a.client_id = $1 AND a.status = 'rejected' AND a.resolved_at >= b.yesterday_start AND a.resolved_at < b.today_start) AS yesterday_approvals_rejected,
+       (SELECT COUNT(*) FROM messages m, bounds b
+         WHERE m.client_id = $1 AND m.created_at >= b.today_start AND m.created_at < b.tomorrow_start AND m.channel = 'email') AS today_email_drafted,
+       (SELECT COUNT(*) FROM messages m, bounds b
+         WHERE m.client_id = $1 AND m.created_at >= b.today_start AND m.created_at < b.tomorrow_start AND m.channel = 'linkedin') AS today_linkedin_drafted,
+       (SELECT COUNT(*) FROM messages m, bounds b
+         WHERE m.client_id = $1 AND m.sent_at >= b.today_start AND m.sent_at < b.tomorrow_start AND m.channel = 'email') AS today_email_sent,
+       (SELECT COUNT(*) FROM messages m, bounds b
+         WHERE m.client_id = $1 AND m.sent_at >= b.today_start AND m.sent_at < b.tomorrow_start AND m.channel = 'linkedin') AS today_linkedin_sent,
+       (SELECT COUNT(*) FROM logs l, bounds b
+         WHERE l.client_id = $1 AND l.created_at >= b.today_start AND l.created_at < b.tomorrow_start AND l.action = 'autonomous_kickoff') AS kickoff_logs_today,
+       (SELECT COUNT(*) FROM pipeline_traces pt, bounds b
+         WHERE pt.client_id = $1 AND pt.created_at >= b.today_start AND pt.created_at < b.tomorrow_start) AS pipeline_traces_today,
+       EXISTS (
+         SELECT 1 FROM agent_memory am, bounds b
+         WHERE am.client_id = $1
+           AND am.agent = 'captain'
+           AND am.key = 'daily_kickoff_' || b.utc_today::text
+       ) AS daily_kickoff_memory_written`,
+    [clientId]
+  );
+
+  const funnelPromise = pipelineTrace.getTodayFunnel(clientId).catch(() => []);
+
   const [research, sales, enforcer, rejectReasons, pipeline,
-         dbOk, cronHealth,
-         spendToday, spendMtd, meetingsWeek, meetingsMtd,
-         channelMix, targets, spendMaxDay] = await Promise.all([
+          dbOk, cronHealth,
+          spendToday, spendMtd, meetingsWeek, meetingsMtd,
+          channelMix, targets, spendMaxDay, businessTruth, funnelRows] = await Promise.all([
     researchPromise, salesPromise, enforcerPromise, rejectReasonsPromise, pipelinePromise,
     dbCheckPromise, cronHealthPromise,
     spendTodayPromise, spendMtdPromise, meetingsThisWeekPromise, meetingsMtdPromise,
-    channelMixPromise, targetsPromise, spendMaxDayPromise,
+    channelMixPromise, targetsPromise, spendMaxDayPromise, businessTruthPromise, funnelPromise,
   ]);
 
   // Stale jobs derived from cronHealth — jobs in 'stale' state
@@ -267,6 +346,8 @@ async function collectTeamKPIs(clientId) {
   const s = sales.rows[0];
   const e = enforcer.rows[0];
   const p = pipeline.rows[0];
+  const bt = businessTruth.rows[0] || {};
+  const cm = channelMix.rows[0] || {};
 
   const passRate = (s.first_attempt_total > 0)
     ? Math.round((s.first_pass / s.first_attempt_total) * 100)
@@ -307,9 +388,27 @@ async function collectTeamKPIs(clientId) {
     },
     pipeline: {
       pending_approvals: Number(p.pending_approvals) || 0,
-      approved_unsent_linkedin: Number(p.approved_unsent_linkedin) || 0,
+      linkedin_awaiting_accept: Number(p.linkedin_awaiting_accept) || 0,
+      stale_orphan_approval_rows: Number(p.stale_orphan_approval_rows) || 0,
       approved_unsent_email: Number(p.approved_unsent_email) || 0,
       bounces_7d: Number(p.bounces_7d) || 0,
+    },
+    business_day: {
+      today_kl: bt.today_kl,
+      yesterday_kl: bt.yesterday_kl,
+      yesterday: {
+        email_sent: Number(bt.yesterday_email_sent) || 0,
+        linkedin_sent: Number(bt.yesterday_linkedin_sent) || 0,
+        approvals_approved: Number(bt.yesterday_approvals_approved) || 0,
+        approvals_rejected: Number(bt.yesterday_approvals_rejected) || 0,
+      },
+      today: {
+        email_drafted: Number(bt.today_email_drafted) || 0,
+        linkedin_drafted: Number(bt.today_linkedin_drafted) || 0,
+        email_sent: Number(bt.today_email_sent) || 0,
+        linkedin_sent: Number(bt.today_linkedin_sent) || 0,
+      },
+      kickoff: deriveKickoffStatus(bt, cronHealth),
     },
     vp: {
       credits_used_today: cfg.vp_credits_used_today,
@@ -351,22 +450,25 @@ async function collectTeamKPIs(clientId) {
       target_email_sent:    Number(targets.rows[0]?.te) || 30,
       target_linkedin_sent: Number(targets.rows[0]?.tl) || 20,
       email: {
-        drafted:           Number(channelMix.rows[0].email_drafted) || 0,
-        pending_approval:  Number(channelMix.rows[0].email_pending_approval) || 0,
-        approved_unsent:   Number(channelMix.rows[0].email_approved_unsent) || 0,
-        sent:              Number(channelMix.rows[0].email_sent) || 0,
+        drafted:           Number(cm.email_drafted) || 0,
+        pending_approval:  Number(cm.email_pending_approval) || 0,
+        approved_unsent:   Number(cm.email_approved_unsent) || 0,
+        sent:              Number(cm.email_sent) || 0,
       },
       linkedin: {
-        drafted:           Number(channelMix.rows[0].linkedin_drafted) || 0,
-        pending_approval:  Number(channelMix.rows[0].linkedin_pending_approval) || 0,
-        approved_unsent:   Number(channelMix.rows[0].linkedin_approved_unsent) || 0,
-        sent:              Number(channelMix.rows[0].linkedin_sent) || 0,
+        drafted:           Number(cm.linkedin_drafted) || 0,
+        pending_approval:  Number(cm.linkedin_pending_approval) || 0,
+        approved_unsent:   Number(cm.linkedin_approved_unsent) || 0,
+        sent:              Number(cm.linkedin_sent) || 0,
       },
-      pool_email_ready:    Number(channelMix.rows[0].pool_email_ready) || 0,
-      pool_linkedin_only:  Number(channelMix.rows[0].pool_linkedin_only) || 0,
-      approvals_pending:   Number(channelMix.rows[0].approvals_pending_n) || 0,
-      approvals_oldest_hours: Number(channelMix.rows[0].approvals_oldest_hours) || 0,
+      pool_email_ready:    Number(cm.pool_email_ready) || 0,
+      pool_linkedin_only:  Number(cm.pool_linkedin_only) || 0,
+      approvals_pending:   Number(cm.approvals_pending_n) || 0,
+      approvals_oldest_hours: Number(cm.approvals_oldest_hours) || 0,
+      linkedin_awaiting_accept: Number(cm.linkedin_awaiting_accept) || 0,
+      stale_orphan_approval_rows: Number(cm.stale_orphan_approval_rows) || 0,
     },
+    funnel: buildFunnelSnapshot(funnelRows),
   };
 }
 
@@ -382,211 +484,126 @@ function projectMonthEndMeetings(mtd) {
   return Math.round((mtd / dayOfMonth) * daysInMonth);
 }
 
+function deriveKickoffStatus(row, cronHealth) {
+  if (process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true') {
+    return {
+      state: 'disabled',
+      detail: 'CAPTAIN_DAILY_KICKOFF_ENABLED disabled',
+      memory_written: false,
+      kickoff_logs_today: Number(row.kickoff_logs_today) || 0,
+      pipeline_traces_today: Number(row.pipeline_traces_today) || 0,
+    };
+  }
+
+  const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (enabledSlugs.length === 0) {
+    return {
+      state: 'disabled',
+      detail: 'AUTONOMOUS_ENABLED_CLIENTS empty',
+      memory_written: false,
+      kickoff_logs_today: Number(row.kickoff_logs_today) || 0,
+      pipeline_traces_today: Number(row.pipeline_traces_today) || 0,
+    };
+  }
+
+  const daily = cronHealth?.daily_kickoff;
+  if (daily?.status === 'disabled') {
+    return { state: 'disabled', detail: daily.lastSkipReason || 'daily kickoff disabled' };
+  }
+  if (daily?.status === 'skipped' && /window passed|without/i.test(daily.lastSkipReason || '')) {
+    return { state: 'missed', detail: daily.lastSkipReason };
+  }
+
+  const traces = Number(row.pipeline_traces_today) || 0;
+  const logs = Number(row.kickoff_logs_today) || 0;
+  if (row.daily_kickoff_memory_written || traces > 0 || logs > 0) {
+    return {
+      state: traces > 0 ? 'traced' : 'started',
+      detail: `${logs} kickoff log rows, ${traces} pipeline trace rows`,
+      memory_written: !!row.daily_kickoff_memory_written,
+      kickoff_logs_today: logs,
+      pipeline_traces_today: traces,
+    };
+  }
+
+  const klMinutesNow = Number(row.kl_minutes_now);
+  if (Number.isFinite(klMinutesNow) && klMinutesNow < (9 * 60 + 30)) {
+    return {
+      state: 'waiting',
+      detail: 'waiting for 09:30 MYT daily kickoff window',
+      memory_written: false,
+      kickoff_logs_today: logs,
+      pipeline_traces_today: traces,
+    };
+  }
+
+  if (Number.isFinite(klMinutesNow) && klMinutesNow > (9 * 60 + 40)) {
+    return {
+      state: 'missed',
+      detail: '09:30 MYT daily kickoff window passed with no memory row, kickoff log, or pipeline trace',
+      memory_written: false,
+      kickoff_logs_today: logs,
+      pipeline_traces_today: traces,
+    };
+  }
+
+  return {
+    state: 'not_started',
+    detail: 'no daily kickoff memory row, kickoff log, or pipeline trace today',
+    memory_written: false,
+    kickoff_logs_today: logs,
+    pipeline_traces_today: traces,
+  };
+}
+
+function buildFunnelSnapshot(rows = []) {
+  const stageCounts = {};
+  const kickoffs = new Set();
+  for (const row of rows || []) {
+    stageCounts[row.stage] = (stageCounts[row.stage] || 0) + Number(row.cnt || 0);
+    if (row.kickoff_id) kickoffs.add(row.kickoff_id);
+  }
+
+  const enrolled = stageCounts.enrolled || 0;
+  const icpRejected = stageCounts.icp_rejected || 0;
+  const drafted = stageCounts.drafted || 0;
+  const draftFailed = stageCounts.draft_failed || 0;
+  const reviewed = stageCounts.reviewed || 0;
+  const approved = stageCounts.approved || 0;
+  const rejected = stageCounts.rejected || 0;
+  const sent = stageCounts.sent || 0;
+  const replied = stageCounts.replied || 0;
+  const silentDrop = Math.max(0, enrolled - drafted - draftFailed - icpRejected);
+  const rate = (num, den) => den > 0 ? Math.round((num / den) * 100) : null;
+
+  return {
+    kickoffs: kickoffs.size,
+    enrolled,
+    icp_rejected: icpRejected,
+    drafted,
+    draft_failed: draftFailed,
+    reviewed,
+    approved,
+    rejected,
+    sent,
+    replied,
+    silent_drop: silentDrop,
+    draft_rate_pct: rate(drafted + draftFailed, Math.max(0, enrolled - icpRejected)),
+    approve_rate_pct: rate(approved, reviewed),
+    send_rate_pct: rate(sent, approved),
+    reply_rate_pct: rate(replied, sent),
+  };
+}
+
 /* ─── Morning brief generator ─────────────────────────────────────── */
 
 /**
- * Compose Captain's morning brief in conversational-tight tone using
- * Sonnet. Returns { summary, raw_kpis } where summary is the message
- * MJ reads on Telegram and raw_kpis is the underlying data.
+ * Compose Captain's morning brief from deterministic operational truth.
+ * No LLM writes factual KPI reporting.
  */
 async function generateMorningBrief(clientId) {
   const kpis = await collectTeamKPIs(clientId);
-
-  // Wave 2 (2026-05-03): pull each beaver's most recent self-report so the
-  // brief quotes what the team thinks of itself, not just our derived numbers.
-  let beaverSelfReports = '';
-  try {
-    const introspection = require('./introspection');
-    const reports = await introspection.latestPerBeaver(clientId);
-    if (reports.length > 0) {
-      beaverSelfReports = '\n\nBEAVER SELF-REPORTS (each beaver\'s most recent self-assessment — quote verbatim where useful):\n' +
-        reports.map(r => `- ${r.agent}: ${r.summary}${r.blockers ? ` BLOCKER: ${r.blockers}` : ''}`).join('\n');
-    }
-  } catch { /* non-critical */ }
-
-  // ── Pre-compute interpretation flags so the LLM can't misread raw numbers ──
-  // (Yesterday's brief said "VP credits exhausted (0 of 25)" — wrong, 0 USED.
-  //  Said "Research Beaver flatlined" — wrong, gated by 735-lead pool.)
-  const vpRemaining = Math.max(0, kpis.vp.credits_budget - kpis.vp.credits_used_today);
-  const vpStatus = kpis.vp.credits_used_today === 0
-    ? `unused today (${kpis.vp.credits_budget} credits available)`
-    : vpRemaining === 0
-      ? `EXHAUSTED — all ${kpis.vp.credits_budget} credits spent today, blocks new enrichment`
-      : vpRemaining < 5
-        ? `low — ${vpRemaining} of ${kpis.vp.credits_budget} remaining today`
-        : `${vpRemaining} of ${kpis.vp.credits_budget} remaining today (used ${kpis.vp.credits_used_today})`;
-
-  // Research Beaver context: sourced 0 != "flatlined" if pool is big.
-  // Cold research is gated when pool >= 5 (server/routes/autonomous.js:1325).
-  const researchStatus = kpis.research_beaver.pool_size >= 100
-    ? `idle by design — pool has ${kpis.research_beaver.pool_size} leads, sourcing gated until pool drains`
-    : kpis.research_beaver.sourced_24h >= kpis.research_beaver.sourced_floor
-      ? `on target (sourced ${kpis.research_beaver.sourced_24h} of ${kpis.research_beaver.sourced_floor} floor)`
-      : kpis.research_beaver.sourced_24h === 0
-        ? `DORMANT — 0 sourced in 24h despite pool low (${kpis.research_beaver.pool_size} leads). Investigate.`
-        : `BELOW FLOOR — sourced ${kpis.research_beaver.sourced_24h} of ${kpis.research_beaver.sourced_floor}`;
-
-  // Sales status: "0 sent" is fine if drafts_24h is high (waiting on approval).
-  const salesStatus = kpis.sales_beaver.drafts_24h === 0 && kpis.sales_beaver.sent_24h === 0
-    ? `idle (0 drafts, 0 sent in 24h)`
-    : kpis.sales_beaver.sent_24h === 0
-      ? `${kpis.sales_beaver.drafts_24h} drafts written, 0 sent — pipeline waiting on approval/send`
-      : `${kpis.sales_beaver.drafts_24h} drafts, ${kpis.sales_beaver.sent_24h} sent, ${kpis.sales_beaver.replies_24h} replies (${kpis.sales_beaver.first_attempt_pass_rate_pct ?? '—'}% first-pass)`;
-
-  // Enforcer status. A low approve rate is NOT automatically "calibration".
-  // If rejections are hard-gate failures (fabrication, sign-off, banned phrase)
-  // the copy is bad and lowering the threshold will not help — read the reasons.
-  const topReject = kpis.enforcer.top_reject_reasons?.[0]?.reason || '';
-  const hardGateReject = /hard gate|fabricat|sign-?off|banned|wrong company|not (present|in).{0,24}lead context|no verifiable/i.test(topReject);
-  const enforcerStatus = kpis.enforcer.reviews_24h === 0
-    ? `idle (no reviews in 24h)`
-    : kpis.enforcer.approve_rate_pct < 30
-      ? (hardGateReject
-          ? `DRAFT QUALITY FAILURE: ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews. Rejections are hard-gate failures (top: "${topReject}"). This is a COPY problem, NOT Enforcer calibration. Lowering the auto-approve threshold will NOT help — fix the Sales Beaver draft.`
-          : `OVER-RESTRICTIVE: ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews. Rejections cluster just below threshold (top: "${topReject || 'mixed'}") — likely a calibration issue.`)
-      : kpis.enforcer.approve_rate_pct < 60
-        ? `tight: ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews. Top reject: ${topReject || 'mixed'}.`
-        : `healthy: ${kpis.enforcer.approve_rate_pct}% approve on ${kpis.enforcer.reviews_24h} reviews.`;
-
-  const overallHealth = (kpis.dam_health.db_ok && kpis.dam_health.encryption_key_ok && kpis.dam_health.stale_jobs.length === 0)
-    ? 'green'
-    : kpis.dam_health.stale_jobs.length > 0 || !kpis.dam_health.gmail_oauth_set
-      ? 'amber'
-      : 'degraded';
-
-  // ── Phase 1 (2026-05-08): pipeline_traces funnel — replaces metadata-mining
-  // workaround. Aggregates today's kickoffs (KL timezone) across stages and
-  // surfaces silent-drop count + Enforcer approve rate as anomaly flags.
-  // The 2026-05-08 17:37 MYT incident (95% silent drop, 56 leads vanished
-  // uninstrumented) is exactly the shape this section now exposes.
-  let funnelStatus = 'no kickoffs traced today (Phase 1 instrumentation deploys with this brief)';
-  let funnelDetailLine = '';
-  let funnelAnomalyFlag = '';
-  try {
-    const todayFunnel = await pipelineTrace.getTodayFunnel(clientId);
-    if (todayFunnel.length > 0) {
-      const stageCounts = {};
-      const kickoffs = new Set();
-      for (const row of todayFunnel) {
-        stageCounts[row.stage] = (stageCounts[row.stage] || 0) + Number(row.cnt);
-        if (row.kickoff_id) kickoffs.add(row.kickoff_id);
-      }
-      const enrolled = stageCounts.enrolled || 0;
-      const icpRej = stageCounts.icp_rejected || 0;
-      const drafted = stageCounts.drafted || 0;
-      const draftFailed = stageCounts.draft_failed || 0;
-      const reviewed = stageCounts.reviewed || 0;
-      const approved = stageCounts.approved || 0;
-      const rejected = stageCounts.rejected || 0;
-      const sent = stageCounts.sent || 0;
-      const replied = stageCounts.replied || 0;
-      // Silent drop = leads enrolled but neither drafted, draft_failed, nor icp_rejected.
-      // After Phase 1 full instrumentation, this should be ~0. If non-zero, an exit
-      // path is uninstrumented or a new bug emerged.
-      const silentDrop = Math.max(0, enrolled - drafted - draftFailed - icpRej);
-      const draftRate = enrolled > 0 ? Math.round(((drafted + draftFailed) / Math.max(1, enrolled - icpRej)) * 100) : null;
-      const approveRate = reviewed > 0 ? Math.round((approved / reviewed) * 100) : null;
-      const sendRate = approved > 0 ? Math.round((sent / approved) * 100) : null;
-      const replyRate = sent > 0 ? Math.round((replied / sent) * 100) : null;
-
-      funnelStatus = `${kickoffs.size} kickoff(s) today: ${enrolled} enrolled → ${icpRej} icp-rej → ${drafted} drafted (${draftFailed} failed) → ${reviewed} reviewed → ${approved} approved → ${sent} sent → ${replied} replied`;
-
-      funnelDetailLine = `enrolled ${enrolled} · icp-rej ${icpRej} · drafted ${drafted} (${draftRate ?? '—'}% post-icp) · draft-failed ${draftFailed} · reviewed ${reviewed} · approved ${approved} (${approveRate ?? '—'}% of reviewed) · sent ${sent} (${sendRate ?? '—'}% of approved) · replied ${replied} (${replyRate ?? '—'}% of sent)`;
-
-      const anomalies = [];
-      if (silentDrop > Math.max(2, enrolled * 0.05)) {
-        anomalies.push(`SILENT-DROP ${silentDrop} of ${enrolled} (${Math.round((silentDrop / enrolled) * 100)}%) — uninstrumented exit path`);
-      }
-      if (approveRate !== null && approveRate < 30 && reviewed >= 5) {
-        anomalies.push(`Enforcer approve ${approveRate}% on ${reviewed} reviews — ${hardGateReject ? 'hard-gate draft-quality failures (fix the copy, not the threshold)' : 'calibration drift'}`);
-      }
-      if (sendRate !== null && sendRate < 50 && approved >= 5) {
-        anomalies.push(`send rate ${sendRate}% — approved-not-sent backlog growing`);
-      }
-      if (anomalies.length > 0) {
-        funnelAnomalyFlag = ' ⚠️ ' + anomalies.join('; ');
-      }
-    }
-  } catch (err) {
-    console.warn('[captain] funnel pull failed:', err.message);
-  }
-
-  // ── Phase 5.5: Monday Plan of the Week injection ──────────────────────
-  // On Monday (UTC day 1), load Sunday's weekly plan from agent_memory and
-  // prepend it to the brief. Gives MJ the week framing before the daily ops.
-  let weeklyPlanSection = '';
-  try {
-    if (new Date().getUTCDay() === 1) { // Monday
-      const lastSunday = new Date();
-      lastSunday.setUTCDate(lastSunday.getUTCDate() - 1);
-      const day = lastSunday.getUTCDay();
-      const diff = (day + 6) % 7;
-      lastSunday.setUTCDate(lastSunday.getUTCDate() - diff);
-      const weekStart = lastSunday.toISOString().slice(0, 10);
-
-      const { rows: planRows } = await pool.query(
-        `SELECT content FROM agent_memory
-         WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2 LIMIT 1`,
-        [clientId, `weekly_plan_${weekStart}`]
-      );
-      if (planRows[0]?.content?.summary) {
-        weeklyPlanSection = `\n\n${planRows[0].content.summary}`;
-      }
-    }
-  } catch { /* non-critical */ }
-
-  const userMessage = `Compose this morning's brief for ${kpis.tenant.name}. Three sections, plain text + HTML, EXACTLY this format. Lead with overall health verdict in the SYSTEM HEALTH first sentence.${weeklyPlanSection ? '\n\nPREPEND this Plan of the Week BEFORE the SYSTEM HEALTH section (it is Monday):\n' + weeklyPlanSection : ''}
-
-PRE-INTERPRETED STATUS (use these labels — do NOT re-interpret raw numbers below):
-- Overall: ${overallHealth}
-- VP: ${vpStatus}
-- Research Beaver: ${researchStatus}
-- Sales Beaver: ${salesStatus}
-- Enforcer: ${enforcerStatus}
-- Pipeline funnel: ${funnelStatus}${funnelAnomalyFlag}
-
-<b>SYSTEM HEALTH</b>
-DB: ${kpis.dam_health.db_ok ? 'connected' : 'UNREACHABLE'} · Encryption: ${kpis.dam_health.encryption_key_ok ? 'valid' : 'MISSING'}
-API keys: llm ${kpis.dam_health.provider} ${kpis.dam_health.selected_key_set ? 'set' : 'MISSING'}, anthropic ${kpis.dam_health.anthropic_set ? 'set' : 'MISSING'}, openai ${kpis.dam_health.openai_set ? 'set' : 'MISSING'}, brave ${kpis.dam_health.brave_set ? 'set' : 'MISSING'}, vp ${kpis.dam_health.vp_set ? 'set' : 'MISSING'}, gmail-oauth ${kpis.dam_health.gmail_oauth_set ? 'set' : 'MISSING'}
-Stale crons: ${kpis.dam_health.stale_jobs.length === 0 ? 'none — all firing' : kpis.dam_health.stale_jobs.join(', ')}
-LLM spend: $${kpis.cost.llm_spend_today_usd.toFixed(4)} today · $${kpis.cost.llm_spend_mtd_usd.toFixed(2)} mtd / $${kpis.cost.llm_monthly_budget_usd.toFixed(2)} monthly cap${kpis.cost.llm_spend_mtd_usd >= kpis.cost.llm_monthly_budget_usd ? ' — OVER BUDGET' : kpis.cost.llm_spend_mtd_usd >= kpis.cost.llm_monthly_budget_usd * 0.8 ? ' — 80%+ of cap' : ''}${kpis.cost.llm_max_day_usd >= kpis.cost.llm_monthly_budget_usd * 0.2 ? ` · worst day $${kpis.cost.llm_max_day_usd.toFixed(2)} (SPIKE)` : ''}
-VP: ${vpStatus}
-
-<b>SITUATION REPORT</b> (last 24h)
-Research Beaver: ${researchStatus}. Avg quality ${kpis.research_beaver.scored_avg ?? '—'}, top ${kpis.research_beaver.top_quality_score ?? '—'}, ${kpis.research_beaver.strategies_used} strategies in use.
-Sales Beaver: ${salesStatus}.
-Enforcer: ${enforcerStatus}
-Pipeline: ${kpis.pipeline.pending_approvals} pending MJ, ${kpis.pipeline.approved_unsent_linkedin} LinkedIn unsent, ${kpis.pipeline.approved_unsent_email} email unsent, ${kpis.pipeline.bounces_7d} bounces 7d.
-Funnel today (pipeline_traces — Phase 1): ${funnelDetailLine || 'no traced kickoffs yet today'}.${funnelAnomalyFlag ? ' Anomaly:' + funnelAnomalyFlag.replace(' ⚠️ ', ' ') : ''}
-Meetings: ${kpis.meetings.this_week} this week, ${kpis.meetings.mtd} mtd, projecting ${kpis.meetings.mtd_pace_projected} by month-end.
-
-<b>ORDERS OF THE DAY</b>
-TASKS — what each beaver works on today, 1-2 lines.
-ACTIONS TAKEN — autonomous calls overnight, 1 line if anything.
-NEEDS YOUR CALL — forced-choice decisions for MJ, numbered. "nothing needs your call today." if none.
-${beaverSelfReports}
-
-<b>CHANNEL MIX</b> (today's progress)
-Email: ${kpis.channel_mix.email.sent}/${kpis.channel_mix.target_email_sent} sent (${kpis.channel_mix.email.drafted} drafted) · Pool email-ready: ${kpis.channel_mix.pool_email_ready}
-LinkedIn: ${kpis.channel_mix.linkedin.sent}/${kpis.channel_mix.target_linkedin_sent} sent (${kpis.channel_mix.linkedin.drafted} drafted) · Pool linkedin-only: ${kpis.channel_mix.pool_linkedin_only}
-
-Write the brief now. Use the PRE-INTERPRETED STATUS labels above; do not re-narrate the raw numbers. Where a beaver self-report is sharp, quote it. NO json wrapper, NO code fences, NO "═══" separators. Single blank line between sections.`;
-
-  let summary;
-  try {
-    const result = await callAgent('captain_orchestrator', userMessage, { clientId });
-    summary = extractBriefText(result);
-  } catch (err) {
-    console.warn('[captain] brief generation failed:', err.message);
-    summary = null;
-  }
-
-  // Fallback: if LLM fails, return a structured plain-text brief so MJ
-  // never gets a silent morning. Better degraded than missing.
-  if (!summary || typeof summary !== 'string' || summary.trim().length < 20) {
-    summary = renderPlainBrief(kpis);
-  }
-
+  const summary = renderPlainBrief(kpis);
   return { summary: sanitizeForTelegram(summary), raw_kpis: kpis };
 }
 
@@ -688,26 +705,66 @@ function sanitizeForTelegram(s) {
  * Mirrors the 3-section structure so MJ's mental model stays consistent.
  */
 function renderPlainBrief(k) {
-  const health = k.dam_health.db_ok && k.dam_health.encryption_key_ok && k.dam_health.stale_jobs.length === 0
+  const dailyKickoff = k.dam_health.cron_health?.daily_kickoff;
+  const marketSensing = k.dam_health.cron_health?.market_sensing;
+  const dailyKickoffProblem = ['disabled', 'skipped', 'stale'].includes(dailyKickoff?.status) || k.business_day.kickoff.state === 'missed' || k.business_day.kickoff.state === 'disabled';
+  const health = k.dam_health.db_ok && k.dam_health.encryption_key_ok && !dailyKickoffProblem && k.dam_health.stale_jobs.length === 0
     ? 'green'
-    : 'degraded';
+    : 'amber';
+  const vpRemaining = Math.max(0, k.vp.credits_budget - k.vp.credits_used_today);
+  const vpLine = k.vp.credits_used_today === 0
+    ? `vp credits untouched, ${k.vp.credits_budget} of ${k.vp.credits_budget} available`
+    : `vp credits ${k.vp.credits_used_today}/${k.vp.credits_budget} used, ${vpRemaining} available`;
+  const spendLine = `spend $${k.cost.llm_spend_today_usd.toFixed(4)} today, $${k.cost.llm_spend_mtd_usd.toFixed(2)} mtd of $${k.cost.llm_monthly_budget_usd.toFixed(2)} cap`;
+  const marketLine = marketSensing?.status === 'disabled'
+    ? `market sensing disabled by spend gate (${marketSensing.lastSkipReason || 'disabled'})`
+    : process.env.MARKET_SENSING_ENABLED !== 'true'
+      ? 'market sensing disabled by spend gate (MARKET_SENSING_ENABLED disabled)'
+    : marketSensing?.status === 'ok'
+      ? `market sensing ${marketSensing.lastMeta?.opportunities ?? 'unknown'} opps from ${marketSensing.lastMeta?.rawResults ?? 'unknown'} raw`
+      : `market sensing ${marketSensing?.status || 'waiting'}`;
+  const kickoffLine = `kickoff ${k.business_day.kickoff.state}: ${k.business_day.kickoff.detail}`;
+  const realQueueLine = `${k.pipeline.pending_approvals} reviewable approvals, ${k.pipeline.linkedin_awaiting_accept} LinkedIn awaiting accept, ${k.pipeline.stale_orphan_approval_rows} stale orphan approval rows`;
+  const yesterdayTotalSent = k.business_day.yesterday.email_sent + k.business_day.yesterday.linkedin_sent;
+  const yesterdayResolved = k.business_day.yesterday.approvals_approved + k.business_day.yesterday.approvals_rejected;
+  const todaySent = k.business_day.today.email_sent + k.business_day.today.linkedin_sent;
+  const todayDrafted = k.business_day.today.email_drafted + k.business_day.today.linkedin_drafted;
+  const funnel = k.funnel || {};
+  const funnelLine = funnel.kickoffs > 0
+    ? `${funnel.kickoffs} kickoff(s): ${funnel.enrolled} enrolled, ${funnel.icp_rejected} icp rejected, ${funnel.drafted} drafted, ${funnel.reviewed} reviewed, ${funnel.approved} approved, ${funnel.sent} sent, ${funnel.silent_drop} silent drop`
+    : 'no traced kickoff funnel today';
+  const researchLine = k.research_beaver.pool_size >= 100
+    ? `research beaver idle by design, pool ${k.research_beaver.pool_size}, sourcing waits for drain or explicit capacity need`
+    : `research beaver sourced ${k.research_beaver.sourced_24h}/${k.research_beaver.sourced_floor} in 24h, pool ${k.research_beaver.pool_size}`;
+  const enforcerLine = k.enforcer.reviews_24h > 0
+    ? `enforcer reviewed ${k.enforcer.reviews_24h}, approve rate ${k.enforcer.approve_rate_pct ?? 'unknown'}%`
+    : 'enforcer idle, no reviews in 24h';
+  const needsCall = k.pipeline.pending_approvals > 0
+    ? `1. ${k.pipeline.pending_approvals} reviewable approvals waiting in the app. clear those; LinkedIn-awaiting-accept is not counted as review queue.`
+    : 'nothing needs your call right now. approval review queue is 0.';
 
   const lines = [
-    `morning. dam health: ${health}.`,
+    `morning. dam ${health}. ${kickoffLine}.`,
     ``,
     `<b>SYSTEM HEALTH</b>`,
-    `db ${k.dam_health.db_ok ? 'ok' : 'UNREACHABLE'} · enc-key ${k.dam_health.encryption_key_ok ? 'valid' : 'MISSING'} · crons ${k.dam_health.stale_jobs.length === 0 ? 'all firing' : 'STALE: ' + k.dam_health.stale_jobs.join(', ')}`,
-    `spend $${k.cost.llm_spend_today_usd.toFixed(4)} today · $${k.cost.llm_spend_mtd_usd.toFixed(2)}/$${k.cost.llm_monthly_budget_usd.toFixed(2)} mtd${k.cost.llm_spend_mtd_usd >= k.cost.llm_monthly_budget_usd ? ' OVER BUDGET' : k.cost.llm_spend_mtd_usd >= k.cost.llm_monthly_budget_usd * 0.8 ? ' (80%+)' : ''} · vp credits ${k.cost.vp_credits_used_today}/${k.cost.vp_credits_budget_today}`,
+    `db ${k.dam_health.db_ok ? 'ok' : 'UNREACHABLE'}, enc-key ${k.dam_health.encryption_key_ok ? 'valid' : 'MISSING'}, daily kickoff ${dailyKickoff?.status || 'waiting'}`,
+    `${spendLine}${k.cost.llm_spend_mtd_usd >= k.cost.llm_monthly_budget_usd ? ' OVER BUDGET' : k.cost.llm_spend_mtd_usd >= k.cost.llm_monthly_budget_usd * 0.8 ? ' 80%+ cap used' : ''}`,
+    `${vpLine}. ${marketLine}.`,
     ``,
     `<b>SITUATION REPORT</b>`,
-    `research beaver: ${k.research_beaver.sourced_24h}/${k.research_beaver.sourced_floor} sourced ${k.research_beaver.meeting_floor ? '(on target)' : '(BELOW FLOOR)'}, avg quality ${k.research_beaver.scored_avg ?? '—'}, pool ${k.research_beaver.pool_size}`,
-    `sales beaver: ${k.sales_beaver.drafts_24h} drafts, ${k.sales_beaver.first_attempt_pass_rate_pct ?? '—'}% first-pass, ${k.sales_beaver.sent_24h} sent, ${k.sales_beaver.replies_24h} replies`,
-    `enforcer: ${k.enforcer.approve_rate_pct ?? '—'}% approve, top reject: ${k.enforcer.top_reject_reasons[0]?.reason || 'none'}`,
-    `pipeline: ${k.pipeline.pending_approvals} pending you, ${k.pipeline.approved_unsent_linkedin} linkedin unsent, ${k.pipeline.approved_unsent_email} email unsent, ${k.pipeline.bounces_7d} bounces 7d`,
-    `meetings: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd, projecting ${k.meetings.mtd_pace_projected} by month-end`,
+    `yesterday: ${yesterdayTotalSent} sent, ${k.business_day.yesterday.email_sent} email and ${k.business_day.yesterday.linkedin_sent} LinkedIn. approvals resolved: ${yesterdayResolved}, ${k.business_day.yesterday.approvals_approved} approved and ${k.business_day.yesterday.approvals_rejected} rejected.`,
+    `today: ${todayDrafted} drafted, ${todaySent} sent, ${k.business_day.today.email_sent} email and ${k.business_day.today.linkedin_sent} LinkedIn.`,
+    `${researchLine}. avg quality ${k.research_beaver.scored_avg ?? 'unknown'}, top ${k.research_beaver.top_quality_score ?? 'unknown'}.`,
+    `sales beaver rolling 24h: ${k.sales_beaver.drafts_24h} drafts, ${k.sales_beaver.sent_24h} sent, ${k.sales_beaver.replies_24h} replies, first-pass ${k.sales_beaver.first_attempt_pass_rate_pct ?? 'unknown'}%.`,
+    `${enforcerLine}.`,
+    `pipeline: ${realQueueLine}. email approved unsent ${k.pipeline.approved_unsent_email}, bounces 7d ${k.pipeline.bounces_7d}.`,
+    `funnel: ${funnelLine}.`,
+    `meetings outcome: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd. tracked as outcome, not fixed daily target.`,
     ``,
     `<b>ORDERS OF THE DAY</b>`,
-    `(captain's llm offline — fallback brief. plan: clear ${k.pipeline.pending_approvals} pending approvals, hit ${k.research_beaver.sourced_floor} quality leads, watch bounces.)`,
+    `TASKS: verify daily kickoff is armed, drain real approval queue only, keep research signal-first and gated by pool/capacity truth.`,
+    `ACTIONS TAKEN: ${kickoffLine}; ${marketLine}.`,
+    `NEEDS YOUR CALL: ${needsCall}`,
   ];
   return lines.join('\n');
 }
@@ -756,71 +813,7 @@ async function generateEodBrief(clientId) {
   const kpis = await collectTeamKPIs(clientId);
   const beaverReports = await beaverState.readAllBeaversKPIsForToday(clientId).catch(() => ({}));
   const todaysActions = await beaverState.readRecentCaptainActions(clientId, 12).catch(() => []);
-
-  // Wave 2 (2026-05-03): pull each beaver's most recent introspection self-report
-  // + Captain's directive landing report (did the directives Captain wrote actually
-  // move the metric?) + 14d cost-per-outcome rollup. Feeds the full feedback loop.
-  let beaverSelfReports = '';
-  let directiveLanding = '';
-  let costRollup = '';
-  try {
-    const introspection = require('./introspection');
-    const reports = await introspection.latestPerBeaver(clientId);
-    if (reports.length > 0) {
-      beaverSelfReports = '\n\nINTROSPECTION (each beaver\'s latest self-report):\n' +
-        reports.map(r => `- ${r.agent}: ${r.summary}${r.blockers ? ` BLOCKER: ${r.blockers}` : ''}`).join('\n');
-    }
-    const landing = await introspection.directiveLandingReport(clientId, 24);
-    const consumedRows = landing.filter(d => d.directive_status === 'consumed');
-    const expiredRows  = landing.filter(d => d.directive_status === 'expired');
-    if (landing.length > 0) {
-      directiveLanding = `\n\nDIRECTIVE LANDING (24h): ${landing.length} written, ${consumedRows.length} consumed, ${expiredRows.length} expired unread.`;
-    }
-    const outcomeCost = require('./outcomeCost');
-    const rollup = await outcomeCost.costPerOutcomeByChannel(clientId, 14);
-    const summaryLine = outcomeCost.formatRollupForBrief(rollup);
-    if (summaryLine) costRollup = `\n\nCOST PER OUTCOME (the ROI metric): ${summaryLine}`;
-  } catch { /* non-critical */ }
-
-  const userMessage = `Compose today's END-OF-DAY brief for ${kpis.tenant.name}. Same conversational-tight tone as morning. Three sections: SYSTEM HEALTH, TODAY'S RESULTS, TOMORROW'S SETUP.
-
-═══ SYSTEM HEALTH (close of day) ═══
-DB ${kpis.dam_health.db_ok ? 'ok' : 'UNREACHABLE'} · stale crons: ${kpis.dam_health.stale_jobs.join(', ') || 'none'}
-spend today $${kpis.cost.llm_spend_today_usd.toFixed(4)} · mtd $${kpis.cost.llm_spend_mtd_usd.toFixed(2)}
-vp credits today ${kpis.cost.vp_credits_used_today} of ${kpis.cost.vp_credits_budget_today}
-
-═══ TODAY'S RESULTS ═══
-research beaver self-report: ${JSON.stringify(beaverReports.research_beaver || 'no report submitted').slice(0, 200)}
-sales beaver self-report: ${JSON.stringify(beaverReports.sales_beaver || 'no report submitted').slice(0, 200)}
-enforcer self-report: ${JSON.stringify(beaverReports.ranger || 'no report submitted').slice(0, 200)}
-
-aggregated 24h: sourced ${kpis.research_beaver.sourced_24h}, drafts ${kpis.sales_beaver.drafts_24h}, sent ${kpis.sales_beaver.sent_24h}, replies ${kpis.sales_beaver.replies_24h}
-channel mix today: email ${kpis.channel_mix.email.sent}/${kpis.channel_mix.target_email_sent} sent, linkedin ${kpis.channel_mix.linkedin.sent}/${kpis.channel_mix.target_linkedin_sent} sent
-meetings: ${kpis.meetings.this_week} this week, ${kpis.meetings.mtd} mtd, projecting ${kpis.meetings.mtd_pace_projected} by month-end
-
-actions you took today: ${todaysActions.length === 0 ? 'none' : todaysActions.map(a => a.action).join(', ')}${beaverSelfReports}${directiveLanding}${costRollup}
-
-═══ TOMORROW'S SETUP ═══
-Surface what each beaver is working on tomorrow + any decisions queued for MJ overnight. If channel mix missed targets, name what needs to change tomorrow (research focus, send pacing, your approval cadence).
-
-Write the brief now. Conversational-tight, lowercase opener, no fluff.`;
-
-  let summary;
-  try {
-    const result = await callAgent('captain_orchestrator', userMessage, { clientId });
-    // Use the same unwrapper as the morning brief — handles ```json code
-    // fences and nested {brief|summary|text} JSON envelopes from Sonnet.
-    // (Bug 2026-05-02: this used to be a raw property fallback chain which
-    //  leaked the entire JSON envelope to Telegram when the model wrapped
-    //  output in markdown code fences.)
-    summary = extractBriefText(result);
-  } catch (err) {
-    console.warn('[captain] EOD brief generation failed:', err.message);
-  }
-
-  if (!summary || typeof summary !== 'string' || summary.trim().length < 20) {
-    summary = renderPlainEodBrief(kpis, beaverReports, todaysActions);
-  }
+  const summary = renderPlainEodBrief(kpis, todaysActions);
 
   return {
     summary: sanitizeForTelegram(summary),
@@ -830,21 +823,78 @@ Write the brief now. Conversational-tight, lowercase opener, no fluff.`;
   };
 }
 
-function renderPlainEodBrief(k, reports, actions) {
+function renderPlainEodBrief(k, actions) {
+  const dailyKickoff = k.dam_health.cron_health?.daily_kickoff;
+  const marketSensing = k.dam_health.cron_health?.market_sensing;
+  const dailyKickoffProblem = ['disabled', 'skipped', 'stale'].includes(dailyKickoff?.status) || k.business_day.kickoff.state === 'missed' || k.business_day.kickoff.state === 'disabled';
+  const health = k.dam_health.db_ok && k.dam_health.encryption_key_ok && !dailyKickoffProblem && k.dam_health.stale_jobs.length === 0
+    ? 'green'
+    : 'amber';
+  const kickoffLine = `kickoff ${k.business_day.kickoff.state}: ${k.business_day.kickoff.detail}`;
+  const marketLine = marketSensing?.status === 'disabled'
+    ? `market sensing disabled by spend gate (${marketSensing.lastSkipReason || 'disabled'})`
+    : process.env.MARKET_SENSING_ENABLED !== 'true'
+      ? 'market sensing disabled by spend gate (MARKET_SENSING_ENABLED disabled)'
+      : marketSensing?.status === 'ok'
+        ? `market sensing ${marketSensing.lastMeta?.opportunities ?? 'unknown'} opps from ${marketSensing.lastMeta?.rawResults ?? 'unknown'} raw`
+        : `market sensing ${marketSensing?.status || 'waiting'}`;
+  const todaySent = k.business_day.today.email_sent + k.business_day.today.linkedin_sent;
+  const todayDrafted = k.business_day.today.email_drafted + k.business_day.today.linkedin_drafted;
+  const funnel = k.funnel || {};
+  const funnelLine = funnel.kickoffs > 0
+    ? `${funnel.kickoffs} kickoff(s): ${funnel.enrolled} enrolled, ${funnel.icp_rejected} icp rejected, ${funnel.drafted} drafted, ${funnel.reviewed} reviewed, ${funnel.approved} approved, ${funnel.sent} sent, ${funnel.silent_drop} silent drop`
+    : 'no traced kickoff funnel today';
+  const researchLine = k.research_beaver.pool_size >= 100
+    ? `research beaver idle by design, pool ${k.research_beaver.pool_size}, sourcing waits for drain or explicit capacity need`
+    : `research beaver sourced ${k.research_beaver.sourced_24h}/${k.research_beaver.sourced_floor} in 24h, pool ${k.research_beaver.pool_size}`;
+  const enforcerLine = k.enforcer.reviews_24h > 0
+    ? `enforcer reviewed ${k.enforcer.reviews_24h}, approve rate ${k.enforcer.approve_rate_pct ?? 'unknown'}%`
+    : 'enforcer idle, no reviews in 24h';
+  const actionLine = actions?.length
+    ? actions.slice(0, 6).map(a => a.action).join(', ')
+    : 'none recorded';
+  const tomorrow = [];
+  if (['disabled', 'missed'].includes(k.business_day.kickoff.state)) {
+    tomorrow.push('fix daily kickoff before relying on autonomy; use single-tenant kickoff only, no /kickoff-all and no force=1');
+  } else if (['waiting', 'not_started'].includes(k.business_day.kickoff.state)) {
+    tomorrow.push('watch for daily kickoff memory/log/trace evidence before calling the morning run healthy');
+  }
+  if (k.pipeline.pending_approvals > 0) {
+    tomorrow.push(`clear ${k.pipeline.pending_approvals} reviewable approvals; LinkedIn-awaiting-accept is not approval work`);
+  }
+  if (k.pipeline.stale_orphan_approval_rows > 0) {
+    tomorrow.push(`clean or quarantine ${k.pipeline.stale_orphan_approval_rows} stale orphan approval rows so reports stay honest`);
+  }
+  if (k.pipeline.approved_unsent_email > 0) {
+    tomorrow.push(`drain ${k.pipeline.approved_unsent_email} approved unsent email rows through the send queue`);
+  }
+  if (k.research_beaver.pool_size < 30) {
+    tomorrow.push('run signal-first sourcing only after spend and pool-capacity gates are green');
+  }
+  if (tomorrow.length === 0) {
+    tomorrow.push('continue scheduled autonomy and verify research, draft, approval, send, reply, and meeting evidence by stage');
+  }
+
   const lines = [
-    `eod brief — ${k.tenant.name}.`,
+    `eod brief — ${k.tenant.name}. dam ${health}. ${kickoffLine}.`,
     ``,
     `═══ system health ═══`,
-    `db ${k.dam_health.db_ok ? 'ok' : 'UNREACHABLE'} · stale crons: ${k.dam_health.stale_jobs.join(', ') || 'none'}`,
-    `spend today $${k.cost.llm_spend_today_usd.toFixed(4)} · mtd $${k.cost.llm_spend_mtd_usd.toFixed(2)}`,
+    `db ${k.dam_health.db_ok ? 'ok' : 'UNREACHABLE'}, enc-key ${k.dam_health.encryption_key_ok ? 'valid' : 'MISSING'}, stale crons: ${k.dam_health.stale_jobs.join(', ') || 'none'}`,
+    `spend today $${k.cost.llm_spend_today_usd.toFixed(4)}, mtd $${k.cost.llm_spend_mtd_usd.toFixed(2)} of $${k.cost.llm_monthly_budget_usd.toFixed(2)} cap`,
+    `vp credits ${k.cost.vp_credits_used_today}/${k.cost.vp_credits_budget_today} used today. ${marketLine}.`,
     ``,
     `═══ today's results ═══`,
-    `sourced ${k.research_beaver.sourced_24h}/${k.research_beaver.sourced_floor}, drafts ${k.sales_beaver.drafts_24h}, sent ${k.sales_beaver.sent_24h}, replies ${k.sales_beaver.replies_24h}`,
-    `meetings: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd, projecting ${k.meetings.mtd_pace_projected} by month-end`,
-    `captain actions today: ${actions?.length || 0}`,
+    `business day ${k.business_day.today_kl}: ${todayDrafted} drafted, ${todaySent} sent, ${k.business_day.today.email_sent} email and ${k.business_day.today.linkedin_sent} LinkedIn.`,
+    `${researchLine}. avg quality ${k.research_beaver.scored_avg ?? 'unknown'}, top ${k.research_beaver.top_quality_score ?? 'unknown'}.`,
+    `sales beaver rolling 24h: ${k.sales_beaver.drafts_24h} drafts, ${k.sales_beaver.sent_24h} sent, ${k.sales_beaver.replies_24h} replies, first-pass ${k.sales_beaver.first_attempt_pass_rate_pct ?? 'unknown'}%.`,
+    `${enforcerLine}.`,
+    `pipeline: ${k.pipeline.pending_approvals} reviewable approvals, ${k.pipeline.linkedin_awaiting_accept} LinkedIn awaiting accept, ${k.pipeline.stale_orphan_approval_rows} stale orphan approval rows, ${k.pipeline.approved_unsent_email} approved unsent email.`,
+    `funnel: ${funnelLine}.`,
+    `meetings outcome: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd. tracked as outcome, not fixed daily target.`,
+    `captain actions today: ${actionLine}`,
     ``,
     `═══ tomorrow's setup ═══`,
-    `(captain's llm offline — tomorrow plan in raw kpis)`,
+    tomorrow.map((line, i) => `${i + 1}. ${line}.`).join('\n'),
   ];
   return lines.join('\n');
 }

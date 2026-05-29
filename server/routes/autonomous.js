@@ -479,16 +479,27 @@ router.post('/kickoff', requireInternalKey, async (req, res) => {
 });
 
 /* ─── POST /api/autonomous/kickoff-all ───────────────────── */
-// 1-hour dedupe gate: rejects if any tenant has already kicked off in the
-// last 60 minutes. Prevents the failure mode where multiple manual triggers
-// (GitHub Actions workflow_dispatch, curl, etc.) burn through Brave/LLM
-// budget by fanning out repeated kickoffs across all tenants.
-//
-// Override with ?force=1 (or { force: true } in body) for legitimate
-// out-of-window runs (e.g. validating a fresh deploy).
+// Disabled by default. Daily autonomy uses the scheduler path, and validation
+// must use single-tenant /kickoff so one bad trigger cannot fan out spend.
+// Re-enable only for a deliberate multi-tenant maintenance window.
 
 router.post('/kickoff-all', requireInternalKey, async (req, res) => {
   const force = req.query.force === '1' || req.query.force === 'true' || req.body?.force === true;
+  if (process.env.KICKOFF_ALL_ENABLED !== 'true') {
+    return res.status(403).json({
+      error: 'kickoff-all is disabled',
+      code: 'KICKOFF_ALL_DISABLED',
+      hint: 'Use POST /api/autonomous/kickoff with one client_id.',
+    });
+  }
+
+  if (force && process.env.KICKOFF_FORCE_OVERRIDE_ENABLED !== 'true') {
+    return res.status(403).json({
+      error: 'kickoff force override is disabled',
+      code: 'KICKOFF_FORCE_DISABLED',
+      hint: 'Wait for the dedupe window or use one approved single-tenant kickoff.',
+    });
+  }
 
   if (!force) {
     const { rows: recent } = await pool.query(
@@ -507,7 +518,7 @@ router.post('/kickoff-all', requireInternalKey, async (req, res) => {
         last_at: lastAt,
         minutes_ago: minsAgo,
         tenants_affected: parseInt(recent[0].tenants, 10) || 0,
-        hint: 'Wait until the run completes, or pass ?force=1 to override.',
+        hint: 'Wait until the run completes or use one approved single-tenant kickoff.',
       });
     }
   }
@@ -2299,7 +2310,14 @@ router.get('/hourly-stats', requireInternalKey, async (req, res) => {
 
 router.get('/system-health', requireInternalKey, async (req, res) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const { rows: [clock] } = await pool.query(
+      `SELECT
+         (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date::text AS date_kl,
+         ((EXTRACT(HOUR FROM NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::int * 60)
+           + EXTRACT(MINUTE FROM NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::int) AS kl_minutes_now`
+    );
+    const today = clock.date_kl;
+    const klMinutesNow = Number(clock.kl_minutes_now) || 0;
     const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
 
     const { rows: clientRows } = await pool.query(
@@ -2310,12 +2328,32 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
 
     const tenants = [];
     for (const c of clientRows) {
-      const [kickoffLog, kpi, msgs, queue, approvedUnsent, leadPool, researchLog, integrations] = await Promise.all([
+      const [kickoffEvidence, kpi, msgs, queue, approvedUnsent, approvalQueue, leadPool, researchLog, integrations] = await Promise.all([
         pool.query(
-          `SELECT created_at FROM logs
-           WHERE client_id = $1 AND agent = 'director' AND action = 'autonomous_kickoff'
-             AND created_at::date = CURRENT_DATE
-           ORDER BY created_at DESC LIMIT 1`,
+          `WITH bounds AS (
+             SELECT
+               (date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') AS start_at,
+               ((date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') + INTERVAL '1 day') AS end_at,
+               (NOW() AT TIME ZONE 'UTC')::date AS utc_today
+           )
+           SELECT
+             (SELECT MAX(created_at)
+                FROM logs l, bounds b
+               WHERE l.client_id = $1
+                 AND l.agent = 'director'
+                 AND l.action = 'autonomous_kickoff'
+                 AND l.created_at >= b.start_at AND l.created_at < b.end_at) AS last_log_at,
+             (SELECT COUNT(*)::int
+                FROM pipeline_traces pt, bounds b
+               WHERE pt.client_id = $1
+                 AND pt.created_at >= b.start_at AND pt.created_at < b.end_at) AS trace_count,
+             EXISTS (
+               SELECT 1
+                 FROM agent_memory am, bounds b
+                WHERE am.client_id = $1
+                  AND am.agent = 'captain'
+                  AND am.key = 'daily_kickoff_' || b.utc_today::text
+             ) AS memory_written`,
           [c.id]
         ),
         pool.query(
@@ -2324,12 +2362,17 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
           [c.id, today]
         ),
         pool.query(
-          `SELECT
-             COUNT(*) FILTER (WHERE status = 'sent' AND DATE(COALESCE(sent_at, created_at)) = CURRENT_DATE)::int AS sent_today,
-             COUNT(*) FILTER (WHERE status = 'pending_approval' AND created_at::date = CURRENT_DATE)::int AS pending_today,
-             COUNT(*) FILTER (WHERE status = 'ranger_rejected' AND created_at::date = CURRENT_DATE)::int AS rejected_today,
+          `WITH bounds AS (
+             SELECT
+               (date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') AS start_at,
+               ((date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') + INTERVAL '1 day') AS end_at
+           )
+           SELECT
+             COUNT(*) FILTER (WHERE status = 'sent' AND COALESCE(sent_at, created_at) >= (SELECT start_at FROM bounds) AND COALESCE(sent_at, created_at) < (SELECT end_at FROM bounds))::int AS sent_today,
+             COUNT(*) FILTER (WHERE status = 'pending_approval' AND created_at >= (SELECT start_at FROM bounds) AND created_at < (SELECT end_at FROM bounds))::int AS pending_today,
+             COUNT(*) FILTER (WHERE status = 'ranger_rejected' AND created_at >= (SELECT start_at FROM bounds) AND created_at < (SELECT end_at FROM bounds))::int AS rejected_today,
              COUNT(*) FILTER (WHERE status = 'approved' AND sent_at IS NULL)::int AS approved_unsent_total
-           FROM messages WHERE client_id = $1`,
+            FROM messages WHERE client_id = $1`,
           [c.id]
         ),
         pool.query(
@@ -2344,6 +2387,19 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
           `SELECT channel, COUNT(*)::int AS n
            FROM messages WHERE client_id = $1 AND status = 'approved' AND sent_at IS NULL
            GROUP BY channel`,
+          [c.id]
+        ),
+        pool.query(
+          `SELECT
+             COUNT(*) FILTER (WHERE COALESCE(a.notes, '') <> 'linkedin_requested' AND m.status = 'pending_approval')::int AS reviewable,
+             COUNT(*) FILTER (WHERE a.notes = 'linkedin_requested' AND m.status = 'linkedin_requested')::int AS linkedin_awaiting_accept,
+             COUNT(*) FILTER (WHERE
+               (a.notes = 'linkedin_requested' AND m.status <> 'linkedin_requested')
+               OR (COALESCE(a.notes, '') <> 'linkedin_requested' AND m.status <> 'pending_approval')
+             )::int AS stale_orphan_rows
+           FROM approvals a
+           JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
+           WHERE a.client_id = $1 AND a.status IN ('pending', 'pending_approval')`,
           [c.id]
         ),
         pool.query(
@@ -2376,17 +2432,33 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
       for (const r of approvedUnsent.rows) approvedUnsentByChannel[r.channel] = r.n;
 
       const i = integrations.rows[0];
+      const evidence = kickoffEvidence.rows[0] || {};
+      const kickoffFired = !!(evidence.last_log_at || evidence.memory_written || Number(evidence.trace_count) > 0);
+      const kickoffState = process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'
+        ? 'disabled'
+        : kickoffFired
+          ? 'fired'
+          : klMinutesNow < (9 * 60 + 30)
+            ? 'waiting'
+            : klMinutesNow > (9 * 60 + 40)
+              ? 'missed'
+              : 'window_open';
       tenants.push({
+        client_id: c.id,
         slug: c.slug,
         name: c.name,
         kickoff_today: {
-          fired: kickoffLog.rows.length > 0,
-          at: kickoffLog.rows[0]?.created_at || null,
+          fired: kickoffFired,
+          state: kickoffState,
+          at: evidence.last_log_at || null,
+          memory_written: !!evidence.memory_written,
+          trace_count: Number(evidence.trace_count) || 0,
         },
         kpi: kpi.rows[0] || null,
         messages: msgs.rows[0],
         send_queue: queue.rows[0],
         approved_unsent: approvedUnsentByChannel,
+        approval_queue: approvalQueue.rows[0],
         lead_pool_remaining: leadPool.rows[0].n,
         research_beaver: researchLog.rows[0],
         integrations: {
@@ -2401,7 +2473,11 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
     res.json({
       data: {
         date: today,
+        timezone: 'Asia/Kuala_Lumpur',
+        kl_minutes_now: klMinutesNow,
         enabled_slugs: enabledSlugs,
+        captain_daily_kickoff_enabled: process.env.CAPTAIN_DAILY_KICKOFF_ENABLED === 'true',
+        market_sensing_enabled: process.env.MARKET_SENSING_ENABLED === 'true',
         telegram_chat_id_present: !!process.env.TELEGRAM_CHAT_ID,
         telegram_bot_token_present: !!process.env.TELEGRAM_BOT_TOKEN,
         agentmail_configured: !!process.env.AGENTMAIL_API_KEY,

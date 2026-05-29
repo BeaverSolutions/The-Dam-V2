@@ -784,15 +784,21 @@ async function start() {
     // runWithClientContext already imported above for follow-up scheduler
 
     async function runDailyKickoff() {
-      if (process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true') return;
+      if (process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true') {
+        return { disabled: true, reason: 'CAPTAIN_DAILY_KICKOFF_ENABLED disabled' };
+      }
 
       const now = new Date();
       const utcHour = now.getUTCHours();
       const utcMin  = now.getUTCMinutes();
-      if (utcHour !== 1 || utcMin < 30 || utcMin > 40) return;
+      const utcMinutes = utcHour * 60 + utcMin;
+      const windowStart = 1 * 60 + 30;
+      const windowEnd = 1 * 60 + 40;
 
       const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
-      if (enabledSlugs.length === 0) return;
+      if (enabledSlugs.length === 0) {
+        return { disabled: true, reason: 'AUTONOMOUS_ENABLED_CLIENTS empty' };
+      }
 
       const dedupeKey = `daily_kickoff_${now.toISOString().slice(0, 10)}`;
 
@@ -802,6 +808,31 @@ async function start() {
         `SELECT id, slug FROM clients WHERE slug = ANY($1) AND is_active = true AND onboarding_completed = true`,
         [enabledSlugs]
       );
+      if (clients.length === 0) {
+        return { skipped: true, reason: 'no active onboarded clients matched AUTONOMOUS_ENABLED_CLIENTS', enabledSlugs };
+      }
+
+      if (utcMinutes < windowStart) {
+        return { waiting: true, reason: 'before 09:30 MYT daily kickoff window', clients: clients.map(client => client.slug) };
+      }
+
+      if (utcMinutes > windowEnd) {
+        const { rows: firedRows } = await pool.query(
+          `SELECT client_id FROM agent_memory WHERE agent = 'captain' AND key = $1 AND client_id = ANY($2)`,
+          [dedupeKey, clients.map(client => client.id)]
+        );
+        if (firedRows.length >= clients.length) {
+          return { alreadyDone: true, reason: 'daily kickoff dedupe rows present', fired: 0, deduped: firedRows.length, clients: clients.map(client => client.slug) };
+        }
+        return {
+          missed: true,
+          reason: 'daily kickoff window passed without all tenant dedupe rows',
+          fired: 0,
+          deduped: firedRows.length,
+          expected: clients.length,
+          clients: clients.map(client => client.slug),
+        };
+      }
 
       // Notification policy (set 2026-05-03): user only gets Morning brief, EOD
       // brief, and Captain-decided impromptu (escalateToMJ via stuck-state monitor).
@@ -813,12 +844,16 @@ async function start() {
       // before tenant B fired left B's row present, and B silently missed its
       // kickoff for the day. Each tenant now checks + marks its own row, and the
       // mark happens BEFORE the kickoff so a crash can't cause a double-fire.
+      const result = { fired: 0, deduped: 0, clients: clients.map(client => client.slug) };
       for (const client of clients) {
         const { rows: already } = await pool.query(
           `SELECT 1 FROM agent_memory WHERE client_id = $1 AND agent = 'captain' AND key = $2 LIMIT 1`,
           [client.id, dedupeKey]
         );
-        if (already.length > 0) continue;
+        if (already.length > 0) {
+          result.deduped++;
+          continue;
+        }
 
         await pool.query(
           `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
@@ -833,7 +868,11 @@ async function start() {
             logger.error({ msg: `[daily-kickoff] Failed for ${client.slug}`, err: err.message });
           })
         );
+        result.fired++;
       }
+      return result.fired > 0
+        ? { fired: true, ...result }
+        : { alreadyDone: true, reason: 'all clients already had daily kickoff dedupe rows', ...result };
     }
 
     // ── Captain EOD brief (19:20 MYT = 11:20 UTC) ────────────────────────────
@@ -1093,30 +1132,47 @@ async function start() {
     // (Haiku + ~21 Brave queries), high-leverage (feeds Research Beaver
     // and Captain's brief). Self-guards on time + dedupes via agent_memory.
     async function runMarketSensingCron() {
+      if (process.env.MARKET_SENSING_ENABLED !== 'true') {
+        return { disabled: true, reason: 'MARKET_SENSING_ENABLED disabled' };
+      }
       const now = new Date();
       const utcHour = now.getUTCHours();
       const utcMin  = now.getUTCMinutes();
-      if (utcHour !== 0 || utcMin < 30 || utcMin > 40) return; // 00:30-00:40 UTC = 08:30-08:40 MYT
-
+      const utcMinutes = utcHour * 60 + utcMin;
+      const windowStart = 0 * 60 + 30;
+      const windowEnd = 0 * 60 + 40;
       const todayKey = `market_signals_${now.toISOString().slice(0, 10)}`;
       const { rows } = await pool.query(
         `SELECT 1 FROM agent_memory WHERE agent = 'market_sensor' AND key = $1 LIMIT 1`,
         [todayKey]
       );
-      if (rows.length > 0) return; // already ran today
+      if (rows.length > 0) {
+        return { alreadyDone: true, reason: 'already ran today' };
+      }
+      if (utcMinutes < windowStart) {
+        return { waiting: true, reason: 'before 08:30 MYT market-sensing window' };
+      }
+      if (utcMinutes > windowEnd) {
+        return { missed: true, reason: 'market-sensing window passed without run' };
+      } // 00:30-00:40 UTC = 08:30-08:40 MYT
 
       const { rows: clients } = await pool.query(
         `SELECT id, slug FROM clients WHERE is_active = true AND onboarding_completed = true`
       );
       const { runMarketSensing } = require('./services/marketSensing');
+      const result = { fired: 0, opportunities: 0, rawResults: 0, clients: clients.map(client => client.slug) };
       for (const client of clients) {
         try {
-          const result = await runMarketSensing(client.id);
-          logger.info({ msg: `[market-sensing] ${client.slug}: ${result.opportunities.length} opps from ${result.raw_results_count} raw` });
+          const clientResult = await runMarketSensing(client.id);
+          result.fired++;
+          result.opportunities += clientResult.opportunities.length;
+          result.rawResults += clientResult.raw_results_count;
+          logger.info({ msg: `[market-sensing] ${client.slug}: ${clientResult.opportunities.length} opps from ${clientResult.raw_results_count} raw` });
         } catch (err) {
           logger.warn({ msg: `[market-sensing] ${client.slug} failed`, err: err.message });
         }
       }
+      return result.fired > 0 ? { fired: true, ...result } : { skipped: true, reason: 'no active onboarded clients' };
     }
 
     // ── Captain KPI gap kickoff (hourly during working hours) ──────────────
@@ -1379,7 +1435,10 @@ async function start() {
         .then(() => { jobHealth.markRun('daily_reflections'); })
         .catch(err => { logger.warn({ msg: 'Daily reflection poll error', err: err.message }); jobHealth.markError('daily_reflections', err.message); });
       runDailyKickoff()
-        .then(() => { jobHealth.markRun('daily_kickoff'); })
+        .then(result => {
+          if (result?.fired || result?.alreadyDone) jobHealth.markRun('daily_kickoff', result);
+          else if (result?.disabled || result?.missed || result?.skipped) jobHealth.markSkipped('daily_kickoff', result?.reason || 'daily kickoff skipped', result);
+        })
         .catch(err => { logger.warn({ msg: 'Daily kickoff poll error', err: err.message }); jobHealth.markError('daily_kickoff', err.message); });
       runCaptainEodBrief()
         .then(() => { jobHealth.markRun('captain_eod_brief'); })
@@ -1388,7 +1447,10 @@ async function start() {
         .then(() => { jobHealth.markRun('stuck_state_monitor'); })
         .catch(err => { logger.warn({ msg: 'Stuck-state monitor poll error', err: err.message }); jobHealth.markError('stuck_state_monitor', err.message); });
       runMarketSensingCron()
-        .then(() => { jobHealth.markRun('market_sensing'); })
+        .then(result => {
+          if (result?.fired || result?.alreadyDone) jobHealth.markRun('market_sensing', result);
+          else if (result?.disabled || result?.missed || result?.skipped) jobHealth.markSkipped('market_sensing', result?.reason || 'market sensing skipped', result);
+        })
         .catch(err => { logger.warn({ msg: 'Market-sensing poll error', err: err.message }); jobHealth.markError('market_sensing', err.message); });
       runQualityTunerCron()
         .then(() => { jobHealth.markRun('quality_tuner'); })

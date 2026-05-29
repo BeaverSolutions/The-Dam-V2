@@ -152,10 +152,57 @@ describe('P0 stabilization contracts', () => {
 
   it('meetings are outcome tracking, not a fixed KPI target', () => {
     const captain = service('services/captainOrchestrator.js');
+    const config = service('config/agents.js');
     expect(captain).not.toContain('MONTHLY_MEETING_TARGET');
     expect(captain).not.toContain('monthly_target');
     expect(captain).not.toContain('gap_to_target');
-    expect(captain).toContain('Meetings: ${kpis.meetings.this_week} this week');
+    expect(config).not.toContain('target of 10');
+    expect(config).not.toContain('projection misses target');
+    expect(captain).toContain('meetings outcome:');
+  });
+
+  it('Captain morning brief separates approval review queue from LinkedIn awaiting accept', () => {
+    const captain = service('services/captainOrchestrator.js');
+    expect(captain).toContain("COALESCE(a.notes, '') <> 'linkedin_requested'");
+    expect(captain).toContain("m.status = 'pending_approval'");
+    expect(captain).toContain('linkedin_awaiting_accept');
+    expect(captain).toContain('stale_orphan_approval_rows');
+    expect(captain).toContain('yesterday_email_sent');
+    expect(captain).toContain('yesterday_linkedin_sent');
+    expect(captain).toContain('renderPlainBrief(kpis)');
+    expect(captain).not.toContain('quote verbatim where useful');
+  });
+
+  it('Captain EOD brief is deterministic and does not use stale self-report narration', () => {
+    const captain = service('services/captainOrchestrator.js');
+    const eod = fnBody(captain, 'async function generateEodBrief', 'function renderPlainEodBrief');
+    expect(eod).toContain('const summary = renderPlainEodBrief(kpis, todaysActions);');
+    expect(eod).not.toContain("callAgent('captain_orchestrator'");
+    expect(eod).not.toContain("INTROSPECTION (each beaver's latest self-report)");
+    expect(eod).not.toContain('directiveLanding');
+    expect(captain).toContain('meetings outcome:');
+    expect(captain).not.toContain('projecting ${kpis.meetings.mtd_pace_projected}');
+    expect(captain).not.toContain('projecting ${k.meetings.mtd_pace_projected}');
+  });
+
+  it('daily kickoff and market sensing cannot look green when disabled or missed', () => {
+    const index = service('index.js');
+    const jobHealth = service('services/jobHealth.js');
+    const captain = service('services/captainOrchestrator.js');
+
+    expect(index).toContain("CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'");
+    expect(index).toContain("MARKET_SENSING_ENABLED !== 'true'");
+    expect(service('../.env.example')).toContain('MARKET_SENSING_ENABLED=false');
+    expect(service('../.env.production.example')).toContain('MARKET_SENSING_ENABLED=false');
+    expect(index).toContain("jobHealth.markSkipped('daily_kickoff'");
+    expect(index).toContain("jobHealth.markSkipped('market_sensing'");
+    expect(index).toContain('daily kickoff window passed without all tenant dedupe rows');
+    expect(jobHealth).toContain('function markSkipped');
+    expect(jobHealth).toContain("status: skippedStatus");
+    expect(captain).toContain("CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'");
+    expect(captain).toContain('AUTONOMOUS_ENABLED_CLIENTS empty');
+    expect(captain).toContain("k.business_day.kickoff.state === 'disabled'");
+    expect(captain).toContain("MARKET_SENSING_ENABLED !== 'true'");
   });
 
   it('pipeline stage updates do not write the removed next_action column', () => {
@@ -197,5 +244,50 @@ describe('P0 stabilization contracts', () => {
   it('autonomous routes require the internal key at router level', () => {
     const autonomous = service('routes/autonomous.js');
     expect(autonomous).toContain('router.use(requireInternalKey)');
+  });
+
+  it('manual kickoff workflow is single-tenant and never uses kickoff-all or force', () => {
+    const autonomous = service('routes/autonomous.js');
+    const trigger = service('../scripts/trigger-kickoff.mjs');
+    const watchdog = service('../scripts/kickoff-watchdog.mjs');
+    const workflow = service('../.github/workflows/trigger-kickoff.yml');
+
+    expect(autonomous).toContain('client_id: c.id');
+    expect(autonomous).toContain("KICKOFF_ALL_ENABLED !== 'true'");
+    expect(autonomous).toContain("KICKOFF_FORCE_OVERRIDE_ENABLED !== 'true'");
+    expect(autonomous).toContain('KICKOFF_ALL_DISABLED');
+    expect(service('../.env.example')).toContain('KICKOFF_ALL_ENABLED=false');
+    expect(service('../.env.production.example')).toContain('KICKOFF_FORCE_OVERRIDE_ENABLED=false');
+    expect(trigger).toContain('Missing env: CLIENT_SLUG. Refusing all-tenant kickoff.');
+    expect(trigger).toContain('/api/autonomous/kickoff');
+    expect(trigger).not.toContain('/api/autonomous/kickoff-all');
+    expect(trigger).not.toContain('force=1');
+    expect(trigger).not.toContain('force: true');
+    expect(watchdog).toContain('Do not use /kickoff-all or force=1');
+    expect(workflow).toContain('required: true');
+  });
+
+  it('system-health and watchdog use MYT kickoff state and approval queue truth', () => {
+    const autonomous = service('routes/autonomous.js');
+    const healthPack = service('../scripts/daily-health-pack.mjs');
+    const watchdog = service('../scripts/kickoff-watchdog.mjs');
+    const platformHealth = service('../scripts/platform-health.mjs');
+
+    expect(autonomous).toContain("Asia/Kuala_Lumpur");
+    expect(autonomous).toContain('kl_minutes_now');
+    expect(autonomous).toContain('memory_written');
+    expect(autonomous).toContain('trace_count');
+    expect(autonomous).toContain('approval_queue');
+    expect(autonomous).toContain('linkedin_awaiting_accept');
+    expect(healthPack).toContain("state === 'missed'");
+    expect(healthPack).toContain('waiting for 09:30 MYT');
+    expect(healthPack).toContain('Approval queue:');
+    expect(healthPack).toContain('research starved and lead pool thin');
+    expect(watchdog).toContain("['missed', 'disabled'].includes");
+    expect(platformHealth).toContain("api('/api/autonomous/system-health')");
+    expect(platformHealth).not.toContain("api('/api/autonomous/hourly-stats')");
+    expect(platformHealth).not.toContain('Sent: ${sentToday}/50');
+    expect(platformHealth).toContain('LI-awaiting');
+    expect(platformHealth).toContain('pipeline produced no approval-ready output');
   });
 });

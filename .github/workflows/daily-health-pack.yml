@@ -2,8 +2,7 @@ name: Daily Health Pack
 
 on:
   schedule:
-    # 01:05 UTC = 09:05 MYT — fires after the 09:30 MYT kickoff window check.
-    # Note: kickoff fires at 09:30 MYT, so this runs BEFORE — it's a state snapshot at start of MJ's day.
+    # 01:05 UTC = 09:05 MYT. Kickoff fires at 09:30 MYT, so this is a pre-kickoff state snapshot.
     - cron: '5 1 * * *'
   workflow_dispatch: {}
 

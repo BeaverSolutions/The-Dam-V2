@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Daily Health Pack — fires 09:00 MYT (01:00 UTC) via GitHub Actions cron.
+// Daily Health Pack — fires 09:05 MYT (01:05 UTC) via GitHub Actions cron.
 // Pulls /api/autonomous/system-health and posts a Telegram summary so MJ
 // sees pipeline state before opening Claude Code.
 //
@@ -28,6 +28,18 @@ async function tg(text) {
 }
 
 function emoji(ok) { return ok ? '🟢' : '🔴'; }
+
+function kickoffLabel(kickoff) {
+  const state = kickoff?.state || (kickoff?.fired ? 'fired' : 'unknown');
+  if (state === 'fired') {
+    return `✅ fired${kickoff.at ? ` (${new Date(kickoff.at).toLocaleTimeString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit' })} MYT)` : ''}`;
+  }
+  if (state === 'waiting') return '⏳ waiting for 09:30 MYT';
+  if (state === 'window_open') return '⏳ 09:30 window open';
+  if (state === 'disabled') return '🔴 disabled';
+  if (state === 'missed') return '🔴 MISSED';
+  return `⚠ ${state}`;
+}
 
 async function main() {
   const statsRes = await fetch(`${API_URL}/api/autonomous/system-health`, {
@@ -67,10 +79,12 @@ async function main() {
     const rejected = t.messages?.rejected_today ?? 0;
     const gap = (kpi.target ?? 0) - sent;
     lines.push(`Target ${target} · Sent ${sent} · Pending ${pending} · Rejected ${rejected} · Gap ${gap}`);
-    lines.push(`Kickoff: ${t.kickoff_today.fired ? '✅ fired' : '❌ NOT FIRED'}${t.kickoff_today.at ? ` (${new Date(t.kickoff_today.at).toLocaleTimeString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit' })} MYT)` : ''}`);
+    lines.push(`Kickoff: ${kickoffLabel(t.kickoff_today)}`);
     const aue = t.approved_unsent?.email ?? 0;
     const auli = t.approved_unsent?.linkedin ?? 0;
     lines.push(`Approved unsent: ${aue} email · ${auli} linkedin`);
+    const aq = t.approval_queue || {};
+    lines.push(`Approval queue: ${aq.reviewable ?? 0} reviewable · ${aq.linkedin_awaiting_accept ?? 0} LinkedIn awaiting accept · ${aq.stale_orphan_rows ?? 0} stale rows`);
     const sq = t.send_queue || {};
     lines.push(`Send queue: ${sq.sq_pending ?? 0} pending · ${sq.sq_stuck ?? 0} stuck >1h · ${sq.sq_failed ?? 0} failed`);
     const rb = t.research_beaver || {};
@@ -84,10 +98,12 @@ async function main() {
   // Health verdict
   const t0 = data.tenants[0];
   const verdict = [];
-  if (!t0?.kickoff_today.fired) verdict.push('❌ kickoff missed');
-  if ((t0?.research_beaver?.leads_saved_24h ?? 0) < 10) verdict.push('⚠ research starved');
+  if (t0?.kickoff_today?.state === 'missed') verdict.push('❌ kickoff missed');
+  if (t0?.kickoff_today?.state === 'disabled') verdict.push('❌ daily kickoff disabled');
+  if ((t0?.research_beaver?.leads_saved_24h ?? 0) < 10 && (t0?.lead_pool_remaining ?? 0) < 30) verdict.push('⚠ research starved and lead pool thin');
   if ((t0?.send_queue?.sq_stuck ?? 0) > 0) verdict.push('⚠ send queue stuck');
-  if ((t0?.approved_unsent?.linkedin ?? 0) > 5) verdict.push(`⚠ ${t0.approved_unsent.linkedin} LinkedIn awaiting manual send`);
+  if ((t0?.approval_queue?.reviewable ?? 0) > 20) verdict.push(`⚠ ${t0.approval_queue.reviewable} reviewable approvals waiting`);
+  if ((t0?.approval_queue?.stale_orphan_rows ?? 0) > 0) verdict.push(`⚠ ${t0.approval_queue.stale_orphan_rows} stale approval rows need cleanup`);
   if (!data.gmail_oauth_configured && !data.agentmail_configured) verdict.push('❌ NO email provider configured');
 
   if (verdict.length) {

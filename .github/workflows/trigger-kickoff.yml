@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
     inputs:
       client_slug:
-        description: "Client slug (e.g. beaver-solutions). Empty = all enabled clients."
-        required: false
+        description: "Client slug (single tenant only, e.g. beaver-solutions)."
+        required: true
         default: "beaver-solutions"
 
 jobs:

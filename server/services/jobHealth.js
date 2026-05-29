@@ -22,15 +22,40 @@ const DB_BUILDER_WINDOWS_UTC = [
 ];
 const DB_BUILDER_GRACE_MS = 20 * MINUTE;
 
+function ensureJob(jobName) {
+  if (!jobs[jobName]) {
+    jobs[jobName] = {
+      runs: 0,
+      skips: 0,
+      errors: 0,
+      lastRunAt: null,
+      lastSkippedAt: null,
+      lastSkipReason: null,
+      lastErrorAt: null,
+      lastError: null,
+      lastMeta: null,
+    };
+  }
+  return jobs[jobName];
+}
+
 function markRun(jobName, metadata = null) {
-  if (!jobs[jobName]) jobs[jobName] = { runs: 0, errors: 0, lastRunAt: null, lastErrorAt: null, lastError: null, lastMeta: null };
+  ensureJob(jobName);
   jobs[jobName].runs++;
   jobs[jobName].lastRunAt = new Date().toISOString();
   jobs[jobName].lastMeta = metadata;
 }
 
+function markSkipped(jobName, reason, metadata = null) {
+  ensureJob(jobName);
+  jobs[jobName].skips++;
+  jobs[jobName].lastSkippedAt = new Date().toISOString();
+  jobs[jobName].lastSkipReason = String(reason || 'skipped').slice(0, 200);
+  jobs[jobName].lastMeta = metadata ? { ...metadata, reason: jobs[jobName].lastSkipReason } : { reason: jobs[jobName].lastSkipReason };
+}
+
 function markError(jobName, errMsg) {
-  if (!jobs[jobName]) jobs[jobName] = { runs: 0, errors: 0, lastRunAt: null, lastErrorAt: null, lastError: null, lastMeta: null };
+  ensureJob(jobName);
   jobs[jobName].errors++;
   jobs[jobName].lastErrorAt = new Date().toISOString();
   jobs[jobName].lastError = String(errMsg).slice(0, 200);
@@ -103,12 +128,21 @@ function getStatus() {
     const isStale = name === 'db_builder'
       ? isDbBuilderStale(data.lastRunAt, now)
       : staleThreshold && msSinceRun && msSinceRun > staleThreshold;
+    const lastRunMs = data.lastRunAt ? new Date(data.lastRunAt).getTime() : 0;
+    const lastSkippedMs = data.lastSkippedAt ? new Date(data.lastSkippedAt).getTime() : 0;
+    const latestEventWasSkip = lastSkippedMs > lastRunMs;
+    const skippedStatus = latestEventWasSkip
+      ? (/disabled/i.test(data.lastSkipReason || '') ? 'disabled' : 'skipped')
+      : null;
 
     summary[name] = {
-      status: isStale ? 'stale' : (data.runs > 0 ? 'ok' : 'waiting'),
+      status: skippedStatus || (isStale ? 'stale' : (data.runs > 0 ? 'ok' : 'waiting')),
       runs: data.runs,
+      skips: data.skips || 0,
       errors: data.errors,
       lastRunAt: data.lastRunAt,
+      lastSkippedAt: data.lastSkippedAt,
+      lastSkipReason: data.lastSkipReason,
       lastError: data.lastError,
       lastMeta: data.lastMeta,
     };
@@ -117,4 +151,4 @@ function getStatus() {
   return summary;
 }
 
-module.exports = { markRun, markError, getStatus, isDbBuilderStale };
+module.exports = { markRun, markSkipped, markError, getStatus, isDbBuilderStale };

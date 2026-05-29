@@ -46,70 +46,88 @@ async function main() {
   const anomalies = [];
   const summary = [];
 
-  let hourly, health;
+  let health;
   try {
-    [{ data: hourly }, { data: health }] = await Promise.all([
-      api('/api/autonomous/hourly-stats'),
-      api('/api/autonomous/system-health'),
-    ]);
+    ({ data: health } = await api('/api/autonomous/system-health'));
   } catch (err) {
     await tg(`<b>Platform Health</b>\n\n🔴 Audit failed: ${err.message.slice(0, 300)}`);
     process.exit(1);
   }
 
-  // Pipeline numbers
-  const sentToday = (hourly.email_sent || 0) + (hourly.li_sent || 0);
-  const pending = hourly.pending_approval || 0;
-  const replies = (hourly.email_replied || 0) + (hourly.li_replied || 0);
-  const failed1h = hourly.failed_1h || 0;
-  const leadsToday = hourly.leads_today || 0;
-
-  summary.push(`Sent: ${sentToday}/50 · Pending: ${pending} · Replies: ${replies}`);
-  summary.push(`Leads sourced today: ${leadsToday}`);
-
-  // Anomaly checks
-  if (pending >= 20) {
-    anomalies.push(`🔴 Approval queue ${pending} pending — clearing blocks autonomous loop`);
-  } else if (pending >= 10) {
-    anomalies.push(`🟡 Approval queue ${pending} pending — review soon`);
+  if (!health.enabled_slugs?.length) {
+    anomalies.push('🔴 AUTONOMOUS_ENABLED_CLIENTS empty — no tenant can run scheduled autonomy');
   }
 
-  if (sentToday === 0 && pending < 5) {
-    anomalies.push(`🔴 0 sent today AND queue empty — pipeline producing nothing`);
-  } else if (sentToday < 10 && new Date().getUTCHours() >= 10) {
-    anomalies.push(`🟡 Only ${sentToday} sent by EOD — well under 50/day target`);
+  if (!health.captain_daily_kickoff_enabled) {
+    anomalies.push('🔴 CAPTAIN_DAILY_KICKOFF_ENABLED disabled — daily kickoff will not fire');
   }
 
-  if (leadsToday === 0) {
-    anomalies.push(`🟡 Research Beaver sourced 0 today — pool not refreshing`);
+  if (!health.market_sensing_enabled) {
+    summary.push('Market sensing: disabled by spend gate');
   }
 
-  if (failed1h > 5) {
-    anomalies.push(`🔴 ${failed1h} send failures in last hour`);
-  }
+  const tenants = health.tenants || [];
+  for (const t of tenants) {
+    const kpi = t.kpi || {};
+    const sent = t.messages?.sent_today ?? 0;
+    const target = kpi.target ?? null;
+    const reviewable = t.approval_queue?.reviewable ?? 0;
+    const awaitingAccept = t.approval_queue?.linkedin_awaiting_accept ?? 0;
+    const staleApprovalRows = t.approval_queue?.stale_orphan_rows ?? 0;
+    const pool = t.lead_pool_remaining ?? null;
+    const researchSaved = t.research_beaver?.leads_saved_24h ?? 0;
+    const noResults = t.research_beaver?.no_results_24h ?? 0;
+    const stuckSend = t.send_queue?.sq_stuck ?? 0;
+    const failedSend = t.send_queue?.sq_failed ?? 0;
+    const kickoff = t.kickoff_today || {};
+    const kickoffState = kickoff.state || 'unknown';
+    const targetText = target === null ? sent : `${sent}/${target}`;
 
-  // System health from system-health endpoint
-  if (health) {
-    const cronHealth = health.cron_health || {};
-    const stale = Object.entries(cronHealth).filter(([, v]) => v?.status !== 'ok');
-    if (stale.length > 0) {
-      anomalies.push(`🔴 Stale crons: ${stale.map(([k]) => k).join(', ')}`);
+    summary.push(`${t.name}: kickoff ${kickoffState}, sent ${targetText}, reviewable ${reviewable}, LI-awaiting ${awaitingAccept}, pool ${pool ?? '?'}`);
+
+    if (kickoffState === 'missed') {
+      anomalies.push(`🔴 ${t.slug} daily kickoff missed — no memory/log/trace evidence`);
+    } else if (kickoffState === 'disabled') {
+      anomalies.push(`🔴 ${t.slug} daily kickoff disabled`);
     }
 
-    const poolEmail = health.pool_email_ready ?? null;
-    const poolLi = health.pool_linkedin_only ?? null;
-    if (poolEmail !== null && poolEmail < 20) {
-      anomalies.push(`🟡 Email-ready pool thin: ${poolEmail} leads`);
+    if (reviewable >= 20) {
+      anomalies.push(`🔴 ${t.slug} approval review queue ${reviewable} — clearing blocks autonomous loop`);
+    } else if (reviewable >= 10) {
+      anomalies.push(`🟡 ${t.slug} approval review queue ${reviewable} — review soon`);
     }
 
-    if (poolEmail !== null && poolLi !== null) {
-      summary.push(`Pool: ${poolEmail} email-ready · ${poolLi} linkedin-only`);
+    if (staleApprovalRows > 0) {
+      anomalies.push(`🟡 ${t.slug} has ${staleApprovalRows} stale approval rows — cleanup/reporting risk`);
+    }
+
+    if (sent === 0 && reviewable === 0 && ['fired', 'missed'].includes(kickoffState)) {
+      anomalies.push(`🔴 ${t.slug} has 0 sent and 0 reviewable after kickoff window — pipeline produced no approval-ready output`);
+    }
+
+    if (target !== null && sent < target && Number(health.kl_minutes_now) >= 18 * 60) {
+      anomalies.push(`🟡 ${t.slug} sent ${sent}/${target} by EOD — below configured daily outreach target`);
+    }
+
+    if (pool !== null && pool < 20) {
+      anomalies.push(`🟡 ${t.slug} lead pool thin: ${pool} selectable leads`);
+    } else if (pool !== null && pool >= 100 && researchSaved === 0) {
+      summary.push(`${t.name}: Research idle by design while pool holds at ${pool}`);
+    } else if (researchSaved === 0 && noResults > 0) {
+      anomalies.push(`🟡 ${t.slug} Research returned ${noResults} no-result runs and saved 0 leads`);
+    }
+
+    if (stuckSend > 0) {
+      anomalies.push(`🔴 ${t.slug} send queue has ${stuckSend} stuck rows`);
+    }
+    if (failedSend > 5) {
+      anomalies.push(`🔴 ${t.slug} send queue has ${failedSend} failed rows`);
     }
   }
 
   const sev = severity(anomalies);
   const lines = [
-    `<b>Platform Health — ${new Date().toISOString().slice(0, 10)}</b>`,
+    `<b>Platform Health — ${health.date || new Date().toISOString().slice(0, 10)} MYT</b>`,
     sev,
     '',
     ...summary,
