@@ -1,13 +1,6 @@
 #!/usr/bin/env node
-// Hourly status report — runs via GitHub Actions cron at :07 each UTC hour.
-// Skips fires outside 09:00–19:00 MYT (01:00–11:00 UTC).
-// Calls BeavrDam HTTP API (/api/autonomous/hourly-stats) — no direct DB access needed.
-//
-// Env required:
-//   TELEGRAM_BOT_TOKEN        Jarvis bot (@BeaverSolutionsBot)
-//   TELEGRAM_CHAT_ID          MJ's numeric chat id
-//   BEAVRDAM_API_URL          https://app.beaver.solutions
-//   BEAVRDAM_INTERNAL_API_KEY Railway INTERNAL_API_KEY value
+// Hourly status report. Read-only: pulls /api/autonomous/system-health and
+// sends Telegram. Does not trigger kickoff, sourcing, providers, or DB writes.
 
 const TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -20,7 +13,7 @@ if (!TOKEN || !CHAT_ID || !API_KEY) {
 }
 
 const WORK_START_UTC = 1;   // 09:00 MYT
-const WORK_END_UTC   = 11;  // 19:00 MYT (inclusive)
+const WORK_END_UTC   = 11;  // 19:00 MYT inclusive
 
 async function tg(method, payload) {
   const res = await fetch(`https://api.telegram.org/bot${TOKEN}/${method}`, {
@@ -29,6 +22,14 @@ async function tg(method, payload) {
     body: JSON.stringify(payload),
   });
   return res.json();
+}
+
+function kickoffLabel(kickoff) {
+  const state = kickoff?.state || 'unknown';
+  if (state === 'fired') return `fired${kickoff.at ? ` (${new Date(kickoff.at).toLocaleTimeString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit' })} MYT)` : ''}`;
+  if (state === 'waiting') return 'waiting for 09:30 MYT';
+  if (state === 'window_open') return '09:30 window open';
+  return state;
 }
 
 async function main() {
@@ -41,36 +42,55 @@ async function main() {
     return;
   }
 
-  const mytHour = (utcHour + 8) % 24;
-
-  const statsRes = await fetch(`${API_URL}/api/autonomous/hourly-stats`, {
+  const healthRes = await fetch(`${API_URL}/api/autonomous/system-health`, {
     headers: { 'x-internal-key': API_KEY },
   });
-
-  if (!statsRes.ok) {
-    const body = await statsRes.text().catch(() => '');
-    throw new Error(`BeavrDam API ${statsRes.status}: ${body}`);
+  if (!healthRes.ok) {
+    const body = await healthRes.text().catch(() => '');
+    throw new Error(`BeavrDam API ${healthRes.status}: ${body.slice(0, 300)}`);
   }
 
-  const { data: d } = await statsRes.json();
+  const { data } = await healthRes.json();
+  const mytHour = Math.floor((Number(data.kl_minutes_now || ((utcHour + 8) % 24) * 60)) / 60);
+  const tenant = data.tenants?.[0];
+  if (!tenant) {
+    throw new Error(`No tenant returned by system-health. enabled_slugs=${data.enabled_slugs?.join(',') || 'empty'}`);
+  }
 
-  const text = `<b>[${String(mytHour).padStart(2,'0')}:00 MYT] Hourly</b>
+  const kpi = tenant.kpi || {};
+  const messages = tenant.messages || {};
+  const approvalQueue = tenant.approval_queue || {};
+  const sendQueue = tenant.send_queue || {};
+  const research = tenant.research_beaver || {};
+  const integrations = tenant.integrations || {};
+  const sent = messages.sent_today ?? 0;
+  const target = kpi.target ?? '?';
+  const pendingToday = messages.pending_today ?? 0;
+  const rejectedToday = messages.rejected_today ?? 0;
+  const approvedEmail = tenant.approved_unsent?.email ?? 0;
+  const approvedLinkedIn = tenant.approved_unsent?.linkedin ?? 0;
+  const reviewable = approvalQueue.reviewable ?? 0;
+  const awaitingAccept = approvalQueue.linkedin_awaiting_accept ?? 0;
+  const staleRows = approvalQueue.stale_orphan_rows ?? 0;
 
-<b>Pipeline (today):</b>
-📧 Email:     ${d.email_sent} sent · ${d.email_pending} pending · ${d.email_replied} replied
-🔗 LinkedIn:  ${d.li_sent} sent · ${d.li_pending} pending · ${d.li_replied} accepted
+  const lines = [
+    `<b>[${String(mytHour).padStart(2, '0')}:00 MYT] BeavrDam Hourly</b>`,
+    '',
+    `<b>${tenant.name}</b>`,
+    `Kickoff: ${kickoffLabel(tenant.kickoff_today)}`,
+    `Sent today: ${sent}/${target}. Pending today: ${pendingToday}. Rejected today: ${rejectedToday}.`,
+    `Approval queue: ${reviewable} reviewable, ${awaitingAccept} LinkedIn awaiting accept, ${staleRows} stale rows.`,
+    `Approved unsent: ${approvedEmail} email, ${approvedLinkedIn} LinkedIn.`,
+    `Send queue: ${sendQueue.sq_pending ?? 0} pending, ${sendQueue.sq_stuck ?? 0} stuck, ${sendQueue.sq_failed ?? 0} failed.`,
+    `Research: ${research.leads_saved_24h ?? 0} saved in 24h, ${research.no_results_24h ?? 0} no-result runs, pool ${tenant.lead_pool_remaining ?? '?'}.`,
+    `Integrations: Gmail ${integrations.gmail_connected ? 'connected' : 'missing'}, AgentMail ${integrations.agentmail_provisioned ? 'ready' : 'missing'}.`,
+    '',
+    `Daily kickoff gate: ${data.captain_daily_kickoff_enabled ? 'enabled' : 'disabled'}. Market sensing: ${data.market_sensing_enabled ? 'enabled' : 'disabled'}.`,
+  ];
 
-<b>DB Builder:</b>
-+${d.leads_today} new leads (${d.leads_email_route} email-route · ${d.leads_linkedin_route} linkedin-route)
-Pattern memory: ${d.pattern_count} verified companies
-
-<b>Queue:</b> ${d.pending_approval} pending approval · ${d.auto_approved} auto-✅ · ${d.auto_rejected} auto-❌ · ${d.failed_1h} failed
-
-<b>Q2:</b> 20 clients (10 Beaver + 10 Emplifive)`;
-
-  const res = await tg('sendMessage', { chat_id: CHAT_ID, text, parse_mode: 'HTML' });
+  const res = await tg('sendMessage', { chat_id: CHAT_ID, text: lines.join('\n'), parse_mode: 'HTML' });
   if (!res.ok) throw new Error(`Telegram: ${res.description}`);
-  console.log(`Sent for ${mytHour}:00 MYT · message_id=${res.result.message_id}`);
+  console.log(`Sent hourly report for ${tenant.slug} at ${mytHour}:00 MYT; message_id=${res.result.message_id}`);
 }
 
 main().catch(async err => {
@@ -80,7 +100,7 @@ main().catch(async err => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: CHAT_ID,
-      text: `<b>⚠️ Hourly report error</b>\n${err.message}`,
+      text: `<b>Hourly report error</b>\n${err.message}`,
       parse_mode: 'HTML',
     }),
   }).catch(() => {});

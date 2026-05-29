@@ -270,6 +270,7 @@ describe('P0 stabilization contracts', () => {
   it('system-health and watchdog use MYT kickoff state and approval queue truth', () => {
     const autonomous = service('routes/autonomous.js');
     const healthPack = service('../scripts/daily-health-pack.mjs');
+    const hourlyReport = service('../scripts/hourly-report.mjs');
     const watchdog = service('../scripts/kickoff-watchdog.mjs');
     const platformHealth = service('../scripts/platform-health.mjs');
     const postDeployCheck = service('../scripts/post-deploy-autonomy-check.mjs');
@@ -286,6 +287,13 @@ describe('P0 stabilization contracts', () => {
     expect(healthPack).toContain('waiting for 09:30 MYT');
     expect(healthPack).toContain('Approval queue:');
     expect(healthPack).toContain('research starved and lead pool thin');
+    expect(hourlyReport).toContain('/api/autonomous/system-health');
+    expect(hourlyReport).toContain('Approval queue:');
+    expect(hourlyReport).toContain('LinkedIn awaiting accept');
+    expect(hourlyReport).toContain('Daily kickoff gate:');
+    expect(hourlyReport).not.toContain('/api/autonomous/hourly-stats');
+    expect(hourlyReport).not.toContain('Q2:');
+    expect(hourlyReport).not.toContain('Emplifive');
     expect(watchdog).toContain("['missed', 'disabled'].includes");
     expect(platformHealth).toContain("api('/api/autonomous/system-health')");
     expect(platformHealth).not.toContain("api('/api/autonomous/hourly-stats')");
