@@ -9,6 +9,7 @@ const CLIENT_SLUG = (process.env.CLIENT_SLUG || 'beaver-solutions').trim();
 const EXPECT_DAILY_KICKOFF_ENABLED = process.env.EXPECT_DAILY_KICKOFF_ENABLED === 'true';
 const EXPECT_MARKET_SENSING_ENABLED = process.env.EXPECT_MARKET_SENSING_ENABLED === 'true';
 const MAX_REVIEWABLE = Number(process.env.MAX_REVIEWABLE_APPROVALS || 20);
+const WAIT_FOR_JOBS_SECONDS = Number(process.env.WAIT_FOR_JOBS_SECONDS || 0);
 
 if (!API_KEY) {
   console.error('Missing env: BEAVRDAM_INTERNAL_API_KEY');
@@ -121,10 +122,23 @@ function validateSystemHealth(checks, data) {
   }
 }
 
+async function readHealthWithJobs() {
+  const deadline = Date.now() + Math.max(0, WAIT_FOR_JOBS_SECONDS) * 1000;
+  let lastHealth = null;
+  for (;;) {
+    lastHealth = await getJson('/health');
+    if (jobStatus(lastHealth, 'daily_kickoff') && jobStatus(lastHealth, 'market_sensing')) {
+      return lastHealth;
+    }
+    if (Date.now() >= deadline) return lastHealth;
+    await new Promise(resolve => setTimeout(resolve, 15000));
+  }
+}
+
 async function main() {
   const checks = [];
   const [health, systemHealth] = await Promise.all([
-    getJson('/health'),
+    readHealthWithJobs(),
     getJson('/api/autonomous/system-health', { 'x-internal-key': API_KEY }),
   ]);
 

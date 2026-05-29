@@ -273,6 +273,7 @@ describe('P0 stabilization contracts', () => {
     const watchdog = service('../scripts/kickoff-watchdog.mjs');
     const platformHealth = service('../scripts/platform-health.mjs');
     const postDeployCheck = service('../scripts/post-deploy-autonomy-check.mjs');
+    const postDeployWorkflow = service('../.github/workflows/post-deploy-autonomy-check.yml');
     const packageJson = service('../package.json');
 
     expect(autonomous).toContain("Asia/Kuala_Lumpur");
@@ -294,9 +295,14 @@ describe('P0 stabilization contracts', () => {
     expect(postDeployCheck).toContain("getJson('/health')");
     expect(postDeployCheck).toContain("getJson('/api/autonomous/system-health'");
     expect(postDeployCheck).toContain('EXPECT_DAILY_KICKOFF_ENABLED');
+    expect(postDeployCheck).toContain('WAIT_FOR_JOBS_SECONDS');
     expect(postDeployCheck).toContain('reviewable approvals under cap');
     expect(postDeployCheck).not.toContain("method: 'POST'");
     expect(postDeployCheck).not.toContain('/kickoff');
+    expect(postDeployWorkflow).toContain('workflow_dispatch');
+    expect(postDeployWorkflow).toContain('BEAVRDAM_INTERNAL_API_KEY');
+    expect(postDeployWorkflow).toContain('expect_daily_kickoff_enabled');
+    expect(postDeployWorkflow).toContain('WAIT_FOR_JOBS_SECONDS');
     expect(packageJson).toContain('"check:post-deploy"');
   });
 });

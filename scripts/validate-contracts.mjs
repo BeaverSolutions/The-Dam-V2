@@ -60,6 +60,7 @@ const dailyHealthPack = readFileSync(resolve(SERVER, '..', 'scripts', 'daily-hea
 const platformHealth = readFileSync(resolve(SERVER, '..', 'scripts', 'platform-health.mjs'), 'utf8');
 const postDeployAutonomyCheck = readFileSync(resolve(SERVER, '..', 'scripts', 'post-deploy-autonomy-check.mjs'), 'utf8');
 const triggerKickoffWorkflow = readFileSync(resolve(SERVER, '..', '.github', 'workflows', 'trigger-kickoff.yml'), 'utf8');
+const postDeployAutonomyWorkflow = readFileSync(resolve(SERVER, '..', '.github', 'workflows', 'post-deploy-autonomy-check.yml'), 'utf8');
 const envExample = readFileSync(resolve(SERVER, '..', '.env.example'), 'utf8');
 const prodEnvExample = readFileSync(resolve(SERVER, '..', '.env.production.example'), 'utf8');
 const allSources = [agents, dbBuilder, sendQueue, pipeline];
@@ -340,10 +341,15 @@ const postDeployNoMoneyCheck = postDeployAutonomyCheck.includes("getJson('/healt
   && postDeployAutonomyCheck.includes("getJson('/api/autonomous/system-health'")
   && postDeployAutonomyCheck.includes('EXPECT_DAILY_KICKOFF_ENABLED')
   && postDeployAutonomyCheck.includes('EXPECT_MARKET_SENSING_ENABLED')
+  && postDeployAutonomyCheck.includes('WAIT_FOR_JOBS_SECONDS')
   && postDeployAutonomyCheck.includes('reviewable approvals under cap')
   && !postDeployAutonomyCheck.includes("method: 'POST'")
   && !postDeployAutonomyCheck.includes('/kickoff')
-  && !postDeployAutonomyCheck.includes('provider_usage');
+  && !postDeployAutonomyCheck.includes('provider_usage')
+  && postDeployAutonomyWorkflow.includes('workflow_dispatch')
+  && postDeployAutonomyWorkflow.includes('BEAVRDAM_INTERNAL_API_KEY')
+  && postDeployAutonomyWorkflow.includes('WAIT_FOR_JOBS_SECONDS')
+  && postDeployAutonomyWorkflow.includes('expect_daily_kickoff_enabled');
 check('Post-deploy autonomy check is read-only/no-money', postDeployNoMoneyCheck,
   postDeployNoMoneyCheck ? 'checker uses /health + /system-health only' : 'checker can mutate, trigger kickoff, or rely on provider data');
 
