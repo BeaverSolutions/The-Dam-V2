@@ -712,13 +712,13 @@ ${icpContext}
 
 CRITICAL: Do NOT count search query terms as evidence of location. Only count actual evidence: country-specific company suffix/TLD, city names in the company description or person's headline, LinkedIn country/city hints, or company website location markers. Generic mentions of a country in snippets are unreliable.
 
-CRITICAL ROLE CHECK: The ONLY acceptable roles are: ${icp.job_titles || 'CEO, Founder, Co-Founder, Managing Director, Owner, Director'}. If the title is anything else — Manager, Head of, VP, Coordinator, Lead, Specialist, Engineer — mark role as "unlikely". We only want founders and top-level decision-makers who own the business or run it.
+CRITICAL ROLE CHECK: The acceptable roles are the ICP titles only: ${icp.job_titles || 'CEO, Founder, Co-Founder, Managing Director, Owner, Director'}. Founder/owner/C-suite/Managing Director roles are strongest. Head of Sales, Head of Growth, Sales Director, or VP Sales are acceptable only when those titles are explicitly present in the ICP and the company appears SMB/founder-led. Generic Manager, Coordinator, Lead, Specialist, Engineer, Assistant, or unrelated functional roles are not acceptable.
 
 Verify:
 1. LOCATION: Is this person actually based in ${icp.geographies || 'Malaysia'}? Cite specific evidence.
 2. COUNTRY: Resolve to a single country full name from this fixed list: Malaysia, Singapore, Indonesia, Philippines, Thailand, Vietnam, US, UK, India, China, Japan, Australia, UAE, Other, Unknown. Use evidence from the LinkedIn URL country tag, company TLD, headline city, or "Sdn Bhd"/"Pte Ltd" suffix. If unsure → "Unknown" (do not guess).
 3. INDUSTRY: Is this company actually in ${icp.industries || 'the target industry'}? Not just tangentially related.
-4. ROLE: Is "${candidate.title}" actually a founder/owner/CEO/MD role (${icp.job_titles || 'CEO/Founder/Director'})? "Likely" is NOT good enough — if the title does not clearly indicate ownership or C-level, mark as "unlikely".
+4. ROLE: Is "${candidate.title}" actually one of the ICP-approved decision-maker roles (${icp.job_titles || 'CEO/Founder/Director'})? "Likely" is NOT good enough for unrelated titles. For ICP-listed senior commercial roles, require clear evidence they own revenue/growth in an SMB/founder-led company.
 
 Return JSON:
 {"location":"confirmed|likely|unlikely|unknown","location_evidence":"...","country":"Malaysia|Singapore|Indonesia|Philippines|Thailand|Vietnam|US|UK|India|China|Japan|Australia|UAE|Other|Unknown","industry":"confirmed|likely|unlikely|unknown","industry_evidence":"...","role":"confirmed|likely|unlikely|unknown","confidence":0-100,"pass":true|false,"reason":"one line summary"}`;
@@ -838,6 +838,39 @@ async function verifyBatch(candidates, icp, clientId = null) {
   return { verified, rejected };
 }
 
+function summarizeRejectionReasons(rejected) {
+  return rejected.reduce((acc, lead) => {
+    const reason = String(lead?.verification?.rejectReason || 'unknown');
+    const bucket = reason.startsWith('Location:')
+      ? 'location'
+      : reason.startsWith('Industry:')
+        ? 'industry'
+        : reason.startsWith('Role:')
+          ? 'role'
+          : reason.startsWith('Title ')
+            ? 'title'
+            : reason.startsWith('Score too low')
+              ? 'score'
+              : reason.startsWith('Haiku')
+                ? 'verification_unavailable'
+                : 'other';
+    acc[bucket] = (acc[bucket] || 0) + 1;
+    return acc;
+  }, {});
+}
+
+function rejectionSamples(rejected, limit = 10) {
+  return rejected.slice(0, limit).map(lead => ({
+    name: lead.name || null,
+    title: lead.title || null,
+    company: lead.company || null,
+    data_source: lead.data_source || null,
+    source_strategy: lead.metadata?.source_strategy || null,
+    reason: lead.verification?.rejectReason || 'unknown',
+    score: lead.verification?.score ?? null,
+  }));
+}
+
 /* ─── Strategy 1: Direct LinkedIn people search ──────────── */
 
 /**
@@ -878,6 +911,46 @@ function titleHintsFromIcp(icpMemory) {
   return clean.length > 0
     ? clean.map(t => /\s/.test(t) ? `"${t}"` : t).join(' OR ')
     : 'Founder OR CEO OR "Managing Director"';
+}
+
+function companyDiscoveryContext(item, companyName) {
+  const strategy = item?.strategy || 'company';
+  const industry = item?.industry || 'the tenant ICP';
+  const location = item?.location || 'the target geography';
+
+  if (strategy === 'signal_jobs') {
+    return {
+      dataSource: 'brave_signal_jobs',
+      sourceStrategy: 'signal_company_first',
+      signal: `Hiring signal: ${companyName || industry} is actively hiring`,
+      whyNow: `Hiring activity detected via company search for "${industry}" in ${location}; decision-maker lookup is scoped to the discovered company.`,
+    };
+  }
+
+  if (strategy === 'signal_news') {
+    return {
+      dataSource: 'brave_signal_news',
+      sourceStrategy: 'signal_company_first',
+      signal: `Growth signal: ${companyName || industry} recently hired, raised, or launched`,
+      whyNow: `Recent growth event detected via company search for "${industry}" in ${location}; decision-maker lookup is scoped to the discovered company.`,
+    };
+  }
+
+  if (strategy === 'signal_growth' || strategy === 'signal') {
+    return {
+      dataSource: 'brave_signal_growth',
+      sourceStrategy: 'signal_company_first',
+      signal: `Growth signal: ${companyName || industry} matches ${industry}`,
+      whyNow: `Growth activity detected for "${industry}" in ${location}; decision-maker lookup is scoped to the discovered company.`,
+    };
+  }
+
+  return {
+    dataSource: 'brave_company',
+    sourceStrategy: 'company_first',
+    signal: `Company-first match: ${companyName || industry} matches ${industry}`,
+    whyNow: `Company discovered through ${industry} company search in the target geography.`,
+  };
 }
 
 async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
@@ -947,6 +1020,7 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
 
           if (filtered.length > 0) {
             for (const h of filtered) {
+              const context = companyDiscoveryContext(item, companyName);
               leads.push(normaliseLead({
                 name:           `${h.firstName || ''} ${h.lastName || ''}`.trim(),
                 title:          h.title || '',
@@ -955,15 +1029,16 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
                 email:          h.email || '',
                 email_verified: h.confidence >= 70,
                 email_source:   h.email ? 'hunter_domain' : '',
-                data_source:    'hunter_domain',
+                data_source:    h.email ? 'hunter_domain' : context.dataSource,
                 domain:         domain || h.domain || '',
                 linkedin_company_url: c.linkedin_company_url || '',
-                signal:         `Company-first match: ${companyName} matches ${item.industry || 'the tenant ICP'}`,
-                why_now:        `Company discovered through ${item.industry || 'ICP'} company search in the target geography.`,
+                signal:         context.signal,
+                why_now:        context.whyNow,
                 snippet:        [h.snippet, c.snippet].filter(Boolean).join(' '),
                 metadata:       {
-                  source_strategy: 'company_first',
+                  source_strategy: context.sourceStrategy,
                   company_discovery_query: item.query,
+                  company_discovery_strategy: item.strategy || 'company',
                   company_discovery_snippet: c.snippet || '',
                   linkedin_company_url: c.linkedin_company_url || '',
                 },
@@ -977,19 +1052,21 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
               if (stats) stats.fallbackQueriesUsed.push(fallbackQuery);
               const fallbackResults = await searchService.searchLinkedInProfiles(fallbackQuery, 3, { country: item.country || 'MY' });
               for (const r of fallbackResults) {
+                const context = companyDiscoveryContext(item, companyName);
                 leads.push(normaliseLead({
                   ...r,
                   company:        companyName || r.company,
                   domain:         domain || '',
                   linkedin_company_url: c.linkedin_company_url || '',
-                  data_source:    'brave_company',
+                  data_source:    context.dataSource,
                   email_source:   r.email ? 'brave' : '',
-                  signal:         `Company-first match: ${companyName} matches ${item.industry || 'the tenant ICP'}`,
-                  why_now:        `Company discovered through ${item.industry || 'ICP'} company search in the target geography.`,
+                  signal:         context.signal,
+                  why_now:        context.whyNow,
                   snippet:        [r.snippet, c.snippet].filter(Boolean).join(' '),
                   metadata:       {
-                    source_strategy: 'company_first',
+                    source_strategy: context.sourceStrategy,
                     company_discovery_query: item.query,
+                    company_discovery_strategy: item.strategy || 'company',
                     company_discovery_snippet: c.snippet || '',
                     linkedin_company_url: c.linkedin_company_url || '',
                   },
@@ -1151,15 +1228,21 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     const signalNewsQueries  = picked.filter(q => q.strategy === 'signal_news');
     const signalGrowthQueries = picked.filter(q => q.strategy === 'signal_growth');
     const companyQueries = picked.filter(q => q.strategy === 'company');
-    const companyFallbackBudget = companyQueries.length > 0
+    const companyDiscoveryQueries = [
+      ...signalJobsQueries,
+      ...signalNewsQueries,
+      ...signalGrowthQueries,
+      ...companyQueries,
+    ];
+    const companyFallbackBudget = companyDiscoveryQueries.length > 0
       ? Math.min(paidQueriesRemaining, Math.max(targetCount * 2, 1))
       : 0;
     paidQueriesRemaining -= companyFallbackBudget;
     const companyFirstStats = { fallbackQueriesUsed: [] };
 
     // 5 & 6. Run all strategies in parallel
-    const allSignalCount = signalQueries.length + signalJobsQueries.length + signalNewsQueries.length + signalGrowthQueries.length;
-    const perQueryLimit = Math.max(Math.ceil(targetCount / Math.max(directQueries.length + allSignalCount, 1)), 2);
+    const profileQueryCount = directQueries.length + signalQueries.length;
+    const perQueryLimit = Math.max(Math.ceil(targetCount / Math.max(profileQueryCount, 1)), 2);
 
     const directPromises = directQueries.map(q =>
       strategyDirectPeople(q, perQueryLimit)
@@ -1177,52 +1260,12 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         })
     );
 
-    // Buying signal queries — tag matched leads with signal + why_now
-    const signalJobsPromises = signalJobsQueries.map(q =>
-      strategySignalBased(q, perQueryLimit)
-        .then(leads => leads.map(l => ({
-          ...l,
-          signal: l.signal || `Hiring signal: ${q.industry} company in ${q.location} is actively hiring`,
-          why_now: l.why_now || `Hiring activity detected via job posting for "${q.industry}" in ${q.location} — likely scaling team now`,
-          data_source: 'brave_signal_jobs',
-        })))
-        .catch(err => {
-          console.warn('[research] Signal-jobs query failed:', err.message);
-          return [];
-        })
-    );
-
-    const signalNewsPromises = signalNewsQueries.map(q =>
-      strategySignalBased(q, perQueryLimit)
-        .then(leads => leads.map(l => ({
-          ...l,
-          signal: l.signal || `Growth signal: ${q.industry} company in ${q.location} recently hired, raised, or launched`,
-          why_now: l.why_now || `Recent growth event detected for "${q.industry}" company in ${q.location} — timing is right for outreach`,
-          data_source: 'brave_signal_news',
-        })))
-        .catch(err => {
-          console.warn('[research] Signal-news query failed:', err.message);
-          return [];
-        })
-    );
-
-    const signalGrowthPromises = signalGrowthQueries.map(q =>
-      strategyCompanyFirst(clientId, { ...icpMemory, industries: q.industry }, 3, { queryItems: [q], maxFallbackProfileQueries: 0 })
-        .then(leads => leads.map(l => ({
-          ...l,
-          signal: l.signal || `Growth signal: ${q.industry} company in ${q.location} showing employee growth`,
-          why_now: l.why_now || `Team expansion detected for "${q.industry}" company in ${q.location}`,
-          data_source: l.data_source || 'brave_signal_growth',
-        })))
-        .catch(err => {
-          console.warn('[research] Signal-growth query failed:', err.message);
-          return [];
-        })
-    );
-
-    const companyPromise = companyQueries.length > 0
+    // Signal job/news queries must discover companies first. Running them as
+    // generic profile searches returns people who mention hiring/sales terms,
+    // then Layer 2 correctly rejects them as non-ICP decision-makers.
+    const companyPromise = companyDiscoveryQueries.length > 0
       ? strategyCompanyFirst(clientId, icpMemory, targetCount * 2, {
-        queryItems: companyQueries,
+        queryItems: companyDiscoveryQueries,
         maxFallbackProfileQueries: companyFallbackBudget,
         stats: companyFirstStats,
       })
@@ -1232,24 +1275,18 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         })
       : Promise.resolve([]);
 
-    const [directResults, signalResults, signalJobsResults, signalNewsResults, signalGrowthResults, companyLeads] = await Promise.all([
+    const [directResults, signalResults, companyLeads] = await Promise.all([
       Promise.all(directPromises).then(arrays => arrays.flat()),
       Promise.all(signalPromises).then(arrays => arrays.flat()),
-      Promise.all(signalJobsPromises).then(arrays => arrays.flat()),
-      Promise.all(signalNewsPromises).then(arrays => arrays.flat()),
-      Promise.all(signalGrowthPromises).then(arrays => arrays.flat()),
       companyPromise,
     ]);
 
     // 7. Merge and deduplicate by linkedin_url
     // Signal-tagged leads are prioritised (they come first, dedup keeps first occurrence)
     const allLeads = [
-      ...signalJobsResults,   // P1: active hiring signal
-      ...signalNewsResults,   // P1: growth event signal
-      ...signalGrowthResults, // P2: growth signal
+      ...companyLeads,        // P1/P2: signal/company-first with scoped decision-maker lookup
       ...signalResults,       // P2: signal-based
       ...directResults,       // P3: direct people
-      ...companyLeads,        // P3: company-first
     ];
 
     const seen = new Set();
@@ -1362,10 +1399,13 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       queriesUsed.push(...actualPicked.map(q => q.query));
 
       const retryDirectQueries = actualPicked.filter(q => q.strategy === 'direct');
-      const retrySignalQueries = actualPicked.filter(q =>
-        q.strategy === 'signal' || q.strategy === 'signal_jobs' || q.strategy === 'signal_news'
+      const retrySignalQueries = actualPicked.filter(q => q.strategy === 'signal');
+      const retryCompanyQueries = actualPicked.filter(q =>
+        q.strategy === 'company'
+        || q.strategy === 'signal_growth'
+        || q.strategy === 'signal_jobs'
+        || q.strategy === 'signal_news'
       );
-      const retryCompanyQueries = actualPicked.filter(q => q.strategy === 'company' || q.strategy === 'signal_growth');
       const retryCompanyStats = { fallbackQueriesUsed: [] };
       const retryCompanyFallbackBudget = retryCompanyQueries.length > 0
         ? Math.min(paidQueriesRemaining, Math.max(shortfall * 2, 1))
@@ -1533,6 +1573,8 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         verified: verified.length,
         rejected: rejected.length,
         rejection_reasons: rejected.map(r => `${r.name}: ${r.verification?.rejectReason || 'unknown'}`),
+        rejection_summary: summarizeRejectionReasons(rejected),
+        rejection_samples: rejectionSamples(rejected),
         retries: retryCount,
         search_rounds: searchRounds,
         circuit_breaker: circuitBreakerTripped,

@@ -571,6 +571,8 @@ async function researchSearch(clientId, { query, command = null, filters = {} })
       circuit_breaker_tripped: researchResult.verification_stats?.circuit_breaker_tripped ?? null,
       layer2_verified: researchResult.verification_stats?.verified ?? null,
       layer2_rejected: researchResult.verification_stats?.rejected ?? null,
+      rejection_summary: researchResult.verification_stats?.rejection_summary ?? null,
+      rejection_samples: researchResult.verification_stats?.rejection_samples ?? null,
     };
 
     if (multiLeads.length > 0) {
@@ -653,6 +655,8 @@ async function researchSearch(clientId, { query, command = null, filters = {} })
       queries_total: verificationStats.queries_total ?? null,
       rounds_ran: verificationStats.rounds_ran ?? null,
       circuit_breaker_tripped: verificationStats.circuit_breaker_tripped ?? null,
+      rejection_summary: verificationStats.rejection_summary ?? null,
+      rejection_samples: verificationStats.rejection_samples ?? null,
       likely_cause: likelyCause,
     },
   });
@@ -3519,6 +3523,12 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     if (verificationStats.rejected != null || researchDiagnostics.layer2_rejected != null) {
       diagnostics.research_rejected = Number(verificationStats.rejected ?? researchDiagnostics.layer2_rejected) || 0;
     }
+    if (verificationStats.rejection_summary || researchDiagnostics.rejection_summary) {
+      diagnostics.rejection_summary = verificationStats.rejection_summary || researchDiagnostics.rejection_summary;
+    }
+    if (verificationStats.rejection_samples || researchDiagnostics.rejection_samples) {
+      diagnostics.rejection_samples = verificationStats.rejection_samples || researchDiagnostics.rejection_samples;
+    }
     if (verificationStats.circuit_breaker_tripped || researchDiagnostics.circuit_breaker_tripped) {
       diagnostics.research_circuit_breaker = verificationStats.circuit_breaker_tripped || researchDiagnostics.circuit_breaker_tripped;
     }
@@ -3966,6 +3976,8 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         provider_candidates: providerCandidates,
         research_verified: rawLeads.length,
         research_rejected: diagnostics.research_rejected ?? null,
+        rejection_summary: diagnostics.rejection_summary || null,
+        rejection_samples: diagnostics.rejection_samples || null,
         dup_count: dupCount,
         reason: dupReason,
       },

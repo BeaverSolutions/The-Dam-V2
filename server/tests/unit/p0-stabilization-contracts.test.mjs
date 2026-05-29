@@ -248,11 +248,16 @@ describe('P0 stabilization contracts', () => {
     expect(research).toContain('signalStrategies');
     expect(research).toContain("q.strategy === 'direct'");
     expect(research).toContain('const companyQueries = picked.filter');
+    expect(research).toContain('const companyDiscoveryQueries = [');
+    expect(research).toContain('signal_jobs');
+    expect(research).toContain('signal_company_first');
     expect(research).toContain('queryItems');
     expect(research).toContain('maxFallbackProfileQueries');
     expect(research).toContain('fallbackQueriesUsed');
     expect(research).toContain('fallbackProfileBudget > 0');
     expect(research).toContain('initial verification rejected all');
+    expect(research).toContain('rejection_summary');
+    expect(research).toContain('rejection_samples');
     expect(research).toContain('retryCompanyQueries');
   });
 
