@@ -4,14 +4,24 @@ const pool = require('../db/pool');
 const logger = require('../utils/logger');
 
 // ─── Model pricing (USD per million tokens) ────────────────────
-// Overridable via env vars so Anthropic price changes don't need a redeploy.
-// Input/output prices match Anthropic list pricing as of 2026-04-05.
-// cache_write is typically 1.25× input; cache_read is typically 0.1× input.
+// MULTI-PROVIDER. Each tenant may run its own preferred LLM (Anthropic, OpenAI,
+// …) — as owner we test every provider before onboarding clients — so cost
+// truth must cover every model the system can call, not just Claude. Every
+// price is env-overridable so a provider price change (or a new tenant's model)
+// needs no redeploy.
 //
-// If you add a new model, add an entry here OR set the corresponding env vars.
-// Unknown models return cost=0 (fail-open for observability, NOT for billing).
-// Pricing block. Model IDs may include version dates OR short aliases.
-// List ALL known IDs so costForUsage never falls through to the $0.05 default.
+//   Anthropic: cache_write ≈ 1.25× input, cache_read ≈ 0.1× input.
+//   OpenAI:    no separate cache-write charge (cached input auto-discounts on
+//              read at ~0.25× input). cache_write is set = input here but is
+//              never billed because the OpenAI adapter reports
+//              cache_creation_input_tokens = 0 (services/llm/openai.js).
+//
+// TO ADD A MODEL (e.g. a new tenant's preferred LLM): add a *_PRICING const +
+// a PRICING entry below. An unknown model NO LONGER flat-bills — it falls to
+// DEFAULT_PRICING (conservative, errs HIGH) and logs LOUDLY so it gets added.
+// 2026-05-30 incident: gpt-4.1 had no entry, so every call flat-billed the
+// $0.05 default; the daily budget tripped on a phantom $10 (real ≈ $1.88) and
+// shut the autonomous loop down for the day on a number that wasn't real.
 const SONNET_PRICING = {
   input:       Number(process.env.SONNET_INPUT_PER_M)       || 3.00,
   output:      Number(process.env.SONNET_OUTPUT_PER_M)      || 15.00,
@@ -24,6 +34,27 @@ const HAIKU_PRICING = {
   cache_write: Number(process.env.HAIKU_CACHE_WRITE_PER_M)  || 1.00,
   cache_read:  Number(process.env.HAIKU_CACHE_READ_PER_M)   || 0.08,
 };
+// OpenAI gpt-4.1 family (USD/1M, list price as of 2026-05). cache_read = 0.25× input.
+const GPT41_PRICING = {
+  input:       Number(process.env.GPT41_INPUT_PER_M)        || 2.00,
+  output:      Number(process.env.GPT41_OUTPUT_PER_M)       || 8.00,
+  cache_write: Number(process.env.GPT41_INPUT_PER_M)        || 2.00, // unused (cache_creation=0 for OpenAI)
+  cache_read:  Number(process.env.GPT41_CACHE_READ_PER_M)   || 0.50,
+};
+const GPT41_MINI_PRICING = {
+  input:       Number(process.env.GPT41_MINI_INPUT_PER_M)      || 0.40,
+  output:      Number(process.env.GPT41_MINI_OUTPUT_PER_M)     || 1.60,
+  cache_write: Number(process.env.GPT41_MINI_INPUT_PER_M)      || 0.40, // unused (cache_creation=0 for OpenAI)
+  cache_read:  Number(process.env.GPT41_MINI_CACHE_READ_PER_M) || 0.10,
+};
+// Conservative estimate for ANY model not listed in PRICING. Errs HIGH so an
+// unrecognised model over-counts (budget-safe) instead of silently flat-billing.
+const DEFAULT_PRICING = {
+  input:       Number(process.env.DEFAULT_INPUT_PER_M)       || 5.00,
+  output:      Number(process.env.DEFAULT_OUTPUT_PER_M)      || 20.00,
+  cache_write: Number(process.env.DEFAULT_CACHE_WRITE_PER_M) || 6.25,
+  cache_read:  Number(process.env.DEFAULT_CACHE_READ_PER_M)  || 0.50,
+};
 const PRICING = {
   // Sonnet variants (all same pricing)
   'claude-sonnet-4-6':          SONNET_PRICING,
@@ -32,6 +63,11 @@ const PRICING = {
   // Haiku variants (all same pricing)
   'claude-haiku-4-5-20251001':  HAIKU_PRICING,
   'claude-haiku-4-5':           HAIKU_PRICING,
+  // OpenAI gpt-4.1 family (reasoning + fast tiers; see services/llm/openai.js mapModel)
+  'gpt-4.1':                    GPT41_PRICING,
+  'gpt-4.1-2025-04-14':         GPT41_PRICING,
+  'gpt-4.1-mini':               GPT41_MINI_PRICING,
+  'gpt-4.1-mini-2025-04-14':    GPT41_MINI_PRICING,
 };
 
 // ─── Monthly LLM spend cap ──────────────────────────────────────
@@ -50,10 +86,16 @@ function getMonthlyBudget() { return LLM_MONTHLY_BUDGET_USD; }
  * Returns 0 for unknown models (so we don't crash the pipeline on a rename).
  */
 function costForUsage(model, usage = {}) {
-  const p = PRICING[model];
-  if (!p) {
-    logger.error({ msg: 'Unknown model for billing — applying conservative default cost', model });
-    return 0.05; // Conservative default per call to prevent silent budget bypass
+  const p = PRICING[model] || DEFAULT_PRICING;
+  if (!PRICING[model]) {
+    // Do NOT flat-bill. A flat per-call number under-counts on big calls (real
+    // money leaks past the cap) and over-counts on small ones (phantom budget
+    // trips — the 2026-05-30 gpt-4.1 incident). Estimate from real tokens at a
+    // conservative HIGH rate, and shout so the model gets added to PRICING.
+    logger.error({
+      msg: 'Unknown model for billing — using conservative DEFAULT_PRICING token estimate. ADD THIS MODEL TO PRICING in services/budget.js.',
+      model,
+    });
   }
   const cost = (
     (usage.input_tokens || 0)                * p.input +
