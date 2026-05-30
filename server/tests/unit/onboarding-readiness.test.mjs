@@ -9,6 +9,58 @@ const middleware = name => readFileSync(resolve(__dirname, `../../middleware/${n
 const clientPage = name => readFileSync(resolve(__dirname, `../../../client/src/pages/${name}`), 'utf-8');
 
 describe('onboarding readiness contracts', () => {
+  it('does not expose bearer JWTs in auth JSON responses', () => {
+    const authSource = route('auth.js');
+
+    expect(authSource).toContain('function setAuthCookie');
+    expect(authSource).toContain('httpOnly: true');
+    expect(authSource).toContain('res.json({ data: { user: result.user } })');
+    expect(authSource).toContain('res.status(201).json({ data: { user: result.user } })');
+    expect(authSource).toContain('res.json({ data: { user } })');
+    expect(authSource).not.toContain('res.json({ data: { token, user } })');
+    expect(authSource).not.toContain('res.status(201).json({ data: result })');
+    expect(authSource).not.toContain('res.json({ data: { token:');
+  });
+
+  it('keeps raw admin SQL disabled unless explicitly enabled', () => {
+    const adminSource = route('admin.js');
+
+    expect(adminSource).toContain("process.env.ADMIN_SQL_ENABLED === 'true'");
+    expect(adminSource).toContain('if (!ADMIN_SQL_ENABLED)');
+    expect(adminSource).toContain("code: 'NOT_FOUND'");
+  });
+
+  it('renders weekly learning notes as text, not injected HTML', () => {
+    const dashboardSource = clientPage('Dashboard.jsx');
+
+    expect(dashboardSource).toContain('whiteSpace');
+    expect(dashboardSource).not.toContain('dangerouslySetInnerHTML');
+  });
+
+  it('has a public privacy policy and internal data map', () => {
+    const appSource = readFileSync(resolve(__dirname, '../../../client/src/App.jsx'), 'utf-8');
+    const privacySource = clientPage('Privacy.jsx');
+    const dataMap = readFileSync(resolve(__dirname, '../../../ops/security-data-map.md'), 'utf-8');
+
+    expect(appSource).toContain("import Privacy from './pages/Privacy'");
+    expect(appSource).toContain('path="/privacy"');
+    expect(privacySource).toContain('Privacy Policy');
+    expect(privacySource).toContain('Where Data Is Stored');
+    expect(dataMap).toContain('Data categories');
+    expect(dataMap).toContain('Storage locations');
+  });
+
+  it('closes Supabase advisor findings for admin errors and mutable trigger search paths', () => {
+    const migration = readFileSync(resolve(__dirname, '../../db/migrations/080_security_prelaunch_hardening.sql'), 'utf-8');
+
+    expect(migration).toContain('ALTER TABLE admin_api_errors ENABLE ROW LEVEL SECURITY');
+    expect(migration).toContain('CREATE POLICY beaver_super_admin_read ON admin_api_errors');
+    expect(migration).toContain('CREATE OR REPLACE FUNCTION public.tenant_profiles_set_updated_at()');
+    expect(migration).toContain('CREATE OR REPLACE FUNCTION public.billing_intents_set_updated_at()');
+    expect(migration).toContain('SET search_path = public');
+    expect(migration).toContain('INSERT INTO schema_migrations (version) VALUES (80)');
+  });
+
   it('admin credential status reads encrypted agent_memory secrets, not a missing credentials table', () => {
     const adminSource = route('admin.js');
 

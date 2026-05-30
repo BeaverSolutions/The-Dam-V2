@@ -7,6 +7,15 @@ const validate = require('../middleware/validate');
 const authService = require('../services/auth');
 const authMiddleware = require('../middleware/auth');
 
+function setAuthCookie(res, token) {
+  res.cookie('dam_token', token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 86400000, // 24h
+  });
+}
+
 // ─── Tight rate limiters for credential endpoints ──────────────
 // The global /api rateLimiter keys by (user.clientId || ip) at 100 req/min.
 // That is too loose for auth endpoints — an attacker spraying from one IP
@@ -66,7 +75,8 @@ router.post('/signup',
   async (req, res, next) => {
     try {
       const result = await authService.signup(req.body);
-      res.status(201).json({ data: result });
+      setAuthCookie(res, result.token);
+      res.status(201).json({ data: { user: result.user } });
     } catch (err) {
       next(err);
     }
@@ -84,13 +94,8 @@ router.post('/login',
   async (req, res, next) => {
     try {
       const result = await authService.login(req.body);
-      res.cookie('dam_token', result.token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge: 86400000, // 24h
-      });
-      res.json({ data: result });
+      setAuthCookie(res, result.token);
+      res.json({ data: { user: result.user } });
     } catch (err) {
       next(err);
     }
@@ -150,7 +155,8 @@ router.post('/refresh-token', authMiddleware, async (req, res, next) => {
       client_id: req.user.clientId,
       role: req.user.role,
     });
-    res.json({ data: { token, user } });
+    setAuthCookie(res, token);
+    res.json({ data: { user } });
   } catch (err) {
     next(err);
   }
@@ -188,7 +194,8 @@ router.post('/join',
   async (req, res, next) => {
     try {
       const result = await authService.joinWithToken(req.body);
-      res.status(201).json({ data: result });
+      setAuthCookie(res, result.token);
+      res.status(201).json({ data: { user: result.user } });
     } catch (err) { next(err); }
   }
 );

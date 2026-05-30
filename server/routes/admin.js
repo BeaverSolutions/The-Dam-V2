@@ -12,6 +12,8 @@ const crypto = require('crypto');
 const { generateAccessCode, createSignupToken } = require('../services/auth');
 const billing = require('../services/billing');
 
+const ADMIN_SQL_ENABLED = process.env.ADMIN_SQL_ENABLED === 'true';
+
 // Super Admin is a cross-tenant control plane. Use ownerQuery here so the
 // tenant-scoped RLS pool wrapper does not hide other clients from Beaver admins.
 const adminQuery = (...args) => pool.ownerQuery(...args);
@@ -680,6 +682,10 @@ router.get('/telegram/webhook-info', async (req, res, next) => {
 
 router.post('/sql', async (req, res, next) => {
   try {
+    if (!ADMIN_SQL_ENABLED) {
+      return res.status(404).json({ error: 'Not found', code: 'NOT_FOUND' });
+    }
+
     const { query, params = [] } = req.body;
     if (!query || typeof query !== 'string') {
       return res.status(400).json({ error: 'query required', code: 'MISSING_QUERY' });

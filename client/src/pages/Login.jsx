@@ -95,6 +95,10 @@ export default function Login() {
           <a href="mailto:sales@beaver.solutions" style={{ color: 'var(--brand)', textDecoration: 'none' }}>
             sales@beaver.solutions
           </a>
+          {' '}·{' '}
+          <a href="/privacy" style={{ color: 'var(--brand)', textDecoration: 'none' }}>
+            Privacy
+          </a>
         </p>
       </div>
     </div>

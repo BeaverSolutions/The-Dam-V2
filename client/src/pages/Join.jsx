@@ -39,8 +39,8 @@ export default function Join() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setSubmitError(null);
-    if (form.password.length < 8) {
-      setSubmitError('Password must be at least 8 characters.');
+    if (form.password.length < 12) {
+      setSubmitError('Password must be at least 12 characters.');
       return;
     }
     setSubmitting(true);
@@ -140,7 +140,7 @@ export default function Join() {
                     name="password"
                     value={form.password}
                     onChange={handleChange}
-                    placeholder="Min. 8 characters"
+                    placeholder="Min. 12 characters"
                     required
                   />
                 </div>
@@ -162,6 +162,8 @@ export default function Join() {
         <p style={{ textAlign: 'center', marginTop: '1rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
           Already have an account?{' '}
           <a href="/login" style={{ color: 'var(--brand)', textDecoration: 'none' }}>Sign in</a>
+          {' '}·{' '}
+          <a href="/privacy" style={{ color: 'var(--brand)', textDecoration: 'none' }}>Privacy</a>
         </p>
       </div>
     </div>

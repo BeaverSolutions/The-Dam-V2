@@ -641,7 +641,7 @@ function WeeklyLearningsCard() {
       {learnings.director_notes && (
         <div>
           <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--purple)', marginBottom: '0.25rem' }}>📝 Director's notes</div>
-          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }} dangerouslySetInnerHTML={{ __html: learnings.director_notes }} />
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{learnings.director_notes}</div>
         </div>
       )}
     </div>

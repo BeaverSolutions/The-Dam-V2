@@ -19,6 +19,7 @@ import Import from './pages/Import';
 import Settings from './pages/Settings';
 import Admin from './pages/Admin';
 import Join from './pages/Join';
+import Privacy from './pages/Privacy';
 
 function PrivateRoute({ children }) {
   return isAuthenticated() ? children : <Navigate to="/login" replace />;
@@ -56,6 +57,7 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/join" element={<Join />} />
+        <Route path="/privacy" element={<Privacy />} />
         <Route path="/verify-email" element={<VerifyEmail />} />
         <Route path="/access-code" element={<AccessCode />} />
         <Route
