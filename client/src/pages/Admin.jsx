@@ -51,6 +51,7 @@ function LlmSpendCard() {
 
 // ─── helpers ──────────────────────────────────────────────────
 const fmt = (n) => (n ?? 0).toLocaleString();
+const money = (n) => `RM ${fmt(n)}`;
 const ago = (ts) => {
   if (!ts) return 'Never';
   const diff = Date.now() - new Date(ts).getTime();
@@ -103,7 +104,7 @@ function CredRow({ label, data }) {
 // ─── Create Client Modal ──────────────────────────────────────
 function CreateClientModal({ onClose, onCreated }) {
   const { request } = useApi();
-  const [form, setForm] = useState({ name: '', email: '', plan: 'starter' });
+  const [form, setForm] = useState({ name: '', email: '', plan: 'starter', trial_length_days: 30 });
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -167,6 +168,12 @@ function CreateClientModal({ onClose, onCreated }) {
             <option value="starter">Starter</option>
             <option value="growth">Growth</option>
             <option value="enterprise">Enterprise</option>
+          </select>
+
+          <label style={labelStyle}>Trial</label>
+          <select className="input" style={inputStyle} value={form.trial_length_days} onChange={e => setForm(f => ({ ...f, trial_length_days: Number(e.target.value) }))}>
+            <option value={14}>14 days</option>
+            <option value={30}>30 days</option>
           </select>
 
           <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.25rem' }}>
@@ -272,6 +279,7 @@ function ClientDetail({ clientId, onBack }) {
   const [users, setUsers] = useState([]);
   const [logs, setLogs] = useState([]);
   const [creds, setCreds] = useState(null);
+  const [billing, setBilling] = useState(null);
   const [tab, setTab] = useState('users');
   const [loading, setLoading] = useState(true);
   const [resettingId, setResettingId] = useState(null);
@@ -284,16 +292,18 @@ function ClientDetail({ clientId, onBack }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [clientRes, usersRes, logsRes, credsRes] = await Promise.allSettled([
+      const [clientRes, usersRes, logsRes, credsRes, billingRes] = await Promise.allSettled([
         request(`/admin/clients/${clientId}`),
         request(`/admin/clients/${clientId}/users`),
         request(`/admin/clients/${clientId}/logs?limit=30`),
         request(`/admin/clients/${clientId}/credentials`),
+        request(`/admin/clients/${clientId}/billing`),
       ]);
       if (clientRes.status === 'fulfilled') setClient(clientRes.value.data);
       if (usersRes.status === 'fulfilled') setUsers(usersRes.value.data || []);
       if (logsRes.status === 'fulfilled') setLogs(logsRes.value.data || []);
       if (credsRes.status === 'fulfilled') setCreds(credsRes.value.data);
+      if (billingRes.status === 'fulfilled') setBilling(billingRes.value.data);
     } finally { setLoading(false); }
   }, [clientId]);
 
@@ -331,6 +341,18 @@ function ClientDetail({ clientId, onBack }) {
       setLinkCopied(true);
       setTimeout(() => setLinkCopied(false), 2000);
     });
+  };
+
+  const updateBillingStatus = async (intentId, status) => {
+    try {
+      await request(`/admin/billing-intents/${intentId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status }),
+      });
+      load();
+    } catch (err) {
+      alert(err.message || 'Failed to update billing status');
+    }
   };
 
   if (loading) return <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}><Loader size={20} className="spin" /></div>;
@@ -374,7 +396,7 @@ function ClientDetail({ clientId, onBack }) {
 
       {/* Tabs */}
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem', borderBottom: '1px solid var(--border)', paddingBottom: '0.75rem' }}>
-        {['users', 'activity', 'credentials'].map(t => (
+        {['users', 'activity', 'billing', 'credentials'].map(t => (
           <button key={t} onClick={() => setTab(t)} style={{
             background: tab === t ? 'rgba(200,255,0,0.08)' : 'none',
             border: 'none',
@@ -472,6 +494,62 @@ function ClientDetail({ clientId, onBack }) {
               <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{ago(log.created_at)}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Billing tab */}
+      {tab === 'billing' && (
+        <div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.75rem', marginBottom: '1rem' }}>
+            <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 8, padding: '0.875rem' }}>
+              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Billing status</div>
+              <div style={{ fontSize: '1rem', fontWeight: 700, marginTop: 4 }}>{billing?.client?.billing_status || client.billing_status || 'trial'}</div>
+            </div>
+            <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 8, padding: '0.875rem' }}>
+              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Pending invoice</div>
+              <div style={{ fontSize: '1rem', fontWeight: 700, marginTop: 4, color: billing?.pending_charges_rm > 0 ? 'var(--orange)' : 'var(--text)' }}>{money(billing?.pending_charges_rm || 0)}</div>
+            </div>
+            <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 8, padding: '0.875rem' }}>
+              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Accumulated charges</div>
+              <div style={{ fontSize: '1rem', fontWeight: 700, marginTop: 4 }}>{money(billing?.accumulated_charges_rm || 0)}</div>
+            </div>
+            <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 8, padding: '0.875rem' }}>
+              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Trial</div>
+              <div style={{ fontSize: '1rem', fontWeight: 700, marginTop: 4 }}>{billing?.client?.trial_length_days || client.trial_length_days || 30} days</div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 2 }}>Ends {billing?.client?.trial_ends_at ? new Date(billing.client.trial_ends_at).toLocaleDateString() : '—'}</div>
+            </div>
+          </div>
+
+          <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+            <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', fontSize: '0.85rem', fontWeight: 600 }}>Upgrade intents</div>
+            {(!billing?.intents || billing.intents.length === 0) && (
+              <div style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.85rem' }}>No upgrade intent yet</div>
+            )}
+            {billing?.intents?.map(intent => (
+              <div key={intent.id} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '1rem', alignItems: 'center', padding: '0.875rem 1rem', borderBottom: '1px solid var(--border)' }}>
+                <div>
+                  <div style={{ fontSize: '0.9rem', fontWeight: 600 }}>{intent.plan} · {intent.term.replace('_', ' ')}</div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 2 }}>
+                    {money(intent.total_amount_rm)} · {intent.months} month{intent.months === 1 ? '' : 's'} at {money(intent.monthly_amount_rm)}/mo · {ago(intent.created_at)}
+                  </div>
+                </div>
+                <span style={{ fontSize: '0.72rem', padding: '3px 9px', borderRadius: 100, background: 'rgba(255,255,255,0.05)', color: intent.status === 'paid' ? 'var(--lime)' : intent.status === 'cancelled' ? 'var(--text-muted)' : 'var(--orange)' }}>
+                  {intent.status.replace('_', ' ')}
+                </span>
+                <select
+                  className="input"
+                  style={{ ...inputStyle, margin: 0, width: 150, fontSize: '0.75rem' }}
+                  value={intent.status}
+                  onChange={e => updateBillingStatus(intent.id, e.target.value)}
+                >
+                  <option value="pending_invoice">Pending invoice</option>
+                  <option value="invoice_sent">Invoice sent</option>
+                  <option value="paid">Paid</option>
+                  <option value="cancelled">Cancelled</option>
+                </select>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -605,7 +683,7 @@ export default function Admin() {
                 </span>
               </div>
               <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 2 }}>
-                {client.email} · {client.user_count} user{client.user_count !== 1 ? 's' : ''}
+                {client.email} · {client.user_count} user{client.user_count !== 1 ? 's' : ''} · {client.billing_status || 'trial'} · pending {money(client.pending_charges_rm || 0)}
               </div>
             </div>
 

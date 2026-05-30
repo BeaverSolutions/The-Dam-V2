@@ -24,7 +24,7 @@ const OpenAI = require('openai');
 const { AGENTS, MODELS, CLAUDE_MODEL, MAX_TOKENS } = require('../../config/agents');
 const { checkBudget, logUsage, notifyBudgetExceeded, BudgetExceededError } = require('../budget');
 const { getCurrentClientId } = require('../../middleware/clientContext');
-const { getOutreachRules, getProofNumbers } = require('../salesRules');
+const { resolveTenantAwarePrompt } = require('../tenantPromptResolver');
 
 const REQUEST_TIMEOUT_MS = Number(process.env.OPENAI_REQUEST_TIMEOUT_MS) || 60_000;
 
@@ -49,21 +49,6 @@ function mapModel(claudeModel) {
   const m = String(claudeModel || '').toLowerCase();
   if (m.includes('haiku')) return OPENAI_MODEL_FAST;        // fast / high-volume tier
   return OPENAI_MODEL_REASONING;                            // sonnet / reasoning tier (default)
-}
-
-// ─── Prompt resolution — kept in sync with claude.js ────────────────────────
-const _resolvedPromptCache = new Map();
-function resolveSystemPrompt(agentKey, rawPrompt) {
-  if (!rawPrompt.includes('{{OUTREACH_RULES}}') && !rawPrompt.includes('{{PROOF_NUMBERS}}')) {
-    return rawPrompt;
-  }
-  const cached = _resolvedPromptCache.get(agentKey);
-  if (cached) return cached;
-  const resolved = rawPrompt
-    .replace('{{OUTREACH_RULES}}', getOutreachRules())
-    .replace('{{PROOF_NUMBERS}}', getProofNumbers());
-  _resolvedPromptCache.set(agentKey, resolved);
-  return resolved;
 }
 
 // Kept in sync with claude.js EXECUTION_MODE_SUFFIX. Must contain "JSON" so
@@ -135,7 +120,12 @@ async function callAgentOpenAI(agentKey, userMessage, context = {}) {
 
   await enforceBudget(clientId, agentKey);
 
-  const systemText = resolveSystemPrompt(agentKey, agent.systemPrompt) + EXECUTION_MODE_SUFFIX;
+  const systemText = (await resolveTenantAwarePrompt({
+    agentKey,
+    rawPrompt: agent.systemPrompt,
+    clientId,
+    channel: context?.channel,
+  })) + EXECUTION_MODE_SUFFIX;
 
   let response;
   const t0 = Date.now();
@@ -195,7 +185,12 @@ async function callAgentWithToolsOpenAI(agentKey, userMessage, tools, toolHandle
   const model = mapModel(agent.model || CLAUDE_MODEL);
   const maxTokens = agent.maxTokens || MAX_TOKENS;
   const clientId = context?.clientId || getCurrentClientId() || null;
-  const systemText = context?.systemPrompt || resolveSystemPrompt(agentKey, agent.systemPrompt);
+  const systemText = context?.systemPrompt || await resolveTenantAwarePrompt({
+    agentKey,
+    rawPrompt: agent.systemPrompt,
+    clientId,
+    channel: context?.channel,
+  });
 
   await enforceBudget(clientId, agentKey);
 

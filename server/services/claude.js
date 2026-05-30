@@ -4,27 +4,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { CLAUDE_MODEL, MAX_TOKENS, AGENTS } = require('../config/agents');
 const { checkBudget, logUsage, notifyBudgetExceeded, BudgetExceededError } = require('./budget');
 const { getCurrentClientId } = require('../middleware/clientContext');
-const { getOutreachRules, getProofNumbers } = require('./salesRules');
-
-// Resolve {{OUTREACH_RULES}} / {{PROOF_NUMBERS}} placeholders in agent prompts.
-// Sales Beaver and Enforcer Beaver prompts include these tokens so the v1.0
-// canonical rules ship from sales-rules/*.md at runtime instead of being
-// hardcoded in config/agents.js. Resolution is cached per agentKey to keep
-// the substituted prompt byte-stable across calls (required for the
-// prompt-cache hit on the system block).
-const _resolvedPromptCache = new Map();
-function resolveSystemPrompt(agentKey, rawPrompt) {
-  if (!rawPrompt.includes('{{OUTREACH_RULES}}') && !rawPrompt.includes('{{PROOF_NUMBERS}}')) {
-    return rawPrompt;
-  }
-  const cached = _resolvedPromptCache.get(agentKey);
-  if (cached) return cached;
-  const resolved = rawPrompt
-    .replace('{{OUTREACH_RULES}}', getOutreachRules())
-    .replace('{{PROOF_NUMBERS}}', getProofNumbers());
-  _resolvedPromptCache.set(agentKey, resolved);
-  return resolved;
-}
+const { resolveTenantAwarePrompt } = require('./tenantPromptResolver');
 
 // 30s ceiling on any Claude call. If a model is slow, we fail fast
 // rather than leaking a hanging HTTP connection that the background
@@ -151,6 +131,13 @@ async function callAgent(agentKey, userMessage, context = {}) {
     }
   }
 
+  const systemPromptText = await resolveTenantAwarePrompt({
+    agentKey,
+    rawPrompt: agent.systemPrompt,
+    clientId,
+    channel: context?.channel,
+  });
+
   // One request body, parametrised by model so an overloaded primary can be
   // retried once on the fallback tier.
   const buildRequest = (modelToUse) => ({
@@ -162,7 +149,7 @@ async function callAgent(agentKey, userMessage, context = {}) {
     system: [
       {
         type: 'text',
-        text: resolveSystemPrompt(agentKey, agent.systemPrompt) + EXECUTION_MODE_SUFFIX,
+        text: systemPromptText + EXECUTION_MODE_SUFFIX,
         cache_control: { type: 'ephemeral' },
       },
     ],
@@ -264,8 +251,6 @@ async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, con
   // (e.g. Captain Beaver loading myclaw/*.md persona files). Falls back to the config prompt.
   // Override path skips token resolution (caller is fully responsible for content);
   // config-prompt path resolves {{OUTREACH_RULES}} / {{PROOF_NUMBERS}} from sales-rules/.
-  const systemPromptText = context?.systemPrompt || resolveSystemPrompt(agentKey, agent.systemPrompt);
-
   const clientId = context?.clientId || getCurrentClientId() || null;
 
   // Budget gate (reuse single-shot logic)
@@ -283,6 +268,13 @@ async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, con
       console.warn(`[claude:budget] WARN client=${clientId} agent=${agentKey} at ${Math.round(pct * 100)}% of ${period} cap`);
     }
   }
+
+  const systemPromptText = context?.systemPrompt || await resolveTenantAwarePrompt({
+    agentKey,
+    rawPrompt: agent.systemPrompt,
+    clientId,
+    channel: context?.channel,
+  });
 
   const MAX_ITERATIONS = 10;
 

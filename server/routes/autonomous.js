@@ -1350,7 +1350,11 @@ HARD RULES: No em dashes. Max 1 question mark. No bullets. No fabricated details
 Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'},"body":"..."}`;
 
           const { callAgent } = require('../services/claude');
-          const draft = await callAgent('sales_beaver', prompt);
+          const draft = await callAgent('sales_beaver', prompt, {
+            clientId,
+            channel: escalation.new_channel,
+            mode: 'channel_escalation',
+          });
           if (!draft?.body) continue;
 
           const cleanBody = draft.body.replace(/\s*\u2014\s*/g, ', ').replace(/\u2014/g, ' ');

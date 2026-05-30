@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Mail, CheckCircle, XCircle, Search, Save, Eye, EyeOff, Send, AtSign, Calendar, MessageSquare } from 'lucide-react';
+import { Mail, CheckCircle, XCircle, Search, Save, Eye, EyeOff, Send, AtSign, Calendar, MessageSquare, CreditCard } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { getUser } from '../utils/auth';
 
@@ -11,6 +11,9 @@ function Section({ title, children }) {
     </div>
   );
 }
+
+const fmt = (n) => (n ?? 0).toLocaleString();
+const money = (n) => `RM ${fmt(n)}`;
 
 export default function Settings() {
   const { request } = useApi();
@@ -78,6 +81,15 @@ export default function Settings() {
   const [nameSaving, setNameSaving] = useState(false);
   const [nameSaved, setNameSaved] = useState(false);
 
+  // Manual billing / upgrade intent
+  const [billing, setBilling] = useState(null);
+  const [billingLoading, setBillingLoading] = useState(true);
+  const [billingPlan, setBillingPlan] = useState(user?.client?.plan || 'growth');
+  const [billingTerm, setBillingTerm] = useState('monthly');
+  const [billingConfirming, setBillingConfirming] = useState(false);
+  const [billingConfirmed, setBillingConfirmed] = useState(false);
+  const [billingError, setBillingError] = useState('');
+
   // Auto-approval threshold (Wave 1)
   const [autoApproveThreshold, setAutoApproveThreshold] = useState('');
   const [autoApproveLoading, setAutoApproveLoading] = useState(true);
@@ -97,6 +109,38 @@ export default function Settings() {
       }
     } catch {}
     setNameSaving(false);
+  };
+
+  const loadBilling = () => {
+    setBillingLoading(true);
+    request('/billing/summary')
+      .then(res => {
+        if (res?.data) {
+          setBilling(res.data);
+          setBillingPlan(res.data.client?.plan || user?.client?.plan || 'growth');
+        }
+      })
+      .catch(() => {})
+      .finally(() => setBillingLoading(false));
+  };
+
+  const handleConfirmUpgrade = async () => {
+    setBillingConfirming(true);
+    setBillingConfirmed(false);
+    setBillingError('');
+    try {
+      const res = await request('/billing/upgrade-intent', {
+        method: 'POST',
+        body: JSON.stringify({ plan: billingPlan, term: billingTerm }),
+      });
+      if (res?.data?.summary) setBilling(res.data.summary);
+      setBillingConfirmed(true);
+      setTimeout(() => setBillingConfirmed(false), 3500);
+    } catch (err) {
+      setBillingError(err.message || 'Failed to confirm upgrade');
+    } finally {
+      setBillingConfirming(false);
+    }
   };
 
   // Load + save auto-approval threshold
@@ -228,6 +272,7 @@ export default function Settings() {
 
   useEffect(() => {
     loadIntegrations();
+    loadBilling();
 
     request('/agents/director/icp')
       .then(res => {
@@ -373,6 +418,7 @@ export default function Settings() {
   const apolloInfo = integrations.apollo;
   const hunterInfo = integrations.hunter;
   const braveInfo = integrations.brave;
+  const selectedBillingOption = billing?.plan_options?.find(option => option.term === billingTerm);
 
   return (
     <div className="fade-in">
@@ -406,6 +452,69 @@ export default function Settings() {
             {nameSaved ? <><CheckCircle size={14} /> Saved</> : <><Save size={14} /> Save</>}
           </button>
         </div>
+      </Section>
+
+      {/* Billing */}
+      <Section title="Billing">
+        {billingLoading ? (
+          <div className="skeleton" style={{ height: 140, borderRadius: 'var(--radius)' }} />
+        ) : (
+          <div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.75rem', marginBottom: '1rem' }}>
+              <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: '0.875rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: 6 }}>
+                  <CreditCard size={14} /> Current status
+                </div>
+                <div style={{ fontSize: '1rem', fontWeight: 700 }}>{billing?.client?.billing_status || 'trial'}</div>
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 4 }}>
+                  Trial ends {billing?.client?.trial_ends_at ? new Date(billing.client.trial_ends_at).toLocaleDateString() : '—'}
+                </div>
+              </div>
+              <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: '0.875rem' }}>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: 6 }}>Pending invoice</div>
+                <div style={{ fontSize: '1rem', fontWeight: 700, color: billing?.pending_charges_rm > 0 ? 'var(--orange)' : 'var(--text)' }}>{money(billing?.pending_charges_rm || 0)}</div>
+              </div>
+              <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: '0.875rem' }}>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: 6 }}>Accumulated charges</div>
+                <div style={{ fontSize: '1rem', fontWeight: 700 }}>{money(billing?.accumulated_charges_rm || 0)}</div>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', alignItems: 'end' }}>
+              <div className="form-group">
+                <label className="form-label">Plan</label>
+                <select className="form-input" value={billingPlan} onChange={e => setBillingPlan(e.target.value)} disabled={billingConfirming}>
+                  <option value="starter">Starter</option>
+                  <option value="growth">Growth</option>
+                  <option value="enterprise">Enterprise</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Term</label>
+                <select className="form-input" value={billingTerm} onChange={e => setBillingTerm(e.target.value)} disabled={billingConfirming}>
+                  {billing?.plan_options?.map(option => (
+                    <option key={option.term} value={option.term}>
+                      {option.label} — {money(option.total_amount_rm)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ paddingBottom: '1rem' }}>
+                <button className="btn btn-primary" onClick={handleConfirmUpgrade} disabled={billingConfirming || !selectedBillingOption}>
+                  {billingConfirming ? 'Confirming…' : 'Confirm upgrade intent'}
+                </button>
+              </div>
+            </div>
+
+            {selectedBillingOption && (
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '-0.25rem' }}>
+                Total: <strong style={{ color: 'var(--text)' }}>{money(selectedBillingOption.total_amount_rm)}</strong> · {selectedBillingOption.months} month{selectedBillingOption.months === 1 ? '' : 's'} at {money(selectedBillingOption.monthly_amount_rm)}/mo. No card charge here; Beaver Solutions will send an invoice with payment details.
+              </div>
+            )}
+            {billingConfirmed && <div style={{ fontSize: '0.8rem', color: 'var(--lime)', marginTop: '0.75rem' }}><CheckCircle size={13} style={{ verticalAlign: 'middle' }} /> Upgrade intent recorded. Invoice will follow by email.</div>}
+            {billingError && <div style={{ fontSize: '0.8rem', color: 'var(--orange)', marginTop: '0.75rem' }}>{billingError}</div>}
+          </div>
+        )}
       </Section>
 
       {/* Auto-approval threshold (Wave 1) */}

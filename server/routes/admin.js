@@ -9,6 +9,7 @@ const validate = require('../middleware/validate');
 const pool = require('../db/pool');
 const bcrypt = require('bcrypt');
 const { generateAccessCode, createSignupToken } = require('../services/auth');
+const billing = require('../services/billing');
 
 // ─────────────────────────────────────────────
 // CLIENTS
@@ -19,7 +20,20 @@ router.get('/clients', async (req, res, next) => {
   try {
     const result = await pool.query(`
       SELECT
-        c.id, c.name, c.email, c.slug, c.plan, c.onboarding_completed, c.created_at,
+        c.id, c.name, c.email, c.slug, c.plan, c.onboarding_completed,
+        c.trial_length_days, c.trial_started_at, c.trial_ends_at, c.billing_status, c.created_at,
+        COALESCE((
+          SELECT SUM(bi.total_amount_rm)::int
+          FROM billing_intents bi
+          WHERE bi.client_id = c.id
+            AND bi.status IN ('pending_invoice', 'invoice_sent', 'paid')
+        ), 0) AS accumulated_charges_rm,
+        COALESCE((
+          SELECT SUM(bi.total_amount_rm)::int
+          FROM billing_intents bi
+          WHERE bi.client_id = c.id
+            AND bi.status IN ('pending_invoice', 'invoice_sent')
+        ), 0) AS pending_charges_rm,
         (SELECT COUNT(*)::int FROM users u WHERE u.client_id = c.id)                                        AS user_count,
         (SELECT COUNT(*)::int FROM leads l WHERE l.client_id = c.id AND l.deleted_at IS NULL)               AS lead_count,
         (SELECT COUNT(*)::int FROM messages m WHERE m.client_id = c.id)                                     AS message_count,
@@ -38,11 +52,13 @@ router.post('/clients',
     body('name').trim().isLength({ min: 1, max: 200 }),
     body('email').isEmail().normalizeEmail(),
     body('plan').optional().isIn(['starter', 'growth', 'enterprise']),
+    body('trial_length_days').optional().custom(value => [14, 30].includes(Number(value))),
     validate,
   ],
   async (req, res, next) => {
     try {
-      const { name, email, plan = 'starter' } = req.body;
+      const { name, email, plan = 'starter', trial_length_days = 30 } = req.body;
+      const trial = billing.calculateTrialWindow(Number(trial_length_days));
 
       // Check email not already taken
       const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
@@ -55,8 +71,11 @@ router.post('/clients',
 
       // Create client
       const clientRes = await pool.query(
-        `INSERT INTO clients (name, email, plan, slug) VALUES ($1, $2, $3, $4) RETURNING id, name, email, slug, plan`,
-        [name, email, plan, slug]
+        `INSERT INTO clients
+           (name, email, plan, slug, trial_length_days, trial_started_at, trial_ends_at, billing_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'trial')
+         RETURNING id, name, email, slug, plan, trial_length_days, trial_started_at, trial_ends_at, billing_status`,
+        [name, email, plan, slug, trial.trial_length_days, trial.trial_started_at, trial.trial_ends_at]
       );
       const client = clientRes.rows[0];
 
@@ -302,6 +321,38 @@ router.get('/clients/:id/logs',
         [req.params.id, limit]
       );
       res.json({ data: result.rows, meta: { total: result.rows.length } });
+    } catch (err) { next(err); }
+  }
+);
+
+// ─────────────────────────────────────────────
+// BILLING PER CLIENT
+// ─────────────────────────────────────────────
+
+// GET /api/admin/clients/:id/billing — manual-invoice ledger for one client
+router.get('/clients/:id/billing',
+  [param('id').isUUID(), validate],
+  async (req, res, next) => {
+    try {
+      const data = await billing.getBillingSummary(req.params.id);
+      if (!data.client) return res.status(404).json({ error: 'Client not found', code: 'NOT_FOUND' });
+      res.json({ data });
+    } catch (err) { next(err); }
+  }
+);
+
+// PATCH /api/admin/billing-intents/:id — mark manual invoice state
+router.patch('/billing-intents/:id',
+  [
+    param('id').isUUID(),
+    body('status').isIn(['pending_invoice', 'invoice_sent', 'paid', 'cancelled']),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      const intent = await billing.updateBillingIntentStatus(req.params.id, req.body.status);
+      if (!intent) return res.status(404).json({ error: 'Billing intent not found', code: 'NOT_FOUND' });
+      res.json({ data: intent });
     } catch (err) { next(err); }
   }
 );

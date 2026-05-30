@@ -602,7 +602,7 @@ Return JSON only:
   // the bad sign-off survives to Enforcer → hard reject. Today: 14 of 23
   // rejects today were this exact pattern. Hardcoded "Michael Jerry" matches
   // the existing hardcode in the email FORMAT block at line ~442.
-  const result = await callAgent('sales_beaver', prompt);
+  const result = await callAgent('sales_beaver', prompt, { clientId, channel, mode: 'followup' });
   if (result && typeof result.body === 'string' && result.body.length > 0) {
     let stripped = fuStripEmDashes(result.body)
       .replace(FU_SIGNOFF_STRIP_REGEX, '').replace(/\s+$/, '')

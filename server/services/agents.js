@@ -1515,7 +1515,7 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
       const result = await callAgent(
         'ranger',
         `Review this message:\n\n${leadContextStr}MESSAGE:\n${fixedBody}${personaContext}`,
-        { message_id }
+        { message_id, clientId, channel: reviewChannel }
       );
 
       // Normalise new format { decision, score, breakdown, feedback, suggested_edit, reject_reason }
@@ -5177,7 +5177,7 @@ Return JSON only:
 
   if (!callAgent) throw new Error('Claude not available');
 
-  const result = await callAgent('sales_beaver', prompt, { lead_id: leadId, mode: 'proposal' });
+  const result = await callAgent('sales_beaver', prompt, { lead_id: leadId, clientId, channel: 'email', mode: 'proposal' });
 
   await logsService.createLog(clientId, {
     agent: 'sales_beaver',

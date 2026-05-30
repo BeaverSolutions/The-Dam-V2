@@ -143,6 +143,7 @@ app.use('/api/calendar',     authMiddleware, tenantScope, clientContext, require
 app.use('/api/agents',       authMiddleware, tenantScope, clientContext, require('./routes/agents'));
 app.use('/api/integrations', authMiddleware, tenantScope, clientContext, require('./routes/integrations'));
 app.use('/api/dashboard',    authMiddleware, tenantScope, clientContext, require('./routes/dashboard'));
+app.use('/api/billing',      authMiddleware, tenantScope, clientContext, require('./routes/billing'));
 app.use('/api/import',       authMiddleware, tenantScope, clientContext, require('./routes/import'));
 app.use('/api/exports',      authMiddleware, tenantScope, clientContext, require('./routes/exports'));
 
@@ -1629,7 +1630,8 @@ Do NOT mention the LinkedIn request. Treat this as a fresh cold email. One speci
 
 HARD RULES: No em dashes. Max 1 question mark. No bullets. No fabricated details. No "I hope this finds you well."
 
-Return JSON: {"subject":"...","body":"..."}`
+Return JSON: {"subject":"...","body":"..."}`,
+                  { clientId: msg.client_id, channel: 'email', mode: 'linkedin_stale_escalation' }
                 );
 
                 if (draft?.body && typeof draft.body === 'string') {
