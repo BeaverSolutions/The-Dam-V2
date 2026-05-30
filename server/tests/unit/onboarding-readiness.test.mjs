@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const route = name => readFileSync(resolve(__dirname, `../../routes/${name}`), 'utf-8');
 const service = name => readFileSync(resolve(__dirname, `../../services/${name}`), 'utf-8');
+const middleware = name => readFileSync(resolve(__dirname, `../../middleware/${name}`), 'utf-8');
 const clientPage = name => readFileSync(resolve(__dirname, `../../../client/src/pages/${name}`), 'utf-8');
 
 describe('onboarding readiness contracts', () => {
@@ -77,6 +78,20 @@ describe('onboarding readiness contracts', () => {
     expect(migration).toContain('CREATE TRIGGER set_updated_at BEFORE UPDATE ON calendar_events');
     expect(migration).toContain('EXECUTE FUNCTION update_updated_at()');
     expect(migration).toContain('INSERT INTO schema_migrations (version) VALUES (78)');
+  });
+
+  it('surfaces and records sanitized admin API failures instead of generic production 500s', () => {
+    const errorHandlerSource = middleware('errorHandler.js');
+    const migration = readFileSync(resolve(__dirname, '../../db/migrations/079_admin_api_errors.sql'), 'utf-8');
+
+    expect(errorHandlerSource).toContain("startsWith('/api/admin')");
+    expect(errorHandlerSource).toContain('recordAdminApiError');
+    expect(errorHandlerSource).toContain('Admin API failed');
+    expect(errorHandlerSource).toContain('trace_id');
+    expect(errorHandlerSource).toContain('admin_api_errors');
+    expect(migration).toContain('CREATE TABLE IF NOT EXISTS admin_api_errors');
+    expect(migration).toContain('trace_id    UUID NOT NULL');
+    expect(migration).toContain('INSERT INTO schema_migrations (version) VALUES (79)');
   });
 
   it('Apollo CSV import is a trusted email source for Tier A imported leads', () => {
