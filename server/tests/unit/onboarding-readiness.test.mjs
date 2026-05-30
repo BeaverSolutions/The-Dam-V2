@@ -35,6 +35,21 @@ describe('onboarding readiness contracts', () => {
     expect(migration).toContain('admin@beaversolutions.com');
   });
 
+  it('creates admin-provisioned clients atomically with safe duplicate handling', () => {
+    const adminSource = route('admin.js');
+
+    expect(adminSource).toContain('async function uniqueClientSlug');
+    expect(adminSource).toContain('SELECT id FROM clients WHERE slug = $1 LIMIT 1');
+    expect(adminSource).toContain("SELECT 'user' AS kind, id FROM users WHERE email = $1");
+    expect(adminSource).toContain("SELECT 'client' AS kind, id FROM clients WHERE email = $1");
+    expect(adminSource).toContain("await dbClient.query('BEGIN')");
+    expect(adminSource).toContain("await dbClient.query('COMMIT')");
+    expect(adminSource).toContain("await dbClient.query('ROLLBACK')");
+    expect(adminSource).toContain("err.code === '23505'");
+    expect(adminSource).toContain("err.code === '22001'");
+    expect(adminSource).toContain('FIELD_TOO_LONG');
+  });
+
   it('Apollo CSV import is a trusted email source for Tier A imported leads', () => {
     const importSource = route('import.js');
     const importPage = clientPage('Import.jsx');

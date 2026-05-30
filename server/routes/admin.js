@@ -8,8 +8,43 @@ const { body, param } = require('express-validator');
 const validate = require('../middleware/validate');
 const pool = require('../db/pool');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const { generateAccessCode, createSignupToken } = require('../services/auth');
 const billing = require('../services/billing');
+
+function slugBaseFromName(name) {
+  const slug = String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  return (slug || 'client').slice(0, 80);
+}
+
+async function uniqueClientSlug(dbClient, name) {
+  const base = slugBaseFromName(name);
+
+  for (let i = 0; i < 100; i += 1) {
+    const suffix = i === 0 ? '' : `-${i + 1}`;
+    const candidate = `${base.slice(0, 80 - suffix.length)}${suffix}`;
+    const existing = await dbClient.query('SELECT id FROM clients WHERE slug = $1 LIMIT 1', [candidate]);
+    if (existing.rows.length === 0) return candidate;
+  }
+
+  const err = new Error('Could not generate a unique client slug');
+  err.status = 409;
+  err.code = 'SLUG_TAKEN';
+  throw err;
+}
+
+function sendCreateClientDbError(err, res) {
+  if (err.code === '23505') {
+    return res.status(409).json({ error: 'Client or user already exists', code: 'DUPLICATE_CLIENT' });
+  }
+  if (err.code === '22001') {
+    return res.status(400).json({ error: 'One of the submitted values is too long', code: 'FIELD_TOO_LONG' });
+  }
+  return null;
+}
 
 // ─────────────────────────────────────────────
 // CLIENTS
@@ -56,21 +91,30 @@ router.post('/clients',
     validate,
   ],
   async (req, res, next) => {
+    const dbClient = await pool.connect();
     try {
       const { name, email, plan = 'starter', trial_length_days = 30 } = req.body;
       const trial = billing.calculateTrialWindow(Number(trial_length_days));
 
-      // Check email not already taken
-      const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+      await dbClient.query('BEGIN');
+
+      // Check both login and client billing emails before writing anything.
+      const existing = await dbClient.query(
+        `SELECT 'user' AS kind, id FROM users WHERE email = $1
+         UNION ALL
+         SELECT 'client' AS kind, id FROM clients WHERE email = $1
+         LIMIT 1`,
+        [email]
+      );
       if (existing.rows.length > 0) {
+        await dbClient.query('ROLLBACK');
         return res.status(409).json({ error: 'Email already registered', code: 'EMAIL_TAKEN' });
       }
 
-      // Generate slug from name
-      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const slug = await uniqueClientSlug(dbClient, name);
 
       // Create client
-      const clientRes = await pool.query(
+      const clientRes = await dbClient.query(
         `INSERT INTO clients
            (name, email, plan, slug, trial_length_days, trial_started_at, trial_ends_at, billing_status)
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'trial')
@@ -80,10 +124,10 @@ router.post('/clients',
       const client = clientRes.rows[0];
 
       // Create admin user with temp password
-      const tempPassword = `Dam${require('crypto').randomBytes(8).toString('base64url')}!`;
+      const tempPassword = `Dam${crypto.randomBytes(8).toString('base64url')}!`;
       const passwordHash = await bcrypt.hash(tempPassword, 12);
 
-      const userRes = await pool.query(
+      const userRes = await dbClient.query(
         `INSERT INTO users (client_id, email, password_hash, role, email_verified)
          VALUES ($1, $2, $3, 'admin', true) RETURNING id, email, role`,
         [client.id, email, passwordHash]
@@ -91,10 +135,12 @@ router.post('/clients',
 
       // Generate access code
       const code = generateAccessCode();
-      await pool.query(
+      await dbClient.query(
         `INSERT INTO access_codes (client_id, code) VALUES ($1, $2)`,
         [client.id, code]
       );
+
+      await dbClient.query('COMMIT');
 
       res.status(201).json({
         data: {
@@ -108,7 +154,13 @@ router.post('/clients',
           message: 'Client created. Share the temp password and access code with your client.',
         },
       });
-    } catch (err) { next(err); }
+    } catch (err) {
+      await dbClient.query('ROLLBACK').catch(() => {});
+      if (sendCreateClientDbError(err, res)) return;
+      next(err);
+    } finally {
+      dbClient.release();
+    }
   }
 );
 
@@ -224,7 +276,7 @@ router.post('/clients/:id/users',
         return res.status(409).json({ error: 'Email already registered', code: 'EMAIL_TAKEN' });
       }
 
-      const tempPassword = `Dam${require('crypto').randomBytes(8).toString('base64url')}!`;
+      const tempPassword = `Dam${crypto.randomBytes(8).toString('base64url')}!`;
       const passwordHash = await bcrypt.hash(tempPassword, 12);
 
       const userRes = await pool.query(
@@ -255,7 +307,7 @@ router.post('/users/:id/reset-password',
   [param('id').isUUID(), validate],
   async (req, res, next) => {
     try {
-      const newPassword = `Dam${require('crypto').randomBytes(8).toString('base64url')}!`;
+      const newPassword = `Dam${crypto.randomBytes(8).toString('base64url')}!`;
       const passwordHash = await bcrypt.hash(newPassword, 12);
 
       const result = await pool.query(
