@@ -531,20 +531,32 @@ export default function Approvals() {
 
   const handleResolve = async (id, status, notes) => {
     setActionError(null);
+    // Optimistic: clear the row + adjust counts IMMEDIATELY, before the network
+    // round-trip. resolveApproval runs a long synchronous side-effect chain
+    // (founder_feedback + feedback_events + learning-loop writes) that the user
+    // should not wait on to see the row clear. Roll back if the request fails.
+    const snapshot = approvals;
+    setApprovals(prev => prev.filter(a => a.id !== id));
+    setCounts(prev => ({
+      ...prev,
+      [tab]: Math.max(0, prev[tab] - 1),
+      [status]: (prev[status] || 0) + 1,
+    }));
     try {
       await request(`/approvals/${id}`, { method: 'PUT', body: JSON.stringify({ status, ...(notes ? { notes } : {}) }) });
-      setApprovals(prev => prev.filter(a => a.id !== id));
-      setCounts(prev => ({
-        ...prev,
-        [tab]: Math.max(0, prev[tab] - 1),
-        [status]: (prev[status] || 0) + 1,
-      }));
     } catch (err) {
       if (err?.code === 'ALREADY_RESOLVED') {
-        setApprovals(prev => prev.filter(a => a.id !== id));
+        // Already resolved server-side — keep it cleared, resync counts quietly.
         await load(tab);
         return;
       }
+      // Roll back the optimistic removal.
+      setApprovals(snapshot);
+      setCounts(prev => ({
+        ...prev,
+        [tab]: prev[tab] + 1,
+        [status]: Math.max(0, (prev[status] || 0) - 1),
+      }));
       setActionError(err?.message || 'Action failed — please try again');
     }
   };
