@@ -86,7 +86,12 @@ router.get('/clients', async (req, res, next) => {
       ORDER BY c.created_at DESC
     `);
     res.json({ data: result.rows, meta: { total: result.rows.length } });
-  } catch (err) { next(err); }
+  } catch (err) {
+    res.status(err.status || 500).json({
+      error: `Admin client list failed (${err.code || 'ADMIN_CLIENTS_FAILED'})`,
+      code: err.code || 'ADMIN_CLIENTS_FAILED',
+    });
+  }
 });
 
 // POST /api/admin/clients — create new client + admin user

@@ -38,6 +38,7 @@ describe('onboarding readiness contracts', () => {
   it('creates admin-provisioned clients atomically with safe duplicate handling', () => {
     const adminSource = route('admin.js');
 
+    expect(adminSource).toContain('Admin client list failed');
     expect(adminSource).toContain('async function uniqueClientSlug');
     expect(adminSource).toContain('SELECT id FROM clients WHERE slug = $1 LIMIT 1');
     expect(adminSource).toContain("SELECT 'user' AS kind, id FROM users WHERE email = $1");
@@ -66,6 +67,16 @@ describe('onboarding readiness contracts', () => {
     expect(migration).toContain('ALTER TABLE research_misses');
     expect(migration).toContain('ALTER COLUMN miss_reason TYPE TEXT');
     expect(migration).toContain('INSERT INTO schema_migrations (version) VALUES (77)');
+  });
+
+  it('repairs calendar_events updated_at expected by Google Calendar sync', () => {
+    const migration = readFileSync(resolve(__dirname, '../../db/migrations/078_calendar_events_updated_at.sql'), 'utf-8');
+
+    expect(migration).toContain('ALTER TABLE calendar_events');
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()');
+    expect(migration).toContain('CREATE TRIGGER set_updated_at BEFORE UPDATE ON calendar_events');
+    expect(migration).toContain('EXECUTE FUNCTION update_updated_at()');
+    expect(migration).toContain('INSERT INTO schema_migrations (version) VALUES (78)');
   });
 
   it('Apollo CSV import is a trusted email source for Tier A imported leads', () => {
