@@ -1114,6 +1114,15 @@ async function _runAutonomousKickoffInner(clientId) {
     const dueFollowUps = await getDueFollowUps(clientId);
     console.log(`[FollowUp] ${dueFollowUps.length} follow-ups due for client ${clientId}`);
 
+    // Funnel observability: this follow-up path previously emitted ZERO pipeline_traces,
+    // so follow-ups (the bulk of daily output) were invisible to the kickoff funnel and
+    // the validation skill. Fire-and-forget; kickoff_id null (a follow-up is not a cold kickoff).
+    const fuTrace = (leadId, messageId, stage, status, extra = {}) =>
+      pipelineTrace.traceStage(clientId, {
+        lead_id: leadId, message_id: messageId, stage, status,
+        agent: 'sales_beaver', pipeline_path: 'followup_pipeline', ...extra,
+      }).catch(() => {});
+
     for (const followUp of dueFollowUps) {
       try {
         // Get previous messages for this lead (so follow-up uses different angle)
@@ -1131,10 +1140,12 @@ async function _runAutonomousKickoffInner(clientId) {
         if (draft?.status === 'needs_more_research') {
           console.warn(`[FollowUp] Thin-context guard: lead ${followUp.lead_id} touch ${followUp.touch_number} — ${draft.reason}`);
           await pool.query(`UPDATE followup_queue SET status = 'skipped' WHERE id = $1`, [followUp.id]);
+          await fuTrace(followUp.lead_id, null, 'skipped', 'thin_context', { reason: draft.reason || 'needs_more_research', metadata: { touch_number: followUp.touch_number } });
           continue;
         }
         if (!draft?.body) {
           console.warn(`[FollowUp] No draft body for lead ${followUp.lead_id} touch ${followUp.touch_number}`);
+          await fuTrace(followUp.lead_id, null, 'draft_failed', 'no_body', { metadata: { touch_number: followUp.touch_number } });
           continue;
         }
 
@@ -1171,6 +1182,8 @@ async function _runAutonomousKickoffInner(clientId) {
             ]
           );
           await pool.query(`UPDATE followup_queue SET status = 'skipped', message_id = $1 WHERE id = $2`, [savedMsg.id, followUp.id]);
+          await fuTrace(followUp.lead_id, savedMsg.id, 'drafted', 'gate_failed', { metadata: { touch_number: followUp.touch_number } });
+          await fuTrace(followUp.lead_id, savedMsg.id, 'rejected', 'gate_failed', { reason: gateFailures.join(', '), metadata: { touch_number: followUp.touch_number } });
           continue;
         }
 
@@ -1191,6 +1204,8 @@ async function _runAutonomousKickoffInner(clientId) {
           ]
         );
 
+        await fuTrace(followUp.lead_id, savedMsg.id, 'drafted', 'success', { metadata: { touch_number: followUp.touch_number, channel: originalChannel } });
+
         let enforcerApproved = false;
         try {
           const rangerResult = await rangerReview(clientId, {
@@ -1206,12 +1221,15 @@ async function _runAutonomousKickoffInner(clientId) {
             `UPDATE messages SET status = $1, ranger_score = $2, ranger_notes = $3, updated_at = NOW() WHERE id = $4 AND client_id = $5`,
             [newStatus, rangerResult?.score || 0, rangerResult?.notes || rangerResult?.reject_reason || 'Enforcer review', savedMsg.id, clientId]
           );
+          await fuTrace(followUp.lead_id, savedMsg.id, 'reviewed', enforcerApproved ? 'pass' : 'fail', { score: rangerResult?.score || 0 });
+          if (!enforcerApproved) await fuTrace(followUp.lead_id, savedMsg.id, 'rejected', 'enforcer_rejected', { score: rangerResult?.score || 0 });
         } catch (err) {
           console.error('[FollowUp] AI Enforcer unavailable, blocking follow-up (fail-closed):', err.message);
           await pool.query(
             `UPDATE messages SET status = 'ranger_rejected', ranger_notes = 'AI Enforcer unavailable — blocked', updated_at = NOW() WHERE id = $1 AND client_id = $2`,
             [savedMsg.id, clientId]
           );
+          await fuTrace(followUp.lead_id, savedMsg.id, 'rejected', 'enforcer_unavailable');
         }
 
         if (enforcerApproved) {
@@ -1231,6 +1249,7 @@ async function _runAutonomousKickoffInner(clientId) {
               } else {
                 await pool.query(`UPDATE messages SET status = 'linkedin_requested', updated_at = NOW() WHERE id = $1 AND client_id = $2`, [savedMsg.id, clientId]);
               }
+              await fuTrace(followUp.lead_id, savedMsg.id, 'approved', 'auto_approved', { score: rangerScore, metadata: { channel: originalChannel } });
             }
           } catch (err) {
             console.warn('[FollowUp] Auto-approve threshold check failed:', err.message);
