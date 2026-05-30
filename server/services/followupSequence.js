@@ -207,11 +207,51 @@ async function resumeSequence(leadId, clientId = null) {
   );
 }
 
+// ─── Daily follow-up draft cap ──────────────────────────────────
+// A backlog of due follow-ups must not burst-draft in a single autonomous run.
+// 2026-05-30: 119 due → 101 drafted in 70 min, which consumed the ENTIRE daily
+// LLM budget BEFORE cold outreach got a turn (the autonomous run drafts
+// follow-ups first, in routes/autonomous.js). This caps how many follow-ups the
+// autonomous fetchers return per MYT business day, net of those already drafted
+// today, so a backlog drains at a bounded rate instead of all at once.
+// Env-overridable. Manual/admin single-draft endpoints don't call these
+// fetchers, so they're unaffected.
+const FOLLOWUP_DAILY_DRAFT_CAP = Number(process.env.FOLLOWUP_DAILY_DRAFT_CAP) || 25;
+
+// Count follow-up messages already drafted today (MYT business day). A follow-up
+// message is any row with follow_up_day set, regardless of approve/reject status —
+// every draft cost budget, so every draft counts toward the cap.
+async function followUpsDraftedToday(clientId) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS n
+       FROM messages
+      WHERE client_id = $1
+        AND follow_up_day IS NOT NULL
+        AND created_at >= date_trunc('day', (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')) AT TIME ZONE 'Asia/Kuala_Lumpur'`,
+    [clientId]
+  );
+  return rows[0]?.n || 0;
+}
+
+// Remaining follow-up drafts allowed for the current MYT day = cap − already drafted.
+async function remainingFollowUpCapacity(clientId) {
+  const drafted = await followUpsDraftedToday(clientId);
+  return Math.max(0, FOLLOWUP_DAILY_DRAFT_CAP - drafted);
+}
+
 /**
  * Get all follow-ups due today or earlier for a specific client.
+ * Hard-capped at the remaining daily follow-up draft allowance — the autonomous
+ * run drafts everything this returns, so the LIMIT here is the ceiling on
+ * follow-up drafts/day.
  */
 async function getDueFollowUps(clientId) {
   const today = new Date().toISOString().split('T')[0];
+  const capRemaining = await remainingFollowUpCapacity(clientId);
+  if (capRemaining <= 0) {
+    console.warn(`[FollowUp] Daily draft cap reached for client ${clientId} (cap=${FOLLOWUP_DAILY_DRAFT_CAP}); deferring remaining due follow-ups to tomorrow.`);
+    return [];
+  }
   const { rows } = await pool.query(
     `SELECT fq.*, l.name, l.company, l.email, l.title,
             l.metadata->>'industry' AS industry,
@@ -224,8 +264,9 @@ async function getDueFollowUps(clientId) {
        AND l.sequence_status = 'active'
        AND l.last_reply_at IS NULL
        AND l.deleted_at IS NULL
-     ORDER BY fq.scheduled_for ASC`,
-    [clientId, today]
+     ORDER BY fq.scheduled_for ASC
+     LIMIT $3`,
+    [clientId, today, capRemaining]
   );
   return rows;
 }
@@ -284,6 +325,12 @@ async function getLeadSequence(clientId, leadId) {
 async function getDueFollowUpsWithContext(clientId) {
   const today = new Date().toISOString().split('T')[0];
 
+  // Daily cap (see getDueFollowUps): plan only what can still be drafted today,
+  // net of follow-ups already drafted, so Captain doesn't propose angles for a
+  // backlog the drafter won't reach.
+  const capRemaining = await remainingFollowUpCapacity(clientId);
+  if (capRemaining <= 0) return [];
+
   // 1. Get due follow-ups joined with full lead row
   const { rows: dueRows } = await pool.query(
     `SELECT fq.*,
@@ -303,8 +350,9 @@ async function getDueFollowUpsWithContext(clientId) {
        AND l.sequence_status = 'active'
        AND l.last_reply_at IS NULL
        AND l.deleted_at IS NULL
-     ORDER BY fq.scheduled_for ASC`,
-    [clientId, today]
+     ORDER BY fq.scheduled_for ASC
+     LIMIT $3`,
+    [clientId, today, capRemaining]
   );
 
   if (dueRows.length === 0) return [];
@@ -878,4 +926,7 @@ module.exports = {
   nextBusinessDay,
   MY_HOLIDAYS_2026,
   escalateChannel,
+  followUpsDraftedToday,
+  remainingFollowUpCapacity,
+  FOLLOWUP_DAILY_DRAFT_CAP,
 };
