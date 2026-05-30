@@ -79,6 +79,12 @@ async function withTenant(clientId, callback) {
 const RLS_ENFORCE_ENABLED = process.env.RLS_ENFORCE_ENABLED === 'true';
 const rawPoolQuery = pool.query.bind(pool);
 
+// Super-admin endpoints are intentionally cross-tenant. They must run as the
+// connection owner instead of the tenant-scoped app role used by normal routes.
+pool.ownerQuery = async function ownerQuery(...args) {
+  return rawPoolQuery(...args);
+};
+
 if (RLS_ENFORCE_ENABLED) {
   let getCurrentClientId;
   try {

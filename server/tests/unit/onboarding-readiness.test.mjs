@@ -24,7 +24,8 @@ describe('onboarding readiness contracts', () => {
 
     expect(superAdminSource).toContain('BEAVER_SOLUTIONS_CLIENT_ID');
     expect(superAdminSource).toContain('ce2fc8e5-617e-42d5-91fe-4275ceaa0030');
-    expect(superAdminSource).toContain("row.slug === 'beaver-solutions'");
+    expect(superAdminSource).toContain("row?.slug === 'beaver-solutions'");
+    expect(superAdminSource).toContain('pool.ownerQuery');
     expect(superAdminSource).not.toContain("name ILIKE '%beaver%'");
   });
 
@@ -52,6 +53,8 @@ describe('onboarding readiness contracts', () => {
     expect(adminSource).toContain('FIELD_TOO_LONG');
     expect(adminSource).toContain('sendCreateClientUnknownError');
     expect(adminSource).toContain('Client provisioning failed');
+    expect(adminSource).toContain('const adminQuery');
+    expect(adminSource).toContain('pool.ownerQuery');
   });
 
   it('widens generated learning labels so provisioning is not blocked by varchar64 failures', () => {

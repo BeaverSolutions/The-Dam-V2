@@ -15,15 +15,17 @@ async function superAdminOnly(req, res, next) {
       return res.status(403).json({ error: 'Super admin access required', code: 'FORBIDDEN' });
     }
 
-    const result = await pool.query(
+    if (req.user?.clientId === BEAVER_SOLUTIONS_CLIENT_ID) {
+      return next();
+    }
+
+    const result = await pool.ownerQuery(
       `SELECT id, slug FROM clients WHERE id = $1 LIMIT 1`,
       [req.user.clientId]
     );
 
     const row = result.rows[0];
-    const isCanonicalBeaverClient =
-      row?.id === BEAVER_SOLUTIONS_CLIENT_ID ||
-      row.slug === 'beaver-solutions';
+    const isCanonicalBeaverClient = row?.slug === 'beaver-solutions';
 
     if (!isCanonicalBeaverClient) {
       return res.status(403).json({ error: 'Super admin access required', code: 'FORBIDDEN' });

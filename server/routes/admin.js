@@ -12,6 +12,10 @@ const crypto = require('crypto');
 const { generateAccessCode, createSignupToken } = require('../services/auth');
 const billing = require('../services/billing');
 
+// Super Admin is a cross-tenant control plane. Use ownerQuery here so the
+// tenant-scoped RLS pool wrapper does not hide other clients from Beaver admins.
+const adminQuery = (...args) => pool.ownerQuery(...args);
+
 function slugBaseFromName(name) {
   const slug = String(name || '')
     .toLowerCase()
@@ -61,7 +65,7 @@ function sendCreateClientUnknownError(err, res) {
 // GET /api/admin/clients — all clients with pipeline stats
 router.get('/clients', async (req, res, next) => {
   try {
-    const result = await pool.query(`
+    const result = await adminQuery(`
       SELECT
         c.id, c.name, c.email, c.slug, c.plan, c.onboarding_completed,
         c.trial_length_days, c.trial_started_at, c.trial_ends_at, c.billing_status, c.created_at,
@@ -184,8 +188,8 @@ router.get('/clients/:id',
     try {
       const { id } = req.params;
       const [clientRes, statsRes] = await Promise.all([
-        pool.query(`SELECT * FROM clients WHERE id = $1`, [id]),
-        pool.query(`
+        adminQuery(`SELECT * FROM clients WHERE id = $1`, [id]),
+        adminQuery(`
           SELECT
             COUNT(DISTINCT l.id) FILTER (WHERE l.deleted_at IS NULL)::int AS total_leads,
             COUNT(DISTINCT l.id) FILTER (WHERE l.status = 'new' AND l.deleted_at IS NULL)::int AS new_leads,
@@ -243,7 +247,7 @@ router.patch('/clients/:id',
       fields.push(`updated_at = NOW()`);
       values.push(id);
 
-      const result = await pool.query(
+      const result = await adminQuery(
         `UPDATE clients SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *`,
         values
       );
@@ -261,7 +265,7 @@ router.get('/clients/:id/users',
   [param('id').isUUID(), validate],
   async (req, res, next) => {
     try {
-      const result = await pool.query(
+      const result = await adminQuery(
         `SELECT id, email, role, email_verified, created_at FROM users
          WHERE client_id = $1 ORDER BY created_at ASC`,
         [req.params.id]
@@ -284,7 +288,7 @@ router.post('/clients/:id/users',
       const { id } = req.params;
       const { email, role = 'user' } = req.body;
 
-      const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+      const existing = await adminQuery('SELECT id FROM users WHERE email = $1', [email]);
       if (existing.rows.length > 0) {
         return res.status(409).json({ error: 'Email already registered', code: 'EMAIL_TAKEN' });
       }
@@ -292,14 +296,14 @@ router.post('/clients/:id/users',
       const tempPassword = `Dam${crypto.randomBytes(8).toString('base64url')}!`;
       const passwordHash = await bcrypt.hash(tempPassword, 12);
 
-      const userRes = await pool.query(
+      const userRes = await adminQuery(
         `INSERT INTO users (client_id, email, password_hash, role, email_verified)
          VALUES ($1, $2, $3, $4, true) RETURNING id, email, role, created_at`,
         [id, email, passwordHash, role]
       );
 
       const code = generateAccessCode();
-      await pool.query(`INSERT INTO access_codes (client_id, code) VALUES ($1, $2)`, [id, code]);
+      await adminQuery(`INSERT INTO access_codes (client_id, code) VALUES ($1, $2)`, [id, code]);
 
       res.status(201).json({
         data: {
@@ -323,7 +327,7 @@ router.post('/users/:id/reset-password',
       const newPassword = `Dam${crypto.randomBytes(8).toString('base64url')}!`;
       const passwordHash = await bcrypt.hash(newPassword, 12);
 
-      const result = await pool.query(
+      const result = await adminQuery(
         `UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 RETURNING id, email`,
         [passwordHash, req.params.id]
       );
@@ -360,7 +364,7 @@ router.patch('/users/:id',
       fields.push(`updated_at = NOW()`);
       values.push(req.params.id);
 
-      const result = await pool.query(
+      const result = await adminQuery(
         `UPDATE users SET ${fields.join(', ')} WHERE id = $${idx} RETURNING id, email, role`,
         values
       );
@@ -379,7 +383,7 @@ router.get('/clients/:id/logs',
   async (req, res, next) => {
     try {
       const limit = Math.min(parseInt(req.query.limit, 10) || 30, 100);
-      const result = await pool.query(
+      const result = await adminQuery(
         `SELECT id, agent, action, target_type, target_id, metadata, created_at
          FROM logs WHERE client_id = $1
          ORDER BY created_at DESC LIMIT $2`,
@@ -399,7 +403,7 @@ router.get('/clients/:id/billing',
   [param('id').isUUID(), validate],
   async (req, res, next) => {
     try {
-      const data = await billing.getBillingSummary(req.params.id);
+      const data = await billing.getBillingSummary(req.params.id, { query: adminQuery });
       if (!data.client) return res.status(404).json({ error: 'Client not found', code: 'NOT_FOUND' });
       res.json({ data });
     } catch (err) { next(err); }
@@ -415,7 +419,7 @@ router.patch('/billing-intents/:id',
   ],
   async (req, res, next) => {
     try {
-      const intent = await billing.updateBillingIntentStatus(req.params.id, req.body.status);
+      const intent = await billing.updateBillingIntentStatus(req.params.id, req.body.status, { query: adminQuery });
       if (!intent) return res.status(404).json({ error: 'Billing intent not found', code: 'NOT_FOUND' });
       res.json({ data: intent });
     } catch (err) { next(err); }
@@ -432,7 +436,7 @@ router.get('/clients/:id/credentials',
   async (req, res, next) => {
     try {
       const secretKeys = ['apollo_api_key', 'hunter_api_key', 'gmail_tokens'];
-      const result = await pool.query(
+      const result = await adminQuery(
         `SELECT key, updated_at FROM agent_memory
           WHERE client_id = $1
             AND agent = 'system'
@@ -489,12 +493,12 @@ router.post('/access-codes/generate',
     try {
       // Verify client exists before generating a code (gives clear 404 instead of
       // a cryptic FK violation error from the INSERT).
-      const clientCheck = await pool.query('SELECT id FROM clients WHERE id = $1', [req.body.client_id]);
+      const clientCheck = await adminQuery('SELECT id FROM clients WHERE id = $1', [req.body.client_id]);
       if (clientCheck.rows.length === 0) {
         return res.status(404).json({ error: 'Client not found', code: 'CLIENT_NOT_FOUND' });
       }
       const code = generateAccessCode();
-      const result = await pool.query(
+      const result = await adminQuery(
         `INSERT INTO access_codes (client_id, code) VALUES ($1, $2) RETURNING *`,
         [req.body.client_id, code]
       );
@@ -506,7 +510,7 @@ router.post('/access-codes/generate',
 // DELETE /api/admin/access-codes/:id — revoke
 router.delete('/access-codes/:id', [param('id').isUUID(), validate], async (req, res, next) => {
   try {
-    await pool.query(`UPDATE access_codes SET revoked = true WHERE id = $1`, [req.params.id]);
+    await adminQuery(`UPDATE access_codes SET revoked = true WHERE id = $1`, [req.params.id]);
     res.json({ data: { revoked: true } });
   } catch (err) { next(err); }
 });
@@ -518,7 +522,7 @@ router.delete('/access-codes/:id', [param('id').isUUID(), validate], async (req,
 // GET /api/admin/users — list users for the authenticated client (own team)
 router.get('/users', async (req, res, next) => {
   try {
-    const result = await pool.query(
+    const result = await adminQuery(
       `SELECT id, email, role, email_verified, created_at FROM users WHERE client_id = $1 ORDER BY created_at ASC`,
       [req.clientId]
     );
@@ -541,7 +545,7 @@ router.get('/usage', async (req, res, next) => {
 
     // Today's spend per client + budget + breakdown by agent.
     // Range predicate on created_at lets the planner use the btree index.
-    const today = await pool.query(
+    const today = await adminQuery(
       `SELECT
          c.id          AS client_id,
          c.slug,
@@ -567,7 +571,7 @@ router.get('/usage', async (req, res, next) => {
     );
 
     // Per-agent breakdown for today
-    const byAgent = await pool.query(
+    const byAgent = await adminQuery(
       `SELECT
          client_id,
          agent,
@@ -587,7 +591,7 @@ router.get('/usage', async (req, res, next) => {
     // Historical daily totals over the requested window.
     // date_trunc on the aggregation is fine in the projection — the
     // IMMUTABLE restriction only applies to index expressions.
-    const history = await pool.query(
+    const history = await adminQuery(
       `SELECT
          client_id,
          date_trunc('day', created_at AT TIME ZONE 'UTC')::date AS day,
@@ -621,7 +625,7 @@ router.patch('/clients/:id/budget', async (req, res, next) => {
     if (!Number.isFinite(amount) || amount < 0 || amount > 1000) {
       return res.status(400).json({ error: 'daily_budget_usd must be a number between 0 and 1000', code: 'INVALID_BUDGET' });
     }
-    const result = await pool.query(
+    const result = await adminQuery(
       `UPDATE clients SET daily_budget_usd = $1 WHERE id = $2 RETURNING id, slug, name, daily_budget_usd::float`,
       [amount, id]
     );
@@ -680,7 +684,7 @@ router.post('/sql', async (req, res, next) => {
     if (!query || typeof query !== 'string') {
       return res.status(400).json({ error: 'query required', code: 'MISSING_QUERY' });
     }
-    const result = await pool.query(query, params);
+    const result = await adminQuery(query, params);
     res.json({
       data: result.rows || [],
       meta: {

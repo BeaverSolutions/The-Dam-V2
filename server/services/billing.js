@@ -77,15 +77,15 @@ function calculateBillingIntent({ plan, term }) {
   };
 }
 
-async function getBillingSummary(clientId) {
+async function getBillingSummary(clientId, { query = (...args) => pool.query(...args) } = {}) {
   const [clientRes, intentsRes] = await Promise.all([
-    pool.query(
+    query(
       `SELECT id, name, plan, trial_length_days, trial_started_at, trial_ends_at, billing_status
        FROM clients
        WHERE id = $1`,
       [clientId]
     ),
-    pool.query(
+    query(
       `SELECT id, client_id, plan, term, currency, monthly_amount_rm::int,
               months, total_amount_rm::int, status, requested_by, confirmed_at,
               invoice_sent_at, paid_at, cancelled_at, notes, created_at, updated_at
@@ -200,7 +200,7 @@ async function notifyUpgradeIntent(clientId, intent) {
   });
 }
 
-async function updateBillingIntentStatus(intentId, status) {
+async function updateBillingIntentStatus(intentId, status, { query = (...args) => pool.query(...args) } = {}) {
   const allowed = ['pending_invoice', 'invoice_sent', 'paid', 'cancelled'];
   if (!allowed.includes(status)) throw new Error('Unsupported billing status');
 
@@ -211,7 +211,7 @@ async function updateBillingIntentStatus(intentId, status) {
   }[status];
 
   const setTimestamp = statusField ? `, ${statusField} = COALESCE(${statusField}, NOW())` : '';
-  const result = await pool.query(
+  const result = await query(
     `UPDATE billing_intents
         SET status = $1,
             updated_at = NOW()
@@ -232,7 +232,7 @@ async function updateBillingIntentStatus(intentId, status) {
     cancelled: 'trial',
   }[status];
 
-  await pool.query(
+  await query(
     `UPDATE clients SET billing_status = $1, updated_at = NOW() WHERE id = $2`,
     [clientBillingStatus, intent.client_id]
   );
