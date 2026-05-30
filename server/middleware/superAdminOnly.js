@@ -2,9 +2,11 @@
 
 const pool = require('../db/pool');
 
+const BEAVER_SOLUTIONS_CLIENT_ID = 'ce2fc8e5-617e-42d5-91fe-4275ceaa0030';
+
 /**
  * Super admin middleware — only Beaver Solutions admins can pass.
- * Checks: role = 'admin' AND the user's client slug = 'beaver-solutions'.
+ * Checks: role = 'admin' AND canonical Beaver client id/slug.
  * Applied on all /api/admin routes that need cross-client visibility.
  */
 async function superAdminOnly(req, res, next) {
@@ -14,11 +16,16 @@ async function superAdminOnly(req, res, next) {
     }
 
     const result = await pool.query(
-      `SELECT slug FROM clients WHERE id = $1 LIMIT 1`,
+      `SELECT id, slug FROM clients WHERE id = $1 LIMIT 1`,
       [req.user.clientId]
     );
 
-    if (result.rows[0]?.slug !== 'beaver-solutions') {
+    const row = result.rows[0];
+    const isCanonicalBeaverClient =
+      row?.id === BEAVER_SOLUTIONS_CLIENT_ID ||
+      row.slug === 'beaver-solutions';
+
+    if (!isCanonicalBeaverClient) {
       return res.status(403).json({ error: 'Super admin access required', code: 'FORBIDDEN' });
     }
 

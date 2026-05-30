@@ -18,6 +18,23 @@ describe('onboarding readiness contracts', () => {
     expect(adminSource).not.toContain('FROM credentials');
   });
 
+  it('super admin access accepts only the canonical Beaver client identity', () => {
+    const superAdminSource = readFileSync(resolve(__dirname, '../../middleware/superAdminOnly.js'), 'utf-8');
+
+    expect(superAdminSource).toContain('BEAVER_SOLUTIONS_CLIENT_ID');
+    expect(superAdminSource).toContain('ce2fc8e5-617e-42d5-91fe-4275ceaa0030');
+    expect(superAdminSource).toContain("row.slug === 'beaver-solutions'");
+    expect(superAdminSource).not.toContain("name ILIKE '%beaver%'");
+  });
+
+  it('repairs the canonical Beaver client slug during migration', () => {
+    const migration = readFileSync(resolve(__dirname, '../../db/migrations/076_fix_super_admin_beaver_slug.sql'), 'utf-8');
+
+    expect(migration).toContain("slug = 'beaver-solutions'");
+    expect(migration).toContain('ce2fc8e5-617e-42d5-91fe-4275ceaa0030');
+    expect(migration).toContain('admin@beaversolutions.com');
+  });
+
   it('Apollo CSV import is a trusted email source for Tier A imported leads', () => {
     const importSource = route('import.js');
     const importPage = clientPage('Import.jsx');
