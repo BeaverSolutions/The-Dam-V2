@@ -46,6 +46,14 @@ function sendCreateClientDbError(err, res) {
   return null;
 }
 
+function sendCreateClientUnknownError(err, res) {
+  const code = err.code || 'CLIENT_CREATE_FAILED';
+  return res.status(err.status || 500).json({
+    error: err.status ? err.message : `Client provisioning failed (${code})`,
+    code,
+  });
+}
+
 // ─────────────────────────────────────────────
 // CLIENTS
 // ─────────────────────────────────────────────
@@ -157,7 +165,7 @@ router.post('/clients',
     } catch (err) {
       await dbClient.query('ROLLBACK').catch(() => {});
       if (sendCreateClientDbError(err, res)) return;
-      next(err);
+      sendCreateClientUnknownError(err, res);
     } finally {
       dbClient.release();
     }

@@ -48,6 +48,24 @@ describe('onboarding readiness contracts', () => {
     expect(adminSource).toContain("err.code === '23505'");
     expect(adminSource).toContain("err.code === '22001'");
     expect(adminSource).toContain('FIELD_TOO_LONG');
+    expect(adminSource).toContain('sendCreateClientUnknownError');
+    expect(adminSource).toContain('Client provisioning failed');
+  });
+
+  it('widens generated learning labels so provisioning is not blocked by varchar64 failures', () => {
+    const migration = readFileSync(resolve(__dirname, '../../db/migrations/077_widen_learning_label_columns.sql'), 'utf-8');
+
+    expect(migration).toContain('ALTER TABLE signup_tokens');
+    expect(migration).toContain('ALTER COLUMN token TYPE TEXT');
+    expect(migration).toContain('ALTER TABLE agent_outcomes');
+    expect(migration).toContain('ALTER COLUMN source_strategy TYPE TEXT');
+    expect(migration).toContain('ALTER COLUMN signal_type TYPE TEXT');
+    expect(migration).toContain('ALTER COLUMN segment TYPE TEXT');
+    expect(migration).toContain('ALTER TABLE agent_directives');
+    expect(migration).toContain('ALTER COLUMN directive_type TYPE TEXT');
+    expect(migration).toContain('ALTER TABLE research_misses');
+    expect(migration).toContain('ALTER COLUMN miss_reason TYPE TEXT');
+    expect(migration).toContain('INSERT INTO schema_migrations (version) VALUES (77)');
   });
 
   it('Apollo CSV import is a trusted email source for Tier A imported leads', () => {
