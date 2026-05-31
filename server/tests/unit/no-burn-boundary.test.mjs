@@ -3,9 +3,15 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const indexSource = readFileSync(resolve(__dirname, '../../index.js'), 'utf-8');
 const autonomousSource = readFileSync(resolve(__dirname, '../../routes/autonomous.js'), 'utf-8');
 const agentsSource = readFileSync(resolve(__dirname, '../../services/agents.js'), 'utf-8');
 const pipelineSource = readFileSync(resolve(__dirname, '../../services/pipeline.js'), 'utf-8');
+const researchEnrichmentSource = readFileSync(resolve(__dirname, '../../services/researchEnrichment.js'), 'utf-8');
+const signalHuntSource = readFileSync(resolve(__dirname, '../../services/signalHunt.js'), 'utf-8');
+const searchServiceSource = readFileSync(resolve(__dirname, '../../services/searchService.js'), 'utf-8');
+const marketSensingSource = readFileSync(resolve(__dirname, '../../services/marketSensing.js'), 'utf-8');
+const emailEnrichmentSource = readFileSync(resolve(__dirname, '../../services/emailEnrichment.js'), 'utf-8');
 
 // ── 2c: unify the no-burn boundary across the autonomous kickoff loop ─────
 // The two generic paid-sourcing escape hatches (on-demand research + VP rescue)
@@ -66,8 +72,7 @@ describe('budget-cap no-burn boundary', () => {
 
   it('does not mark the scheduled daily kickoff as done when budget is blocked', () => {
     const schedulerBudgetLog = autonomousSource.indexOf("'kickoff_blocked_budget'");
-    const indexBudgetLog = readFileSync(resolve(__dirname, '../../index.js'), 'utf-8')
-      .indexOf("'daily_kickoff_blocked_budget'");
+    const indexBudgetLog = indexSource.indexOf("'daily_kickoff_blocked_budget'");
     expect(schedulerBudgetLog).toBeGreaterThan(-1);
     expect(indexBudgetLog).toBeGreaterThan(-1);
   });
@@ -83,5 +88,73 @@ describe('budget-cap no-burn boundary', () => {
     const zeroStop = autonomousSource.indexOf("'db_pool_zero_output_stop'");
     expect(dbCall).toBeGreaterThan(-1);
     expect(zeroStop).toBeGreaterThan(dbCall);
+  });
+
+  it('dedupes research enrichment before paid work and keeps it bounded', () => {
+    const dedupeInsert = indexSource.indexOf("daily_pre_followup_enrichment");
+    const enrichmentCall = indexSource.indexOf('runDailyEnrichmentPass(clientRow.id)');
+    expect(indexSource).toContain('research_enrichment_${now.toISOString().slice(0, 10)}');
+    expect(dedupeInsert).toBeGreaterThan(-1);
+    expect(enrichmentCall).toBeGreaterThan(dedupeInsert);
+    expect(researchEnrichmentSource).toContain("envNumber('RESEARCH_ENRICHMENT_DAILY_LEAD_CAP', 5)");
+    expect(researchEnrichmentSource).toContain("envNumber('RESEARCH_ENRICHMENT_BRAVE_DAILY_CAP', 5)");
+    expect(researchEnrichmentSource).toContain('const selectedQueries = ENRICHMENT_EXTRA_QUERIES ? queries : queries.slice(0, 1)');
+  });
+
+  it('keeps manual cold-signal enrichment behind LLM and Brave guards', () => {
+    expect(researchEnrichmentSource).toContain("envNumber('COLD_SIGNAL_ENRICHMENT_BRAVE_DAILY_CAP', 5)");
+    expect(researchEnrichmentSource).toContain('Cold signal enrichment blocked by ${budget.period} LLM budget guard before Brave spend.');
+    expect(researchEnrichmentSource).toContain('searchFreshSignals(lead, { clientId, maxQueries: 1 })');
+    const budgetGate = researchEnrichmentSource.indexOf("reason: 'llm_budget_blocked'");
+    const coldSearch = researchEnrichmentSource.indexOf('searchFreshSignals(lead, { clientId, maxQueries: 1 })');
+    expect(budgetGate).toBeGreaterThan(-1);
+    expect(coldSearch).toBeGreaterThan(budgetGate);
+  });
+
+  it('does not spend Signal Hunt provider calls after LLM budget is blocked', () => {
+    const firstAssert = signalHuntSource.indexOf('await assertLlmBudgetOpen(clientId);');
+    const openWebSearch = signalHuntSource.indexOf('searchOpenWeb(q.query');
+    expect(firstAssert).toBeGreaterThan(-1);
+    expect(openWebSearch).toBeGreaterThan(firstAssert);
+    expect(signalHuntSource).toContain('isBudgetExceededError(err)');
+    expect(signalHuntSource).toContain('throw err;');
+    expect(signalHuntSource).toContain('{ country, clientId }');
+  });
+
+  it('attributes open-web provider usage to explicit clientId when supplied', () => {
+    expect(searchServiceSource).toContain('function currentClientId(options = {})');
+    expect(searchServiceSource).toContain('return options.clientId || getCurrentClientId() || null');
+    expect(searchServiceSource).toContain('const clientId = currentClientId(options)');
+    expect(emailEnrichmentSource).toContain('clientId: lead.clientId || lead.client_id || null');
+    expect(pipelineSource).toContain('clientId,');
+    expect(researchEnrichmentSource).toContain('findEmail({ name: lead.name, company: lead.company, clientId })');
+  });
+
+  it('keeps market sensing behind budget and per-job Brave caps', () => {
+    expect(marketSensingSource).toContain("envNumber('MARKET_SENSING_BRAVE_DAILY_CAP', 10)");
+    expect(marketSensingSource).toContain('const budget = await checkBudget(clientId)');
+    expect(marketSensingSource).toContain('queries.slice(0, queryBudget)');
+  });
+
+  it('runs LinkedIn stale sweep after UTC budget reset and gates enrichment', () => {
+    expect(indexSource).toContain('target.setHours(8, 10, 0, 0)');
+    expect(indexSource).toContain('LINKEDIN_SWEEP_MIN_LLM_REMAINING_USD');
+    expect(indexSource).toContain('skipped before enrichment by LLM budget guard');
+    const budgetGate = indexSource.indexOf('LINKEDIN_SWEEP_MIN_LLM_REMAINING_USD');
+    const enrichmentCall = indexSource.indexOf('emailEnrichment.enrichEmail');
+    expect(budgetGate).toBeGreaterThan(-1);
+    expect(enrichmentCall).toBeGreaterThan(budgetGate);
+  });
+
+  it('keeps pool email enrichment opt-in, budget-gated, and small by default', () => {
+    expect(indexSource).toContain("POOL_EMAIL_ENRICHMENT_ENABLED !== 'true'");
+    expect(indexSource).toContain('POOL_EMAIL_ENRICHMENT_MIN_LLM_REMAINING_USD');
+    expect(indexSource).toContain('POOL_EMAIL_ENRICHMENT_LIMIT || 5');
+    expect(researchEnrichmentSource).toContain('Pool email enrichment blocked by LLM budget guard before provider spend.');
+    expect(researchEnrichmentSource).toContain("providerUsageToday('millionverifier', clientId)");
+    const budgetGate = indexSource.indexOf('POOL_EMAIL_ENRICHMENT_MIN_LLM_REMAINING_USD');
+    const runCall = indexSource.indexOf('runPoolEmailEnrichment(client.id');
+    expect(budgetGate).toBeGreaterThan(-1);
+    expect(runCall).toBeGreaterThan(budgetGate);
   });
 });

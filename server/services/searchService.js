@@ -20,8 +20,8 @@ const spendGuard = require('./spendGuard');
 const pool = require('../db/pool');
 const { getCurrentClientId } = require('../middleware/clientContext');
 
-function currentClientId() {
-  return getCurrentClientId() || null;
+function currentClientId(options = {}) {
+  return options.clientId || getCurrentClientId() || null;
 }
 
 function providerBlockedError(provider, guard) {
@@ -523,7 +523,7 @@ async function searchOpenWeb(query, limit = 5, options = {}) {
   try {
     const braveKey = process.env.BRAVE_API_KEY;
     if (!braveKey) throw new Error('BRAVE_API_KEY not set');
-    const clientId = currentClientId();
+    const clientId = currentClientId(options);
     const guard = await spendGuard.checkProvider('brave', { clientId, estimatedUnits: 1 });
     if (!guard.allowed) throw providerBlockedError('brave', guard);
 
@@ -571,7 +571,7 @@ async function searchOpenWeb(query, limit = 5, options = {}) {
     const apiKey = process.env.GOOGLE_CSE_API_KEY;
     const cx     = process.env.GOOGLE_CSE_CX;
     if (!apiKey || !cx) throw new Error('GOOGLE_CSE not configured');
-    const clientId = currentClientId();
+    const clientId = currentClientId(options);
     const guard = await spendGuard.checkProvider('google_cse', { clientId, estimatedUnits: 1 });
     if (!guard.allowed) throw providerBlockedError('google_cse', guard);
 

@@ -544,6 +544,7 @@ async function start() {
           `SELECT id FROM clients WHERE is_active = true AND onboarding_completed = true`
         );
         const { runPoolEmailEnrichment } = require('./services/researchEnrichment');
+        const { checkBudget } = require('./services/budget');
         let promoted = 0, processed = 0, firedClients = 0;
         for (const client of clients) {
           const { rows: already } = await pool.query(
@@ -551,6 +552,21 @@ async function start() {
             [client.id, dedupeKey]
           );
           if (already.length > 0) continue;
+          const budgetState = await checkBudget(client.id).catch(err => ({
+            allowed: false,
+            remaining: 0,
+            error: err.message,
+            period: 'unknown',
+          }));
+          if (!budgetState.allowed || budgetState.remaining < Number(process.env.POOL_EMAIL_ENRICHMENT_MIN_LLM_REMAINING_USD || 1)) {
+            logger.warn({
+              msg: '[pool-email-enrich] skipped before provider spend by LLM budget guard',
+              clientId: client.id,
+              period: budgetState.period,
+              remaining: budgetState.remaining,
+            });
+            continue;
+          }
           // Mark fired BEFORE running so a restart mid-pass cannot double-spend.
           await pool.query(
             `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
@@ -559,7 +575,7 @@ async function start() {
             [client.id, dedupeKey]
           ).catch(() => {});
           const result = await runWithClientContext(client.id, () =>
-            runPoolEmailEnrichment(client.id, { limit: 30 })
+            runPoolEmailEnrichment(client.id, { limit: Number(process.env.POOL_EMAIL_ENRICHMENT_LIMIT || 5) })
           ).catch(err => { jobHealth.markError('pool_email_enrichment', err.message); return null; });
           promoted += Number(result?.promoted || 0);
           processed += Number(result?.processed || 0);
@@ -649,11 +665,35 @@ async function start() {
         );
         if (!clientRow) return;
 
+        const { checkBudget } = require('./services/budget');
+        const budgetState = await checkBudget(clientRow.id).catch(err => ({
+          allowed: false,
+          error: err.message,
+          spend: null,
+          budget: null,
+          period: 'unknown',
+        }));
+        if (!budgetState.allowed) {
+          logger.warn({ msg: 'Research enrichment blocked by budget guard', clientId: clientRow.id, budgetState });
+          return { blocked: true, reason: 'budget_guard_preflight', budgetState };
+        }
+
+        // Mark before paid work. This cron only supports the morning pre-plan
+        // enrichment window; retry loops here can drain Brave before kickoff.
+        await pool.query(
+          `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+           VALUES ($1, 'research_beaver', $2, $3::jsonb, 'config')
+           ON CONFLICT (client_id, agent, key) DO NOTHING`,
+          [clientRow.id, dedupeKey, JSON.stringify({ started_at: now.toISOString(), reason: 'daily_pre_followup_enrichment' })]
+        ).catch(() => {});
+
         const { runDailyEnrichmentPass } = require('./services/researchEnrichment');
-        const result = await runDailyEnrichmentPass(clientRow.id);
+        const result = await runWithClientContext(clientRow.id, () => runDailyEnrichmentPass(clientRow.id));
         logger.info({ msg: 'Research enrichment pass complete', ...result });
+        return result;
       } catch (err) {
         logger.warn({ msg: 'Research enrichment pass failed', err: err.message });
+        return { error: err.message };
       }
     }
 
@@ -1548,7 +1588,10 @@ none from this broken report; check app truth before approving batches.`;
     // Poll every 10 minutes — each function self-guards against running outside its window
     setInterval(() => {
       runResearchEnrichment()
-        .then(() => { jobHealth.markRun('research_enrichment'); })
+        .then(result => {
+          if (result?.blocked) jobHealth.markSkipped('research_enrichment', result.reason || 'research enrichment blocked', result);
+          else if (result?.processed !== undefined || result?.error) jobHealth.markRun('research_enrichment', result);
+        })
         .catch(err => { logger.warn({ msg: 'Research enrichment poll error', err: err.message }); jobHealth.markError('research_enrichment', err.message); });
       runMorningBrief()
         .then(() => { jobHealth.markRun('morning_brief'); })
@@ -1562,7 +1605,7 @@ none from this broken report; check app truth before approving batches.`;
       runDailyKickoff()
         .then(result => {
           if (result?.fired || result?.alreadyDone) jobHealth.markRun('daily_kickoff', result);
-          else if (result?.disabled || result?.missed || result?.skipped) jobHealth.markSkipped('daily_kickoff', result?.reason || 'daily kickoff skipped', result);
+          else if (result?.disabled || result?.missed || result?.skipped || result?.blocked) jobHealth.markSkipped('daily_kickoff', result?.reason || 'daily kickoff skipped', result);
         })
         .catch(err => { logger.warn({ msg: 'Daily kickoff poll error', err: err.message }); jobHealth.markError('daily_kickoff', err.message); });
       runCaptainEodBrief()
@@ -1574,7 +1617,7 @@ none from this broken report; check app truth before approving batches.`;
       runMarketSensingCron()
         .then(result => {
           if (result?.fired || result?.alreadyDone) jobHealth.markRun('market_sensing', result);
-          else if (result?.disabled || result?.missed || result?.skipped) jobHealth.markSkipped('market_sensing', result?.reason || 'market sensing skipped', result);
+          else if (result?.disabled || result?.missed || result?.skipped || result?.blocked) jobHealth.markSkipped('market_sensing', result?.reason || 'market sensing skipped', result);
         })
         .catch(err => { logger.warn({ msg: 'Market-sensing poll error', err: err.message }); jobHealth.markError('market_sensing', err.message); });
       runQualityTunerCron()
@@ -1633,6 +1676,26 @@ none from this broken report; check app truth before approving batches.`;
 
         for (const msg of staleMessages) {
           try {
+            const minLlmRemaining = Number(process.env.LINKEDIN_SWEEP_MIN_LLM_REMAINING_USD || 0.25);
+            const { checkBudget } = require('./services/budget');
+            const budgetState = await checkBudget(msg.client_id).catch(err => ({
+              allowed: false,
+              remaining: 0,
+              error: err.message,
+              period: 'unknown',
+            }));
+            if (!budgetState.allowed || budgetState.remaining < minLlmRemaining) {
+              logger.warn({
+                msg: '[linkedin-sweep] skipped before enrichment by LLM budget guard',
+                clientId: msg.client_id,
+                lead: msg.lead_name,
+                period: budgetState.period,
+                remaining: budgetState.remaining,
+                min_required: minLlmRemaining,
+              });
+              continue;
+            }
+
             let foundEmail = msg.lead_email;
 
             if (!foundEmail) {
@@ -1735,20 +1798,21 @@ Return JSON: {"subject":"...","body":"..."}`,
       }
     }
 
-    // Run once daily at 07:00 MYT (before Research Beaver 08:30 run — stale leads
-    // cleared first so fresh research doesn't duplicate them)
+    // Run once daily at 08:10 MYT. This is after the UTC budget reset (08:00
+    // MYT) and before Research Beaver's 08:30 run, so stale leads clear first
+    // without spending from yesterday's LLM budget window.
     function scheduleLinkedInSweep() {
       const now = new Date();
       const myt = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur' }));
       const target = new Date(myt);
-      target.setHours(7, 0, 0, 0);
+      target.setHours(8, 10, 0, 0);
       if (myt >= target) target.setDate(target.getDate() + 1);
       const msUntil = target.getTime() - myt.getTime();
       setTimeout(() => {
         sweepStaleLinkedInRequests().then(() => jobHealth.markRun('linkedin_sweep')).catch(err => jobHealth.markError('linkedin_sweep', err.message));
         setInterval(() => sweepStaleLinkedInRequests().then(() => jobHealth.markRun('linkedin_sweep')).catch(err => jobHealth.markError('linkedin_sweep', err.message)), 24 * 60 * 60 * 1000);
       }, msUntil);
-      logger.info({ msg: `LinkedIn stale sweep scheduled: first run in ${Math.round(msUntil / 60000)}min (07:00 MYT daily, ${LINKEDIN_STALE_DAYS}-day threshold, batch ${LINKEDIN_SWEEP_BATCH})` });
+      logger.info({ msg: `LinkedIn stale sweep scheduled: first run in ${Math.round(msUntil / 60000)}min (08:10 MYT daily, ${LINKEDIN_STALE_DAYS}-day threshold, batch ${LINKEDIN_SWEEP_BATCH})` });
     }
     scheduleLinkedInSweep();
 

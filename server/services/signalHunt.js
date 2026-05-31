@@ -25,6 +25,7 @@ const logsService = require('./logs');
 const { searchOpenWeb, searchLinkedInProfiles } = require('./searchService');
 const hunterService = require('./hunter');
 const { callAgent } = require('./claude');
+const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
 
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -35,6 +36,19 @@ function envInt(name, fallback) {
 
 const MAX_SIGNAL_QUERIES_PER_RUN = envInt('SIGNAL_HUNT_MAX_QUERIES', 6);
 const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
+
+async function assertLlmBudgetOpen(clientId) {
+  const budget = await checkBudget(clientId);
+  if (!budget.allowed) {
+    throw new BudgetExceededError({
+      clientId,
+      spend: budget.spend,
+      budget: budget.budget,
+      period: budget.period,
+    });
+  }
+  return budget;
+}
 
 // Default signal queries — used when no client-specific config exists.
 // Phrased as Google search queries with SEA/MY bias.
@@ -273,6 +287,10 @@ Rules:
       if (jsonMatch) return JSON.parse(jsonMatch[0]);
     }
   } catch (err) {
+    if (isBudgetExceededError(err)) {
+      console.warn('[signalHunt] budget cap reached during signal parsing:', err.message);
+      throw err;
+    }
     console.warn('[signalHunt] budgeted signal parsing failed:', err.message);
   }
 
@@ -327,6 +345,7 @@ async function findDecisionMaker(companyName, icpTitles = [], country = 'MY') {
  */
 async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries = null } = {}) {
   console.log(`[signalHunt] Starting signal hunt for client ${clientId} (target: ${maxLeads})`);
+  await assertLlmBudgetOpen(clientId);
 
   const config = await loadSignalConfig(clientId, icp);
   const allSignals = [];
@@ -347,6 +366,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   for (const q of config.queries) {
     if (allSignals.length >= maxLeads * 2) break; // 2x buffer — some will fail contact lookup
 
+    await assertLlmBudgetOpen(clientId);
     if (!consumePaidQuery(1)) {
       console.log('[signalHunt] Paid-query budget exhausted before open-web signal search');
       break;
@@ -357,7 +377,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     try {
       const country = q.country || 'MY';
       const geoText = countryNameFromCode(country);
-      const results = await searchOpenWeb(q.query, config.max_results_per_query || 5, { country });
+      const results = await searchOpenWeb(q.query, config.max_results_per_query || 5, { country, clientId });
       if (results.length === 0) continue;
 
       const extracted = await extractSignalsFromResults(clientId, results, q.signal_type, geoText);
@@ -417,6 +437,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   for (const signal of uniqueSignals.slice(0, maxLeads * 2)) {
     if (leads.length >= maxLeads) break;
 
+    await assertLlmBudgetOpen(clientId);
     if (!consumePaidQuery(1)) {
       console.log('[signalHunt] Paid-query budget exhausted before decision-maker lookup');
       break;

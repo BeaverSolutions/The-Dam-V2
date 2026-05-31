@@ -621,6 +621,7 @@ async function enrichEmail(clientId, lead, options = {}) {
       first_name: lead.first_name || null,
       last_name: lead.last_name || null,
       domain: lead.domain || null,
+      clientId,
     });
     if (result?.email) {
       await pool.query(

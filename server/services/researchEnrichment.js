@@ -29,9 +29,23 @@ const { searchOpenWeb } = require('./searchService');
 const logger = require('../utils/logger');
 const { scoreAndPersist } = require('./qualityScorer');
 const { getTenantConfig } = require('./tenantConfig');
+const { checkBudget, isBudgetExceededError } = require('./budget');
+const { CAPS, providerUsageToday } = require('./spendGuard');
 
 const ENRICHMENT_STALE_DAYS = 7;
-const MAX_ENRICHMENT_PER_DAY = 30; // hard cap to prevent Brave burn
+function envNumber(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// Conservative default: this job enriches context; it is not the main outreach
+// producer. Keep its Brave footprint small so 09:30 kickoff keeps capacity.
+const MAX_ENRICHMENT_PER_DAY = Math.min(30, Math.max(0, envNumber('RESEARCH_ENRICHMENT_DAILY_LEAD_CAP', 5)));
+const MAX_ENRICHMENT_BRAVE_UNITS = Math.min(30, Math.max(0, envNumber('RESEARCH_ENRICHMENT_BRAVE_DAILY_CAP', 5)));
+const MAX_COLD_SIGNAL_BRAVE_UNITS = Math.min(25, Math.max(0, envNumber('COLD_SIGNAL_ENRICHMENT_BRAVE_DAILY_CAP', 5)));
+const ENRICHMENT_EXTRA_QUERIES = process.env.RESEARCH_ENRICHMENT_EXTRA_QUERIES === 'true';
 
 /**
  * Check whether a lead's existing enrichment is fresh enough to skip.
@@ -48,11 +62,12 @@ function isEnrichmentFresh(metadata) {
  * Run a Brave search for fresh signals about a single lead.
  * Returns structured findings or null if quota exhausted or no signals found.
  */
-async function searchFreshSignals(lead) {
+async function searchFreshSignals(lead, { clientId = null, maxQueries = 1 } = {}) {
   const company = (lead.company || '').trim();
   if (!company || /^(unknown|n\/a|independent)$/i.test(company)) return null;
 
-  // Three targeted queries — small total Brave footprint per lead
+  // Default is one query per lead. Extra queries are opt-in because this cron
+  // runs before the real outreach producer and must not drain Brave capacity.
   const queries = [
     `"${company}" hiring OR recruiting OR "we're hiring" 2026`,
     `"${company}" news OR funding OR launch OR announced`,
@@ -60,9 +75,10 @@ async function searchFreshSignals(lead) {
   ].filter(Boolean);
 
   const allHits = [];
-  for (const q of queries) {
+  const selectedQueries = ENRICHMENT_EXTRA_QUERIES ? queries : queries.slice(0, 1);
+  for (const q of selectedQueries.slice(0, Math.max(1, maxQueries))) {
     try {
-      const hits = await searchOpenWeb(q, 3);
+      const hits = await searchOpenWeb(q, 3, { clientId });
       if (Array.isArray(hits)) allHits.push(...hits.slice(0, 3));
     } catch (err) {
       const msg = String(err.message || '').toLowerCase();
@@ -118,6 +134,10 @@ If no fresh signals, return {"signals_found":[],"summary":"No fresh signals — 
     const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
     return JSON.parse(cleaned);
   } catch (err) {
+    if (isBudgetExceededError(err)) {
+      logger.warn({ msg: '[research-enrichment] LLM budget blocked during synthesis', err: err.message });
+      throw err;
+    }
     logger.warn({ msg: '[research-enrichment] Haiku synthesis failed', err: err.message });
     return null;
   }
@@ -129,7 +149,7 @@ If no fresh signals, return {"signals_found":[],"summary":"No fresh signals — 
  *   { enriched: true, signals_count, recommended_template } on success
  *   { enriched: false, reason } on skip or failure
  */
-async function enrichLeadForFollowUp(clientId, lead) {
+async function enrichLeadForFollowUp(clientId, lead, { maxQueriesPerLead = 1 } = {}) {
   // Skip conditions
   if (isEnrichmentFresh(lead.metadata)) {
     return { enriched: false, reason: 'fresh_enrichment_exists' };
@@ -139,7 +159,7 @@ async function enrichLeadForFollowUp(clientId, lead) {
     return { enriched: false, reason: 'thin_context' };
   }
 
-  const searchResult = await searchFreshSignals(lead);
+  const searchResult = await searchFreshSignals(lead, { clientId, maxQueries: maxQueriesPerLead });
   if (searchResult?._quota_exhausted) {
     return { enriched: false, reason: 'brave_quota_exhausted' };
   }
@@ -185,6 +205,42 @@ async function enrichLeadForFollowUp(clientId, lead) {
  */
 async function runDailyEnrichmentPass(clientId) {
   const today = new Date().toISOString().split('T')[0];
+  const budget = await checkBudget(clientId);
+  if (!budget.allowed) {
+    return {
+      processed: 0,
+      enriched: 0,
+      skipped: 0,
+      errors: 0,
+      blocked: true,
+      reason: 'llm_budget_blocked',
+      period: budget.period,
+      spend: budget.spend,
+      budget: budget.budget,
+      message: `Research enrichment blocked by ${budget.period} LLM budget guard.`,
+    };
+  }
+
+  const maxQueriesPerLead = ENRICHMENT_EXTRA_QUERIES ? 3 : 1;
+  const braveSpent = await providerUsageToday('brave', clientId);
+  const braveRemaining = Math.max(0, (Number(CAPS.brave) || 0) - braveSpent);
+  const braveBudgetForThisJob = Math.min(braveRemaining, MAX_ENRICHMENT_BRAVE_UNITS);
+  const affordableLeads = Math.floor(braveBudgetForThisJob / maxQueriesPerLead);
+  const leadLimit = Math.min(MAX_ENRICHMENT_PER_DAY, affordableLeads);
+
+  if (leadLimit <= 0) {
+    return {
+      processed: 0,
+      enriched: 0,
+      skipped: 0,
+      errors: 0,
+      blocked: true,
+      reason: 'brave_capacity_unavailable',
+      brave_spent_today: braveSpent,
+      brave_cap: CAPS.brave,
+      message: 'Research enrichment blocked before Brave spend: no reserved Brave capacity available.',
+    };
+  }
 
   const { rows: dueLeads } = await pool.query(
     `SELECT DISTINCT l.id, l.name, l.company, l.title, l.linkedin_url, l.metadata
@@ -199,7 +255,7 @@ async function runDailyEnrichmentPass(clientId) {
        AND fq.touch_number < 5
      ORDER BY l.id
      LIMIT $3`,
-    [clientId, today, MAX_ENRICHMENT_PER_DAY]
+    [clientId, today, leadLimit]
   );
 
   if (dueLeads.length === 0) {
@@ -217,7 +273,7 @@ async function runDailyEnrichmentPass(clientId) {
       continue;
     }
     try {
-      const result = await enrichLeadForFollowUp(clientId, lead);
+      const result = await enrichLeadForFollowUp(clientId, lead, { maxQueriesPerLead });
       if (result.enriched) {
         enriched++;
       } else {
@@ -228,6 +284,17 @@ async function runDailyEnrichmentPass(clientId) {
         }
       }
     } catch (err) {
+      if (isBudgetExceededError(err)) {
+        return {
+          processed: dueLeads.length,
+          enriched,
+          skipped,
+          errors,
+          blocked: true,
+          reason: 'llm_budget_blocked_mid_run',
+          message: `Research enrichment stopped by LLM budget guard after ${enriched} enrichments.`,
+        };
+      }
       errors++;
       logger.warn({ msg: '[research-enrichment] Error enriching lead', leadId: lead.id, err: err.message });
     }
@@ -344,6 +411,10 @@ Return JSON ONLY:
     }
     // LLM returned nothing usable — fall through to the deterministic floor.
   } catch (err) {
+    if (isBudgetExceededError(err)) {
+      logger.warn({ msg: '[cold-signal] synthesis blocked by LLM budget', leadId: lead.id, err: err.message });
+      throw err;
+    }
     const emsg = String(err.message || '');
     // A transient API failure (overload / rate-limit / timeout / 5xx) is NOT a
     // "no angle" result — flag it so the caller leaves the lead for a retry.
@@ -388,7 +459,7 @@ async function enrichColdLeadSignal(clientId, lead, tenantConfig) {
 
   // Web search is best-effort. An empty result is NOT a dead end — the synth
   // falls back to a verifiable role/company angle from the lead's own record.
-  const searchResult = await searchFreshSignals(lead);
+  const searchResult = await searchFreshSignals(lead, { clientId, maxQueries: 1 });
   if (searchResult?._quota_exhausted) return { enriched: false, reason: 'brave_quota_exhausted' };
 
   const syn = await synthesizeColdSignal(clientId, lead, searchResult?.hits || []);
@@ -448,7 +519,41 @@ async function enrichColdLeadSignal(clientId, lead, tenantConfig) {
  * `limit` is hard-bounded 1..25; each lead is <=3 web searches + 1 Haiku call.
  */
 async function runColdPoolSignalEnrichment(clientId, opts = {}) {
-  const cap = Math.min(Math.max(1, parseInt(opts.limit, 10) || 5), 25);
+  const budget = await checkBudget(clientId);
+  if (!budget.allowed) {
+    return {
+      processed: 0,
+      enriched: 0,
+      no_signal: 0,
+      skipped: 0,
+      errors: 0,
+      blocked: true,
+      reason: 'llm_budget_blocked',
+      period: budget.period,
+      spend: budget.spend,
+      budget: budget.budget,
+      message: `Cold signal enrichment blocked by ${budget.period} LLM budget guard before Brave spend.`,
+    };
+  }
+
+  const requestedLimit = Math.min(Math.max(1, parseInt(opts.limit, 10) || 5), 25);
+  const braveSpent = await providerUsageToday('brave', clientId);
+  const braveRemaining = Math.max(0, (Number(CAPS.brave) || 0) - braveSpent);
+  const cap = Math.min(requestedLimit, Math.floor(Math.min(braveRemaining, MAX_COLD_SIGNAL_BRAVE_UNITS)));
+  if (cap <= 0) {
+    return {
+      processed: 0,
+      enriched: 0,
+      no_signal: 0,
+      skipped: 0,
+      errors: 0,
+      blocked: true,
+      reason: 'brave_capacity_unavailable',
+      brave_spent_today: braveSpent,
+      brave_cap: CAPS.brave,
+      message: 'Cold signal enrichment blocked before Brave spend: no reserved Brave capacity available.',
+    };
+  }
   // VP-imported leads enrich at a far higher signal-yield than LinkedIn-scraped
   // leads (the latter are thin micro-SMBs with no web footprint). Default to
   // 'vp' so manual runs don't burn web-search + Haiku spend on the low-yield pool.
@@ -607,9 +712,47 @@ async function ensureLeadAngle(clientId, leadId) {
  * @param {object} opts — { limit?: 1..50 (default 20), dryRun?: bool }
  */
 async function runPoolEmailEnrichment(clientId, opts = {}) {
-  const cap = Math.min(Math.max(1, parseInt(opts.limit, 10) || 20), 50);
   const dryRun = opts.dryRun === true;
+  const budget = dryRun ? { allowed: true, remaining: Infinity } : await checkBudget(clientId);
+  const minLlmRemaining = Number(process.env.POOL_EMAIL_ENRICHMENT_MIN_LLM_REMAINING_USD || 1);
+  if (!budget.allowed || budget.remaining < minLlmRemaining) {
+    return {
+      processed: 0,
+      promoted: 0,
+      no_email: 0,
+      errors: 0,
+      blocked: true,
+      reason: 'llm_budget_blocked',
+      period: budget.period,
+      spend: budget.spend,
+      budget: budget.budget,
+      remaining: budget.remaining,
+      message: 'Pool email enrichment blocked by LLM budget guard before provider spend.',
+    };
+  }
 
+  const requestedLimit = Math.min(Math.max(1, parseInt(opts.limit, 10) || 20), 50);
+  const braveSpent = dryRun ? requestedLimit : await providerUsageToday('brave', clientId);
+  const braveRemaining = dryRun ? requestedLimit : Math.max(0, (Number(CAPS.brave) || 0) - braveSpent);
+  const mvSpent = dryRun ? requestedLimit * 3 : await providerUsageToday('millionverifier', clientId);
+  const mvRemaining = dryRun ? requestedLimit * 3 : Math.max(0, (Number(CAPS.millionverifier) || 0) - mvSpent);
+  const providerBound = dryRun ? requestedLimit : Math.min(braveRemaining, Math.floor(mvRemaining / 3));
+  const cap = Math.min(requestedLimit, Math.floor(providerBound));
+  if (cap <= 0) {
+    return {
+      processed: 0,
+      promoted: 0,
+      no_email: 0,
+      errors: 0,
+      blocked: true,
+      reason: 'provider_capacity_unavailable',
+      brave_spent_today: braveSpent,
+      brave_cap: CAPS.brave,
+      millionverifier_spent_today: mvSpent,
+      millionverifier_cap: CAPS.millionverifier,
+      message: 'Pool email enrichment blocked before provider spend: no reserved Brave/MillionVerifier capacity available.',
+    };
+  }
   // Select Tier-B pool leads that are missing a verified email but HAVE a
   // usable company (required for domain discovery) and a LinkedIn URL, and
   // were not attempted in the last 7 days. Junk-company list mirrors the
@@ -654,7 +797,7 @@ async function runPoolEmailEnrichment(clientId, opts = {}) {
 
   for (const lead of leads) {
     try {
-      const result = await findEmail({ name: lead.name, company: lead.company });
+      const result = await findEmail({ name: lead.name, company: lead.company, clientId });
       if (result?.email && result.status === 'deliverable') {
         await pool.query(
           `UPDATE leads

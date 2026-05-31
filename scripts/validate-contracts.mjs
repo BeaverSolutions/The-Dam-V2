@@ -137,7 +137,7 @@ check('send_queue enqueue conflict truth', enqueueConflictTruth,
 // 11. Signal Hunt must read both historical config shapes and pass country into search.
 const signalConfigShape = signalHunt.includes('content?.signal_queries')
   && signalHunt.includes('Object.entries(signalQueries)')
-  && signalHunt.includes('searchOpenWeb(q.query, config.max_results_per_query || 5, { country })');
+  && signalHunt.includes('searchOpenWeb(q.query, config.max_results_per_query || 5, { country, clientId })');
 check('Signal Hunt config + country-aware search', signalConfigShape,
   signalConfigShape ? 'signal_queries object/array + country search found' : 'signal hunt may ignore DB config or country');
 

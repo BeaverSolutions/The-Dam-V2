@@ -175,7 +175,9 @@ async function discoverDomain(lead) {
   // Single open-web query — official site lookup. Spec budget: 1-2 max per
   // call. searchOpenWeb is Brave-primary with Google CSE + DDG fallbacks.
   try {
-    const items = await searchOpenWeb(`"${cleaned}" official website`, 5);
+    const items = await searchOpenWeb(`"${cleaned}" official website`, 5, {
+      clientId: lead.clientId || lead.client_id || null,
+    });
     for (const item of items) {
       // searchOpenWeb shape: { title, description, url } (Brave) or { link, title, snippet } (DDG).
       const url = item.url || item.link || '';

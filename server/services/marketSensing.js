@@ -24,6 +24,7 @@ const pool = require('../db/pool');
 const logger = require('../utils/logger');
 const { callAgent } = require('./claude');
 const spendGuard = require('./spendGuard');
+const { checkBudget, BudgetExceededError } = require('./budget');
 
 // MY + SEA-agency news sources for v1. Mix of MY-general business/tech
 // publications and SEA agency-vertical publications (which heavily cover
@@ -88,6 +89,15 @@ const RESULTS_PER_QUERY   = 5;            // Brave count per query
 const QUERY_GAP_MS        = 150;          // Gap between Brave calls (politeness)
 const MAX_RAW_FOR_LLM     = 80;           // Cap input to Haiku to avoid token blowout
 
+function envNumber(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+const MARKET_SENSING_BRAVE_DAILY_CAP = Math.min(30, Math.max(0, envNumber('MARKET_SENSING_BRAVE_DAILY_CAP', 10)));
+
 /**
  * Pull tenant config + return ranked signal slots and the vertical clause.
  */
@@ -146,10 +156,18 @@ async function fetchSignals(clientId) {
   // Mark the (currently unused) vertical clause so future v2 reuse is obvious
   void verticalsClause;
 
+  const spentToday = await spendGuard.providerUsageToday('brave', clientId);
+  const remainingToday = Math.max(0, (Number(spendGuard.CAPS.brave) || 0) - spentToday);
+  const queryBudget = Math.min(remainingToday, MARKET_SENSING_BRAVE_DAILY_CAP);
+  if (queryBudget <= 0) {
+    logger.warn({ msg: '[market-sensing] no reserved Brave capacity, skipping before spend', spentToday, cap: spendGuard.CAPS.brave });
+    return [];
+  }
+
   const all = [];
   let okCount = 0;
   let errCount = 0;
-  for (const { source, signal, query } of queries) {
+  for (const { source, signal, query } of queries.slice(0, queryBudget)) {
     try {
       const guard = await spendGuard.checkProvider('brave', { clientId, estimatedUnits: 1 });
       if (!guard.allowed) {
@@ -300,6 +318,15 @@ async function persistMarketSignals(clientId, payload) {
  */
 async function runMarketSensing(clientId) {
   const startedAt = new Date();
+  const budget = await checkBudget(clientId);
+  if (!budget.allowed) {
+    throw new BudgetExceededError({
+      clientId,
+      spend: budget.spend,
+      budget: budget.budget,
+      period: budget.period,
+    });
+  }
   const rawSignals = await fetchSignals(clientId);
   const opportunities = await extractOpportunities(clientId, rawSignals);
 
