@@ -10,6 +10,7 @@ const { runWithClientContext } = require('../middleware/clientContext');
 const pipelineTrace = require('../services/pipelineTrace');
 const logger = require('../utils/logger');
 const { leadSelectionFeedbackExclusionSql } = require('../services/founderFeedbackSignals');
+const { checkBudget, isBudgetExceededError } = require('../services/budget');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
@@ -1070,6 +1071,31 @@ async function runAutonomousKickoff(clientId) {
 async function _runAutonomousKickoffInner(clientId) {
   const today = new Date().toISOString().split('T')[0];
 
+  const budgetState = await checkBudget(clientId).catch(err => ({
+    allowed: false,
+    error: err.message,
+    spend: null,
+    budget: null,
+    period: 'unknown',
+  }));
+  if (!budgetState.allowed) {
+    await logAction(clientId, 'director', 'kickoff_blocked_budget', 'system', null, {
+      reason: 'budget_guard_preflight',
+      spend: budgetState.spend,
+      budget: budgetState.budget,
+      period: budgetState.period,
+      error: budgetState.error || null,
+    });
+    logger.warn({ msg: '[kickoff] blocked before run by budget guard', clientId, budgetState });
+    return {
+      blocked: true,
+      reason: 'budget_guard_preflight',
+      spend: budgetState.spend,
+      budget: budgetState.budget,
+      period: budgetState.period,
+    };
+  }
+
   // Ensure today's KPI row exists
   await pool.query(
     `INSERT INTO daily_kpi (client_id, date) VALUES ($1, $2)
@@ -1881,7 +1907,7 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
             batch, pool_size: passingIds.length, draft_size: draftSize, audited_out: auditRejects.length,
           });
 
-          await directorExecute(clientId, {
+          const dbResult = await directorExecute(clientId, {
             plan_id: uuidv4(),
             command: `DB-POOL BATCH: Process ${passingIds.length} pre-researched leads from the lead pool. These are already verified and saved. Draft outreach using any signal/angle data in their metadata. Do NOT re-run research.`,
             batchIndex: batch - 1,
@@ -1889,11 +1915,34 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
             use_existing_leads: passingIds,
           });
           usedDbPool = true;
+          const dbDrafted = Number(dbResult?.summary?.messages_drafted || 0);
+          const dbApproved = Number(dbResult?.summary?.approved || 0);
+          const dbRejected = Number(dbResult?.summary?.rejected || 0);
+          if (dbDrafted + dbApproved + dbRejected === 0) {
+            console.warn(`[Autonomous] DB pool batch ${batch} produced zero drafts/rejections — stopping to avoid no-output spend loop.`);
+            await logAction(clientId, 'director', 'db_pool_zero_output_stop', 'system', null, {
+              batch,
+              pool_size: passingIds.length,
+              draft_size: draftSize,
+              summary: dbResult?.summary || null,
+              boundary: 'no_burn_zero_output',
+            });
+            break;
+          }
         } else {
           console.warn(`[Autonomous] After ICP audit, pool dropped below threshold (${passingIds.length} passing). Falling back to cold research.`);
         }
       }
     } catch (err) {
+      if (isBudgetExceededError(err)) {
+        console.warn(`[Autonomous] DB pool stopped by budget guard: ${err.message}`);
+        await logAction(clientId, 'director', 'kickoff_blocked_budget', 'system', null, {
+          batch,
+          reason: 'budget_exceeded_during_db_pool',
+          error: err.message,
+        });
+        break;
+      }
       console.warn(`[Autonomous] DB pool query failed, falling back to cold research:`, err.message);
     }
 

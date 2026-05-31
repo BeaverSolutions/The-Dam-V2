@@ -876,6 +876,7 @@ none from this broken report; check app truth before approving batches.`;
       if (process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true') {
         return { disabled: true, reason: 'CAPTAIN_DAILY_KICKOFF_ENABLED disabled' };
       }
+      const { checkBudget } = require('./services/budget');
 
       const now = new Date();
       const utcHour = now.getUTCHours();
@@ -933,7 +934,7 @@ none from this broken report; check app truth before approving batches.`;
       // before tenant B fired left B's row present, and B silently missed its
       // kickoff for the day. Each tenant now checks + marks its own row, and the
       // mark happens BEFORE the kickoff so a crash can't cause a double-fire.
-      const result = { fired: 0, deduped: 0, clients: clients.map(client => client.slug) };
+      const result = { fired: 0, deduped: 0, budgetBlocked: 0, clients: clients.map(client => client.slug) };
       for (const client of clients) {
         const { rows: already } = await pool.query(
           `SELECT 1 FROM agent_memory WHERE client_id = $1 AND agent = 'captain' AND key = $2 LIMIT 1`,
@@ -941,6 +942,30 @@ none from this broken report; check app truth before approving batches.`;
         );
         if (already.length > 0) {
           result.deduped++;
+          continue;
+        }
+
+        const budgetState = await checkBudget(client.id).catch(err => ({
+          allowed: false,
+          error: err.message,
+          spend: null,
+          budget: null,
+          period: 'unknown',
+        }));
+        if (!budgetState.allowed) {
+          result.budgetBlocked++;
+          await pool.query(
+            `INSERT INTO logs (client_id, agent, action, target_type, metadata)
+             VALUES ($1, 'director', 'daily_kickoff_blocked_budget', 'system', $2)`,
+            [client.id, JSON.stringify({
+              reason: 'budget_guard_preflight',
+              spend: budgetState.spend,
+              budget: budgetState.budget,
+              period: budgetState.period,
+              error: budgetState.error || null,
+            })]
+          ).catch(() => {});
+          logger.warn({ msg: `[daily-kickoff] Budget guard blocked ${client.slug}`, budgetState });
           continue;
         }
 
@@ -962,6 +987,8 @@ none from this broken report; check app truth before approving batches.`;
       }
       return result.fired > 0
         ? { fired: true, ...result }
+        : result.budgetBlocked > 0
+          ? { blocked: true, reason: 'daily kickoff blocked by budget guard', ...result }
         : { alreadyDone: true, reason: 'all clients already had daily kickoff dedupe rows', ...result };
     }
 

@@ -16,6 +16,7 @@ const { getClientConfig, buildClientContext } = require('./clientConfig');
 const { evaluateLeadQuality } = require('../utils/leadQuality');
 const { recordOutcome, attributionFromLead } = require('./outcomeTracker');
 const { LEAD_SELECTION_REJECTION_SQL, leadSelectionFeedbackExclusionSql } = require('./founderFeedbackSignals');
+const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
 
 // Channel-specific drafting instructions injected into the Sales Beaver prompt.
 // Module scope (2026-05-16, Jules F-03): was a local const inside
@@ -27,6 +28,19 @@ const CHANNEL_HINTS = {
   linkedin: 'Write a SHORT LinkedIn DM (NOT an email). 2-3 sentences max, under 50 words total. No subject line. No greeting like "Hi Name,". No sign-off (no "Regards,", no name at end). Just a casual peer-to-peer message ending with one question.',
   instagram: 'Write a casual Instagram DM. 1-2 sentences, under 30 words. No greeting, no sign-off. Reference something about their company. End with a casual question. Most informal channel.',
 };
+
+async function assertLlmBudgetOpen(clientId) {
+  const budget = await checkBudget(clientId);
+  if (!budget.allowed) {
+    throw new BudgetExceededError({
+      clientId,
+      spend: budget.spend,
+      budget: budget.budget,
+      period: budget.period,
+    });
+  }
+  return budget;
+}
 
 // ICP+channel patches per MJ direction 2026-04-29
 // ─── ICP v2: Beaver Solutions tenant — MY+SG+US, sales/BD/revenue persona ───
@@ -1011,6 +1025,10 @@ ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}${found
         console.warn(`[agents] Could not extract body from raw response for lead ${lead_id}. Raw: ${raw.substring(0, 200)}`);
       }
     } catch (err) {
+      if (isBudgetExceededError(err)) {
+        console.warn('[agents] Sales generation blocked by budget cap:', err.message);
+        throw err;
+      }
       console.warn('[agents] Sales Claude failed:', err.message);
       await logMistake(clientId, 'sales_beaver', 'Claude call failed during message generation', err.message, 'Check Claude API connectivity and lead context quality');
     }
@@ -2336,6 +2354,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       if (meta.search_query) contextParts.push(`Search context: ${meta.search_query}`);
 
       // Search for personalisation signals before drafting
+      await assertLlmBudgetOpen(clientId);
       try {
         const signals = await searchPersonalisationSignals(lead);
         if (signals.length > 0) {
@@ -2865,6 +2884,20 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         }
       }
     } catch (err) {
+      if (isBudgetExceededError(err)) {
+        console.error(`[signal-pipeline] Budget cap abort while processing ${lead.name}:`, err.message);
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id,
+          kickoff_id: plan_id,
+          stage: 'draft_failed',
+          status: 'budget_exceeded_abort',
+          agent: 'director',
+          reason: err.message,
+          pipeline_path: 'signal_pipeline',
+          metadata: { lead_name: lead.name },
+        }).catch(() => {});
+        throw err;
+      }
       console.error(`[signal-pipeline] Error processing ${lead.name}:`, err.message);
       // Phase 1 hotfix (2026-05-09): unexpected errors were invisible in funnel.
       pipelineTrace.traceStage(clientId, {
@@ -4266,6 +4299,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     if (command) contextParts.push(`Campaign intent: "${command}"`);
 
     // Search for personalisation signals before drafting
+    await assertLlmBudgetOpen(clientId);
     try {
       const signals = await searchPersonalisationSignals(lead);
       if (signals.length > 0) {

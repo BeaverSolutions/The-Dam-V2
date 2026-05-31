@@ -351,6 +351,10 @@ class BudgetExceededError extends Error {
   }
 }
 
+function isBudgetExceededError(err) {
+  return err?.name === 'BudgetExceededError' || err?.code === 'BUDGET_EXCEEDED';
+}
+
 module.exports = {
   checkBudget,
   logUsage,
@@ -362,5 +366,6 @@ module.exports = {
   getMonthlyBudget,
   notifyBudgetExceeded,
   BudgetExceededError,
+  isBudgetExceededError,
   PRICING,
 };

@@ -53,3 +53,35 @@ describe('PIPELINE_V2 per-lead unification is wired on both paths (Phase 2b)', (
     expect(pipelineSource).toContain("process.env.PIPELINE_V2_ENABLED === 'true'");
   });
 });
+
+describe('budget-cap no-burn boundary', () => {
+  it('blocks autonomous kickoff before it can start paid work', () => {
+    const budgetGuard = autonomousSource.indexOf('const budgetState = await checkBudget(clientId)');
+    const firstKpiWrite = autonomousSource.indexOf('INSERT INTO daily_kpi');
+    expect(budgetGuard).toBeGreaterThan(-1);
+    expect(firstKpiWrite).toBeGreaterThan(-1);
+    expect(budgetGuard).toBeLessThan(firstKpiWrite);
+    expect(autonomousSource).toContain("'kickoff_blocked_budget'");
+  });
+
+  it('does not mark the scheduled daily kickoff as done when budget is blocked', () => {
+    const schedulerBudgetLog = autonomousSource.indexOf("'kickoff_blocked_budget'");
+    const indexBudgetLog = readFileSync(resolve(__dirname, '../../index.js'), 'utf-8')
+      .indexOf("'daily_kickoff_blocked_budget'");
+    expect(schedulerBudgetLog).toBeGreaterThan(-1);
+    expect(indexBudgetLog).toBeGreaterThan(-1);
+  });
+
+  it('treats budget cap as a hard abort, not a normal null draft', () => {
+    expect(agentsSource).toContain('Sales generation blocked by budget cap');
+    expect(agentsSource).toContain("status: 'budget_exceeded_abort'");
+    expect(pipelineSource).toContain("'budget_exceeded_abort'");
+  });
+
+  it('stops DB-pool loops after a zero-output batch', () => {
+    const dbCall = autonomousSource.indexOf('const dbResult = await directorExecute');
+    const zeroStop = autonomousSource.indexOf("'db_pool_zero_output_stop'");
+    expect(dbCall).toBeGreaterThan(-1);
+    expect(zeroStop).toBeGreaterThan(dbCall);
+  });
+});

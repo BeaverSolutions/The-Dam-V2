@@ -46,6 +46,7 @@
 
 const pool = require('../db/pool');
 const pipelineTrace = require('./pipelineTrace');
+const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
 
 // ─── Feature flag ──────────────────────────────────────────────────────────
 // During Phase 2 migration both code paths coexist in the repo. Flip via
@@ -55,6 +56,19 @@ const PIPELINE_V2_ENABLED = process.env.PIPELINE_V2_ENABLED === 'true';
 
 function isV2Enabled() {
   return PIPELINE_V2_ENABLED;
+}
+
+async function assertLlmBudgetOpen(clientId) {
+  const budget = await checkBudget(clientId);
+  if (!budget.allowed) {
+    throw new BudgetExceededError({
+      clientId,
+      spend: budget.spend,
+      budget: budget.budget,
+      period: budget.period,
+    });
+  }
+  return budget;
 }
 
 // ─── Stage signatures (skeleton — implementations land in subsequent steps) ──
@@ -158,6 +172,7 @@ async function processLead(clientId, lead, ctx = {}) {
     if (command) contextParts.push(`Campaign intent: "${command}"`);
 
     if (typeof searchPersonalisationSignals === 'function') {
+      await assertLlmBudgetOpen(clientId);
       try {
         const signals = await searchPersonalisationSignals(lead);
         if (signals.length > 0) {
@@ -385,6 +400,11 @@ async function processLead(clientId, lead, ctx = {}) {
     });
     return { outcome: 'approved', messageId: msg.id, channel };
   } catch (err) {
+    if (isBudgetExceededError(err)) {
+      console.error(`[pipeline.processLead] Budget cap abort while processing ${lead.name}:`, err.message);
+      await trace('draft_failed', 'budget_exceeded_abort', { agent: 'director', reason: err.message, metadata: { lead_name: lead.name } });
+      throw err;
+    }
     console.error(`[pipeline.processLead] Error processing ${lead.name}:`, err.message);
     await trace('draft_failed', 'unexpected_error', { agent: 'director', metadata: { lead_name: lead.name, error: err.message } });
     return { outcome: 'draft_failed', reason: err.message };
