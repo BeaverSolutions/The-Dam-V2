@@ -188,6 +188,49 @@ describe('P0 stabilization contracts', () => {
     expect(captain).not.toContain('quote verbatim where useful');
   });
 
+  it('scheduled Captain Telegram never falls back to legacy directorBrief', () => {
+    const index = service('index.js');
+    const morningJob = fnBody(index, 'async function runMorningBrief', 'async function runWeeklyReview');
+    expect(morningJob).not.toContain('directorBrief');
+    expect(morningJob).not.toContain('Pipeline ready');
+    expect(morningJob).toContain('generateEmergencyMorningBrief');
+    expect(service('services/agents.js')).not.toContain('You have ${stats.total_leads} leads in the pipeline');
+    expect(service('services/agents.js')).not.toContain('waiting for your review.');
+  });
+
+  it('Captain situation report leads with operational sections MJ needs', () => {
+    const captain = service('services/captainOrchestrator.js');
+    expect(captain).toContain('<b>PIPELINE STATUS</b>');
+    expect(captain).toContain('<b>OUTREACH STATUS</b>');
+    expect(captain).toContain("<b>TODAY'S PLAN</b>");
+    expect(captain).toContain('<b>IMPEDIMENTS</b>');
+    expect(captain).toContain('<b>NEED YOUR CALL</b>');
+    expect(captain).toContain('draft_failed');
+    expect(captain).toContain('LLM budget cap hit');
+  });
+
+  it('Captain Need Your Call separates approval tab, follow-up tab, and LinkedIn send checks', () => {
+    const captain = service('services/captainOrchestrator.js');
+    expect(captain).toContain('new_outreach_pending_approvals');
+    expect(captain).toContain('followup_pending_approvals');
+    expect(captain).toContain("COALESCE(m.metadata->>'is_followup', 'false') = 'true'");
+    expect(captain).toContain("COALESCE(m.metadata->>'is_followup', 'false') <> 'true'");
+    expect(captain).toContain('new outreach draft');
+    expect(captain).toContain('Approval tab need your approval');
+    expect(captain).toContain('Follow-ups tab need your approval');
+    expect(captain).toContain('Need to Send tab');
+    expect(captain).toContain('check LinkedIn acceptance');
+  });
+
+  it('budget Telegram alerts are scoped to the configured Telegram client', () => {
+    const budget = service('services/budget.js');
+    expect(budget).toContain('canSendBudgetTelegramForClient');
+    expect(budget).toContain('process.env.TELEGRAM_CLIENT_SLUG');
+    expect(budget).toContain('budget.telegram.suppressed_for_unlinked_client');
+    expect(budget).toContain('ONLY this client spend is included');
+    expect(budget).not.toContain('const slug = rows[0]?.slug || clientId');
+  });
+
   it('Captain EOD brief is deterministic and does not use stale self-report narration', () => {
     const captain = service('services/captainOrchestrator.js');
     const eod = fnBody(captain, 'async function generateEodBrief', 'function renderPlainEodBrief');

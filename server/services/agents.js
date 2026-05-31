@@ -5034,7 +5034,16 @@ async function directorBrief(clientId) {
   const [leadsRes, messagesRes, approvalsRes, logsRes, leadsWeekRes] = await Promise.all([
     pool.query('SELECT COUNT(*) FROM leads WHERE client_id = $1 AND deleted_at IS NULL', [clientId]),
     pool.query('SELECT COUNT(*) FROM messages WHERE client_id = $1', [clientId]),
-    pool.query("SELECT COUNT(*) FROM approvals WHERE client_id = $1 AND status = 'pending'", [clientId]),
+    pool.query(
+      `SELECT COUNT(*)
+         FROM approvals a
+         JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
+        WHERE a.client_id = $1
+          AND a.status IN ('pending', 'pending_approval')
+          AND COALESCE(a.notes, '') <> 'linkedin_requested'
+          AND m.status = 'pending_approval'`,
+      [clientId]
+    ),
     pool.query('SELECT agent, action, created_at FROM logs WHERE client_id = $1 ORDER BY created_at DESC LIMIT 5', [clientId]),
     pool.query("SELECT COUNT(*) FROM leads WHERE client_id = $1 AND deleted_at IS NULL AND created_at >= NOW() - INTERVAL '7 days'", [clientId]),
   ]);
@@ -5046,7 +5055,7 @@ async function directorBrief(clientId) {
     leads_this_week: parseInt(leadsWeekRes.rows[0].count, 10),
   };
 
-  let summary = `You have ${stats.total_leads} leads in the pipeline, ${stats.messages_sent} messages generated, and ${stats.pending_approvals} approval${stats.pending_approvals !== 1 ? 's' : ''} waiting for your review.`;
+  let summary = `Pipeline has ${stats.total_leads} leads, ${stats.messages_sent} messages generated, and ${stats.pending_approvals} reviewable approval${stats.pending_approvals !== 1 ? 's' : ''} waiting in the app. LinkedIn awaiting accept is not counted as review work.`;
 
   if (callAgent) {
     try {

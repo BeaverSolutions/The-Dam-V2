@@ -130,7 +130,7 @@ async function collectTeamKPIs(clientId) {
 
   // ─── Pipeline state ──
   const pipelinePromise = pool.query(
-    `SELECT
+      `SELECT
         (SELECT COUNT(*)
            FROM approvals a
            JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
@@ -138,6 +138,22 @@ async function collectTeamKPIs(clientId) {
              AND a.status IN ('pending', 'pending_approval')
              AND COALESCE(a.notes, '') <> 'linkedin_requested'
              AND m.status = 'pending_approval') AS pending_approvals,
+        (SELECT COUNT(*)
+           FROM approvals a
+           JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
+           WHERE a.client_id = $1
+             AND a.status IN ('pending', 'pending_approval')
+             AND COALESCE(a.notes, '') <> 'linkedin_requested'
+             AND m.status = 'pending_approval'
+             AND COALESCE(m.metadata->>'is_followup', 'false') <> 'true') AS new_outreach_pending_approvals,
+        (SELECT COUNT(*)
+           FROM approvals a
+           JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
+           WHERE a.client_id = $1
+             AND a.status IN ('pending', 'pending_approval')
+             AND COALESCE(a.notes, '') <> 'linkedin_requested'
+             AND m.status = 'pending_approval'
+             AND COALESCE(m.metadata->>'is_followup', 'false') = 'true') AS followup_pending_approvals,
         (SELECT COUNT(*) FROM messages
           WHERE client_id = $1 AND channel = 'linkedin' AND status = 'linkedin_requested' AND sent_at IS NULL) AS linkedin_awaiting_accept,
         (SELECT COUNT(*)
@@ -409,6 +425,8 @@ async function collectTeamKPIs(clientId) {
     },
     pipeline: {
       pending_approvals: Number(p.pending_approvals) || 0,
+      new_outreach_pending_approvals: Number(p.new_outreach_pending_approvals) || 0,
+      followup_pending_approvals: Number(p.followup_pending_approvals) || 0,
       linkedin_awaiting_accept: Number(p.linkedin_awaiting_accept) || 0,
       stale_orphan_approval_rows: Number(p.stale_orphan_approval_rows) || 0,
       approved_unsent_email: Number(p.approved_unsent_email) || 0,
@@ -750,7 +768,9 @@ function renderPlainBrief(k) {
       ? `market sensing ${marketSensing.lastMeta?.opportunities ?? 'unknown'} opps from ${marketSensing.lastMeta?.rawResults ?? 'unknown'} raw`
       : `market sensing ${marketSensing?.status || 'waiting'}`;
   const kickoffLine = `kickoff ${k.business_day.kickoff.state}: ${k.business_day.kickoff.detail}`;
-  const realQueueLine = `${k.pipeline.pending_approvals} reviewable approvals, ${k.pipeline.linkedin_awaiting_accept} LinkedIn awaiting accept, ${k.pipeline.stale_orphan_approval_rows} stale orphan approval rows`;
+  const newOutreachApprovals = k.pipeline.new_outreach_pending_approvals ?? 0;
+  const followupApprovals = k.pipeline.followup_pending_approvals ?? 0;
+  const realQueueLine = `${newOutreachApprovals} new outreach approvals, ${followupApprovals} follow-up approvals, ${k.pipeline.linkedin_awaiting_accept} LinkedIn acceptance checks, ${k.pipeline.stale_orphan_approval_rows} stale orphan approval rows`;
   const yesterdayTotalSent = k.business_day.yesterday.email_sent + k.business_day.yesterday.linkedin_sent;
   const yesterdayResolved = k.business_day.yesterday.approvals_approved + k.business_day.yesterday.approvals_rejected;
   const todaySent = k.business_day.today.email_sent + k.business_day.today.linkedin_sent;
@@ -765,9 +785,30 @@ function renderPlainBrief(k) {
   const enforcerLine = k.enforcer.reviews_24h > 0
     ? `enforcer reviewed ${k.enforcer.reviews_24h}, approve rate ${k.enforcer.approve_rate_pct ?? 'unknown'}%`
     : 'enforcer idle, no reviews in 24h';
-  const needsCall = k.pipeline.pending_approvals > 0
-    ? `1. ${k.pipeline.pending_approvals} reviewable approvals waiting in the app. clear those; LinkedIn-awaiting-accept is not counted as review queue.`
-    : 'nothing needs your call right now. approval review queue is 0.';
+  const needsCallLines = [
+    `1. ${newOutreachApprovals} new outreach draft${newOutreachApprovals === 1 ? '' : 's'} in Approval tab need your approval.`,
+    `2. ${followupApprovals} follow-up${followupApprovals === 1 ? '' : 's'} in Follow-ups tab need your approval.`,
+    `3. ${k.pipeline.linkedin_awaiting_accept} need to be sent. check LinkedIn acceptance in Need to Send tab.`,
+  ];
+  const needsCall = needsCallLines.join('\n');
+  const impediments = [];
+  if (k.cost.llm_spend_mtd_usd >= k.cost.llm_monthly_budget_usd) {
+    impediments.push(`LLM budget cap hit: $${k.cost.llm_spend_mtd_usd.toFixed(4)} / $${k.cost.llm_monthly_budget_usd.toFixed(2)}. fresh LLM drafting is blocked until budget resets or BYOK/cap changes.`);
+  }
+  if (dailyKickoffProblem) impediments.push(`daily kickoff not healthy: ${kickoffLine}`);
+  if ((funnel.draft_failed || 0) > 0) impediments.push(`draft_failed: ${funnel.draft_failed} lead(s) entered the funnel but produced no usable draft.`);
+  if (k.pipeline.stale_orphan_approval_rows > 0) impediments.push(`${k.pipeline.stale_orphan_approval_rows} stale orphan approval rows are polluting raw approval counts.`);
+  if (k.pipeline.pending_approvals > 0) impediments.push(`${k.pipeline.pending_approvals} real reviewable approvals still block send volume.`);
+  const impedimentLine = impediments.length ? impediments.join(' ') : 'none blocking from current snapshot.';
+  const todayPlan = [
+    k.cost.llm_spend_mtd_usd >= k.cost.llm_monthly_budget_usd
+      ? 'hold paid LLM drafting and do not raise budget until no-burn output proof is green'
+      : 'keep drafting gated by spend and output proof',
+    k.pipeline.pending_approvals > 0
+      ? `clear ${newOutreachApprovals} new outreach approval(s) and ${followupApprovals} follow-up approval(s); check ${k.pipeline.linkedin_awaiting_accept} LinkedIn acceptance item(s) separately`
+      : 'approval queue is clear; watch send queue',
+    'fix any funnel draft_failed cause before more paid sourcing',
+  ].join('; ');
 
   // Phase 3: per-beaver scorecard block (additive). recommended_action shows the
   // fix for each miss; execution is gated behind the autonomy flags (Phase 4).
@@ -791,23 +832,110 @@ function renderPlainBrief(k) {
     `${spendLine}${k.cost.llm_spend_mtd_usd >= k.cost.llm_monthly_budget_usd ? ' OVER BUDGET' : k.cost.llm_spend_mtd_usd >= k.cost.llm_monthly_budget_usd * 0.8 ? ' 80%+ cap used' : ''}`,
     `${vpLine}. ${marketLine}.`,
     ``,
-    `<b>SITUATION REPORT</b>`,
-    `yesterday: ${yesterdayTotalSent} sent, ${k.business_day.yesterday.email_sent} email and ${k.business_day.yesterday.linkedin_sent} LinkedIn. approvals resolved: ${yesterdayResolved}, ${k.business_day.yesterday.approvals_approved} approved and ${k.business_day.yesterday.approvals_rejected} rejected.`,
-    `today: ${todayDrafted} drafted, ${todaySent} sent, ${k.business_day.today.email_sent} email and ${k.business_day.today.linkedin_sent} LinkedIn.`,
+    `<b>PIPELINE STATUS</b>`,
     `${researchLine}. avg quality ${k.research_beaver.scored_avg ?? 'unknown'}, top ${k.research_beaver.top_quality_score ?? 'unknown'}.`,
-    `sales beaver rolling 24h: ${k.sales_beaver.drafts_24h} drafts, ${k.sales_beaver.sent_24h} sent, ${k.sales_beaver.replies_24h} replies, first-pass ${k.sales_beaver.first_attempt_pass_rate_pct ?? 'unknown'}%.`,
-    `${enforcerLine}.`,
     `pipeline: ${realQueueLine}. email approved unsent ${k.pipeline.approved_unsent_email}, bounces 7d ${k.pipeline.bounces_7d}.`,
     `funnel: ${funnelLine}.`,
     `meetings outcome: ${k.meetings.this_week} this week, ${k.meetings.mtd} mtd. tracked as outcome, not fixed daily target.`,
     ``,
+    `<b>OUTREACH STATUS</b>`,
+    `yesterday: ${yesterdayTotalSent} sent, ${k.business_day.yesterday.email_sent} email and ${k.business_day.yesterday.linkedin_sent} LinkedIn. approvals resolved: ${yesterdayResolved}, ${k.business_day.yesterday.approvals_approved} approved and ${k.business_day.yesterday.approvals_rejected} rejected.`,
+    `today: ${todayDrafted} drafted, ${todaySent} sent, ${k.business_day.today.email_sent} email and ${k.business_day.today.linkedin_sent} LinkedIn.`,
+    `sales beaver rolling 24h: ${k.sales_beaver.drafts_24h} drafts, ${k.sales_beaver.sent_24h} sent, ${k.sales_beaver.replies_24h} replies, first-pass ${k.sales_beaver.first_attempt_pass_rate_pct ?? 'unknown'}%.`,
+    `${enforcerLine}.`,
+    ``,
     ...scorecardLines,
-    `<b>ORDERS OF THE DAY</b>`,
-    `TASKS: verify daily kickoff is armed, drain real approval queue only, keep research signal-first and gated by pool/capacity truth.`,
-    `ACTIONS TAKEN: ${kickoffLine}; ${marketLine}.`,
-    `NEEDS YOUR CALL: ${needsCall}`,
+    `<b>TODAY'S PLAN</b>`,
+    todayPlan,
+    ``,
+    `<b>IMPEDIMENTS</b>`,
+    impedimentLine,
+    ``,
+    `<b>NEED YOUR CALL</b>`,
+    needsCall,
   ];
   return lines.join('\n');
+}
+
+async function generateEmergencyMorningBrief(clientId, err) {
+  const sinceToday = `(date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur')`;
+  const [pipeline, outreach, spend] = await Promise.allSettled([
+    pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE deleted_at IS NULL AND status NOT IN ('contacted', 'meeting_booked', 'closed_won', 'closed_lost') AND status NOT LIKE 'rejected_%') AS pool_size,
+         COUNT(*) FILTER (WHERE deleted_at IS NULL AND status = 'new' AND email IS NOT NULL) AS email_ready,
+         COUNT(*) FILTER (WHERE deleted_at IS NULL AND status = 'new' AND email IS NULL AND linkedin_url IS NOT NULL) AS linkedin_ready
+       FROM leads
+       WHERE client_id = $1`,
+      [clientId]
+    ),
+    pool.query(
+      `SELECT
+         (SELECT COUNT(*) FROM messages WHERE client_id = $1 AND created_at >= ${sinceToday}) AS drafted_today,
+         (SELECT COUNT(*) FROM messages WHERE client_id = $1 AND sent_at >= ${sinceToday}) AS sent_today,
+         (SELECT COUNT(*)
+            FROM approvals a
+            JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
+           WHERE a.client_id = $1
+             AND a.status IN ('pending', 'pending_approval')
+             AND COALESCE(a.notes, '') <> 'linkedin_requested'
+             AND m.status = 'pending_approval') AS reviewable_approvals,
+         (SELECT COUNT(*)
+            FROM approvals a
+            JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
+           WHERE a.client_id = $1
+             AND a.status IN ('pending', 'pending_approval')
+             AND COALESCE(a.notes, '') <> 'linkedin_requested'
+             AND m.status = 'pending_approval'
+             AND COALESCE(m.metadata->>'is_followup', 'false') <> 'true') AS new_outreach_pending_approvals,
+         (SELECT COUNT(*)
+            FROM approvals a
+            JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
+           WHERE a.client_id = $1
+             AND a.status IN ('pending', 'pending_approval')
+             AND COALESCE(a.notes, '') <> 'linkedin_requested'
+             AND m.status = 'pending_approval'
+             AND COALESCE(m.metadata->>'is_followup', 'false') = 'true') AS followup_pending_approvals,
+         (SELECT COUNT(*) FROM messages WHERE client_id = $1 AND channel = 'linkedin' AND status = 'linkedin_requested' AND sent_at IS NULL) AS linkedin_awaiting_accept`,
+      [clientId]
+    ),
+    pool.query(
+      `SELECT COALESCE(SUM(cost_usd), 0)::numeric(10,4) AS spend
+         FROM llm_usage
+        WHERE client_id = $1
+          AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'UTC')`,
+      [clientId]
+    ),
+  ]);
+
+  const p = pipeline.status === 'fulfilled' ? pipeline.value.rows[0] || {} : {};
+  const o = outreach.status === 'fulfilled' ? outreach.value.rows[0] || {} : {};
+  const s = spend.status === 'fulfilled' ? spend.value.rows[0] || {} : {};
+  const errorMessage = err?.message ? String(err.message).slice(0, 220) : 'unknown error';
+  const spendMtd = Number(s.spend) || 0;
+  const budget = getMonthlyBudget();
+
+  const summary = [
+    `<b>SYSTEM HEALTH</b>`,
+    `dam amber. Captain full morning brief failed: ${errorMessage}. spend $${spendMtd.toFixed(4)} mtd of $${budget.toFixed(2)} cap.`,
+    ``,
+    `<b>PIPELINE STATUS</b>`,
+    `pool ${Number(p.pool_size) || 0}; email-ready ${Number(p.email_ready) || 0}; LinkedIn-ready ${Number(p.linkedin_ready) || 0}.`,
+    ``,
+    `<b>OUTREACH STATUS</b>`,
+    `today drafted ${Number(o.drafted_today) || 0}, sent ${Number(o.sent_today) || 0}; new outreach approvals ${Number(o.new_outreach_pending_approvals) || 0}; follow-up approvals ${Number(o.followup_pending_approvals) || 0}; LinkedIn acceptance checks ${Number(o.linkedin_awaiting_accept) || 0}.`,
+    ``,
+    `<b>TODAY'S PLAN</b>`,
+    `do not trust legacy totals. use app truth, clear real reviewable approvals, and avoid paid sourcing until Captain full report is restored.`,
+    ``,
+    `<b>IMPEDIMENTS</b>`,
+    `Captain operational snapshot failed before the full situation report could render.`,
+    ``,
+    `<b>NEED YOUR CALL</b>`,
+    `1. ${Number(o.new_outreach_pending_approvals) || 0} new outreach draft(s) in Approval tab need your approval.\n2. ${Number(o.followup_pending_approvals) || 0} follow-up(s) in Follow-ups tab need your approval.\n3. ${Number(o.linkedin_awaiting_accept) || 0} need to be sent. check LinkedIn acceptance in Need to Send tab.`,
+  ].join('\n');
+
+  return { summary: sanitizeForTelegram(summary), error: errorMessage };
 }
 
 /* ─── Persistence ─────────────────────────────────────────────────── */
@@ -2071,6 +2199,7 @@ function buildChannelMixIssues(kpis) {
 module.exports = {
   collectTeamKPIs,
   generateMorningBrief,
+  generateEmergencyMorningBrief,
   persistMorningBrief,
   runMorningBrief,
   // EOD

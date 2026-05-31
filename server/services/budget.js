@@ -270,6 +270,11 @@ function todayKey(clientId, period = 'day') {
   return `${clientId}:${period}:${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
+function canSendBudgetTelegramForClient(clientRow) {
+  const telegramSlug = process.env.TELEGRAM_CLIENT_SLUG || 'beaver-solutions';
+  return !!clientRow?.slug && clientRow.slug === telegramSlug;
+}
+
 /**
  * Fire a one-per-day Telegram alert when a client hits a budget cap. The
  * `period` ('day' | 'month') names which cap and its reset window. Deduped
@@ -290,8 +295,19 @@ async function notifyBudgetExceeded({ clientId, spend, budget, period = 'day' })
       `SELECT slug, name FROM clients WHERE id = $1 LIMIT 1`,
       [clientId]
     );
-    const slug = rows[0]?.slug || clientId;
-    const name = rows[0]?.name || slug;
+    const clientRow = rows[0];
+    if (!clientRow) return;
+    if (!canSendBudgetTelegramForClient(clientRow)) {
+      logger.info({
+        msg: 'budget.telegram.suppressed_for_unlinked_client',
+        clientId,
+        slug: clientRow.slug,
+        telegram_client_slug: process.env.TELEGRAM_CLIENT_SLUG || 'beaver-solutions',
+      });
+      return;
+    }
+    const slug = clientRow.slug;
+    const name = clientRow.name || slug;
 
     const window = period === 'month' ? 'Monthly' : 'Daily';
     const reset = period === 'month' ? 'the 1st of next month (UTC)' : 'UTC midnight';
@@ -304,6 +320,7 @@ async function notifyBudgetExceeded({ clientId, spend, budget, period = 'day' })
       chatId,
       `🛑 <b>${window} budget cap hit — ${name}</b>\n\n` +
       `Spent: <b>$${spend.toFixed(4)}</b> / $${budget.toFixed(2)} USD.\n` +
+      `ONLY this client spend is included in this alert.\n` +
       `All Claude calls for <code>${slug}</code> are blocked until ${reset}.\n\n` +
       `To unblock: raise ${knob}.`
     );
