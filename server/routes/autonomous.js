@@ -1555,42 +1555,50 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     gap: remainingGap, sent: sentAfterFollowUps, target, brief: brief.substring(0, 200),
   });
 
-  // ── Phase C: Signal-first pass (runs BEFORE cold research) ──────────
-  // Signal is the input, not a filter. Run signal hunt first and feed the
-  // results straight into Sales/Enforcer. Whatever gap remains after signal
-  // is filled by the cold research loop below.
-  try {
-    const { runSignalHunt, saveSignalLeads } = require('../services/signalHunt');
-    const signalTarget = Math.min(remainingGap, 30); // don't exceed daily gap
-    console.log(`[Autonomous] Phase C: Running signal hunt for up to ${signalTarget} P1/P2 leads`);
+  // ── Phase C: optional signal prefill ─────────────────────────────────
+  // Default OFF for daily kickoff: DB pool must execute before paid Signal
+  // Hunt. Enable DAILY_KICKOFF_SIGNAL_PREFILL_ENABLED only when intentionally
+  // testing signal-first spend with explicit capacity and output monitoring.
+  if (process.env.DAILY_KICKOFF_SIGNAL_PREFILL_ENABLED === 'true') {
+    try {
+      const { runSignalHunt, saveSignalLeads } = require('../services/signalHunt');
+      const signalTarget = Math.min(remainingGap, 30); // don't exceed daily gap
+      console.log(`[Autonomous] Phase C: Running signal hunt for up to ${signalTarget} P1/P2 leads`);
 
-    const signalLeads = await runSignalHunt(clientId, { maxLeads: signalTarget, icp });
-    if (signalLeads.length > 0) {
-      const saved = await saveSignalLeads(clientId, signalLeads);
-      console.log(`[Autonomous] Signal hunt saved ${saved.length} pre-qualified leads (P1=${saved.filter(l => l.signal_tier === 'P1').length})`);
+      const signalLeads = await runSignalHunt(clientId, { maxLeads: signalTarget, icp });
+      if (signalLeads.length > 0) {
+        const saved = await saveSignalLeads(clientId, signalLeads);
+        console.log(`[Autonomous] Signal hunt saved ${saved.length} pre-qualified leads (P1=${saved.filter(l => l.signal_tier === 'P1').length})`);
 
-      // Trigger directorExecute with signal-sourced leads already in the DB.
-      // The command is a signal-specific brief so Captain gates are naturally
-      // bypassed (leads were pre-qualified by signal detection).
-      if (saved.length > 0) {
-        const signalBrief = `SIGNAL-SOURCED BATCH: Process ${saved.length} pre-qualified leads already saved with P1/P2 signals. These are not cold — they have real buying triggers (hiring, funding, expansion). Draft outreach that references the specific signal for each lead. Do NOT re-run research, use the leads already saved today.`;
-        try {
-          await directorExecute(clientId, {
-            plan_id: uuidv4(),
-            command: signalBrief,
-            batchIndex: 0,
-            limit: saved.length,
-            use_existing_leads: saved.map(l => l.id), // NEW: hint to directorExecute
-          });
-        } catch (err) {
-          console.warn('[Autonomous] Signal batch directorExecute failed:', err.message);
+        // Trigger directorExecute with signal-sourced leads already in the DB.
+        // The command is a signal-specific brief so Captain gates are naturally
+        // bypassed (leads were pre-qualified by signal detection).
+        if (saved.length > 0) {
+          const signalBrief = `SIGNAL-SOURCED BATCH: Process ${saved.length} pre-qualified leads already saved with P1/P2 signals. These are not cold — they have real buying triggers (hiring, funding, expansion). Draft outreach that references the specific signal for each lead. Do NOT re-run research, use the leads already saved today.`;
+          try {
+            await directorExecute(clientId, {
+              plan_id: uuidv4(),
+              command: signalBrief,
+              batchIndex: 0,
+              limit: saved.length,
+              use_existing_leads: saved.map(l => l.id), // NEW: hint to directorExecute
+            });
+          } catch (err) {
+            console.warn('[Autonomous] Signal batch directorExecute failed:', err.message);
+          }
         }
+      } else {
+        console.log('[Autonomous] Signal hunt returned 0 leads — falling through to cold research');
       }
-    } else {
-      console.log('[Autonomous] Signal hunt returned 0 leads — falling through to cold research');
+    } catch (err) {
+      console.warn('[Autonomous] Signal hunt phase failed, continuing with cold research:', err.message);
     }
-  } catch (err) {
-    console.warn('[Autonomous] Signal hunt phase failed, continuing with cold research:', err.message);
+  } else {
+    console.log('[Autonomous] Daily signal prefill disabled — DB pool executes first; Research Beaver top-up runs via DB Builder.');
+    await logAction(clientId, 'director', 'daily_signal_prefill_skipped', 'system', null, {
+      reason: 'DAILY_KICKOFF_SIGNAL_PREFILL_ENABLED not true',
+      boundary: 'db_pool_before_paid_signal_hunt',
+    }).catch(() => {});
   }
 
   // ── Loop scheduler (Phase B1 fix) ────────────────────────────

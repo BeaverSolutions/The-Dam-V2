@@ -3,6 +3,7 @@
 const pool = require('../db/pool');
 const searchService = require('./searchService');
 const hunterService = require('./hunter');
+const { checkBudget } = require('./budget');
 
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -12,6 +13,17 @@ function envInt(name, fallback) {
 }
 
 const MAX_PAID_SEARCH_QUERIES_PER_RUN = envInt('RESEARCH_MAX_PAID_QUERIES_PER_RUN', 6);
+
+async function assertLlmBudgetOpen(clientId) {
+  const budget = await checkBudget(clientId);
+  if (!budget.allowed) {
+    const err = new Error(`LLM budget blocked (${budget.period}: ${budget.spend}/${budget.budget})`);
+    err.code = 'LLM_BUDGET_BLOCKED';
+    err.budgetState = budget;
+    throw err;
+  }
+  return budget;
+}
 
 /* ─── Rotation pools ─────────────────────────────────────── */
 
@@ -647,6 +659,28 @@ async function verifyCandidate(candidate, icp, hunterCache = {}, clientId = null
     rejectReason: null,
   };
 
+  // Free title gate before Hunter/LLM. Do not spend on obviously wrong roles.
+  const candidateTitle = (candidate.title || '').toLowerCase().trim();
+  if (candidateTitle) {
+    if (BANNED_TITLE_KEYWORDS.some(bk => candidateTitle.includes(bk))) {
+      verification.rejectReason = `Title "${candidate.title}" is not a decision-maker role (banned keyword match)`;
+      verification.pass = false;
+      console.log(`[verify] ⛔ Pre-filter reject: "${candidate.name}" — title "${candidate.title}" contains banned keyword`);
+      return { ...candidate, verification };
+    }
+  }
+
+  try {
+    await assertLlmBudgetOpen(clientId);
+  } catch (err) {
+    verification.rejectReason = err.code === 'LLM_BUDGET_BLOCKED'
+      ? 'LLM budget blocked before Hunter/Haiku verification'
+      : `Budget check failed before verification: ${err.message}`;
+    verification.pass = false;
+    console.warn(`[verify] ⛔ Rejecting "${candidate.name}" before paid verification — ${verification.rejectReason}`);
+    return { ...candidate, verification };
+  }
+
   // ── Hunter company lookup (use cache to avoid duplicate calls) ──
   const companyKey = (candidate.company || '').toLowerCase().trim();
   let hunterData = hunterCache[companyKey] || null;
@@ -674,17 +708,6 @@ async function verifyCandidate(candidate, icp, hunterCache = {}, clientId = null
     verification.score += 10; // company domain exists
     if (hunterData.employees > 0) verification.score += 5;
     verification.hunterMatch = true;
-  }
-
-  // ── Pre-Haiku title gate: hard reject banned titles before spending API calls ──
-  const candidateTitle = (candidate.title || '').toLowerCase().trim();
-  if (candidateTitle) {
-    if (BANNED_TITLE_KEYWORDS.some(bk => candidateTitle.includes(bk))) {
-      verification.rejectReason = `Title "${candidate.title}" is not a decision-maker role (banned keyword match)`;
-      verification.pass = false;
-      console.log(`[verify] ⛔ Pre-filter reject: "${candidate.name}" — title "${candidate.title}" contains banned keyword`);
-      return { ...candidate, verification };
-    }
   }
 
   // ── Haiku AI classification (the core verification) ──
@@ -1173,6 +1196,29 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
 
   try {
     try {
+      await assertLlmBudgetOpen(clientId);
+    } catch (budgetErr) {
+      console.warn('[research] blocked before paid search by LLM budget guard:', budgetErr.message);
+      return {
+        ...emptyResult,
+        diagnostics: {
+          blocked: true,
+          reason: 'llm_budget_blocked_before_paid_search',
+          budget: budgetErr.budgetState || null,
+        },
+        verification_stats: {
+          candidates: 0,
+          candidates_total: 0,
+          queries_total: 0,
+          rounds_ran: 0,
+          circuit_breaker_tripped: 'llm_budget_blocked_before_paid_search',
+          verified: 0,
+          rejected: 0,
+        },
+      };
+    }
+
+    try {
       const { getLegacyIcpForClient } = require('./tenantContext');
       const canonicalIcp = await getLegacyIcpForClient(clientId, {
         source: 'service',
@@ -1326,6 +1372,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         })
       : Promise.resolve([]);
 
+    await assertLlmBudgetOpen(clientId);
     const [directResults, signalResults, companyLeads] = await Promise.all([
       Promise.all(directPromises).then(arrays => arrays.flat()),
       Promise.all(signalPromises).then(arrays => arrays.flat()),
@@ -1378,6 +1425,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     console.log(`[research] Layer 1 complete: ${preFiltered.length} candidates (from ${deduped.length} raw). Starting Layer 2 verification...`);
 
     const icp = icpMemory || {};
+    await assertLlmBudgetOpen(clientId);
     let { verified, rejected } = await verifyBatch(preFiltered, icp, clientId);
     let companyFilteredOutTotal = companyFirstStats.companyFilteredOut || 0;
 
@@ -1473,6 +1521,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       searchRounds++;
       queriesUsedTotal += actualPicked.length; // accumulate for metric
 
+      await assertLlmBudgetOpen(clientId);
       const retryResults = await Promise.all([
         ...retryDirectQueries.map(q => strategyDirectPeople(q, perQueryLimit).catch(() => [])),
         ...retrySignalQueries.map(q => strategySignalBased(q, perQueryLimit).catch(() => [])),
@@ -1515,6 +1564,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       }
 
       console.log(`[research] Retry ${retryCount}: verifying ${retryCandidates.length} fresh candidates`);
+      await assertLlmBudgetOpen(clientId);
       const retryVerification = await verifyBatch(retryCandidates, currentIcp || icp, clientId);
       verified.push(...retryVerification.verified.filter(l => !allVerifiedUrls.has(l.linkedin_url)));
       rejected.push(...retryVerification.rejected);
@@ -1636,6 +1686,26 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       scoring_stats: scoringStats,
     };
   } catch (err) {
+    if (err.code === 'LLM_BUDGET_BLOCKED') {
+      console.warn('[research] stopped by LLM budget guard:', err.message);
+      return {
+        ...emptyResult,
+        diagnostics: {
+          blocked: true,
+          reason: 'llm_budget_blocked_mid_research',
+          budget: err.budgetState || null,
+        },
+        verification_stats: {
+          candidates: 0,
+          candidates_total: 0,
+          queries_total: 0,
+          rounds_ran: 0,
+          circuit_breaker_tripped: 'llm_budget_blocked_mid_research',
+          verified: 0,
+          rejected: 0,
+        },
+      };
+    }
     console.warn('[research] researchLeads total failure:', err.message);
     return emptyResult;
   }

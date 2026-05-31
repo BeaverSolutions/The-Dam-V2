@@ -21,6 +21,13 @@ const { evaluateLeadQuality } = require('../utils/leadQuality');
 const { searchEmailDomain } = require('./searchService');
 const spendGuard = require('./spendGuard');
 
+function envInt(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 async function loadCanonicalIcp(clientId) {
   const { rows: icpRows } = await pool.query(
     `SELECT content FROM agent_memory
@@ -143,7 +150,11 @@ let _running = false;
 
 const DEFAULTS = {
   min_ready_pool: 200,
-  min_email_ready_pool: 300,   // email-ready leads floor (was missing — fell back to 100)
+  // Daily autonomy needs 30 email + 20 LinkedIn, not a 300-lead hoard.
+  // Keeping this low prevents the 08:30 pool maintainer from spending a full
+  // provider day before kickoff proves it needs more supply.
+  min_email_ready_pool: 30,
+  min_linkedin_ready_pool: 20,
   batch_size: 20,
   max_batches_per_run: 3,
   budget_cap_pct: 0.5,
@@ -178,6 +189,26 @@ async function checkDbHealth(clientId) {
     `SELECT
        COUNT(*) FILTER (WHERE email IS NOT NULL) AS ready_with_email,
        COUNT(*) FILTER (WHERE email IS NULL) AS ready_no_email,
+       COUNT(*) FILTER (
+         WHERE lead_tier = 'A'
+           AND email IS NOT NULL AND email <> ''
+           AND NOT EXISTS (
+             SELECT 1 FROM messages m
+              WHERE m.client_id = leads.client_id
+                AND m.lead_id = leads.id
+                AND m.status <> 'deleted'
+           )
+       ) AS available_with_email,
+       COUNT(*) FILTER (
+         WHERE lead_tier = 'B'
+           AND linkedin_url IS NOT NULL AND linkedin_url <> ''
+           AND NOT EXISTS (
+             SELECT 1 FROM messages m
+              WHERE m.client_id = leads.client_id
+                AND m.lead_id = leads.id
+                AND m.status <> 'deleted'
+           )
+       ) AS available_linkedin,
        COUNT(*) AS total
      FROM leads
      WHERE client_id = $1
@@ -191,8 +222,10 @@ async function checkDbHealth(clientId) {
   const total = parseInt(rows[0].total, 10) || 0;
   const withEmail = parseInt(rows[0].ready_with_email, 10) || 0;
   const noEmail = parseInt(rows[0].ready_no_email, 10) || 0;
+  const availableWithEmail = parseInt(rows[0].available_with_email, 10) || 0;
+  const availableLinkedin = parseInt(rows[0].available_linkedin, 10) || 0;
 
-  return { total, withEmail, noEmail };
+  return { total, withEmail, noEmail, availableWithEmail, availableLinkedin };
 }
 
 // ── Lead Saver (mirrors agents.js:1849-1937 dedup + INSERT pattern) ──────────
@@ -417,9 +450,11 @@ async function sourceLeads(clientId, deficit, config) {
     return 0;
   }
 
+  const hardBatchCap = Math.max(1, envInt('DB_BUILDER_MAX_BATCHES_PER_RUN', 1));
   const batchCount = Math.min(
     Math.ceil(deficit / config.batch_size),
-    config.max_batches_per_run
+    config.max_batches_per_run,
+    hardBatchCap
   );
 
   let totalSaved = 0;
@@ -605,11 +640,14 @@ async function runDbBuilder() {
 
           // Check pool health
           const health = await checkDbHealth(client.id);
-          // Deficit is now computed against EMAIL-READY pool size, not raw total.
-          // LinkedIn-only leads exist but don't count toward the floor — they
-          // can't be drafted under the email-first policy.
-          const emailPoolTarget = rebuildDirective?.payload?.target_min || config.min_email_ready_pool || 100;
-          const emailDeficit = Math.max(0, emailPoolTarget - health.withEmail);
+          // Deficits are computed against eligible, uncontacted supply. Raw pool
+          // counts include already-drafted/requested leads and can make Research
+          // Beaver think tomorrow has capacity when kickoff cannot select them.
+          const emailPoolTarget = rebuildDirective?.payload?.target_min || config.min_email_ready_pool || 30;
+          const linkedinPoolTarget = config.min_linkedin_ready_pool || 20;
+          const emailDeficit = Math.max(0, emailPoolTarget - health.availableWithEmail);
+          const linkedinDeficit = Math.max(0, linkedinPoolTarget - health.availableLinkedin);
+          const totalDeficit = Math.max(emailDeficit, linkedinDeficit);
 
           await logsService.createLog(client.id, {
             agent: 'research_beaver',
@@ -619,21 +657,32 @@ async function runDbBuilder() {
               total: health.total,
               with_email: health.withEmail,
               no_email: health.noEmail,
+              available_with_email: health.availableWithEmail,
+              available_linkedin: health.availableLinkedin,
               email_pool_target: emailPoolTarget,
+              linkedin_pool_target: linkedinPoolTarget,
               email_deficit: emailDeficit,
-              healthy: emailDeficit === 0,
+              linkedin_deficit: linkedinDeficit,
+              healthy: totalDeficit === 0,
               captain_directive: rebuildDirective ? { reason: rebuildDirective.reason, severity: rebuildDirective.severity } : null,
             },
           });
 
-          if (emailDeficit === 0) {
-            logger.info({ msg: '[db-builder] Email pool healthy', slug: client.slug, with_email: health.withEmail, target: emailPoolTarget });
+          if (totalDeficit === 0) {
+            logger.info({
+              msg: '[db-builder] Pool healthy',
+              slug: client.slug,
+              available_email: health.availableWithEmail,
+              email_target: emailPoolTarget,
+              available_linkedin: health.availableLinkedin,
+              linkedin_target: linkedinPoolTarget,
+            });
             if (consumedDirectiveIds.length > 0) {
               await directivesSvc.markConsumed(client.id, consumedDirectiveIds).catch(() => {});
             }
             return;
           }
-          const deficit = emailDeficit;
+          const deficit = totalDeficit;
 
           // Check budget before sourcing
           const budget = await checkBudget(client.id);
@@ -646,6 +695,8 @@ async function runDbBuilder() {
             msg: '[db-builder] Pool low, sourcing',
             slug: client.slug,
             total: health.total,
+            available_email: health.availableWithEmail,
+            available_linkedin: health.availableLinkedin,
             deficit,
           });
 
@@ -663,8 +714,14 @@ async function runDbBuilder() {
               pool_after_total: newHealth.total,
               email_pool_before: health.withEmail,
               email_pool_after: newHealth.withEmail,
+              available_email_before: health.availableWithEmail,
+              available_email_after: newHealth.availableWithEmail,
+              available_linkedin_before: health.availableLinkedin,
+              available_linkedin_after: newHealth.availableLinkedin,
               email_pool_target: emailPoolTarget,
-              email_deficit_remaining: Math.max(0, emailPoolTarget - newHealth.withEmail),
+              linkedin_pool_target: linkedinPoolTarget,
+              email_deficit_remaining: Math.max(0, emailPoolTarget - newHealth.availableWithEmail),
+              linkedin_deficit_remaining: Math.max(0, linkedinPoolTarget - newHealth.availableLinkedin),
             },
           });
 
@@ -707,8 +764,12 @@ async function runDbBuilder() {
                   target: 40,
                   saved_today: totalSaved,
                   email_pool_now: newHealth.withEmail,
+                  available_email_now: newHealth.availableWithEmail,
+                  available_linkedin_now: newHealth.availableLinkedin,
                   email_target: emailPoolTarget,
-                  email_deficit: Math.max(0, emailPoolTarget - newHealth.withEmail),
+                  linkedin_target: linkedinPoolTarget,
+                  email_deficit: Math.max(0, emailPoolTarget - newHealth.availableWithEmail),
+                  linkedin_deficit: Math.max(0, linkedinPoolTarget - newHealth.availableLinkedin),
                   icp_v2_source_rejects: missRow?.n || 0,
                   captured_at: new Date().toISOString(),
                   hit_target: totalSaved >= 40,
@@ -751,6 +812,18 @@ async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
 
   if (process.env.ALLOW_VP_PAID_ENRICHMENT !== 'true') {
     return { saved: 0, credits: 0, reason: 'vp_paid_enrichment_disabled' };
+  }
+
+  const budget = await checkBudget(clientId);
+  if (!budget.allowed) {
+    return {
+      saved: 0,
+      credits: 0,
+      reason: 'llm_budget_blocked_before_vp',
+      period: budget.period,
+      spend: budget.spend,
+      budget: budget.budget,
+    };
   }
 
   // Hard daily credit cap via central spend guard.
@@ -919,6 +992,12 @@ async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
 // ── On-Demand Sourcing (called by autonomous kickoff when pool is dry) ───────
 
 async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSize = 20 } = {}) {
+  const budget = await checkBudget(clientId);
+  if (!budget.allowed) {
+    logger.info({ msg: '[db-builder] on-demand: budget exhausted before provider work' });
+    return { saved: 0, reason: 'budget_exhausted', period: budget.period };
+  }
+
   // VP is primary for email leads (verified email, ~3cr each).
   // When VP daily cap is hit or credits are exhausted, Brave takes over for
   // BOTH channels. LinkedIn leads always go through Brave.
@@ -943,12 +1022,6 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
   if (!icpMemory) {
     logger.warn({ msg: '[db-builder] on-demand: no ICP memory, cannot source' });
     return { saved: 0, reason: 'no_icp_memory' };
-  }
-
-  const budget = await checkBudget(clientId);
-  if (!budget.allowed) {
-    logger.info({ msg: '[db-builder] on-demand: budget exhausted' });
-    return { saved: 0, reason: 'budget_exhausted' };
   }
 
   const patterns = await loadEmailPatterns(clientId);

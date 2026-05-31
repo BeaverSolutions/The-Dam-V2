@@ -12,6 +12,8 @@ const signalHuntSource = readFileSync(resolve(__dirname, '../../services/signalH
 const searchServiceSource = readFileSync(resolve(__dirname, '../../services/searchService.js'), 'utf-8');
 const marketSensingSource = readFileSync(resolve(__dirname, '../../services/marketSensing.js'), 'utf-8');
 const emailEnrichmentSource = readFileSync(resolve(__dirname, '../../services/emailEnrichment.js'), 'utf-8');
+const dbBuilderSource = readFileSync(resolve(__dirname, '../../services/dbBuilder.js'), 'utf-8');
+const researchSource = readFileSync(resolve(__dirname, '../../services/research.js'), 'utf-8');
 
 // ── 2c: unify the no-burn boundary across the autonomous kickoff loop ─────
 // The two generic paid-sourcing escape hatches (on-demand research + VP rescue)
@@ -156,5 +158,30 @@ describe('budget-cap no-burn boundary', () => {
     const runCall = indexSource.indexOf('runPoolEmailEnrichment(client.id');
     expect(budgetGate).toBeGreaterThan(-1);
     expect(runCall).toBeGreaterThan(budgetGate);
+  });
+
+  it('does not run paid daily Signal Hunt before DB pool execution by default', () => {
+    expect(autonomousSource).toContain("DAILY_KICKOFF_SIGNAL_PREFILL_ENABLED === 'true'");
+    expect(autonomousSource).toContain('daily_signal_prefill_skipped');
+    expect(autonomousSource).toContain('db_pool_before_paid_signal_hunt');
+  });
+
+  it('uses eligible uncontacted pool truth for DB Builder top-up decisions', () => {
+    expect(dbBuilderSource).toContain('available_with_email');
+    expect(dbBuilderSource).toContain('available_linkedin');
+    expect(dbBuilderSource).toContain('min_linkedin_ready_pool: 20');
+    expect(dbBuilderSource).toContain('const emailDeficit = Math.max(0, emailPoolTarget - health.availableWithEmail)');
+    expect(dbBuilderSource).toContain('const linkedinDeficit = Math.max(0, linkedinPoolTarget - health.availableLinkedin)');
+    expect(dbBuilderSource).toContain("envInt('DB_BUILDER_MAX_BATCHES_PER_RUN', 1)");
+  });
+
+  it('blocks research paid search and verification when LLM budget is closed', () => {
+    expect(researchSource).toContain('async function assertLlmBudgetOpen(clientId)');
+    expect(researchSource).toContain('llm_budget_blocked_before_paid_search');
+    expect(researchSource).toContain('LLM budget blocked before Hunter/Haiku verification');
+    const firstBudgetCheck = researchSource.indexOf('await assertLlmBudgetOpen(clientId)');
+    const initialFanout = researchSource.indexOf('const [directResults, signalResults, companyLeads] = await Promise.all');
+    expect(firstBudgetCheck).toBeGreaterThan(-1);
+    expect(initialFanout).toBeGreaterThan(firstBudgetCheck);
   });
 });
