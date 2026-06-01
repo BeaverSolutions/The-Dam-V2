@@ -1070,6 +1070,9 @@ async function runAutonomousKickoff(clientId) {
 
 async function _runAutonomousKickoffInner(clientId) {
   const today = new Date().toISOString().split('T')[0];
+  const HARD_CEILING = 15;
+  const PENDING_CEILING = 30;
+  const CHANNEL_ESCALATION_DAILY_CAP = Number(process.env.CHANNEL_ESCALATION_DAILY_CAP) || 5;
 
   const budgetState = await checkBudget(clientId).catch(err => ({
     allowed: false,
@@ -1341,6 +1344,38 @@ async function _runAutonomousKickoffInner(clientId) {
     // auto-draft a message on a different channel for approval.
     try {
       const { escalateChannel } = require('../services/followupSequence');
+      const { rows: [channelEscalationQueue] } = await pool.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE status = 'pending_approval' AND DATE(created_at) = $2) AS pending,
+           COUNT(*) FILTER (WHERE status = 'approved' AND DATE(created_at) = $2) AS approved_awaiting_send,
+           COUNT(*) FILTER (
+             WHERE metadata->>'is_channel_escalation' = 'true'
+               AND DATE(created_at) = $2
+           ) AS drafted_today
+         FROM messages
+         WHERE client_id = $1`,
+        [clientId, today]
+      );
+      const livePending = parseInt(channelEscalationQueue?.pending, 10) || 0;
+      const liveApproved = parseInt(channelEscalationQueue?.approved_awaiting_send, 10) || 0;
+      const channelEscalationsDraftedToday = parseInt(channelEscalationQueue?.drafted_today, 10) || 0;
+      const channelEscalationHeadroom = Math.max(0, PENDING_CEILING - livePending - liveApproved);
+      const channelEscalationRemaining = Math.max(0, CHANNEL_ESCALATION_DAILY_CAP - channelEscalationsDraftedToday);
+      const channelEscalationLimit = Math.min(channelEscalationHeadroom, channelEscalationRemaining);
+
+      if (channelEscalationLimit <= 0) {
+        await logAction(clientId, 'director', 'approval_queue_swamped', 'system', null, {
+          mode: 'channel_escalation',
+          livePending,
+          liveApproved,
+          channelEscalationsDraftedToday,
+          channelEscalationHeadroom,
+          channelEscalationRemaining,
+          cap: CHANNEL_ESCALATION_DAILY_CAP,
+          message: 'channel escalation paused before drafting',
+        });
+      }
+
       const { rows: escalationCandidates } = await pool.query(
         `SELECT DISTINCT l.id AS lead_id FROM leads l
          WHERE l.client_id = $1
@@ -1352,8 +1387,9 @@ async function _runAutonomousKickoffInner(clientId) {
              SELECT 1 FROM messages m
              WHERE m.lead_id = l.id AND m.client_id = $1
                AND m.metadata->>'is_channel_escalation' = 'true'
-           )`,
-        [clientId]
+           )
+         LIMIT $2`,
+        [clientId, channelEscalationLimit]
       );
 
       for (const { lead_id } of escalationCandidates) {
@@ -1406,12 +1442,24 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
 
           // Insert as pending_ranger with channel escalation flag
           const { rows: [savedMsg] } = await pool.query(
-            `INSERT INTO messages (client_id, lead_id, subject, body, status, channel, metadata)
-             VALUES ($1, $2, $3, $4, 'pending_ranger', $5, $6)
+            `INSERT INTO messages (client_id, lead_id, subject, body, status, channel, metadata, follow_up_day)
+             VALUES ($1, $2, $3, $4, 'pending_ranger', $5, $6, NULL)
              RETURNING id`,
             [clientId, lead_id, draft.subject || null, cleanBody, escalation.new_channel,
              JSON.stringify({ is_channel_escalation: true, original_channel: escalation.original_channel, new_channel: escalation.new_channel })]
           );
+          pipelineTrace.traceStage(clientId, {
+            lead_id,
+            message_id: savedMsg.id,
+            stage: 'drafted',
+            status: 'channel_escalation',
+            agent: 'sales_beaver',
+            pipeline_path: 'channel_escalation',
+            metadata: {
+              original_channel: escalation.original_channel,
+              new_channel: escalation.new_channel,
+            },
+          }).catch(() => {});
 
           // Run through Enforcer
           let enforcerApproved = false;
@@ -1611,8 +1659,6 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
   //     (MJ is the bottleneck, more drafting won't help)
   //   - HARD_CEILING: absolute max batches to cap API spend
   //   - ZERO_STREAK: 3 consecutive batches with zero new leads → stop (pool exhausted)
-  const HARD_CEILING = 15;
-  const PENDING_CEILING = 30;
   const BATCH_SIZE = 20; // raised from 10 — auto-fix means more drafts survive
   let zeroStreak = 0;
 

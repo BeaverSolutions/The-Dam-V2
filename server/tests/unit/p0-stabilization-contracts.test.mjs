@@ -365,6 +365,30 @@ describe('P0 stabilization contracts', () => {
     expect(autonomous).toContain('router.use(requireInternalKey)');
   });
 
+  it('channel escalation is capped, queue-aware, and traced before drafting', () => {
+    const autonomous = service('routes/autonomous.js');
+    const block = fnBody(autonomous, 'Channel escalation: after touch 3+', 'Sprint 7D: Ranger rejection pattern detection');
+
+    expect(autonomous).toContain('CHANNEL_ESCALATION_DAILY_CAP');
+    expect(block).toContain('channelEscalationHeadroom');
+    expect(block).toContain('channelEscalationRemaining');
+    expect(block).toContain('LIMIT $2');
+    expect(block).toContain('pipelineTrace.traceStage(clientId');
+    expect(block.indexOf('approval_queue_swamped')).toBeLessThan(block.indexOf("callAgent('sales_beaver'"));
+  });
+
+  it('channel escalation drafts do not consume follow-up draft capacity', () => {
+    const autonomous = service('routes/autonomous.js');
+    const block = fnBody(autonomous, 'Channel escalation: after touch 3+', 'Sprint 7D: Ranger rejection pattern detection');
+    expect(block).toContain('follow_up_day');
+    expect(block).toContain('NULL');
+
+    const followups = service('services/followupSequence.js');
+    const counter = fnBody(followups, 'async function followUpsDraftedToday', 'async function remainingFollowUpCapacity');
+    expect(counter).toContain("COALESCE(metadata->>'is_channel_escalation', 'false') <> 'true'");
+    expect(counter).toContain('follow_up_day > 0');
+  });
+
   it('manual kickoff workflow is single-tenant and never uses kickoff-all or force', () => {
     const autonomous = service('routes/autonomous.js');
     const trigger = service('../scripts/trigger-kickoff.mjs');

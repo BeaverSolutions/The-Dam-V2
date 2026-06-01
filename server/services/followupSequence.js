@@ -218,15 +218,17 @@ async function resumeSequence(leadId, clientId = null) {
 // fetchers, so they're unaffected.
 const FOLLOWUP_DAILY_DRAFT_CAP = Number(process.env.FOLLOWUP_DAILY_DRAFT_CAP) || 25;
 
-// Count follow-up messages already drafted today (MYT business day). A follow-up
-// message is any row with follow_up_day set, regardless of approve/reject status —
-// every draft cost budget, so every draft counts toward the cap.
+// Count follow-up messages already drafted today (MYT business day). Only real
+// follow-up touches count toward this cap; channel escalations are separate and
+// are capped in autonomous.js.
 async function followUpsDraftedToday(clientId) {
   const { rows } = await pool.query(
     `SELECT COUNT(*)::int AS n
        FROM messages
       WHERE client_id = $1
         AND follow_up_day IS NOT NULL
+        AND follow_up_day > 0
+        AND COALESCE(metadata->>'is_channel_escalation', 'false') <> 'true'
         AND created_at >= date_trunc('day', (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')) AT TIME ZONE 'Asia/Kuala_Lumpur'`,
     [clientId]
   );

@@ -160,6 +160,26 @@ const DEFAULTS = {
   budget_cap_pct: 0.5,
 };
 
+function finiteScore(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function effectiveLeadScore(lead = {}) {
+  const candidates = [
+    lead.score,
+    lead.quality_score,
+    lead.verification?.score,
+    lead.metadata?.verification?.score,
+    lead.metadata?.score,
+  ];
+  for (const value of candidates) {
+    const n = finiteScore(value);
+    if (n !== null && n > 0) return n;
+  }
+  return 0;
+}
+
 // ── Config loader ────────────────────────────────────────────────────────────
 
 async function getConfig(clientId) {
@@ -231,6 +251,12 @@ async function checkDbHealth(clientId) {
 // ── Lead Saver (mirrors agents.js:1849-1937 dedup + INSERT pattern) ──────────
 
 async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
+  const leadScore = effectiveLeadScore(lead);
+  lead.score = leadScore;
+  if (lead.quality_score === undefined || lead.quality_score === null || lead.quality_score === '') {
+    lead.quality_score = leadScore;
+  }
+
   // Quality gate — reject placeholder/freelance/generic-company leads at source.
   // Saves enrichment budget downstream and keeps the prospecting pool clean.
   const quality = evaluateLeadQuality(lead);
@@ -341,7 +367,7 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
   // at every kickoff (autonomous.js:1606) wastes tokens AND was silently broken
   // (rejected_legacy_audit isn't in leads_status_check). Run it here once instead.
   const { applyIcpV2Filter } = require('./agents');
-  const v2 = applyIcpV2Filter(lead);
+  const v2 = applyIcpV2Filter({ ...lead, score: leadScore });
   if (!v2.pass) {
     console.warn(`[db_builder] ICP v2 reject at sourcing: ${lead.name} (${lead.company}) — ${v2.reason}`);
     await pool.query(
@@ -394,7 +420,7 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
         lead.company || 'Unknown Company',
         lead.title || null,
         lead.signal_tier || null,
-        lead.score || 0,
+        leadScore,
         lead.email_verified || false,
         lead.email_source || null,
         lead.linkedin_url || null,
@@ -412,7 +438,7 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
         stage: 'enrolled',
         status: 'sourced',
         agent: 'research_beaver',
-        score: lead.score || null,
+        score: leadScore || null,
         pipeline_path: 'dbBuilder',
         metadata: {
           lead_tier: leadTier,
@@ -1057,4 +1083,4 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
   return { saved, health, reason: saved > 0 ? 'sourced' : 'no_results' };
 }
 
-module.exports = { runDbBuilder, checkDbHealth, sourceLeadsOnDemand, sourceLeadsViaVP };
+module.exports = { runDbBuilder, checkDbHealth, sourceLeadsOnDemand, sourceLeadsViaVP, effectiveLeadScore };
