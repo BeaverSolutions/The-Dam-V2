@@ -2034,15 +2034,13 @@ async function directorPlan(clientId, { command, source }) {
 
 /**
  * =========================
- * HUNTER.IO EMAIL ENRICHMENT
+ * EMAIL ENRICHMENT
  * =========================
  */
 async function enrichLeadsWithHunter(clientId, leads) {
   if (!leads || leads.length === 0) return leads;
 
-  // Check if Hunter key is configured — skip enrichment silently if not
-  const apiKey = await hunterService.getApiKey(clientId);
-  if (!apiKey) return leads;
+  const { findEmail } = require('./emailEnrichment');
 
   const enriched = [];
   for (const lead of leads) {
@@ -2057,30 +2055,29 @@ async function enrichLeadsWithHunter(clientId, leads) {
       const firstName = nameParts[0] || '';
       const lastName = nameParts.slice(1).join(' ') || '';
 
-      // Try: name + company domain
-      const result = await hunterService.findEmail(clientId, {
-        firstName,
-        lastName,
+      const result = await findEmail({
+        name: lead.name,
         company: lead.company,
+        first_name: firstName,
+        last_name: lastName,
+        domain: lead.domain || null,
+        clientId,
       });
 
       if (result?.email) {
-        console.log(`[hunter] Found ${result.email} for ${lead.name} at ${lead.company} (confidence: ${result.confidence})`);
+        console.log(`[emailEnrichment] Found ${result.email} for ${lead.name} at ${lead.company} (source: ${result.email_source}, confidence: ${result.confidence})`);
         enriched.push({
           ...lead,
           email: result.email,
-          email_verified: result.verified,
-          email_source: 'hunter',
+          email_verified: result.status === 'deliverable',
+          email_source: result.email_source || 'findemail',
         });
         continue;
       }
 
-      // Domain fallback DISABLED — grabbing a random email at the domain causes
-      // name-email mismatches (e.g. Rob Go → stephen.lai@nextview.com).
-      // Captain Beaver rule: no email is better than the wrong person's email.
       enriched.push(lead); // save lead without email — can be enriched manually later
     } catch (err) {
-      console.warn(`[hunter] Enrichment failed for ${lead.name}:`, err.message);
+      console.warn(`[emailEnrichment] Enrichment failed for ${lead.name}:`, err.message);
       enriched.push(lead); // always save the lead even without email
     }
   }
@@ -2090,7 +2087,7 @@ async function enrichLeadsWithHunter(clientId, leads) {
     action: 'hunter_enrichment_complete',
     metadata: {
       total: leads.length,
-      enriched: enriched.filter(l => l.email_source?.startsWith('hunter')).length,
+      enriched: enriched.filter(l => ['hunter', 'pattern+verify', 'pattern+catch_all', 'scrape+pattern', 'scrape'].includes(l.email_source)).length,
     },
   });
 

@@ -99,6 +99,7 @@ async function tryHunter(clientId, firstName, lastName, company) {
     return {
       email: result.email,
       confidence: result.confidence || 0,
+      verified: result.verified === true,
       source: 'hunter',
     };
   } catch (err) {
@@ -308,7 +309,7 @@ function stripAccents(s) {
  * @param {string} email
  * @returns {Promise<{status,score,isCatchAll,provider}>}
  */
-async function verifyEmail(email) {
+async function verifyEmail(email, clientIdOverride = null) {
   const unknown = { status: 'unknown', score: 0, isCatchAll: false, provider: null };
   if (!email || typeof email !== 'string') return unknown;
 
@@ -317,7 +318,7 @@ async function verifyEmail(email) {
     console.warn('[emailEnrichment] verifyEmail: no MILLION_VERIFIER / EMAIL_VERIFY_API_KEY set — returning unknown');
     return unknown;
   }
-  const clientId = getCurrentClientId() || null;
+  const clientId = clientIdOverride || getCurrentClientId() || null;
   const guard = await spendGuard.checkProvider('millionverifier', { clientId, estimatedUnits: 1 });
   if (!guard.allowed) {
     console.warn(`[emailEnrichment] MillionVerifier blocked by spend guard: ${guard.reason}`);
@@ -381,6 +382,7 @@ async function verifyEmail(email) {
  */
 async function findEmail(lead) {
   if (!lead?.name || !lead?.company) return null;
+  const clientId = lead.clientId || lead.client_id || null;
 
   const domain = lead.domain || await discoverDomain(lead);
   if (!domain) return null;
@@ -440,7 +442,23 @@ async function findEmail(lead) {
     }
   }
 
-  // Step 5: verify ambiguous top candidates via MillionVerifier (paid).
+  // Step 5: use Hunter while its configured free-credit budget is available.
+  // If Hunter is blocked or exhausted, hunter.findEmail returns null and the
+  // MillionVerifier pattern fallback below continues.
+  if (lead.skipHunter !== true) {
+    const hunterResult = await tryHunter(clientId, firstName, lastName, lead.company);
+    if (hunterResult?.email) {
+      return {
+        email: hunterResult.email,
+        status: hunterResult.verified ? 'deliverable' : 'unknown',
+        confidence: hunterResult.confidence || 0,
+        isCatchAll: false,
+        email_source: 'hunter',
+      };
+    }
+  }
+
+  // Step 6: verify ambiguous top candidates via MillionVerifier (paid).
   // Cap to first-3 in GENERATION order (hit-rate priority), NOT name-score
   // order. Name-score over-weights "first.last" patterns that match BOTH
   // name tokens vs. simpler "first@" patterns that match one but are more
@@ -448,7 +466,7 @@ async function findEmail(lead) {
   const verifyCandidates = candidates.slice(0, 3);
   for (const email of verifyCandidates) {
     const nameScore = scoreEmailNameMatch(email, firstName, lastName);
-    const v = await verifyEmail(email);
+    const v = await verifyEmail(email, clientId);
     if (v.status === 'deliverable') {
       return {
         email,

@@ -1348,7 +1348,7 @@ async function toolClearPendingMessages(clientId, { lead_ids, message_ids, note,
 async function toolDraftEmailForLeads(clientId, { lead_ids, note } = {}) {
   if (!lead_ids?.length) return { ok: false, error: 'lead_ids required' };
 
-  const hunterService = require('./hunter');
+  const { findEmail } = require('./emailEnrichment');
   const { processExistingLeadsPipeline: runPipeline } = require('./agents');
   const { v4: uuidV4 } = require('uuid');
 
@@ -1379,32 +1379,36 @@ async function toolDraftEmailForLeads(clientId, { lead_ids, note } = {}) {
       continue;
     }
 
-    // Try Hunter if no email yet
+    // Try Hunter first through the enrichment orchestrator; if Hunter is
+    // exhausted or misses, fall through to MillionVerifier-backed patterns.
     if (!lead.email) {
       try {
         const nameParts = (lead.name || '').split(' ');
-        const hunterResult = await hunterService.findEmail(clientId, {
-          firstName: nameParts[0] || '',
-          lastName: nameParts.slice(1).join(' ') || '',
+        const emailResult = await findEmail({
+          name: lead.name,
           company: lead.company,
+          first_name: nameParts[0] || '',
+          last_name: nameParts.slice(1).join(' ') || '',
+          domain: lead.domain || null,
+          clientId,
         });
 
-        if (hunterResult?.email) {
+        if (emailResult?.email) {
           await pool.query(
-            `UPDATE leads SET email = $1, email_verified = $2, email_source = 'hunter', updated_at = NOW()
+            `UPDATE leads SET email = $1, email_verified = $2, email_source = $5, updated_at = NOW()
               WHERE id = $3 AND client_id = $4`,
-            [hunterResult.email, hunterResult.verified === true, leadId, clientId]
+            [emailResult.email, emailResult.status === 'deliverable', leadId, clientId, emailResult.email_source || 'findemail']
           );
-          lead.email = hunterResult.email;
-          lead.email_source = 'hunter';
-          lead.email_verified = hunterResult.verified === true;
-          results.push({ lead_id: leadId, lead_name: lead.name, email: hunterResult.email, hunter_confidence: hunterResult.confidence, status: 'email_found_queuing' });
+          lead.email = emailResult.email;
+          lead.email_source = emailResult.email_source || 'findemail';
+          lead.email_verified = emailResult.status === 'deliverable';
+          results.push({ lead_id: leadId, lead_name: lead.name, email: emailResult.email, email_source: lead.email_source, email_confidence: emailResult.confidence, status: 'email_found_queuing' });
         } else {
-          results.push({ lead_id: leadId, lead_name: lead.name, ok: false, reason: 'Hunter found no email' });
+          results.push({ lead_id: leadId, lead_name: lead.name, ok: false, reason: 'No email found via Hunter/MillionVerifier fallback' });
           continue;
         }
       } catch (err) {
-        results.push({ lead_id: leadId, lead_name: lead.name, ok: false, reason: `Hunter error: ${err.message}` });
+        results.push({ lead_id: leadId, lead_name: lead.name, ok: false, reason: `Email enrichment error: ${err.message}` });
         continue;
       }
     } else {

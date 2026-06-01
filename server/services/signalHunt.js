@@ -13,7 +13,7 @@
  *   2. Run open-web searches for each signal query (funding, hiring, expansion)
  *   3. Use Haiku to parse company name + signal summary from each result
  *   4. For each extracted company, run LinkedIn people search to find founder/decision-maker
- *   5. Enrich with Hunter email
+ *   5. Enrich with Hunter first, then MillionVerifier-backed pattern fallback
  *   6. Return leads with P1 tag + signal + why_now + angle
  *
  * These leads become the FIRST batch the outreach pipeline processes
@@ -23,7 +23,6 @@
 const pool = require('../db/pool');
 const logsService = require('./logs');
 const { searchOpenWeb, searchLinkedInProfiles } = require('./searchService');
-const hunterService = require('./hunter');
 const { callAgent } = require('./claude');
 const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
 
@@ -465,29 +464,25 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       continue;
     }
 
-    // Step 5: Hunter email enrichment
+    // Step 5: email enrichment. Uses Hunter while its cap allows, then falls
+    // through to pattern + MillionVerifier when Hunter is exhausted.
     let email = null;
     let email_source = null;
     let email_verified = false;
-    const hunterEnabled = Number(require('./spendGuard').CAPS.hunter || 0) > 0;
-    if (hunterEnabled) {
-      try {
-        const nameParts = (person.name || '').trim().split(/\s+/);
-        const firstName = nameParts[0] || '';
-        const lastName = nameParts.slice(1).join(' ') || '';
-        const hunter = await hunterService.findEmail(clientId, {
-          firstName,
-          lastName,
-          company: signal.company,
-        });
-        if (hunter?.email) {
-          email = hunter.email;
-          email_source = 'hunter';
-          email_verified = !!hunter.verified;
-        }
-      } catch (err) {
-        console.warn(`[signalHunt] Hunter enrichment failed for ${person.name}:`, err.message);
+    try {
+      const { findEmail } = require('./emailEnrichment');
+      const enriched = await findEmail({
+        name: person.name,
+        company: signal.company,
+        clientId,
+      });
+      if (enriched?.email) {
+        email = enriched.email;
+        email_source = enriched.email_source || 'findemail';
+        email_verified = enriched.status === 'deliverable';
       }
+    } catch (err) {
+      console.warn(`[signalHunt] Email enrichment failed for ${person.name}:`, err.message);
     }
 
     leads.push({

@@ -3730,9 +3730,33 @@ router.post('/backfill-hunter-emails', requireInternalKey, async (req, res) => {
           }
         }
 
+        // Step 3: MillionVerifier-backed pattern fallback. Hunter was already
+        // tried above, so skip it here to avoid double-spending Hunter credits.
+        if (!email) {
+          try {
+            const { findEmail } = require('../services/emailEnrichment');
+            const enriched = await findEmail({
+              name: lead.name,
+              company: lead.company,
+              first_name: firstName,
+              last_name: lastName,
+              clientId: client_id,
+              skipHunter: true,
+            });
+            if (enriched?.email && (enriched.confidence || 0) >= minConfidence) {
+              email = enriched.email;
+              isVerified = enriched.status === 'deliverable';
+              emailSource = enriched.email_source || 'findemail';
+              confidence = enriched.confidence || 0;
+            }
+          } catch (err) {
+            logger.warn({ msg: '[backfill-hunter] verifier fallback failed', leadId: lead.id, err: err.message });
+          }
+        }
+
         if (!email) {
           counts.skipped++;
-          reasons.no_email_found_in_hunter_or_brave = (reasons.no_email_found_in_hunter_or_brave || 0) + 1;
+          reasons.no_email_found = (reasons.no_email_found || 0) + 1;
           continue;
         }
 
