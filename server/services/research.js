@@ -4,6 +4,7 @@ const pool = require('../db/pool');
 const searchService = require('./searchService');
 const hunterService = require('./hunter');
 const { checkBudget } = require('./budget');
+const signalPlanner = require('./signalPlanner');
 
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -136,6 +137,61 @@ function normaliseLead(partial) {
   };
 }
 
+function countryListFromIcp(icp) {
+  return parseCsvField(icp.geo || icp.geographies || icp.countries || icp.locations || icp.target_markets);
+}
+
+function strategyForSignalFamily(family) {
+  if (family === 'hiring_capability_build') return 'signal_jobs';
+  if (family === 'expansion_growth' || family === 'capital_budget_event') return 'signal_news';
+  if (family === 'active_gtm_spend') return 'signal';
+  return 'signal_growth';
+}
+
+function buildQueryPoolFromSignalPlanner(icpMemory) {
+  const buyingSignals = Array.isArray(icpMemory?.buying_signals)
+    ? icpMemory.buying_signals.filter(signal => signal && signal.enabled !== false)
+    : [];
+  if (buyingSignals.length === 0) return [];
+
+  const tenant = {
+    icp: {
+      verticals: parseCsvField(icpMemory.industries || icpMemory.verticals),
+      personas: parseCsvField(icpMemory.job_titles || icpMemory.who || icpMemory.personas),
+      geo: countryListFromIcp(icpMemory),
+      exclusions: Array.isArray(icpMemory.exclusions) ? icpMemory.exclusions : parseCsvField(icpMemory.exclusions),
+      competitor_offers: Array.isArray(icpMemory.competitor_offers)
+        ? icpMemory.competitor_offers
+        : parseCsvField(icpMemory.competitor_offers),
+    },
+    buying_signals: buyingSignals,
+  };
+  const geo = tenant.icp.geo.length > 0 ? tenant.icp.geo : ['MY'];
+
+  return buyingSignals.flatMap(signal => {
+    const plan = signalPlanner.buildSignalPlan({
+      tenant,
+      signalId: signal.id,
+      geo,
+      maxQueries: signal.stop_rules?.max_paid_searches_per_day,
+    });
+    return plan.queries.map(query => ({
+      query: query.query,
+      strategy: strategyForSignalFamily(plan.signalFamily),
+      title: '',
+      industry: plan.signalFamily,
+      location: geo.join(', '),
+      country: query.query.includes('Singapore') ? 'SG' : query.query.includes('United States') ? 'US' : 'MY',
+      signal_id: plan.signalId,
+      signal_family: plan.signalFamily,
+      source_channel: query.sourceChannel,
+      expected_evidence: query.expectedEvidence,
+      stop_rules: plan.stopRules,
+      reject_rules: plan.rejectRules,
+    }));
+  });
+}
+
 /**
  * Map ICP industry names to concrete search phrases.
  * "Agency" alone is too generic — expand to specific types.
@@ -259,6 +315,8 @@ function widenIcp(originalIcp, level) {
  */
 function buildQueryPool(icpMemory) {
   const icp = icpMemory || {};
+  const plannedPool = buildQueryPoolFromSignalPlanner(icp);
+  if (plannedPool.length > 0) return plannedPool;
 
   // Resolve titles
   const rawTitles = parseCsvField(icp.job_titles || icp.who);

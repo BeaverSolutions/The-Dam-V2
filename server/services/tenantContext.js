@@ -30,6 +30,7 @@
 
 const pool = require('../db/pool');
 const { profileSchema } = require('./tenantProfileSchema');
+const { normalizeBuyingSignalsForTenant } = require('../config/buyingSignals');
 
 // ── AuthCtx construction + assertion ──────────────────────────────────────
 // Soft-typed brand. Real type safety arrives with a TS port; runtime check
@@ -113,7 +114,7 @@ function projectForResearch(profile) {
   return {
     rendered,
     constraints: null,
-    fields: { identity: { company }, icp },
+    fields: { identity: { company }, icp, buying_signals: normalizeBuyingSignalsForTenant(profile) },
   };
 }
 
@@ -127,6 +128,7 @@ function projectForSales(profile, channel) {
   const sender   = identity.sender_persona || {};
   const offer    = profile.offer || {};
   const icp      = profile.icp || {};
+  const buyingSignals = normalizeBuyingSignalsForTenant(profile);
   const voice    = profile.voice || {};
   const examples = voice.examples || {};
   const approvedProof = (profile.proof || []).filter(p => p && p.approved_for_outreach === true);
@@ -178,6 +180,7 @@ function projectForSales(profile, channel) {
       identity,
       offer,
       icp: { verticals: icp.verticals, personas: icp.personas, geo: icp.geo },
+      buying_signals: buyingSignals,
       voice,
       proof: approvedProof,
     },
@@ -192,6 +195,7 @@ function projectForEnforcer(profile, channel) {
   const voice    = profile.voice || {};
   const examples = voice.examples || {};
   const constraints = buildConstraints(profile, channel);
+  const buyingSignals = normalizeBuyingSignalsForTenant(profile);
 
   const rendered = [
     'CONSTRAINTS (hard rejection on violation):',
@@ -217,7 +221,7 @@ function projectForEnforcer(profile, channel) {
   return {
     rendered,
     constraints,
-    fields: { voice, constraints },
+    fields: { voice, constraints, buying_signals: buyingSignals },
   };
 }
 
@@ -229,6 +233,7 @@ function projectForCaptain(profile) {
   const identity = profile.identity || {};
   const offer    = profile.offer || {};
   const icp      = profile.icp || {};
+  const buyingSignals = normalizeBuyingSignalsForTenant(profile);
 
   const rendered = [
     `TENANT: ${identity.company || '(unknown)'}`,
@@ -239,7 +244,7 @@ function projectForCaptain(profile) {
   return {
     rendered,
     constraints: null,
-    fields: { identity: { company: identity.company }, offer: { product: offer.product } },
+    fields: { identity: { company: identity.company }, offer: { product: offer.product }, buying_signals: buyingSignals },
   };
 }
 
@@ -340,6 +345,7 @@ function legacyIcpFromProfile(profile) {
     geographies: Array.isArray(icp.geo) ? icp.geo.join(', ') : '',
     exclusions:  Array.isArray(icp.exclusions) ? icp.exclusions : [],
     competitor_offers: Array.isArray(icp.competitor_offers) ? icp.competitor_offers : [],
+    buying_signals: normalizeBuyingSignalsForTenant(profile),
     source: 'tenant_profiles',
   };
 }

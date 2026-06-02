@@ -21,6 +21,7 @@
  */
 
 const { z } = require('zod');
+const { SIGNAL_FAMILIES } = require('../config/buyingSignals');
 
 // ── identity ─────────────────────────────────────────────────────────────
 const identitySchema = z.object({
@@ -61,6 +62,24 @@ const icpSchema = z.object({
   geo: z.array(z.string()).default([]),
   exclusions: z.array(z.string()).default([]),
   competitor_offers: z.array(z.string()).default([]),
+});
+
+// ── buying signals ───────────────────────────────────────────────────────
+// Tenant-specific signal playbooks. Draft saves can be incomplete while a
+// profile is being assembled; activation requires at least one usable signal.
+const signalFamilySchema = z.enum(SIGNAL_FAMILIES);
+const buyingSignalSchema = z.object({
+  id: z.string().min(1),
+  family: signalFamilySchema,
+  enabled: z.boolean().default(true),
+  priority: z.number().int().positive().default(1),
+  source_channels: z.array(z.string()).default([]),
+  query_terms: z.array(z.string()).default([]),
+  geo_lock: z.boolean().default(true),
+  evidence_required: z.array(z.string()).default([]),
+  decision_maker_strategy: z.array(z.string()).default([]),
+  stop_rules: z.record(z.any()).default({}),
+  reject_rules: z.record(z.any()).default({}),
 });
 
 // ── proof ────────────────────────────────────────────────────────────────
@@ -119,6 +138,7 @@ const profileSchema = z.object({
   identity:    identitySchema,
   offer:       offerSchema,
   icp:         icpSchema,
+  buying_signals: z.array(buyingSignalSchema).default([]),
   proof:       z.array(proofItemSchema).default([]),
   voice:       voiceSchema,
   constraints: constraintsSchema,
@@ -129,6 +149,47 @@ const profileSchema = z.object({
 // Activation-only. Draft saves use profileSchema; flipping status to 'active'
 // runs profileActivationSchema and rejects below the example floors.
 const profileActivationSchema = profileSchema.superRefine((data, ctx) => {
+  const enabledSignals = (data.buying_signals || []).filter(signal => signal?.enabled !== false);
+  if (enabledSignals.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.too_small,
+      type: 'array',
+      minimum: 1,
+      inclusive: true,
+      path: ['buying_signals'],
+      message: 'Activation requires at least one enabled buying signal',
+    });
+  }
+  for (const [idx, signal] of (data.buying_signals || []).entries()) {
+    if (signal?.enabled === false) continue;
+    if ((signal.source_channels || []).length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.too_small,
+        type: 'array',
+        minimum: 1,
+        inclusive: true,
+        path: ['buying_signals', idx, 'source_channels'],
+        message: 'Enabled buying signals require at least one source channel',
+      });
+    }
+    if ((signal.evidence_required || []).length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.too_small,
+        type: 'array',
+        minimum: 1,
+        inclusive: true,
+        path: ['buying_signals', idx, 'evidence_required'],
+        message: 'Enabled buying signals require evidence requirements',
+      });
+    }
+    if (Object.keys(signal.stop_rules || {}).length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['buying_signals', idx, 'stop_rules'],
+        message: 'Enabled buying signals require stop rules',
+      });
+    }
+  }
   if ((data.voice?.examples?.good?.length || 0) < 3) {
     ctx.addIssue({
       code: z.ZodIssueCode.too_small,
@@ -158,6 +219,7 @@ module.exports = {
   identitySchema,
   offerSchema,
   icpSchema,
+  buyingSignalSchema,
   proofItemSchema,
   voiceSchema,
   constraintsSchema,
