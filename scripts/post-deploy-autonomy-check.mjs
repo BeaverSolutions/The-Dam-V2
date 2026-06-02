@@ -48,6 +48,12 @@ function isPausedOrDisabled(job, reasonPattern) {
     && reasonPattern.test(job.lastSkipReason || '');
 }
 
+function isGlobalScheduledPauseVisible(health) {
+  const autonomy = health?.autonomy_state || {};
+  return autonomy.scheduled_paused === true
+    && /SCHEDULED_AUTONOMY_PAUSED/.test(autonomy.reason || '');
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -110,7 +116,11 @@ function validateHealth(checks, health) {
 
   const daily = jobStatus(health, 'daily_kickoff');
   if (!daily) {
-    fail(checks, 'daily kickoff job visible', 'job missing from /health');
+    if (!EXPECT_DAILY_KICKOFF_ENABLED && isGlobalScheduledPauseVisible(health)) {
+      pass(checks, 'daily kickoff safely disabled', 'global scheduled pause visible before job marker');
+    } else {
+      fail(checks, 'daily kickoff job visible', 'job missing from /health');
+    }
   } else if (EXPECT_DAILY_KICKOFF_ENABLED) {
     if (daily.status === 'disabled') fail(checks, 'daily kickoff enabled', daily.lastSkipReason || 'disabled');
     else pass(checks, 'daily kickoff enabled', `status=${daily.status}`);
@@ -122,7 +132,11 @@ function validateHealth(checks, health) {
 
   const kpiGap = jobStatus(health, 'kpi_gap_kickoff');
   if (!kpiGap) {
-    fail(checks, 'KPI-gap kickoff job visible', 'job missing from /health');
+    if (!EXPECT_KPI_GAP_KICKOFF_ENABLED && isGlobalScheduledPauseVisible(health)) {
+      pass(checks, 'KPI-gap kickoff safely disabled', 'global scheduled pause visible before job marker');
+    } else {
+      fail(checks, 'KPI-gap kickoff job visible', 'job missing from /health');
+    }
   } else if (EXPECT_KPI_GAP_KICKOFF_ENABLED) {
     if (kpiGap.status === 'disabled') fail(checks, 'KPI-gap kickoff enabled', kpiGap.lastSkipReason || 'disabled');
     else pass(checks, 'KPI-gap kickoff enabled', `status=${kpiGap.status}`);
@@ -134,7 +148,11 @@ function validateHealth(checks, health) {
 
   const market = jobStatus(health, 'market_sensing');
   if (!market) {
-    fail(checks, 'market sensing job visible', 'job missing from /health');
+    if (!EXPECT_MARKET_SENSING_ENABLED && isGlobalScheduledPauseVisible(health)) {
+      pass(checks, 'market sensing safely disabled', 'global scheduled pause visible before job marker');
+    } else {
+      fail(checks, 'market sensing job visible', 'job missing from /health');
+    }
   } else if (EXPECT_MARKET_SENSING_ENABLED) {
     if (market.status === 'disabled') fail(checks, 'market sensing enabled', market.lastSkipReason || 'disabled');
     else pass(checks, 'market sensing enabled', `status=${market.status}`);
