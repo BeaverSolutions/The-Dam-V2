@@ -12,6 +12,7 @@
  *   drafted | draft_failed
  *   reviewed
  *   approved | rejected | borderline        (borderline — Phase 5)
+ *   repair_routed                            (V2.1 Phase 4)
  *   sent | send_failed
  *   replied | reply_classified              (reply_classified — Phase 8)
  *   meeting_booked                          (Phase 8)
@@ -44,6 +45,7 @@ const STAGE_VOCABULARY = new Set([
   'drafted', 'draft_failed',
   'reviewed',
   'approved', 'rejected', 'borderline',
+  'repair_routed',
   'sent', 'send_failed',
   'replied', 'reply_classified',
   'meeting_booked',

@@ -705,6 +705,7 @@ async function draftWithFallback(clientId, params) {
     leadFriction = null,
     pipeline_path = 'unknown',
     defaultDraftSource = 'sales_beaver',  // signal_pipeline historically used 'signal_hunt'
+    recordRepairRoute: recordRepairRouteFn = recordRepairRoute,
   } = params;
 
   if (!salesGenerate) {
@@ -725,6 +726,25 @@ async function draftWithFallback(clientId, params) {
       draftSource: defaultDraftSource,
       prompt_variant: salesResult.prompt_variant || null,
     };
+  }
+
+  if (salesResult?.status === 'needs_more_research') {
+    console.warn(`${logPrefix} Sales routed lead ${lead_id} to Research repair: ${salesResult.reason || 'needs_more_research'}`);
+    await recordRepairRouteFn(clientId, {
+      lead_id,
+      pipeline_path,
+      agent: 'sales_beaver',
+      source: 'sales_preflight',
+      channel,
+      repair_route: salesResult.repair_route || 'needs_research_repair',
+      failed_rule: salesResult.reason || 'needs_more_research',
+      reason: salesResult.required_repair || salesResult.reason || 'needs_more_research',
+      metadata: {
+        missing_fields: salesResult.missing_fields || [],
+        status: salesResult.status,
+      },
+    }).catch(() => {});
+    return null;
   }
 
   if (!enableEnforcerFallback) {
@@ -761,6 +781,53 @@ async function draftWithFallback(clientId, params) {
     draftSource: 'enforcer_fallback',
     prompt_variant: null,
   };
+}
+
+async function recordRepairRoute(clientId, {
+  lead_id = null,
+  message_id = null,
+  kickoff_id = null,
+  pipeline_path = 'unknown',
+  agent = 'enforcer_beaver',
+  source = 'enforcer_evidence_gate',
+  channel = null,
+  repair_route = 'manual_review',
+  failed_rule = null,
+  reason = null,
+  metadata = {},
+} = {}) {
+  if (!clientId) return { recorded: false, reason: 'missing_client_id' };
+  const repairMetadata = {
+    ...metadata,
+    repair_route,
+    failed_rule,
+    source,
+    channel,
+  };
+
+  await logsService.createLog(clientId, {
+    agent,
+    action: 'repair_route_recorded',
+    target_type: message_id ? 'message' : 'lead',
+    target_id: message_id || lead_id,
+    metadata: repairMetadata,
+  }).catch(() => {});
+
+  if (lead_id || message_id) {
+    pipelineTrace.traceStage(clientId, {
+      lead_id,
+      message_id,
+      kickoff_id,
+      stage: 'repair_routed',
+      status: repair_route || 'manual_review',
+      agent,
+      reason: reason || failed_rule || repair_route,
+      pipeline_path,
+      metadata: repairMetadata,
+    }).catch(() => {});
+  }
+
+  return { recorded: true, repair_route };
 }
 
 // ─── STEP 4 (this commit): ICP gate (soft-delete shape) ────────────────────
@@ -1179,6 +1246,7 @@ module.exports = {
   checkActiveMessage,    // Step 1 — concrete
   enrichEmail,           // Step 3 — concrete (Hunter + optional VP)
   draftWithFallback,     // Step 3 — concrete (Sales Beaver + optional Enforcer fallback)
+  recordRepairRoute,     // Phase 4 — concrete (repair route traces/logs)
   icpGateSoftDelete,     // Step 4 — concrete (applyIcpV2Filter + soft-delete + audit + trace)
   leadReadinessGate,     // Phase 3 pivot — concrete (pre-draft data-integrity check)
   applyEnforcerDecision, // Step 6 — concrete (auto-approve / borderline / manual + persistence)

@@ -415,6 +415,28 @@ The lead context MAY include signal/trigger data (Signal, Why now, Angle, RECENT
 
 In BOTH tiers, anti-fabrication is absolute: every company name, role, product, or fact must come from the lead context provided. If context is thin, write less — never invent details.
 
+V2.1 SIGNAL PACKAGE CONTRACT (HARD GATE):
+For Day 0 cold outbound, the deterministic system requires signal_package before your LLM draft is allowed. Treat this as non-negotiable. Required signal_package fields:
+- source_url
+- evidence
+- why_now
+- decision_maker
+
+If signal_package is missing or any required field is thin, return:
+{"status":"needs_more_research","missing_fields":["<list>"],"reason":"signal_package_incomplete"}
+
+No generic opener. Never write "saw your company", broad company praise, or generic "we help companies" filler. Use this exact writing logic:
+observed signal -> commercial implication -> one pointed diagnostic question
+
+Signal-family logic:
+- Hiring: role -> capacity pressure -> one pointed diagnostic question.
+- Expansion: new market/team -> market/team ramp pressure -> one pointed diagnostic question.
+- Funding/budget: new money -> GTM execution pressure -> one pointed diagnostic question.
+- Active ads: paid demand or campaign motion -> conversion/outbound leverage -> one pointed diagnostic question.
+- Tech stack: process redesign -> operational friction -> one pointed diagnostic question.
+
+Competitor-offer prospects are not outreach targets. If the context says lead_class is competitor_offer, return needs_more_research with reason "competitor_offer_disqualified".
+
 NUMBERS HARD GATE — prospect-specific figures (2026-05-20):
 Never state a specific number about the prospect's business (student count, client count, headcount, revenue, growth rate, follower count, campaign count, team size, years in operation) unless that exact number appears verbatim in the lead context or angle text provided. This rule is separate from PROOF_NUMBERS — those govern Beaver's own verified metrics. This governs any claim about the prospect.
 

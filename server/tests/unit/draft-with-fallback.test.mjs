@@ -7,8 +7,10 @@ const require = createRequire(import.meta.url);
 vi.mock('../../db/pool', () => ({ query: vi.fn() }));
 // pipelineTrace.traceStage is .catch(()=>{})-wrapped — mock to no-op
 vi.mock('../../services/pipelineTrace', () => ({ traceStage: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../../services/pipelineTrace.js', () => ({ traceStage: vi.fn().mockResolvedValue(undefined) }));
 // logs service may be required transitively
 vi.mock('../../services/logs', () => ({ createLog: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../../services/logs.js', () => ({ createLog: vi.fn().mockResolvedValue(undefined) }));
 
 const { draftWithFallback } = require('../../services/pipeline');
 
@@ -52,6 +54,33 @@ describe('draftWithFallback', () => {
     expect(result.draftSource).toBe('enforcer_fallback');
     expect(result.body).toBe('Enforcer-drafted body.');
     expect(result.prompt_variant).toBeNull();
+  });
+
+  it('does not fall through to Enforcer fallback when Sales routes thin evidence to Research', async () => {
+    const salesGenerate = vi.fn().mockResolvedValue({
+      status: 'needs_more_research',
+      repair_route: 'needs_research_repair',
+      missing_fields: ['source_url'],
+    });
+    const rangerDraft = vi.fn().mockResolvedValue({ body: 'Should not be used.' });
+    const recordRepairRoute = vi.fn().mockResolvedValue({ recorded: true });
+
+    const result = await draftWithFallback(CLIENT_ID, {
+      ...baseParams,
+      salesGenerate,
+      rangerDraft,
+      enableEnforcerFallback: true,
+      lead: baseLead,
+      recordRepairRoute,
+    });
+
+    expect(result).toBeNull();
+    expect(rangerDraft).not.toHaveBeenCalled();
+    expect(recordRepairRoute).toHaveBeenCalledWith(CLIENT_ID, expect.objectContaining({
+      lead_id: LEAD_ID,
+      repair_route: 'needs_research_repair',
+      failed_rule: 'needs_more_research',
+    }));
   });
 
   it('returns null when both Sales and Enforcer return no body', async () => {

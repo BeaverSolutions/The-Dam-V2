@@ -807,6 +807,176 @@ async function searchPersonalisationSignals(lead) {
  */
 const SALES_PROMPT_VARIANT = 'sales_v3_2026_05_18_sonnet';
 
+function safeJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function getSignalPackage(source = {}) {
+  const meta = safeJsonObject(source.metadata);
+  return source.signal_package
+    || meta.signal_package
+    || source.signalPackage
+    || meta.signalPackage
+    || null;
+}
+
+function isCompetitorOffer(source = {}, signalPackage = null) {
+  const meta = safeJsonObject(source.metadata);
+  const fit = safeJsonObject(signalPackage?.company_icp_fit);
+  const values = [
+    source.lead_class,
+    meta.lead_class,
+    signalPackage?.lead_class,
+    signalPackage?.reject_reason,
+    fit.lead_class,
+    fit.reject_reason,
+  ].filter(Boolean).map(v => String(v).toLowerCase());
+  return values.some(v => v.includes('competitor_offer') || v.includes('competitor-offer'));
+}
+
+function hasUsefulValue(value) {
+  if (Array.isArray(value)) return value.filter(Boolean).length > 0;
+  if (value && typeof value === 'object') return Object.keys(value).length > 0;
+  return typeof value === 'string' ? value.trim().length > 0 : !!value;
+}
+
+function decisionMakerPresent(signalPackage = {}) {
+  const decisionMaker = signalPackage.decision_maker;
+  if (!decisionMaker) return false;
+  if (Array.isArray(decisionMaker)) return decisionMaker.length > 0;
+  if (typeof decisionMaker === 'object') {
+    return hasUsefulValue(decisionMaker.name) || hasUsefulValue(decisionMaker.title) || hasUsefulValue(decisionMaker.source_url);
+  }
+  return hasUsefulValue(decisionMaker);
+}
+
+function isReplyOrFollowupContext(context = '', opts = {}) {
+  const text = String(context || '').toLowerCase();
+  return opts.is_reply === true
+    || opts.touch_number > 0
+    || text.includes('this is a reply message')
+    || text.includes('reply received:')
+    || text.includes('previous messages sent:')
+    || text.includes('previous messages in this sequence')
+    || text.includes('follow-up')
+    || text.includes('follow up');
+}
+
+function salesSignalPreflight({ lead = {}, channel = 'email', context = '', is_reply = false, touch_number = 0 } = {}) {
+  if (isReplyOrFollowupContext(context, { is_reply, touch_number })) {
+    return { ok: true, bypassed: 'reply_or_followup' };
+  }
+
+  const signalPackage = getSignalPackage(lead);
+  if (isCompetitorOffer(lead, signalPackage)) {
+    return {
+      ok: false,
+      status: 'needs_more_research',
+      missing_fields: [],
+      reason: 'competitor_offer_disqualified',
+      repair_route: 'competitor_offer_disqualified',
+      required_repair: 'Research must park this competitor-offer prospect instead of drafting.',
+    };
+  }
+
+  const missingFields = [];
+  if (!signalPackage || typeof signalPackage !== 'object') {
+    missingFields.push('signal_package');
+  } else {
+    if (!hasUsefulValue(signalPackage.source_url)) missingFields.push('source_url');
+    if (!hasUsefulValue(signalPackage.evidence)) missingFields.push('evidence');
+    if (!hasUsefulValue(signalPackage.why_now)) missingFields.push('why_now');
+    if (!decisionMakerPresent(signalPackage)) missingFields.push('decision_maker');
+  }
+
+  const hasIdentity = hasUsefulValue(lead.name) && hasUsefulValue(lead.company) && hasUsefulValue(lead.title);
+  if (!hasIdentity) missingFields.push('lead_identity');
+  if (!['email', 'linkedin', 'instagram'].includes(String(channel || '').toLowerCase())) {
+    missingFields.push('channel');
+  }
+
+  if (missingFields.length > 0) {
+    return {
+      ok: false,
+      status: 'needs_more_research',
+      missing_fields: [...new Set(missingFields)],
+      reason: 'signal_package_incomplete',
+      repair_route: 'needs_research_repair',
+      required_repair: 'Research must provide source_url, evidence, why_now, and decision_maker before Sales drafts.',
+    };
+  }
+
+  return { ok: true, signal_package: signalPackage };
+}
+
+function signalDraftGuidance(signalPackage = {}) {
+  const family = String(signalPackage.signal_family || signalPackage.signal_type || signalPackage.signal_id || '').toLowerCase();
+  const prefix = 'observed signal -> commercial implication -> one pointed diagnostic question';
+  if (family.includes('hiring')) {
+    return `${prefix}: hiring role implies capacity pressure; ask one diagnostic question about outbound load or pipeline ownership.`;
+  }
+  if (family.includes('expansion') || family.includes('market')) {
+    return `${prefix}: expansion implies market/team ramp pressure; ask one diagnostic question about building pipeline in the new motion.`;
+  }
+  if (family.includes('funding') || family.includes('capital') || family.includes('budget')) {
+    return `${prefix}: fresh capital implies GTM execution pressure; ask one diagnostic question about turning budget into pipeline.`;
+  }
+  if (family.includes('ad') || family.includes('paid') || family.includes('campaign') || family.includes('gtm_spend')) {
+    return `${prefix}: active ads imply paid demand or campaign motion; ask one diagnostic question about conversion or outbound leverage.`;
+  }
+  if (family.includes('tech') || family.includes('stack') || family.includes('crm')) {
+    return `${prefix}: tech stack change implies process redesign and operational friction; ask one diagnostic question about workflow ownership.`;
+  }
+  return `${prefix}: use the verified evidence, name the commercial implication, then ask exactly one diagnostic question.`;
+}
+
+function buildSalesSignalContext({ lead = {}, channel = 'email' } = {}) {
+  const signalPackage = getSignalPackage(lead);
+  if (!signalPackage) return '';
+  const channelLine = channel === 'linkedin'
+    ? 'Channel limit: LinkedIn DM, 2-3 sentences, under 50 words, no subject, no sign-off.'
+    : channel === 'instagram'
+      ? 'Channel limit: Instagram DM, 1-2 sentences, under 30 words, no sign-off.'
+      : 'Channel limit: Email body under 80 words, system appends the sign-off.';
+  return [
+    'SIGNAL PACKAGE (required evidence for this draft):',
+    `- signal_id: ${signalPackage.signal_id || 'unknown'}`,
+    `- signal_family: ${signalPackage.signal_family || 'unknown'}`,
+    `- source_url: ${signalPackage.source_url || 'missing'}`,
+    `- evidence: ${Array.isArray(signalPackage.evidence) ? signalPackage.evidence.join('; ') : signalPackage.evidence || 'missing'}`,
+    `- why_now: ${signalPackage.why_now || 'missing'}`,
+    `- decision_maker: ${typeof signalPackage.decision_maker === 'object' ? JSON.stringify(signalPackage.decision_maker) : signalPackage.decision_maker || 'missing'}`,
+    `- writing_logic: ${signalDraftGuidance(signalPackage)}`,
+    channelLine,
+    'No generic opener. Do not write "saw your company" or broad company praise.',
+  ].join('\n');
+}
+
+async function loadLeadForSalesPreflight(clientId, leadId) {
+  if (!clientId || !leadId) return null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, name, company, title, email, linkedin_url, email_verified, email_source, metadata, status, pipeline_stage
+       FROM leads WHERE id = $1 AND client_id = $2 LIMIT 1`,
+      [leadId, clientId]
+    );
+    return rows[0] || null;
+  } catch (err) {
+    console.warn('[sales-preflight] lead lookup failed:', err.message);
+    return null;
+  }
+}
+
 async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
   await logsService.createLog(clientId, {
     agent: 'sales_beaver',
@@ -815,6 +985,39 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
     target_id: lead_id,
     metadata: { lead_id, channel },
   });
+
+  const salesLead = await loadLeadForSalesPreflight(clientId, lead_id);
+  const signalPreflight = salesSignalPreflight({
+    lead: salesLead || { id: lead_id },
+    channel,
+    context,
+  });
+  if (!signalPreflight.ok) {
+    await logsService.createLog(clientId, {
+      agent: 'sales_beaver',
+      action: 'needs_more_research',
+      target_type: 'lead',
+      target_id: lead_id,
+      metadata: {
+        lead_id,
+        channel,
+        missing_fields: signalPreflight.missing_fields,
+        reason: signalPreflight.reason,
+        repair_route: signalPreflight.repair_route,
+      },
+    }).catch(() => {});
+    return {
+      lead_id,
+      channel,
+      subject: null,
+      body: null,
+      status: 'needs_more_research',
+      missing_fields: signalPreflight.missing_fields,
+      reason: signalPreflight.reason,
+      repair_route: signalPreflight.repair_route,
+      required_repair: signalPreflight.required_repair,
+    };
+  }
 
   if (callAgent) {
     try {
@@ -875,6 +1078,8 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         if (leadAngle.angle)   angleContext += `\n- Suggested angle: ${leadAngle.angle}`;
       }
 
+      const signalContext = buildSalesSignalContext({ lead: salesLead, channel });
+
       // Captain's directive injection — today's hot reject reasons + any other
       // active directives. Marked consumed at end of this draft (whether the
       // resulting message survives Enforcer or not — the directive WAS applied).
@@ -915,6 +1120,7 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         'sales_beaver',
         `Write a ${channel} outreach message for this lead: ${context}
 ${signOffInstruction}
+${signalContext}
 ${angleContext}
 ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}${founderFeedbackContext}${teachingContext}`,
         { lead_id, channel, clientId }
@@ -1380,6 +1586,183 @@ function codeEnforcerGates(body, touchNumber = 0) {
   return { passed: true };
 }
 
+function signalPackageMissingFields(signalPackage = {}) {
+  const missing = [];
+  if (!signalPackage || typeof signalPackage !== 'object') return ['signal_package'];
+  if (!hasUsefulValue(signalPackage.source_url)) missing.push('source_url');
+  if (!hasUsefulValue(signalPackage.evidence)) missing.push('evidence');
+  if (!hasUsefulValue(signalPackage.why_now)) missing.push('why_now');
+  if (!decisionMakerPresent(signalPackage)) missing.push('decision_maker');
+  return missing;
+}
+
+function tokenizeEvidence(value) {
+  const text = Array.isArray(value) ? value.join(' ') : String(value || '');
+  return text
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(token => token.length >= 5 && !['company', 'training', 'business'].includes(token));
+}
+
+function messageReferencesSignal(messageBody = '', signalPackage = {}, leadContext = {}) {
+  const body = String(messageBody || '').toLowerCase();
+  const evidenceTokens = [
+    ...tokenizeEvidence(signalPackage.evidence),
+    ...tokenizeEvidence(signalPackage.why_now),
+    ...tokenizeEvidence(signalPackage.signal_id),
+  ];
+  const uniqueTokens = [...new Set(evidenceTokens)].slice(0, 20);
+  const tokenHits = uniqueTokens.filter(token => body.includes(token)).length;
+  if (tokenHits >= 2) return true;
+
+  const family = String(signalPackage.signal_family || signalPackage.signal_id || '').toLowerCase();
+  if (family.includes('hiring') && /\bhiring|hire|recruit|role|bd(r)?|business development\b/i.test(messageBody)) return true;
+  if (family.includes('expansion') && /\bexpand|expansion|market|office|region|ramp\b/i.test(messageBody)) return true;
+  if ((family.includes('ad') || family.includes('gtm_spend')) && /\bad|ads|campaign|paid|demand\b/i.test(messageBody)) return true;
+  if (family.includes('tech') && /\bcrm|stack|tool|system|workflow|migration\b/i.test(messageBody)) return true;
+  if ((family.includes('funding') || family.includes('capital')) && /\bfunding|raised|capital|round|budget\b/i.test(messageBody)) return true;
+
+  const company = String(leadContext.company || '').toLowerCase();
+  return company.length > 3 && body.includes(company) && tokenHits >= 1;
+}
+
+function hasUnsupportedSignalClaim(messageBody = '', signalPackage = {}) {
+  const body = String(messageBody || '').toLowerCase();
+  const evidenceText = [
+    signalPackage.signal_family,
+    signalPackage.signal_id,
+    signalPackage.evidence,
+    signalPackage.why_now,
+  ].join(' ').toLowerCase();
+  const unsupportedFamilies = [
+    { rule: 'unsupported_signal', claim: /\b(series\s+[abc]|seed|funding|raised|capital|round|investment|investor)\b/i, supported: /\b(funding|capital|raised|round|investment|investor|seed|series)\b/i },
+    { rule: 'unsupported_signal', claim: /\bhiring|recruiting|new role|job post|business development manager\b/i, supported: /\b(hiring|hire|recruit|job|role|business development)\b/i },
+    { rule: 'unsupported_signal', claim: /\bexpanding|new market|new office|launching in\b/i, supported: /\b(expansion|expand|new market|new office|launch)\b/i },
+  ];
+  return unsupportedFamilies.some(({ claim, supported }) => claim.test(body) && !supported.test(evidenceText));
+}
+
+function enforcerEvidenceGate({ message_body, lead_context = {} } = {}) {
+  if (isReplyOrFollowupContext(lead_context.context || '', lead_context)) {
+    return { bypassed: true, approved: true, decision: 'approve', evidence_decision: 'bypassed_reply_or_followup' };
+  }
+
+  const signalPackage = getSignalPackage(lead_context);
+
+  if (isCompetitorOffer(lead_context, signalPackage)) {
+    return {
+      message_id: lead_context.message_id || null,
+      approved: false,
+      decision: 'reject',
+      score: 0,
+      evidence_decision: 'competitor_offer_disqualified',
+      repair_route: 'competitor_offer_disqualified',
+      failed_rule: 'competitor_offer_disqualified',
+      failed_phrase: null,
+      required_repair: 'Research must park competitor-offer prospects instead of sending them to Sales.',
+      notes: 'competitor_offer_disqualified',
+      issues: ['competitor_offer_disqualified'],
+      suggestions: [],
+    };
+  }
+
+  const missingFields = signalPackageMissingFields(signalPackage);
+  if (missingFields.length > 0) {
+    return {
+      message_id: lead_context.message_id || null,
+      approved: false,
+      decision: 'reject',
+      score: 0,
+      evidence_decision: 'needs_research_repair',
+      repair_route: 'needs_research_repair',
+      failed_rule: 'thin_evidence',
+      failed_phrase: null,
+      required_repair: `Research must repair signal_package fields: ${missingFields.join(', ')}`,
+      notes: `needs_research_repair:${missingFields.join(',')}`,
+      issues: missingFields,
+      suggestions: [],
+      missing_fields: missingFields,
+    };
+  }
+
+  if (hasUnsupportedSignalClaim(message_body, signalPackage)) {
+    return {
+      message_id: lead_context.message_id || null,
+      approved: false,
+      decision: 'reject',
+      score: 20,
+      evidence_decision: 'unsupported_signal',
+      repair_route: 'needs_research_repair',
+      failed_rule: 'unsupported_signal',
+      failed_phrase: null,
+      required_repair: 'Research must either provide evidence for the claimed signal or Sales must remove the unsupported claim.',
+      notes: 'unsupported_signal',
+      issues: ['unsupported_signal'],
+      suggestions: [],
+    };
+  }
+
+  const lowerBody = String(message_body || '').toLowerCase();
+  const genericPhrases = [
+    'saw your company',
+    'noticed your company',
+    'doing great',
+    'impressive work',
+    'we help companies',
+    'worth a chat',
+  ];
+  const genericHit = genericPhrases.find(phrase => lowerBody.includes(phrase));
+  const referencesSignal = messageReferencesSignal(message_body, signalPackage, lead_context);
+  if (genericHit || !referencesSignal) {
+    return {
+      message_id: lead_context.message_id || null,
+      approved: false,
+      decision: 'reject',
+      score: 45,
+      evidence_decision: genericHit ? 'generic_message' : 'signal_not_used',
+      repair_route: 'needs_sales_redraft',
+      failed_rule: genericHit ? 'generic_message' : 'weak_copy',
+      failed_phrase: genericHit || null,
+      required_repair: 'Sales must redraft from the actual signal: observed signal -> commercial implication -> one pointed diagnostic question.',
+      notes: genericHit ? `generic_message:${genericHit}` : 'signal_not_used',
+      issues: [genericHit ? 'generic_message' : 'signal_not_used'],
+      suggestions: ['Lead with the verified signal package, not broad company praise.'],
+    };
+  }
+
+  const implicationWords = /\bcapacity|pipeline|ramp|pressure|demand|conversion|outbound|workflow|friction|execution\b/i;
+  if (!implicationWords.test(message_body)) {
+    return {
+      message_id: lead_context.message_id || null,
+      approved: false,
+      decision: 'reject',
+      score: 58,
+      evidence_decision: 'weak_copy',
+      repair_route: 'needs_sales_redraft',
+      failed_rule: 'weak_copy',
+      failed_phrase: null,
+      required_repair: 'Sales must add the commercial implication before asking the diagnostic question.',
+      notes: 'weak_copy',
+      issues: ['weak_copy'],
+      suggestions: ['Add the commercial implication tied to the signal.'],
+    };
+  }
+
+  return {
+    message_id: lead_context.message_id || null,
+    approved: true,
+    decision: 'approve',
+    score: 85,
+    evidence_decision: 'evidence_ok',
+    repair_route: null,
+    failed_rule: null,
+    failed_phrase: null,
+    required_repair: null,
+  };
+}
+
 /**
  * =========================
  * RANGER
@@ -1513,6 +1896,42 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
       suggestions: [],
       reject_reason: gateCheck.reason,
       code_gate_failure: true,
+    };
+  }
+
+  const evidenceGate = enforcerEvidenceGate({
+    message_body: fixedBody,
+    lead_context: {
+      ...lead_context,
+      message_id,
+      channel: reviewChannel || lead_context?.channel,
+    },
+  });
+  if (!evidenceGate.bypassed && !evidenceGate.approved) {
+    console.warn(`[enforcer] Evidence-gate reject: ${evidenceGate.failed_rule}`);
+    if (typeof pipeline.recordRepairRoute === 'function') {
+      pipeline.recordRepairRoute(clientId, {
+        lead_id: lead_context?.lead_id || null,
+        message_id,
+        pipeline_path: lead_context?.pipeline_path || 'unknown',
+        agent: 'enforcer_beaver',
+        source: 'enforcer_evidence_gate',
+        channel: reviewChannel || lead_context?.channel || null,
+        repair_route: evidenceGate.repair_route,
+        failed_rule: evidenceGate.failed_rule,
+        reason: evidenceGate.notes || evidenceGate.required_repair,
+        metadata: {
+          evidence_decision: evidenceGate.evidence_decision,
+          failed_phrase: evidenceGate.failed_phrase,
+          required_repair: evidenceGate.required_repair,
+        },
+      }).catch(() => {});
+    }
+    return {
+      ...evidenceGate,
+      message_id,
+      body: fixedBody,
+      fixes_applied: fixesApplied,
     };
   }
 
@@ -2620,6 +3039,9 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
             name: lead.name, company: lead.company, title: lead.title,
             email: lead.email, lead_id: lead.id,
             signal: meta.signal, angle: meta.angle, why_now: meta.why_now,
+            signal_package: meta.signal_package,
+            channel,
+            pipeline_path: 'signal_pipeline',
           },
         });
       } catch (err) {
@@ -2711,6 +3133,9 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
               name: lead.name, company: lead.company, title: lead.title,
               email: lead.email, lead_id: lead.id,
               signal: meta.signal, angle: meta.angle, why_now: meta.why_now,
+              signal_package: meta.signal_package,
+              channel,
+              pipeline_path: 'signal_pipeline',
             },
           });
           pipelineTrace.traceStage(clientId, {
@@ -4763,6 +5188,9 @@ async function directorExecute(clientId, {
           angle: lead.metadata?.angle,
           friction: lead.metadata?.friction,
           why_now: lead.metadata?.why_now,
+          signal_package: lead.metadata?.signal_package,
+          channel: msg.channel,
+          pipeline_path: 'kickoff_pipeline',
           touch_number: touchNumber,
         },
       });
@@ -4849,6 +5277,10 @@ async function directorExecute(clientId, {
                 angle: lead.metadata?.angle,
                 friction: lead.metadata?.friction,
                 why_now: lead.metadata?.why_now,
+                signal_package: lead.metadata?.signal_package,
+                channel: msg.channel,
+                pipeline_path: 'kickoff_pipeline',
+                touch_number: touchNumber,
               },
             });
 
@@ -5511,4 +5943,12 @@ module.exports = {
   codeEnforcerGates,
   // Fix 6: Founder feedback loop
   getFounderFeedback,
+  _test: {
+    salesSignalPreflight,
+    signalDraftGuidance,
+    buildSalesSignalContext,
+    enforcerEvidenceGate,
+    getSignalPackage,
+    signalPackageMissingFields,
+  },
 };
