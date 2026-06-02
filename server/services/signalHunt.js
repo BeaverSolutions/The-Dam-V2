@@ -25,6 +25,7 @@ const logsService = require('./logs');
 const { searchOpenWeb, searchLinkedInProfiles } = require('./searchService');
 const { callAgent } = require('./claude');
 const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
+const { attachSignalPackageToLead, signalPackageMissingFields } = require('./research');
 const crypto = require('crypto');
 
 function envInt(name, fallback) {
@@ -241,10 +242,145 @@ function normalizeSignalQuery(item, fallbackCountry = 'MY') {
   const country = String(raw.country || countryCodeFromText(query) || fallbackCountry || 'MY').toUpperCase();
   return {
     query,
+    signal_id: raw.signal_id || raw.id || raw.signal,
+    signal_family: raw.signal_family || raw.family,
+    source_channel: raw.source_channel || raw.sourceChannel,
     signal_type: raw.signal_type || raw.type || 'buying_signal',
     tier: raw.tier || 'P2',
     country,
   };
+}
+
+function signalFamilyForType(signalType = '') {
+  const s = String(signalType || '').toLowerCase();
+  if (/hiring|vacancy|job|sales_role|sdr|bdr/.test(s)) return 'hiring_capability_build';
+  if (/fund|grant|invest|capital|raised/.test(s)) return 'capital_budget_event';
+  if (/launch|expansion|expand|growth|new_office/.test(s)) return 'expansion_growth';
+  if (/leadership|appointed|new_ceo|new_cro|joined/.test(s)) return 'leadership_org_change';
+  if (/ad|gtm|campaign|landing|demo|consultation/.test(s)) return 'active_gtm_spend';
+  return 'buying_signal';
+}
+
+function canonicalSignalKey(value = '') {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function signalMatchesPlaybook(query = {}, signalId = null) {
+  if (!signalId) return true;
+  const wanted = canonicalSignalKey(signalId);
+  const candidates = [
+    query.signal_id,
+    query.signal_type,
+    query.signal_family,
+    signalFamilyForType(query.signal_type || query.signal_id || query.signal_family),
+  ].map(canonicalSignalKey).filter(Boolean);
+  if (candidates.includes(wanted)) return true;
+  if (/hiring|sales_role/.test(wanted) && candidates.some(v => /hiring|sales/.test(v))) return true;
+  if (/growth|expansion|launch/.test(wanted) && candidates.some(v => /growth|expansion|launch/.test(v))) return true;
+  if (/capital|fund|grant|investment/.test(wanted) && candidates.some(v => /capital|fund|grant|investment/.test(v))) return true;
+  if (/gtm|ad|campaign/.test(wanted) && candidates.some(v => /gtm|ad|campaign/.test(v))) return true;
+  return false;
+}
+
+function queryMatchesGeo(query = {}, geo = []) {
+  if (geo.length === 0) return true;
+  const country = String(query.country || '').toUpperCase();
+  const queryText = String(query.query || '').toLowerCase();
+  return geo.some(g => {
+    const code = String(g || '').toUpperCase();
+    const name = countryNameFromCode(code).toLowerCase();
+    return country === code || queryText.includes(code.toLowerCase()) || queryText.includes(name);
+  });
+}
+
+function applySignalPlaybookToConfig(config = {}, signalPlaybook = null) {
+  if (!signalPlaybook || typeof signalPlaybook !== 'object') return config;
+  const signalId = signalPlaybook.signal_id || signalPlaybook.signalId || null;
+  const sourceChannel = signalPlaybook.source_channel || signalPlaybook.sourceChannel || null;
+  const geo = listFrom(signalPlaybook.geo).map(v => String(v).toUpperCase());
+  const cap = Math.max(1, Number(signalPlaybook.cap || signalPlaybook.maxLeads || config.queries?.length || 1) || 1);
+  const queries = Array.isArray(config.queries) ? config.queries : [];
+  const signalMatched = queries.filter(q => signalMatchesPlaybook(q, signalId));
+  const geoMatched = signalMatched.filter(q => queryMatchesGeo(q, geo));
+  const selected = (geoMatched.length > 0 ? geoMatched : signalMatched)
+    .slice(0, cap)
+    .map(q => ({
+      ...q,
+      signal_id: signalId || q.signal_id || q.signal_type,
+      signal_family: q.signal_family || signalFamilyForType(signalId || q.signal_type || q.signal_id),
+      source_channel: sourceChannel || q.source_channel || 'web_search',
+    }));
+
+  return {
+    ...config,
+    queries: selected,
+    query_source: `${config.query_source || 'default'}_signal_playbook`,
+    signal_playbook: signalPlaybook,
+  };
+}
+
+function attachSignalPackageToSignalLead(lead = {}, options = {}) {
+  const metadata = { ...(lead.metadata || {}) };
+  const signalType = metadata.signal_id
+    || metadata.signal_type
+    || lead.signal_type
+    || lead.signal
+    || 'signal_hunt';
+  const evidence = metadata.evidence
+    || metadata.signal
+    || metadata.signal_summary
+    || lead.signal
+    || lead.snippet
+    || lead.why_now
+    || null;
+  const whyNow = metadata.why_now || lead.why_now || evidence;
+  const sourceUrl = metadata.source_url
+    || metadata.signal_source_url
+    || lead.signal_source_url
+    || lead.source_url
+    || metadata.linkedin_company_url
+    || lead.linkedin_company_url
+    || null;
+  const sourceChannel = metadata.source_channel
+    || metadata.sourceChannel
+    || options.source_channel
+    || 'web_search';
+  const signalFamily = metadata.signal_family || signalFamilyForType(signalType);
+  const decisionMaker = metadata.decision_maker || {
+    name: lead.name || null,
+    title: lead.title || null,
+    source_url: lead.linkedin_url || metadata.decision_maker_source_url || null,
+  };
+  const contact = metadata.contact || {
+    email: lead.email || null,
+    email_verified: lead.email_verified === true,
+    email_source: lead.email_source || null,
+    linkedin_url: lead.linkedin_url || null,
+  };
+
+  return attachSignalPackageToLead({
+    ...lead,
+    signal: signalType,
+    why_now: whyNow,
+    metadata: {
+      ...metadata,
+      signal_id: signalType,
+      signal_family: signalFamily,
+      source_channel: sourceChannel,
+      source_url: sourceUrl,
+      evidence,
+      company_icp_fit: metadata.company_icp_fit || {
+        vertical_match: metadata.industry || metadata.segment || null,
+        geo_match: metadata.country || lead.country || null,
+        size_signal: null,
+        reject_rules_checked: [],
+      },
+      decision_maker: decisionMaker,
+      contact,
+      why_now: whyNow,
+      sales_angle: metadata.sales_angle || metadata.angle || `${signalType}: ${whyNow || evidence || 'signal-backed outreach angle'}`,
+    },
+  }, options);
 }
 
 function queriesFromConfigContent(content) {
@@ -415,11 +551,12 @@ async function findDecisionMaker(companyName, icpTitles = [], country = 'MY') {
  * @param {object} options.icp - ICP memory for seniority ranking
  * @returns {Promise<Array<Lead>>}
  */
-async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries = null } = {}) {
+async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries = null, signalPlaybook = null } = {}) {
   console.log(`[signalHunt] Starting signal hunt for client ${clientId} (target: ${maxLeads})`);
   await assertLlmBudgetOpen(clientId);
 
-  const config = await loadSignalConfig(clientId, icp);
+  let config = await loadSignalConfig(clientId, icp);
+  config = applySignalPlaybookToConfig(config, signalPlaybook);
   const zeroSet = await blockedByRepeatedZeroQuerySet(clientId, config.queries);
   if (zeroSet.blocked) {
     console.log('[signalHunt] Blocking repeated zero-output query set for today');
@@ -468,6 +605,9 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       validSignals.forEach(s => {
         s.tier = q.tier || 'P2';
         s.country = country;
+        s.signal_id = q.signal_id || q.signal_type;
+        s.signal_family = q.signal_family || signalFamilyForType(q.signal_id || q.signal_type);
+        s.source_channel = q.source_channel || 'web_search';
       });
       allSignals.push(...validSignals);
 
@@ -578,7 +718,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       console.warn(`[signalHunt] Email enrichment failed for ${person.name}:`, err.message);
     }
 
-    leads.push({
+    leads.push(attachSignalPackageToSignalLead({
       name: person.name,
       title: person.title || '',
       company: signal.company,
@@ -591,6 +731,11 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       verified: true,
       data_source: 'signal_hunt',
       metadata: {
+        signal_id: signal.signal_id || signal.signal_type,
+        signal_family: signal.signal_family || signalFamilyForType(signal.signal_id || signal.signal_type),
+        source_channel: signal.source_channel || 'web_search',
+        source_url: signal.source_url,
+        evidence: signal.signal_summary || signal.raw_snippet || signal.why_now,
         signal: signal.signal_summary,
         why_now: signal.why_now,
         angle: signal.angle,
@@ -601,7 +746,10 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         tier: signal.tier,
         source: 'signal_hunt',
       },
-    });
+    }, {
+      evidenceDate: signal.signal_date || undefined,
+      source_channel: signal.source_channel || 'web_search',
+    }));
   }
 
   await logsService.createLog(clientId, {
@@ -648,6 +796,25 @@ async function saveSignalLeads(clientId, leads) {
   const contactGate = require('./contactGate');
 
   for (const lead of leads) {
+    const missingPackageFields = signalPackageMissingFields(lead.metadata?.signal_package);
+    if (missingPackageFields.length > 0) {
+      await logsService.createLog(clientId, {
+        agent: 'research_beaver',
+        action: 'research_blocker',
+        target_type: 'research',
+        metadata: {
+          blocker: 'contact_zero',
+          reason: 'missing_signal_package_before_signal_save',
+          missing_fields: missingPackageFields,
+          lead_name: lead.name || null,
+          lead_company: lead.company || null,
+          source: 'signal_hunt',
+        },
+      }).catch(() => {});
+      console.log(`[signalHunt] Skipping ${lead.name || lead.company || 'lead'} - incomplete signal_package: ${missingPackageFields.join(',')}`);
+      continue;
+    }
+
     // Dedup check on LinkedIn URL
     if (lead.linkedin_url) {
       const dup = await pool.query(
@@ -712,4 +879,14 @@ async function saveSignalLeads(clientId, leads) {
   return saved;
 }
 
-module.exports = { runSignalHunt, saveSignalLeads, loadSignalConfig };
+module.exports = {
+  runSignalHunt,
+  saveSignalLeads,
+  loadSignalConfig,
+  _test: {
+    applySignalPlaybookToConfig,
+    attachSignalPackageToSignalLead,
+    signalPackageMissingFields,
+    signalFamilyForType,
+  },
+};

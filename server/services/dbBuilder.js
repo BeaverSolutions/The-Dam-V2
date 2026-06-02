@@ -599,7 +599,10 @@ async function runDbBuilder() {
           // directive with a higher email-ready target than the default config.
           // Read it before sizing the run.
           const directivesSvc = require('./directives');
-          const dbDirectives = await directivesSvc.readPendingDirectives(client.id, 'db_builder').catch(() => []);
+          const [dbDirectives, researchDirectives] = await Promise.all([
+            directivesSvc.readPendingDirectives(client.id, 'db_builder').catch(() => []),
+            directivesSvc.readPendingDirectives(client.id, 'research_beaver').catch(() => []),
+          ]);
           const rebuildDirective = dbDirectives.find(d => d.directive_type === 'rebuild_email_pool');
           const consumedDirectiveIds = [];
           if (rebuildDirective) consumedDirectiveIds.push(rebuildDirective.id);
@@ -666,6 +669,77 @@ async function runDbBuilder() {
             }
           }
 
+          const signalPlaybookDirectives = researchDirectives.filter(d => d.directive_type === 'run_signal_playbook');
+          if (signalPlaybookDirectives.length > 0) {
+            const { runSignalHunt, saveSignalLeads } = require('./signalHunt');
+            const icpMemory = await loadCanonicalIcp(client.id);
+
+            for (const directive of signalPlaybookDirectives) {
+              const payload = directive.payload || {};
+              if (!payload.signal_id) {
+                consumedDirectiveIds.push(directive.id);
+                await logsService.createLog(client.id, {
+                  agent: 'research_beaver',
+                  action: 'signal_playbook_skipped',
+                  target_type: 'system',
+                  metadata: {
+                    reason: 'missing_signal_id',
+                    directive_id: directive.id,
+                    payload,
+                  },
+                }).catch(() => {});
+                continue;
+              }
+
+              const budget = await checkBudget(client.id);
+              if (!budget.allowed) {
+                logger.info({ msg: '[db-builder] Budget exhausted, keeping run_signal_playbook pending', signal_id: payload.signal_id });
+                break;
+              }
+
+              try {
+                const cap = Math.max(1, Number(payload.cap || 6) || 6);
+                logger.info({ msg: '[db-builder] Processing run_signal_playbook', signal_id: payload.signal_id, cap });
+                const signalLeads = await runSignalHunt(client.id, {
+                  maxLeads: cap,
+                  icp: icpMemory || {},
+                  maxPaidQueries: cap,
+                  signalPlaybook: payload,
+                });
+                const savedSignalLeads = await saveSignalLeads(client.id, signalLeads);
+
+                await logsService.createLog(client.id, {
+                  agent: 'research_beaver',
+                  action: 'signal_playbook_consumed',
+                  target_type: 'system',
+                  metadata: {
+                    directive_id: directive.id,
+                    signal_id: payload.signal_id,
+                    source_channel: payload.source_channel || null,
+                    geo: payload.geo || [],
+                    cap,
+                    found: signalLeads.length,
+                    saved: savedSignalLeads.length,
+                  },
+                });
+                consumedDirectiveIds.push(directive.id);
+                logger.info({ msg: '[db-builder] run_signal_playbook complete', signal_id: payload.signal_id, found: signalLeads.length, saved: savedSignalLeads.length });
+              } catch (err) {
+                logger.warn({ msg: '[db-builder] run_signal_playbook failed', signal_id: payload.signal_id, err: err.message });
+                await logsService.createLog(client.id, {
+                  agent: 'research_beaver',
+                  action: 'signal_playbook_error',
+                  target_type: 'system',
+                  metadata: {
+                    directive_id: directive.id,
+                    signal_id: payload.signal_id,
+                    error: err.message,
+                  },
+                }).catch(() => {});
+              }
+            }
+          }
+
           // Check pool health
           const health = await checkDbHealth(client.id);
           // Deficits are computed against eligible, uncontacted supply. Raw pool
@@ -716,6 +790,9 @@ async function runDbBuilder() {
           const budget = await checkBudget(client.id);
           if (!budget.allowed || budget.pct >= config.budget_cap_pct) {
             logger.info({ msg: '[db-builder] Budget cap, skipping', slug: client.slug, pct: budget.pct });
+            if (consumedDirectiveIds.length > 0) {
+              await directivesSvc.markConsumed(client.id, consumedDirectiveIds).catch(() => {});
+            }
             return;
           }
 

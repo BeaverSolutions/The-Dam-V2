@@ -1,9 +1,12 @@
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 const service = (p) => readFileSync(resolve(__dirname, '../../', p), 'utf-8');
+const signalHunt = require('../../services/signalHunt.js');
 
 // Inline the pure helpers from signalHunt.js so we can execute them
 // without touching DB or network. These match the source 1-for-1.
@@ -94,6 +97,7 @@ function queriesFromConfigContent(content) {
 // ── Source contracts ──────────────────────────────────────────────────────
 describe('signalHunt source contracts (ICP-first query priority)', () => {
   const src = service('services/signalHunt.js');
+  const dbBuilderSrc = service('services/dbBuilder.js');
   const industriesFnStart = src.indexOf('function industriesFromIcp');
   const industriesFnEnd = src.indexOf('function hasIcpSearchScope', industriesFnStart);
   const industriesFn = src.slice(industriesFnStart, industriesFnEnd);
@@ -140,6 +144,113 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
   it('saveSignalLeads sets buying_signal_strength to rich by default', () => {
     expect(src).toContain("|| 'rich'");
     expect(src).toContain('buying_signal_strength, signal_dated_at');
+  });
+
+  it('packages Signal Hunt leads with the V2.1 signal_package contract before save', () => {
+    const packaged = signalHunt._test.attachSignalPackageToSignalLead({
+      name: 'Jane Tan',
+      title: 'Founder',
+      company: 'Acme Training',
+      linkedin_url: 'https://www.linkedin.com/in/janetan',
+      email: 'jane@acmetraining.com',
+      email_source: 'hunter',
+      email_verified: true,
+      data_source: 'signal_hunt',
+      metadata: {
+        signal: 'Acme Training is hiring sales roles in Kuala Lumpur',
+        why_now: 'They are building sales capacity now',
+        angle: 'Ask how founder-led outreach is being handled while hiring',
+        signal_type: 'hiring_sales',
+        signal_source_url: 'https://www.linkedin.com/jobs/view/123',
+        signal_confidence: 0.92,
+        country: 'Malaysia',
+        source: 'signal_hunt',
+      },
+    }, { evidenceDate: '2026-06-03' });
+
+    expect(packaged.metadata.signal_package).toMatchObject({
+      signal_id: 'hiring_sales',
+      signal_family: 'hiring_capability_build',
+      source_channel: 'web_search',
+      source_url: 'https://www.linkedin.com/jobs/view/123',
+      evidence: 'Acme Training is hiring sales roles in Kuala Lumpur',
+      evidence_date: '2026-06-03',
+      why_now: 'They are building sales capacity now',
+      decision_maker: {
+        name: 'Jane Tan',
+        title: 'Founder',
+        source_url: 'https://www.linkedin.com/in/janetan',
+      },
+      contact: {
+        email: 'jane@acmetraining.com',
+        email_verified: true,
+        email_source: 'hunter',
+        linkedin_url: 'https://www.linkedin.com/in/janetan',
+      },
+    });
+    expect(signalHunt._test.signalPackageMissingFields(packaged.metadata.signal_package)).toEqual([]);
+  });
+
+  it('refuses incomplete Signal Hunt packages before contactGate persistence', () => {
+    const saveStart = src.indexOf('async function saveSignalLeads');
+    const packageGate = src.indexOf('signalPackageMissingFields', saveStart);
+    const contactGateCall = src.indexOf('contactGate.tryPersistSourcedLead', saveStart);
+
+    expect(saveStart).toBeGreaterThan(-1);
+    expect(packageGate).toBeGreaterThan(saveStart);
+    expect(contactGateCall).toBeGreaterThan(packageGate);
+    expect(src).toContain('missing_signal_package_before_signal_save');
+  });
+
+  it('applies Captain run_signal_playbook payloads to Signal Hunt query selection', () => {
+    const config = {
+      queries: [
+        { query: '"agency" "Malaysia" "hiring" "sales"', signal_type: 'hiring_sales', tier: 'P1', country: 'MY' },
+        { query: '"agency" "Malaysia" "expanding"', signal_type: 'growth_signal', tier: 'P1', country: 'MY' },
+      ],
+      query_source: 'current_icp',
+      max_results_per_query: 3,
+    };
+
+    const planned = signalHunt._test.applySignalPlaybookToConfig(config, {
+      signal_id: 'hiring_sales_roles',
+      source_channel: 'linkedin_jobs',
+      geo: ['MY'],
+      cap: 1,
+    });
+
+    expect(planned.queries).toHaveLength(1);
+    expect(planned.queries[0]).toMatchObject({
+      signal_type: 'hiring_sales',
+      source_channel: 'linkedin_jobs',
+      signal_id: 'hiring_sales_roles',
+    });
+    expect(planned.query_source).toBe('current_icp_signal_playbook');
+  });
+
+  it('DB Builder consumes Research run_signal_playbook directives before pool health', () => {
+    const researchDirectiveRead = dbBuilderSrc.indexOf("readPendingDirectives(client.id, 'research_beaver')");
+    const playbookFilter = dbBuilderSrc.indexOf("directive_type === 'run_signal_playbook'");
+    const runSignalHunt = dbBuilderSrc.indexOf('runSignalHunt(client.id', playbookFilter);
+    const saveSignalLeads = dbBuilderSrc.indexOf('saveSignalLeads(client.id', playbookFilter);
+    const healthCheck = dbBuilderSrc.indexOf('// Check pool health');
+
+    expect(researchDirectiveRead).toBeGreaterThan(-1);
+    expect(playbookFilter).toBeGreaterThan(researchDirectiveRead);
+    expect(runSignalHunt).toBeGreaterThan(playbookFilter);
+    expect(saveSignalLeads).toBeGreaterThan(runSignalHunt);
+    expect(saveSignalLeads).toBeLessThan(healthCheck);
+    expect(dbBuilderSrc).toContain('signal_playbook_consumed');
+  });
+
+  it('marks acted playbook directives before later budget-cap early returns', () => {
+    const budgetCapLog = dbBuilderSrc.indexOf('Budget cap, skipping');
+    const budgetCapReturn = dbBuilderSrc.indexOf('return;', budgetCapLog);
+    const markConsumed = dbBuilderSrc.indexOf('markConsumed(client.id, consumedDirectiveIds)', budgetCapLog);
+
+    expect(budgetCapLog).toBeGreaterThan(-1);
+    expect(markConsumed).toBeGreaterThan(budgetCapLog);
+    expect(markConsumed).toBeLessThan(budgetCapReturn);
   });
 });
 

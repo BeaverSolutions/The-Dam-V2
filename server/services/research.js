@@ -2093,6 +2093,9 @@ module.exports = {
   buildQueryPool,
   verifyBatch,
   widenIcp,
+  buildSignalPackage,
+  attachSignalPackageToLead,
+  signalPackageMissingFields,
   _test: {
     RESEARCH_BLOCKERS,
     ORDERED_RESEARCH_ENRICHMENT_STAGES,
