@@ -462,6 +462,10 @@ async function start() {
     //
     // setInterval(() => { processFollowUps().catch(() => {}); }, 30 * 60 * 1000);
     // setTimeout(() => { processFollowUps().catch(() => {}); }, 2 * 60 * 1000);
+    jobHealth.markSkipped('follow_up_scheduler', 'FOLLOW_UP_SCHEDULER_DISABLED; Captain-led daily planning owns follow-ups', {
+      disabled: true,
+      owner: 'captain_led_daily_planning',
+    });
     logger.info({ msg: 'Follow-up scheduler DISABLED — Captain-led daily planning replaces 30-min cron' });
 
     const { recoverMissedAutoApprovals } = require('./services/autoApprovalRecovery');
@@ -1573,16 +1577,36 @@ none from this broken report; check app truth before approving batches.`;
       );
       if (clients.length === 0) return;
       const captain = require('./services/captainOrchestrator');
+      const failures = [];
+      const results = [];
       for (const client of clients) {
         try {
           const result = await captain.runDirectiveSweep(client.id);
+          results.push({ client_id: client.id, slug: client.slug, result });
           if (result.directives_written > 0) {
             logger.info({ msg: `[directive-sweep] ${client.slug}: ${result.directives_written} directives written` });
           }
+          if (result?.snapshot_error) {
+            failures.push({ slug: client.slug, reason: 'snapshot_failed', error: result.snapshot_error });
+          }
         } catch (err) {
           logger.warn({ msg: `[directive-sweep] failed for ${client.slug}`, err: err.message });
+          failures.push({ slug: client.slug, reason: 'sweep_failed', error: err.message });
         }
       }
+      if (failures.length > 0) {
+        return {
+          errors: failures.length,
+          reason: 'captain_directive_sweep_snapshot_failed',
+          failures,
+          clients: clients.length,
+        };
+      }
+      return {
+        clients: clients.length,
+        snapshot_written: results.filter(r => r.result?.snapshot_written).length,
+        directives_written: results.reduce((sum, r) => sum + (Number(r.result?.directives_written) || 0), 0),
+      };
     }
 
     // Poll every 10 minutes — each function self-guards against running outside its window
@@ -1630,7 +1654,13 @@ none from this broken report; check app truth before approving batches.`;
         .then(() => { jobHealth.markRun('enforcer_teaching'); })
         .catch(err => { logger.warn({ msg: 'Enforcer-teaching poll error', err: err.message }); jobHealth.markError('enforcer_teaching', err.message); });
       runCaptainDirectiveSweep()
-        .then(() => { jobHealth.markRun('captain_directive_sweep'); })
+        .then(result => {
+          if (result?.errors > 0) {
+            jobHealth.markError('captain_directive_sweep', result.reason || 'captain_directive_sweep_snapshot_failed');
+          } else {
+            jobHealth.markRun('captain_directive_sweep', result);
+          }
+        })
         .catch(err => { logger.warn({ msg: 'Captain directive sweep error', err: err.message }); jobHealth.markError('captain_directive_sweep', err.message); });
       runKpiGapKickoff()
         .then(result => {

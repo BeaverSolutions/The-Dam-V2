@@ -327,6 +327,10 @@ async function sendMessageById(clientId, message_id, provider) {
     [message.lead_id, clientId]
   );
 
+  require('../services/kpi').recountKpi(clientId).catch(err =>
+    console.warn('[integrations] KPI recount failed after email send:', err.message)
+  );
+
   await logsService.createLog(clientId, {
     agent: 'system',
     action: 'email_sent',

@@ -135,6 +135,42 @@ describe('onboarding readiness contracts', () => {
     expect(migration).toContain('INSERT INTO schema_migrations (version) VALUES (78)');
   });
 
+  it('Google Calendar sync uses the partial-index conflict target for google_event_id', () => {
+    const calendarSource = service('googleCalendar.js');
+
+    expect(calendarSource).toContain('ON CONFLICT (client_id, google_event_id) WHERE google_event_id IS NOT NULL DO UPDATE');
+  });
+
+  it('Captain directive sweep health fails when KPI snapshots fail to write', () => {
+    const captainSource = service('captainOrchestrator.js');
+    const indexSource = readFileSync(resolve(__dirname, '../../index.js'), 'utf-8');
+
+    expect(captainSource).toContain('snapshot_written');
+    expect(captainSource).toContain('snapshot_error');
+    expect(captainSource).toContain("'dam_kpi_snapshot_failed'");
+    expect(indexSource).toContain('captain_directive_sweep_snapshot_failed');
+    expect(indexSource).toContain("jobHealth.markError('captain_directive_sweep'");
+  });
+
+  it('approval manual-send paths recount KPI after marking a message sent', () => {
+    const approvalsSource = service('approvals.js');
+    const sentUpdates = approvalsSource.match(/UPDATE messages SET status = 'sent'/g) || [];
+
+    expect(sentUpdates.length).toBeGreaterThanOrEqual(2);
+    expect(approvalsSource).toContain('function recountKpiAsync');
+    expect(approvalsSource).toContain("recountKpiAsync(clientId, 'manual-send approval')");
+    expect(approvalsSource).toContain("recountKpiAsync(clientId, 'linkedin accepted')");
+  });
+
+  it('direct integration email send recounts KPI after real sent state', () => {
+    const integrationsSource = route('integrations.js');
+    const sentIdx = integrationsSource.indexOf("SET status = 'sent', sent_at = NOW()");
+    const recountIdx = integrationsSource.indexOf("require('../services/kpi').recountKpi(clientId)", sentIdx);
+
+    expect(sentIdx).toBeGreaterThan(-1);
+    expect(recountIdx).toBeGreaterThan(sentIdx);
+  });
+
   it('surfaces and records sanitized admin API failures instead of generic production 500s', () => {
     const errorHandlerSource = middleware('errorHandler.js');
     const migration = readFileSync(resolve(__dirname, '../../db/migrations/079_admin_api_errors.sql'), 'utf-8');

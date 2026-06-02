@@ -7,6 +7,12 @@ const { enqueueMessage } = require('./sendQueueWorker');
 const { trackEvent, upsertDealSummary } = require('./conversionTracker');
 const { isLeadSelectionFeedback, leadStatusForFeedback } = require('./founderFeedbackSignals');
 
+function recountKpiAsync(clientId, context) {
+  require('./kpi').recountKpi(clientId).catch(err =>
+    console.warn(`[approvals] KPI recount failed after ${context}:`, err.message)
+  );
+}
+
 // Push approval notification to MyClaw so it doesn't have to poll
 async function notifyMyClaw(approvalId, messageId, clientId) {
   const hookUrl = process.env.MYCLAW_WEBHOOK_URL;
@@ -294,6 +300,7 @@ async function resolveApproval(clientId, approvalId, { status, notes, userId, ed
            WHERE id = $1 AND client_id = $2`,
           [existing.rows[0].message_id, clientId]
         );
+        recountKpiAsync(clientId, 'manual-send approval');
         try {
           const { rows: [msg] } = await pool.query(
             `SELECT lead_id FROM messages WHERE id = $1`, [existing.rows[0].message_id]
@@ -416,6 +423,7 @@ async function markConnectionAccepted(clientId, approvalId, { userId, finalBody 
      WHERE id = $1 AND client_id = $2`,
     [approval.message_id, clientId]
   );
+  recountKpiAsync(clientId, 'linkedin accepted');
 
   // F-02 (2026-05-16): capture founder edits on manual UI LinkedIn sends.
   // If the founder pasted back the text actually sent and it differs from the

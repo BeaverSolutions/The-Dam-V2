@@ -27,7 +27,7 @@
  *           calls to pipeline.persistDraft. Acceptance: grep "INSERT INTO messages"
  *           outside pipeline.js returns zero non-test hits.
  *
- *   Step 3: extract pipeline.draft (Sales Beaver + Hunter/VP enrichment + dedup)
+ *   Step 3: extract pipeline.draft (Sales Beaver + email enrichment + dedup)
  *   Step 4: extract pipeline.icpGate (applyIcpV2Filter + soft-delete + audit)
  *   Step 5: extract pipeline.review (autoFix + brandSafety + Enforcer + redraft)
  *   Step 6: extract pipeline.approve (auto_approve_threshold + INSERT approvals + enqueueMessage)
@@ -85,7 +85,6 @@ async function assertLlmBudgetOpen(clientId) {
  *   - command: string|null     (campaign intent for Sales Beaver context)
  *   - options:
  *       skipIcpGate?: boolean        (true for director_cold — already gated upstream)
- *       enableVpEnrichment?: boolean (true for director_cold, false for signal)
  *       captainValidate?: boolean    (true for kickoff/director, false for signal)
  *       touchNumber?: number         (for follow-ups)
  *       channelHints?: object        (CHANNEL_HINTS map override)
@@ -125,7 +124,7 @@ async function processLead(clientId, lead, ctx = {}) {
     salesGenerate, rangerReview, rangerDraft, selectChannel,
     autoFixMessage, brandSafetyCheck, searchPersonalisationSignals,
     recordOutcome, attributionFromLead, stripEmDashes, applyIcpV2Filter,
-    hunterService, vpService, tenantConfigService, channelHints = {},
+    hunterService, channelHints = {},
     beaverState,
   } = deps;
 
@@ -186,10 +185,10 @@ async function processLead(clientId, lead, ctx = {}) {
       }
     }
 
-    // ── 4. Email enrichment (Hunter + VP) ──
+    // ── 4. Email enrichment (Hunter -> MillionVerifier-backed pattern fallback) ──
     await enrichEmail(clientId, lead, {
-      pipeline_path: pipelinePath, hunterService,
-      enableVp: true, vpService, tenantConfigService,
+      pipeline_path: pipelinePath,
+      hunterService,
     });
 
     // ── 5. Channel selection ──
@@ -543,15 +542,15 @@ async function persistDraft(clientId, params) {
 
 // ─── STEP 3 (this commit): enrichment + draft helpers ──────────────────────
 //
-// Step 3 of the Phase 2 plan is "extract pipeline.draft (Sales Beaver + Hunter/VP
+// Step 3 of the Phase 2 plan is "extract pipeline.draft (Sales Beaver + email
 // enrichment + dedup) — ~150 lines moved". The literal one-shot extraction risks
 // behaviour drift because the 4 call sites differ in real ways (signal has
-// Enforcer fallback, kickoff has VP enrichment, kickoff injects CHANNEL_HINTS).
+// Enforcer fallback, kickoff injects CHANNEL_HINTS).
 //
 // Risk-correct path tonight: extract the two helpers with the highest
 // line-for-line duplication and zero behaviour change:
 //
-//   - enrichEmail(clientId, lead, options)         — Hunter + optional VP
+//   - enrichEmail(clientId, lead, options)         — Hunter -> MillionVerifier
 //   - draftWithFallback(clientId, params)          — Sales Beaver + optional Enforcer fallback
 //
 // Caller wiring stays. Channel selection, dedup, Captain-validate, persistDraft
@@ -561,28 +560,23 @@ async function persistDraft(clientId, params) {
 // Both helpers take service functions via dependency injection to avoid the
 // pipeline.js ↔ agents.js circular require. Caller passes:
 //   - hunterService:      { findEmail }
-//   - vpService:          { findVerifiedEmail }       (optional)
-//   - tenantConfigService:{ getTenantConfig, chargeVpCredits } (only with vpService)
 //   - salesGenerate:      fn(clientId, {lead_id,channel,context}) -> {body,subject,prompt_variant}|null
 //   - rangerDraft:        fn(clientId, {lead_name,...}) -> {body,subject}|null   (optional, for fallback)
 
 /**
  * Enrich a lead's email if missing. Mutates `lead` in place and writes to DB.
  *
- * Mirrors the Hunter+VP blocks in agents.js:
- *   signal_pipeline: lines 1699-1723   (Hunter only, no VP)
- *   kickoff_pipeline: lines 2955-3030  (Hunter + VP threshold gate + credits)
+ * Mirrors the email-enrichment blocks in agents.js:
+ *   signal_pipeline: Hunter -> MillionVerifier-backed pattern fallback
+ *   kickoff_pipeline: Hunter -> MillionVerifier-backed pattern fallback
  *
  * @param {string} clientId
  * @param {object} lead    Has .id, .name, .company, .email, .quality_score
  * @param {object} options
  *   - pipeline_path:        'signal_pipeline' | 'kickoff_pipeline' (for log prefix)
- *   - hunterService:        required, exposes .findEmail(clientId, {firstName,lastName,company})
- *   - enableVp:             default false. Kickoff sets true.
- *   - vpService:            required if enableVp. Exposes .findVerifiedEmail(clientId, {...})
- *   - tenantConfigService:  required if enableVp. Exposes .getTenantConfig(), .chargeVpCredits()
+ *   - hunterService:        legacy injected service; findEmail orchestrator owns Hunter/MillionVerifier order
  *
- * @returns {Promise<{ enriched: boolean, source: 'hunter'|'vp'|null, reason: string|null }>}
+ * @returns {Promise<{ enriched: boolean, source: string|null, reason: string|null }>}
  *   Side-effect: lead.email / lead.email_source / lead.email_verified updated when found.
  */
 async function enrichEmail(clientId, lead, options = {}) {
@@ -597,14 +591,13 @@ async function enrichEmail(clientId, lead, options = {}) {
   const logPrefix = `[${pipeline_path}]`;
 
   // ── v2 (P0 2026-05-23): findEmail orchestrator ───────────────────────
-  // Hunter+VP retired from this path per NEXT-SESSION.md P0 spec ("NO
-  // Hunter/Apollo in the new orchestrator path"). findEmail discovers
+  // VP is not part of autonomous Beaver sourcing. findEmail discovers
   // domain via Brave, scrapes /contact + /about, generates 8 patterns,
   // verifies via MillionVerifier only when ambiguous (consensus scoring
   // saves credits on high-confidence matches).
   //
-  // hunterService / vpService / tenantConfigService options are now
-  // ignored (legacy callers may still pass them — harmless).
+  // hunterService is legacy DI; the findEmail orchestrator owns the provider
+  // order: public web evidence -> Hunter -> MillionVerifier verification.
   //
   // Spend gate: MillionVerifier 500 credits is finite (corrections.md
   // 2026-05-23). findEmail prefers free signals (Brave + scrape + pattern)
@@ -642,6 +635,30 @@ async function enrichEmail(clientId, lead, options = {}) {
     console.warn(`${logPrefix} findEmail failed for ${lead.name}: ${err.message}`);
     return { enriched: false, source: null, reason: 'findemail_error' };
   }
+}
+
+const TRUSTED_EMAIL_SOURCES = new Set([
+  'hunter',
+  'pattern+verify',
+  'scrape+pattern',
+  'scrape',
+  'vibe_csv',
+  'apollo_csv',
+  'vibe_prospecting',
+]);
+
+function isVerifiedEmailReadyLead(lead = {}) {
+  if (!lead?.email) return false;
+  if (lead.email_verified === true) return true;
+  const metadata = lead.metadata && typeof lead.metadata === 'object' ? lead.metadata : {};
+  const source = String(
+    lead.email_source
+    || metadata.email_source
+    || metadata.import_source
+    || metadata.source
+    || ''
+  ).toLowerCase();
+  return TRUSTED_EMAIL_SOURCES.has(source);
 }
 
 /**
@@ -1006,6 +1023,13 @@ async function applyEnforcerDecision(clientId, { msg, lead, rangerResult, finalB
             gatesPass = false;
             gateFailReason = '30-day dedup query error';
           }
+        }
+
+        // Gate 4: email auto-send must have a verified/trusted email source.
+        // Score alone cannot turn a guessed address into something we can send.
+        if (gatesPass && msg.channel === 'email' && !isVerifiedEmailReadyLead(lead)) {
+          gatesPass = false;
+          gateFailReason = 'email source is not verified or trusted';
         }
 
         if (gatesPass) {

@@ -39,10 +39,29 @@ function countriesFromIcp(icp = {}) {
 function hasIcpSearchScope(icp = {}) {
   return [...listFrom(icp.industries), ...listFrom(icp.verticals), ...listFrom(icp.segments), ...listFrom(icp.geographies), ...listFrom(icp.geo), ...listFrom(icp.countries), ...listFrom(icp.locations), ...listFrom(icp.target_markets)].length > 0;
 }
+function industryPriority(value) {
+  const s = String(value || '').toLowerCase();
+  if (/\b(agency|digital|marketing|creative|media|advertising|professional service|consult)/i.test(s)) return 0;
+  if (/\b(outbound|sales|growth|b2b service|smb|founder-led)/i.test(s)) return 1;
+  if (/\b(training|learning|l&d|development)/i.test(s)) return 3;
+  return 2;
+}
+function industriesFromIcp(icp = {}) {
+  const raw = [...listFrom(icp.industries), ...listFrom(icp.verticals), ...listFrom(icp.segments)];
+  const base = raw.length > 0 ? raw : ['B2B corporate training', 'digital agency'];
+  const seen = new Set();
+  return base
+    .filter(value => {
+      const key = String(value || '').trim().toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => industryPriority(a) - industryPriority(b));
+}
 function buildSignalQueriesFromIcp(icp = {}) {
   const countries = countriesFromIcp(icp);
-  const industries = ([...listFrom(icp.industries), ...listFrom(icp.verticals), ...listFrom(icp.segments)]);
-  const finalIndustries = industries.length > 0 ? industries.slice(0, 3) : ['B2B corporate training', 'digital agency'];
+  const finalIndustries = industriesFromIcp(icp);
   const queries = [];
   for (const industry of finalIndustries) {
     for (const country of countries) {
@@ -75,6 +94,9 @@ function queriesFromConfigContent(content) {
 // ── Source contracts ──────────────────────────────────────────────────────
 describe('signalHunt source contracts (ICP-first query priority)', () => {
   const src = service('services/signalHunt.js');
+  const industriesFnStart = src.indexOf('function industriesFromIcp');
+  const industriesFnEnd = src.indexOf('function hasIcpSearchScope', industriesFnStart);
+  const industriesFn = src.slice(industriesFnStart, industriesFnEnd);
 
   it('ICP queries take priority over stored config and both over defaults', () => {
     expect(src).toContain('const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : []');
@@ -82,9 +104,32 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).toContain('...icpQueries, ...configuredQueries');
   });
 
+  it('uses the full ICP and does not slice to the first three industries', () => {
+    expect(src).toContain('function industriesFromIcp');
+    expect(industriesFn).not.toContain('.slice(0, 3)');
+  });
+
+  it('prioritizes agency/professional-services terms ahead of training terms', () => {
+    expect(src).toContain('function industryPriority');
+    expect(src).toContain('professional service');
+    expect(src).toContain('training');
+  });
+
   it('paid query budget consumed once per signal query (not doubled)', () => {
     expect(src).toContain('consumePaidQuery(1)');
     expect(src).not.toContain('consumePaidQuery(2)');
+  });
+
+  it('logs raw-zero blockers and blocks repeated zero-output query sets per day', () => {
+    expect(src).toContain('function signalQuerySetHash');
+    expect(src).toContain('signal_hunt_zero_query_set_');
+    expect(src).toContain("'signal_hunt_zero_query_set_blocked'");
+    expect(src).toContain("'repeated_zero_output_query_set'");
+    expect(src).toContain("'raw_candidates_zero'");
+    expect(src).toContain("'signals_zero_after_llm_parse'");
+    expect(src).toContain("'contacts_zero'");
+    expect(src).toContain('raw_results_total');
+    expect(src).toContain('ON CONFLICT (client_id, agent, key) DO NOTHING');
   });
 
   it('saveSignalLeads routes through contactGate.tryPersistSourcedLead', () => {
@@ -132,6 +177,25 @@ describe('buildSignalQueriesFromIcp', () => {
   it('includes country code on each query', () => {
     const r = buildSignalQueriesFromIcp({ industries: ['Agency'], countries: ['Singapore'] });
     expect(r.every(q => q.country === 'SG')).toBe(true);
+  });
+
+  it('does not drop later ICP verticals after the first three', () => {
+    const r = buildSignalQueriesFromIcp({
+      verticals: ['B2B corporate training', 'professional training', 'L&D providers', 'digital agency'],
+      geographies: ['Malaysia'],
+    });
+    expect(r.some(q => q.query.includes('"digital agency"'))).toBe(true);
+  });
+
+  it('places agency/professional-services queries before training queries', () => {
+    const r = buildSignalQueriesFromIcp({
+      verticals: ['B2B corporate training', 'professional training', 'digital agency', 'professional services'],
+      geographies: ['Malaysia'],
+    });
+    expect(r[0].query).toContain('"digital agency"');
+    expect(r.findIndex(q => q.query.includes('"B2B corporate training"'))).toBeGreaterThan(
+      r.findIndex(q => q.query.includes('"digital agency"'))
+    );
   });
 });
 

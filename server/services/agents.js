@@ -2298,8 +2298,6 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           salesGenerate, rangerReview, rangerDraft, selectChannel, autoFixMessage,
           brandSafetyCheck, searchPersonalisationSignals, recordOutcome, attributionFromLead,
           stripEmDashes, applyIcpV2Filter, hunterService,
-          vpService: require('./vibeProspecting'),
-          tenantConfigService: require('./tenantConfig'),
           channelHints: CHANNEL_HINTS,
           beaverState: require('./beaverState'),
         },
@@ -2368,20 +2366,12 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       }
 
       // ── Email-priority rule ─────────────────────────────────────────────
-      // If the lead has no email, ALWAYS try Hunter first before falling back
-      // to LinkedIn. MJ's rule: email is the primary channel; LinkedIn is only
-      // used when no email is available, and for follow-up escalation after FU2.
-      // Phase 2 Step 3 (2026-05-08): Hunter enrichment via pipeline.enrichEmail.
-      // 2026-05-16 (Jules F-03): signal-rich leads are the most valuable, so
-      // they now get the SAME VP email enrichment the kickoff path uses. The
-      // daily VP credit cap inside enrichEmail bounds total spend regardless
-      // of how many pipeline paths call it.
+      // If the lead has no email, use the autonomous order: public web/domain
+      // evidence -> Hunter -> MillionVerifier-backed pattern verification.
+      // LinkedIn is used only when no usable email is available.
       await pipeline.enrichEmail(clientId, lead, {
         pipeline_path: 'signal-pipeline',
         hunterService,
-        enableVp: true,
-        vpService: require('./vibeProspecting'),
-        tenantConfigService: require('./tenantConfig'),
       });
 
       // ── Channel selection ── single source of truth in selectChannel()
@@ -2982,11 +2972,61 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
  * DIRECTOR — EXECUTE (full pipeline)
  * =========================
  */
-async function directorExecute(clientId, { plan_id, command, batchIndex = 0, limit, use_existing_leads = null, completionAttempt = 0, maxCompletionAttempts = 2, requestedTarget = null, deliveredSoFar = 0, draftedSoFar = 0, rejectedSoFar = 0, leadsFoundSoFar = 0 }) {
+function klDateString() {
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+async function claimDailyPaidSignalAttempt(clientId, { sourceMode, plan_id, maxPaidSignalQueries }) {
+  if (sourceMode !== 'daily_web_linkedin_topup') return true;
+  const key = `${sourceMode}_${klDateString()}`;
+  const { rows } = await pool.query(
+    `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
+     VALUES ($1, 'director', $2, $3::jsonb, 'state', NOW())
+     ON CONFLICT (client_id, agent, key) DO NOTHING
+     RETURNING id`,
+    [
+      clientId,
+      key,
+      JSON.stringify({
+        plan_id,
+        source_mode: sourceMode,
+        max_paid_signal_queries: maxPaidSignalQueries,
+        claimed_at: new Date().toISOString(),
+      }),
+    ]
+  );
+  const claimed = rows.length > 0;
+  if (!claimed) {
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'daily_web_linkedin_topup_deduped',
+      metadata: { plan_id, key, source_mode: sourceMode, boundary: 'one_topup_attempt_per_myt_day' },
+    }).catch(() => {});
+  }
+  return claimed;
+}
+
+async function directorExecute(clientId, {
+  plan_id,
+  command,
+  batchIndex = 0,
+  limit,
+  use_existing_leads = null,
+  completionAttempt = 0,
+  maxCompletionAttempts = 2,
+  requestedTarget = null,
+  deliveredSoFar = 0,
+  draftedSoFar = 0,
+  rejectedSoFar = 0,
+  leadsFoundSoFar = 0,
+  allowPaidSignal = true,
+  sourceMode = 'manual_campaign',
+  maxPaidSignalQueries = null,
+}) {
   await logsService.createLog(clientId, {
     agent: 'director',
     action: 'plan_executing',
-    metadata: { plan_id, batchIndex, signal_sourced: !!use_existing_leads },
+    metadata: { plan_id, batchIndex, signal_sourced: !!use_existing_leads, allow_paid_signal: allowPaidSignal, source_mode: sourceMode },
   });
 
   // ── Beavers read Captain's morning brief at run start ───────────────
@@ -3375,9 +3415,72 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     console.warn('[director] DB-first check failed, proceeding to external research:', err.message);
   }
 
+  if (remainingTarget > 0 && allowPaidSignal === false) {
+    const delivered = deliveredSoFar + dbApprovedCount;
+    const drafted = draftedSoFar + dbDraftedCount;
+    const rejected = rejectedSoFar + dbRejectedCount;
+    const leadsFound = leadsFoundSoFar + dbLeadsCount;
+    const shortfall = Math.max(0, campaignRequested - delivered);
+    const blocker = 'paid_signal_disabled_for_source_mode';
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'paid_signal_disabled_stop',
+      metadata: {
+        plan_id,
+        requested: campaignRequested,
+        delivered,
+        shortfall,
+        source_mode: sourceMode,
+        boundary: 'explicit_no_paid_signal',
+      },
+    }).catch(() => {});
+    await updateExecStatus(clientId, plan_id, {
+      status: shortfall > 0 ? 'blocked' : 'completed',
+      phase: 'captain',
+      beavers: {
+        research: { status: 'blocked', task: `Paid signal disabled for ${sourceMode}`, found: leadsFound, passed: dbLeadsCount },
+        sales:    { status: drafted > 0 ? 'done' : 'idle', task: `${drafted} messages drafted`, drafted, approved: delivered },
+        enforcer: { status: drafted > 0 ? 'done' : 'idle', task: `${delivered} approved, ${rejected} rejected`, reviewed: drafted, rejected },
+        captain:  { status: shortfall > 0 ? 'blocked' : 'done', task: `${delivered}/${campaignRequested} requested outputs delivered`, approved: delivered },
+      },
+      progress: { total: campaignRequested, complete: Math.min(campaignRequested, delivered) },
+      started_at: new Date().toISOString(),
+      blocker,
+      source_mode: sourceMode,
+    });
+    return {
+      plan_id,
+      status: shortfall > 0 ? 'blocked' : 'completed',
+      leads_found: leadsFound,
+      messages_drafted: drafted,
+      messages_failed: 0,
+      summary: {
+        requested: campaignRequested,
+        delivered,
+        shortfall,
+        target_fulfilled: shortfall === 0,
+        blocker,
+        source_mode: sourceMode,
+        db_leads_processed: dbLeadsCount,
+        leads_found: leadsFound,
+        messages_drafted: drafted,
+        approved: delivered,
+        rejected,
+        skipped: dbSkippedCount,
+        reason: `Paid signal sourcing is disabled for ${sourceMode}; stopping instead of spending to chase the shortfall.`,
+      },
+      diagnostics,
+    };
+  }
+
   const searchCapacity = await getSearchProviderCapacity(clientId);
   diagnostics.search_capacity = searchCapacity;
-  const minimumPaidQueriesNeeded = minPaidQueriesForExternalTarget(remainingTarget);
+  const paidSignalCap = Number.isFinite(Number(maxPaidSignalQueries))
+    ? Math.max(0, Number(maxPaidSignalQueries))
+    : null;
+  const minimumPaidQueriesNeeded = paidSignalCap !== null
+    ? Math.min(paidSignalCap, minPaidQueriesForExternalTarget(remainingTarget))
+    : minPaidQueriesForExternalTarget(remainingTarget);
   const insufficientSearchCapacity = remainingTarget > 0
     && Number(searchCapacity.remainingPaidQueries || 0) < minimumPaidQueriesNeeded;
   if (!searchCapacity.hasCapacity || insufficientSearchCapacity) {
@@ -3447,13 +3550,66 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
   // Max 3 rounds to cap API spend (each round = 1 search batch + verification)
   let campaignSearchBudgetRemaining = Math.min(
     Number(searchCapacity.remainingPaidQueries) || 0,
-    minPaidQueriesForExternalTarget(remainingTarget)
+    paidSignalCap !== null
+      ? Math.min(paidSignalCap, minPaidQueriesForExternalTarget(remainingTarget))
+      : minPaidQueriesForExternalTarget(remainingTarget)
   );
+  diagnostics.source_mode = sourceMode;
+  diagnostics.max_paid_signal_queries = paidSignalCap;
 
   // Step 0b: Signal-first sourcing. This is the primary cold-sourcing brain:
   // signal -> company -> decision-maker -> Sales/Enforcer. Generic profile
   // research is only the fallback for any output shortfall.
   if (remainingTarget > 0 && campaignSearchBudgetRemaining > 0) {
+    const dailyAttemptClaimed = await claimDailyPaidSignalAttempt(clientId, {
+      sourceMode,
+      plan_id,
+      maxPaidSignalQueries: campaignSearchBudgetRemaining,
+    });
+    if (!dailyAttemptClaimed) {
+      const delivered = deliveredSoFar + dbApprovedCount;
+      const drafted = draftedSoFar + dbDraftedCount;
+      const rejected = rejectedSoFar + dbRejectedCount;
+      const leadsFound = leadsFoundSoFar + dbLeadsCount;
+      const shortfall = Math.max(0, campaignRequested - delivered);
+      const blocker = 'daily_web_linkedin_topup_already_attempted';
+      diagnostics.daily_web_linkedin_topup_deduped = true;
+      await updateExecStatus(clientId, plan_id, {
+        status: shortfall > 0 ? 'blocked' : 'completed',
+        phase: 'captain',
+        beavers: {
+          research: { status: 'blocked', task: 'Daily web/LinkedIn top-up already attempted', found: leadsFound, passed: dbLeadsCount },
+          sales:    { status: drafted > 0 ? 'done' : 'idle', task: `${drafted} messages drafted`, drafted, approved: delivered },
+          enforcer: { status: drafted > 0 ? 'done' : 'idle', task: `${delivered} approved, ${rejected} rejected`, reviewed: drafted, rejected },
+          captain:  { status: shortfall > 0 ? 'blocked' : 'done', task: `${delivered}/${campaignRequested} requested outputs delivered`, approved: delivered },
+        },
+        progress: { total: campaignRequested, complete: Math.min(campaignRequested, delivered) },
+        started_at: new Date().toISOString(),
+        blocker,
+        source_mode: sourceMode,
+      });
+      return {
+        plan_id,
+        status: shortfall > 0 ? 'blocked' : 'completed',
+        leads_found: leadsFound,
+        messages_drafted: drafted,
+        messages_failed: 0,
+        summary: {
+          requested: campaignRequested,
+          delivered,
+          shortfall,
+          target_fulfilled: shortfall === 0,
+          blocker,
+          source_mode: sourceMode,
+          leads_found: leadsFound,
+          messages_drafted: drafted,
+          approved: delivered,
+          rejected,
+          reason: 'Daily web/LinkedIn top-up already ran for this MYT day; blocked duplicate paid search.',
+        },
+        diagnostics,
+      };
+    }
     const signalBudget = Math.min(campaignSearchBudgetRemaining, Math.max(3, remainingTarget * 2));
     campaignSearchBudgetRemaining = Math.max(0, campaignSearchBudgetRemaining - signalBudget);
     diagnostics.signal_first_budget_reserved = signalBudget;
@@ -3462,7 +3618,7 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
       await logsService.createLog(clientId, {
         agent: 'director',
         action: 'signal_first_started',
-        metadata: { plan_id, remaining_target: remainingTarget, paid_query_budget: signalBudget },
+        metadata: { plan_id, remaining_target: remainingTarget, paid_query_budget: signalBudget, source_mode: sourceMode },
       }).catch(() => {});
 
       const signalLeads = await runSignalHunt(clientId, {
@@ -4214,8 +4370,6 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
           salesGenerate, rangerReview, rangerDraft, selectChannel, autoFixMessage,
           brandSafetyCheck, searchPersonalisationSignals, recordOutcome, attributionFromLead,
           stripEmDashes, applyIcpV2Filter, hunterService,
-          vpService: require('./vibeProspecting'),
-          tenantConfigService: require('./tenantConfig'),
           channelHints: CHANNEL_HINTS,
           beaverState: require('./beaverState'),
         },
@@ -4322,26 +4476,17 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
     // After FU2 with no reply → escalate to next channel (handled in follow-up phase).
     // CHANNEL_HINTS moved to module scope (Jules F-03) so the signal pipeline shares it.
 
-    // ── Email-priority + VP enrichment via pipeline.enrichEmail ──────────
-    // Phase 2 Step 3 (2026-05-08): Hunter + VP enrichment consolidated into
-    // pipeline.enrichEmail. Behaviour identical: Hunter always tried first,
-    // then VP fallback gated by quality_score >= vp_threshold_score AND
-    // daily credit budget. lead.email/email_verified/email_source mutated
-    // in place + DB updated. linkedinAlreadyTried tracked separately below.
+    // ── Email-priority enrichment via pipeline.enrichEmail ────────────────
+    // Autonomous order: public web/domain evidence -> Hunter ->
+    // MillionVerifier-backed pattern verification. VP is not used by Beaver
+    // kickoff sourcing/enrichment.
     let linkedinAlreadyTried = false;
-    {
-      const tenantConfigService = require('./tenantConfig');
-      const vpService = require('./vibeProspecting');
-      await pipeline.enrichEmail(clientId, lead, {
-        pipeline_path: 'pipeline',
-        hunterService,
-        enableVp: true,
-        vpService,
-        tenantConfigService,
-      });
-    }
+    await pipeline.enrichEmail(clientId, lead, {
+      pipeline_path: 'pipeline',
+      hunterService,
+    });
 
-    // If neither Hunter NOR VP found an email AND LinkedIn was previously attempted,
+    // If email enrichment found no email AND LinkedIn was previously attempted,
     // skip the lead entirely — no new channel available, recycling is waste.
     if (!lead.email && lead.linkedin_url) {
       const prevLinkedinRes = await pool.query(
@@ -4911,6 +5056,9 @@ async function directorExecute(clientId, { plan_id, command, batchIndex = 0, lim
         draftedSoFar: totalMessagesDrafted,
         rejectedSoFar: totalRejected,
         leadsFoundSoFar: totalLeadsFound,
+        allowPaidSignal,
+        sourceMode,
+        maxPaidSignalQueries,
       });
     }
   }

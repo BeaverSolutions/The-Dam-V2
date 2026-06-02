@@ -100,15 +100,25 @@ for (const stage of traceStages) {
   check(`pipeline_trace stage '${stage}'`, found, found ? 'found' : 'MISSING');
 }
 
-// 6. VP daily credit cap
-const vpCap = dbBuilder.includes('VP_DAILY_CREDIT_CAP');
-check('VP daily credit cap enforced', vpCap,
-  vpCap ? 'VP_DAILY_CREDIT_CAP constant found' : 'MISSING — autonomous VP sourcing has no spend limit');
+// 6. VP is not autonomous sourcing. It remains available only through explicit
+// manual/subscribed-client paths; Beaver autonomous source order is
+// web/LinkedIn -> Hunter -> MillionVerifier.
+const onDemandStart = dbBuilder.indexOf('async function sourceLeadsOnDemand');
+const onDemandEnd = dbBuilder.indexOf('module.exports', onDemandStart);
+const onDemandBody = dbBuilder.slice(onDemandStart, onDemandEnd);
+const vpNotAutonomous = onDemandStart > -1
+  && !onDemandBody.includes('sourceLeadsViaVP')
+  && onDemandBody.includes('web_linkedin_topup')
+  && dbBuilder.includes('async function sourceLeadsViaVP');
+check('VP is blocked from autonomous on-demand sourcing', vpNotAutonomous,
+  vpNotAutonomous ? 'sourceLeadsOnDemand uses web/LinkedIn; VP remains a separate explicit function' : 'autonomous on-demand sourcing may still call VP');
 
-// 7. VP email-only channel split
-const vpEmailOnly = dbBuilder.includes("neededChannel === 'email'") || dbBuilder.includes('EMAIL CHANNEL ONLY');
-check('VP sources email channel only', vpEmailOnly,
-  vpEmailOnly ? 'channel guard found' : 'VP may source LinkedIn leads (credit waste)');
+// 7. Autonomous email sourcing order is web/LinkedIn -> Hunter -> MillionVerifier.
+const autonomousSourceOrder = onDemandBody.includes('source_order')
+  && onDemandBody.includes('web_linkedin_hunter_millionverifier')
+  && dbBuilder.includes('maxPaidQueries');
+check('Autonomous source order is web/LinkedIn -> Hunter -> MillionVerifier', autonomousSourceOrder,
+  autonomousSourceOrder ? 'source order logged and paid query cap passed to research' : 'autonomous source order or cap is missing');
 
 // 8. Enforcer model is Sonnet (not Haiku)
 const enforcerModel = readFile('config/agents.js').match(/ranger:\s*\{[\s\S]*model:\s*MODELS\.SONNET/);

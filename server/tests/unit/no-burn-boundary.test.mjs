@@ -14,34 +14,73 @@ const marketSensingSource = readFileSync(resolve(__dirname, '../../services/mark
 const emailEnrichmentSource = readFileSync(resolve(__dirname, '../../services/emailEnrichment.js'), 'utf-8');
 const dbBuilderSource = readFileSync(resolve(__dirname, '../../services/dbBuilder.js'), 'utf-8');
 const researchSource = readFileSync(resolve(__dirname, '../../services/research.js'), 'utf-8');
+const agentConfigSource = readFileSync(resolve(__dirname, '../../config/agents.js'), 'utf-8');
 
 // ── 2c: unify the no-burn boundary across the autonomous kickoff loop ─────
-// The two generic paid-sourcing escape hatches (on-demand research + VP rescue)
-// must be gated behind GENERIC_SOURCING_ENABLED so enabling daily kickoff cannot
-// burn generic scraping for 0 output — same boundary as directorExecute's
-// signal_first_terminal_block.
+// Autonomous Beaver sourcing is web/LinkedIn first, then Hunter, then
+// MillionVerifier verification. VP/Explorium is manual CSV or subscribed-client
+// only, never an automatic rescue path for Beaver.
 describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
-  it('gates BOTH generic-sourcing call-sites behind GENERIC_SOURCING_ENABLED', () => {
+  it('gates generic on-demand sourcing behind GENERIC_SOURCING_ENABLED', () => {
     const gates = autonomousSource.match(/process\.env\.GENERIC_SOURCING_ENABLED !== 'true'/g) || [];
-    expect(gates.length).toBeGreaterThanOrEqual(2);
+    expect(gates.length).toBeGreaterThanOrEqual(1);
     expect(autonomousSource).toContain("'generic_sourcing_disabled_skip'");
     expect(autonomousSource).toContain("context: 'pool_dry_on_demand_research'");
-    expect(autonomousSource).toContain("context: 'zero_streak_vp_rescue'");
+    expect(autonomousSource).not.toContain("context: 'zero_streak_web_linkedin_topup'");
   });
 
-  it('puts each gate BEFORE its sourceLeadsOnDemand call (no burn when off)', () => {
-    // On-demand research site: the pool_dry gate precedes the first generic call.
+  it('puts the generic gate BEFORE sourceLeadsOnDemand (no burn when off)', () => {
     const poolDryGate = autonomousSource.indexOf("context: 'pool_dry_on_demand_research'");
-    const firstGenericCall = autonomousSource.indexOf('sourceLeadsOnDemand(clientId, { neededChannel, batchSize: BATCH_SIZE })');
+    const firstGenericCall = autonomousSource.indexOf('const result = await sourceLeadsOnDemand(clientId, {');
     expect(poolDryGate).toBeGreaterThan(-1);
     expect(firstGenericCall).toBeGreaterThan(-1);
     expect(poolDryGate).toBeLessThan(firstGenericCall);
+    expect(autonomousSource.slice(firstGenericCall, firstGenericCall + 250)).toContain('maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP');
+  });
 
-    // Zero-streak rescue site: the rescue gate precedes the VP rescue call.
-    const rescueGate = autonomousSource.indexOf("context: 'zero_streak_vp_rescue'");
-    const vpRescueCall = autonomousSource.lastIndexOf('sourceLeadsOnDemand(clientId, { neededChannel, batchSize: BATCH_SIZE })');
-    expect(rescueGate).toBeGreaterThan(-1);
-    expect(rescueGate).toBeLessThan(vpRescueCall);
+  it('does not keep the old zero-streak rescue path alive', () => {
+    expect(autonomousSource).not.toContain('zeroStreak');
+    expect(autonomousSource).not.toContain('zero_streak_web_linkedin_topup');
+    expect(autonomousSource).not.toContain('3 consecutive zero-lead batches');
+  });
+
+  it('blocks VP from all autonomous on-demand sourcing paths', () => {
+    const onDemandStart = dbBuilderSource.indexOf('async function sourceLeadsOnDemand');
+    const exportsStart = dbBuilderSource.indexOf('module.exports', onDemandStart);
+    const onDemandBody = dbBuilderSource.slice(onDemandStart, exportsStart);
+
+    expect(onDemandBody).not.toContain('sourceLeadsViaVP');
+    expect(onDemandBody).toContain("'web_linkedin_topup'");
+    expect(onDemandBody).toContain("'web_linkedin_no_results'");
+    expect(autonomousSource).not.toContain('vp_rescue_success');
+    expect(autonomousSource).not.toContain('vp_rescue_empty');
+    expect(autonomousSource).not.toContain('zero_streak_vp_rescue');
+    expect(agentsSource).not.toContain('enableVp: true');
+    expect(pipelineSource).not.toContain('enableVp: true');
+    expect(pipelineSource).not.toContain('vpService');
+    expect(agentConfigSource).not.toContain('VP enrichment fires preventively');
+    expect(agentConfigSource).toContain('Autonomous Beaver sourcing never uses VP');
+  });
+
+  it('daily DB-pool director execution cannot silently run paid Signal Hunt', () => {
+    const dbPoolCall = autonomousSource.indexOf('const dbResult = await directorExecute');
+    const dbPoolCallBody = autonomousSource.slice(dbPoolCall, dbPoolCall + 500);
+
+    expect(dbPoolCallBody).toContain("allowPaidSignal: false");
+    expect(dbPoolCallBody).toContain("sourceMode: 'daily_db_pool'");
+  });
+
+  it('daily web/LinkedIn top-up is explicit, capped, and one-attempt', () => {
+    expect(autonomousSource).toContain('DAILY_WEB_LINKEDIN_SIGNAL_CAP');
+    expect(autonomousSource).toContain('Number(process.env.DAILY_WEB_LINKEDIN_SIGNAL_CAP || 6)');
+    expect(autonomousSource).toContain("sourceMode: 'daily_web_linkedin_topup'");
+    expect(autonomousSource).toContain('maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP');
+    expect(autonomousSource).toContain("'daily_web_linkedin_topup_empty'");
+    expect(autonomousSource).toContain("'web_linkedin_topup_attempted'");
+    expect(autonomousSource).toContain("'daily_web_linkedin_topup_deduped'");
+    expect(autonomousSource).toContain("'one_topup_attempt_per_kickoff'");
+    expect(agentsSource).toContain("'daily_web_linkedin_topup_already_attempted'");
+    expect(agentsSource).toContain("'one_topup_attempt_per_myt_day'");
   });
 });
 

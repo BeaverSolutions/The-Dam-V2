@@ -51,6 +51,16 @@ describe('applyEnforcerDecision contracts (pipeline.js)', () => {
     expect(fn).toContain("resolvedAt = new Date()");
   });
 
+  it('email auto-approve requires a verified or trusted email source', () => {
+    expect(src).toContain('function isVerifiedEmailReadyLead');
+    expect(fn).toContain('isVerifiedEmailReadyLead(lead)');
+    expect(fn).toContain("email source is not verified or trusted");
+    expect(src).toContain("'hunter'");
+    expect(src).toContain("'pattern+verify'");
+    expect(src).toContain("'vibe_csv'");
+    expect(src).toContain("'apollo_csv'");
+  });
+
   it('requestedBy label is enforcer_borderline for borderline drafts', () => {
     expect(fn).toContain("'enforcer_borderline'");
     // Must be assigned based on isBorderline check

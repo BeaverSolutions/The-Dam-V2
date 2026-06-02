@@ -1073,6 +1073,7 @@ async function _runAutonomousKickoffInner(clientId) {
   const HARD_CEILING = 15;
   const PENDING_CEILING = 30;
   const CHANNEL_ESCALATION_DAILY_CAP = Number(process.env.CHANNEL_ESCALATION_DAILY_CAP) || 5;
+  const DAILY_WEB_LINKEDIN_SIGNAL_CAP = Math.max(0, Number(process.env.DAILY_WEB_LINKEDIN_SIGNAL_CAP || 6));
 
   const budgetState = await checkBudget(clientId).catch(err => ({
     allowed: false,
@@ -1613,7 +1614,11 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
       const signalTarget = Math.min(remainingGap, 30); // don't exceed daily gap
       console.log(`[Autonomous] Phase C: Running signal hunt for up to ${signalTarget} P1/P2 leads`);
 
-      const signalLeads = await runSignalHunt(clientId, { maxLeads: signalTarget, icp });
+      const signalLeads = await runSignalHunt(clientId, {
+        maxLeads: signalTarget,
+        icp,
+        maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+      });
       if (signalLeads.length > 0) {
         const saved = await saveSignalLeads(clientId, signalLeads);
         console.log(`[Autonomous] Signal hunt saved ${saved.length} pre-qualified leads (P1=${saved.filter(l => l.signal_tier === 'P1').length})`);
@@ -1630,6 +1635,8 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
               batchIndex: 0,
               limit: saved.length,
               use_existing_leads: saved.map(l => l.id), // NEW: hint to directorExecute
+              allowPaidSignal: false,
+              sourceMode: 'daily_signal_prefill_saved_leads',
             });
           } catch (err) {
             console.warn('[Autonomous] Signal batch directorExecute failed:', err.message);
@@ -1658,9 +1665,10 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
   //   - PENDING_CEILING: if > PENDING_CEILING messages waiting approval, alert and stop
   //     (MJ is the bottleneck, more drafting won't help)
   //   - HARD_CEILING: absolute max batches to cap API spend
-  //   - ZERO_STREAK: 3 consecutive batches with zero new leads → stop (pool exhausted)
+  //   - webLinkedinTopupAttempted: one capped paid web/LinkedIn sourcing attempt
+  //     per kickoff; directorExecute also dedupes this per MYT day.
   const BATCH_SIZE = 20; // raised from 10 — auto-fix means more drafts survive
-  let zeroStreak = 0;
+  let webLinkedinTopupAttempted = false;
 
   // ── Channel-mix policy (Wave 1, MJ direction 2026-05-03) ──────────────
   // 30 email + 20 linkedin = 50/day. The kickoff loop biases lead selection
@@ -1816,6 +1824,31 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
           batch, emailGap, linkedinGap, poolEmailReady, poolLinkedinOnly,
           context: 'pool_dry_on_demand_research', boundary: 'no_generic_paid_fallback',
         });
+        if (!webLinkedinTopupAttempted && DAILY_WEB_LINKEDIN_SIGNAL_CAP > 0) {
+          webLinkedinTopupAttempted = true;
+          await logAction(clientId, 'director', 'web_linkedin_topup_attempted', 'system', null, {
+            batch,
+            cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+            context: 'pool_dry_channel_target',
+          });
+          const topupResult = await directorExecute(clientId, {
+            plan_id: uuidv4(),
+            command: '',
+            batchIndex: batch - 1,
+            limit: Math.min(Math.max(emailGap, linkedinGap), BATCH_SIZE),
+            allowPaidSignal: true,
+            sourceMode: 'daily_web_linkedin_topup',
+            maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+          });
+          if (Number(topupResult?.leads_found || topupResult?.summary?.leads_found || 0) === 0) {
+            await logAction(clientId, 'director', 'daily_web_linkedin_topup_empty', 'system', null, {
+              batch,
+              cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+              reason: topupResult?.summary?.blocker || topupResult?.summary?.reason || topupResult?.status || 'no_results',
+              boundary: 'no_burn_zero_raw_stop',
+            });
+          }
+        }
         break;
       }
 
@@ -1836,7 +1869,11 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
 
       try {
         const { sourceLeadsOnDemand } = require('../services/dbBuilder');
-        const result = await sourceLeadsOnDemand(clientId, { neededChannel, batchSize: BATCH_SIZE });
+        const result = await sourceLeadsOnDemand(clientId, {
+          neededChannel,
+          batchSize: BATCH_SIZE,
+          maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+        });
 
         if (result.saved === 0) {
           console.warn(`[Autonomous] On-demand research yielded 0 usable leads (reason: ${result.reason}). Stopping.`);
@@ -1967,6 +2004,8 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
             batchIndex: batch - 1,
             limit: draftSize,
             use_existing_leads: passingIds,
+            allowPaidSignal: false,
+            sourceMode: 'daily_db_pool',
           });
           usedDbPool = true;
           const dbDrafted = Number(dbResult?.summary?.messages_drafted || 0);
@@ -2010,68 +2049,44 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         [clientId, today]
       )).rows[0].c;
 
+      if (webLinkedinTopupAttempted) {
+        await logAction(clientId, 'director', 'daily_web_linkedin_topup_deduped', 'system', null, {
+          batch,
+          boundary: 'one_topup_attempt_per_kickoff',
+        });
+        break;
+      }
+      webLinkedinTopupAttempted = true;
+      await logAction(clientId, 'director', 'web_linkedin_topup_attempted', 'system', null, {
+        batch,
+        cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+        context: 'cold_research_fallback',
+      });
       await directorExecute(clientId, {
         plan_id: uuidv4(),
         command: '',
         batchIndex: batch - 1,
         limit: draftSize,
+        allowPaidSignal: true,
+        sourceMode: 'daily_web_linkedin_topup',
+        maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
       });
 
-      // Zero-streak detection — stop if research yields nothing new
+      // No-burn stop: the daily top-up is capped and single-attempt. If it
+      // produces no new saved leads, do not escalate into generic paid retries.
       const afterSaved = (await pool.query(
         `SELECT COUNT(*) AS c FROM leads WHERE client_id=$1 AND DATE(created_at)=$2`,
         [clientId, today]
       )).rows[0].c;
       if (parseInt(afterSaved) === parseInt(beforeSaved)) {
-        zeroStreak++;
-        console.warn(`[Autonomous] Batch ${batch} added 0 leads (zero streak: ${zeroStreak}/3)`);
-        if (zeroStreak >= 3) {
-          // 2026-05-29 no-burn boundary (Phase 2c): the zero-streak VP/generic
-          // rescue is generic paid scraping. Gated behind GENERIC_SOURCING_ENABLED
-          // so the autonomous loop does not burn generic sourcing for 0 output —
-          // same boundary as directorExecute's signal_first_terminal_block.
-          if (process.env.GENERIC_SOURCING_ENABLED !== 'true') {
-            console.warn(`[Autonomous] 3 zero-lead batches — GENERIC_SOURCING_ENABLED off, skipping generic rescue (no-burn boundary). Pool exhausted for this cycle.`);
-            await logAction(clientId, 'director', 'generic_sourcing_disabled_skip', 'system', null, {
-              batch, context: 'zero_streak_vp_rescue', boundary: 'no_generic_paid_fallback',
-            });
-            await logAction(clientId, 'director', 'research_pool_exhausted', 'system', null, { batch, liveSent, target });
-            break;
-          }
-          console.warn(`[Autonomous] 3 consecutive zero-lead batches — trying VP sourcing before giving up.`);
-
-          try {
-            const { sourceLeadsOnDemand } = require('../services/dbBuilder');
-            const neededChannel = emailGap > 0 ? 'email' : 'linkedin';
-            const vpResult = await sourceLeadsOnDemand(clientId, { neededChannel, batchSize: BATCH_SIZE });
-
-            if (vpResult.saved > 0) {
-              console.log(`[Autonomous] VP sourcing rescued batch — ${vpResult.saved} leads added (pool email=${vpResult.health?.withEmail}). Continuing.`);
-              await logAction(clientId, 'director', 'vp_rescue_success', 'system', null, {
-                batch, saved: vpResult.saved,
-                pool_email: vpResult.health?.withEmail,
-                pool_linkedin: vpResult.health?.noEmail,
-              });
-              zeroStreak = 0;
-              continue;
-            }
-
-            console.warn(`[Autonomous] VP sourcing also returned 0 (reason: ${vpResult.reason}). Pool truly exhausted.`);
-            await logAction(clientId, 'director', 'vp_rescue_empty', 'system', null, {
-              batch, reason: vpResult.reason,
-            });
-          } catch (vpErr) {
-            console.error(`[Autonomous] VP rescue failed:`, vpErr.message);
-            await logAction(clientId, 'director', 'vp_rescue_error', 'system', null, {
-              batch, error: vpErr.message,
-            });
-          }
-
-          await logAction(clientId, 'director', 'research_pool_exhausted', 'system', null, { batch, liveSent, target });
-          break;
-        }
-      } else {
-        zeroStreak = 0;
+        console.warn(`[Autonomous] Batch ${batch} added 0 leads after the capped web/LinkedIn top-up. Stopping for no-burn.`);
+        await logAction(clientId, 'director', 'daily_web_linkedin_topup_empty', 'system', null, {
+          batch,
+          cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+          boundary: 'no_burn_zero_raw_stop',
+        });
+        await logAction(clientId, 'director', 'research_pool_exhausted', 'system', null, { batch, liveSent, target });
+        break;
       }
     }
 
@@ -2128,6 +2143,9 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
 
   // ── Kickoff verification — alert if zero output produced ──
   await verifyKickoffOutput(clientId, target);
+  await require('../services/kpi').recountKpi(clientId).catch(err =>
+    logger.warn({ msg: '[kickoff] final kpi recount failed', clientId, err: err?.message })
+  );
 }
 
 /**

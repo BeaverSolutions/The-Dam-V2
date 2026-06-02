@@ -1017,31 +1017,16 @@ async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
 
 // ── On-Demand Sourcing (called by autonomous kickoff when pool is dry) ───────
 
-async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSize = 20 } = {}) {
+async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSize = 20, maxPaidQueries = null } = {}) {
   const budget = await checkBudget(clientId);
   if (!budget.allowed) {
     logger.info({ msg: '[db-builder] on-demand: budget exhausted before provider work' });
     return { saved: 0, reason: 'budget_exhausted', period: budget.period };
   }
 
-  // VP is primary for email leads (verified email, ~3cr each).
-  // When VP daily cap is hit or credits are exhausted, Brave takes over for
-  // BOTH channels. LinkedIn leads always go through Brave.
-  if (neededChannel === 'email') {
-    try {
-      const vpResult = await sourceLeadsViaVP(clientId, { batchSize });
-      if (vpResult.saved > 0) {
-        const health = await checkDbHealth(clientId);
-        logger.info({ msg: '[db-builder] on-demand email sourced via VP', saved: vpResult.saved, credits: vpResult.credits });
-        return { saved: vpResult.saved, health, reason: 'sourced_vp', credits: vpResult.credits };
-      }
-      logger.warn({ msg: '[db-builder] VP yielded 0 — falling through to Brave', reason: vpResult.reason });
-    } catch (err) {
-      logger.warn({ msg: '[db-builder] VP threw — falling through to Brave', err: err.message });
-    }
-  }
-
-  // Brave path — handles LinkedIn always + email when VP is capped/exhausted
+  // Autonomous policy (2026-06-02): VP is manual CSV/subscribed-client only.
+  // Beaver autonomous sourcing is web/LinkedIn discovery first, then downstream
+  // email enrichment uses Hunter before MillionVerifier pattern verification.
   const researchModule = require('./research');
 
   const icpMemory = await loadCanonicalIcp(clientId);
@@ -1058,6 +1043,7 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
       icpMemory,
       targetCount: batchSize,
       batchIndex: Date.now(),
+      maxPaidQueries,
     });
   } catch (err) {
     logger.warn({ msg: '[db-builder] on-demand research failed', err: err.message });
@@ -1075,12 +1061,20 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
     agent: 'research_beaver',
     action: 'on_demand_sourcing_complete',
     target_type: 'system',
-    metadata: { trigger: 'pool_dry_kickoff', neededChannel, found: leads.length, saved },
+    metadata: {
+      trigger: 'pool_dry_kickoff',
+      mode: 'web_linkedin_topup',
+      source_order: 'web_linkedin_hunter_millionverifier',
+      neededChannel,
+      found: leads.length,
+      saved,
+      maxPaidQueries,
+    },
   });
 
   const health = await checkDbHealth(clientId);
   logger.info({ msg: '[db-builder] on-demand complete', found: leads.length, saved, pool_email: health.withEmail });
-  return { saved, health, reason: saved > 0 ? 'sourced' : 'no_results' };
+  return { saved, health, reason: saved > 0 ? 'web_linkedin_topup' : 'web_linkedin_no_results' };
 }
 
 module.exports = { runDbBuilder, checkDbHealth, sourceLeadsOnDemand, sourceLeadsViaVP, effectiveLeadScore };

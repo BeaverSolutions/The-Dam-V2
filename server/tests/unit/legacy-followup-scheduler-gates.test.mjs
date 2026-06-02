@@ -20,6 +20,8 @@ describe('index.js processFollowUps — legacy gating contracts', () => {
     expect(indexSrc).toContain('// setTimeout(() => { processFollowUps()');
     // And the disable marker comment must be present
     expect(indexSrc).toContain('DISABLED 2026-05-11');
+    expect(indexSrc).toContain("jobHealth.markSkipped('follow_up_scheduler'");
+    expect(indexSrc).toContain('FOLLOW_UP_SCHEDULER_DISABLED');
   });
 
   it('processFollowUps function body exists in source (not deleted — latent risk)', () => {

@@ -264,8 +264,8 @@ async function syncMeetings(clientId) {
       await pool.query(
         `INSERT INTO calendar_events (client_id, lead_id, title, description, start_time, end_time, meeting_link, google_event_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (client_id, google_event_id) DO UPDATE
-           SET title = EXCLUDED.title, start_time = EXCLUDED.start_time, end_time = EXCLUDED.end_time, updated_at = NOW()`,
+         ON CONFLICT (client_id, google_event_id) WHERE google_event_id IS NOT NULL DO UPDATE
+            SET title = EXCLUDED.title, start_time = EXCLUDED.start_time, end_time = EXCLUDED.end_time, updated_at = NOW()`,
         [
           clientId,
           matchedLeads[0].id,

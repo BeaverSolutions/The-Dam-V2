@@ -1410,7 +1410,7 @@ async function detectStuckStates(clientId) {
         `SELECT
            (SELECT COUNT(*) FROM leads WHERE client_id = $1 AND created_at > NOW() - INTERVAL '6 hours') AS leads_6h,
            (SELECT COUNT(*) FROM logs  WHERE client_id = $1 AND created_at > NOW() - INTERVAL '4 hours'
-              AND action IN ('research_no_results','kickoff_zero_output','vp_rescue_empty','research_pool_exhausted')) AS dry_4h`,
+              AND action IN ('research_no_results','kickoff_zero_output','daily_web_linkedin_topup_empty','research_pool_exhausted')) AS dry_4h`,
         [clientId]
       );
       const leads6h = parseInt(src[0]?.leads_6h || 0, 10);
@@ -1419,7 +1419,7 @@ async function detectStuckStates(clientId) {
         issues.push({
           severity: 'critical',
           type: 'sourcing_flatlined',
-          detail: `0 leads sourced in 6h with ${dry4h} dry-run signals in 4h — Research Beaver is producing nothing. Check Brave quota (HTTP 402) and VP/Explorium credit balance.`,
+          detail: `0 leads sourced in 6h with ${dry4h} dry-run signals in 4h — Research Beaver is producing nothing. Check Brave quota, web/LinkedIn extraction, Hunter, and MillionVerifier gates.`,
           recommended_action: 'escalateToMJ',
         });
       }
@@ -2096,6 +2096,8 @@ async function runDirectiveSweep(clientId) {
   // Wave 3 (2026-05-03): persist a KPI snapshot to dam_kpi_snapshots so the
   // Dashboard's Goal Hunt widget can render the latest state without
   // re-running collectTeamKPIs (several joins) on every page load.
+  let snapshot_written = false;
+  let snapshot_error = null;
   try {
     await pool.query(
       `INSERT INTO dam_kpi_snapshots
@@ -2111,8 +2113,15 @@ async function runDirectiveSweep(clientId) {
         cm.approvals_pending,
       ]
     );
+    snapshot_written = true;
   } catch (err) {
+    snapshot_error = err.message;
     console.warn('[directive-sweep] dam_kpi_snapshots write failed (non-fatal):', err.message);
+    await pool.query(
+      `INSERT INTO logs (client_id, agent, action, target_type, metadata, created_at)
+       VALUES ($1, 'captain_orchestrator', 'dam_kpi_snapshot_failed', 'system', $2::jsonb, NOW())`,
+      [clientId, JSON.stringify({ error: err.message })]
+    ).catch(() => {});
   }
 
   // Wave 2 (2026-05-03): Captain writes its own self-report each sweep.
@@ -2142,7 +2151,7 @@ async function runDirectiveSweep(clientId) {
     }).catch(() => {});
   } catch { /* non-critical */ }
 
-  return { directives_written: written.length, kpis_snapshot: kpis };
+  return { directives_written: written.length, kpis_snapshot: kpis, snapshot_written, snapshot_error };
 }
 
 /**

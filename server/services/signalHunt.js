@@ -25,6 +25,7 @@ const logsService = require('./logs');
 const { searchOpenWeb, searchLinkedInProfiles } = require('./searchService');
 const { callAgent } = require('./claude');
 const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
+const crypto = require('crypto');
 
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -35,6 +36,62 @@ function envInt(name, fallback) {
 
 const MAX_SIGNAL_QUERIES_PER_RUN = envInt('SIGNAL_HUNT_MAX_QUERIES', 6);
 const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
+
+function klDateString() {
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function signalQuerySetHash(queries = []) {
+  const canonical = queries
+    .map(q => `${String(q.country || '').toUpperCase()}|${String(q.signal_type || '')}|${String(q.query || '').trim().toLowerCase()}`)
+    .sort()
+    .join('\n');
+  return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+}
+
+async function blockedByRepeatedZeroQuerySet(clientId, queries = []) {
+  const hash = signalQuerySetHash(queries);
+  const key = `signal_hunt_zero_query_set_${klDateString()}_${hash}`;
+  const { rows } = await pool.query(
+    `SELECT content FROM agent_memory
+     WHERE client_id = $1 AND agent = 'research_beaver' AND key = $2
+     LIMIT 1`,
+    [clientId, key]
+  );
+  if (rows.length === 0) return { blocked: false, key, hash };
+
+  await logsService.createLog(clientId, {
+    agent: 'research_beaver',
+    action: 'signal_hunt_zero_query_set_blocked',
+    metadata: {
+      key,
+      query_set_hash: hash,
+      blocker: 'repeated_zero_output_query_set',
+      previous: rows[0].content || null,
+    },
+  }).catch(() => {});
+  return { blocked: true, key, hash, previous: rows[0].content || null };
+}
+
+async function rememberZeroQuerySet(clientId, { key, hash, queries, queriesRun, rawResultsTotal, blocker }) {
+  await pool.query(
+    `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
+     VALUES ($1, 'research_beaver', $2, $3::jsonb, 'state', NOW())
+     ON CONFLICT (client_id, agent, key) DO NOTHING`,
+    [
+      clientId,
+      key,
+      JSON.stringify({
+        query_set_hash: hash,
+        blocker,
+        queries_run: queriesRun,
+        raw_results_total: rawResultsTotal,
+        queries_preview: queries.map(q => q.query).slice(0, queriesRun),
+        recorded_at: new Date().toISOString(),
+      }),
+    ]
+  );
+}
 
 async function assertLlmBudgetOpen(clientId) {
   const budget = await checkBudget(clientId);
@@ -121,8 +178,24 @@ function industriesFromIcp(icp = {}) {
     ...listFrom(icp.verticals),
     ...listFrom(icp.segments),
   ];
-  return (industries.length > 0 ? industries : ['B2B corporate training', 'digital agency'])
-    .slice(0, 3);
+  const base = industries.length > 0 ? industries : ['B2B corporate training', 'digital agency'];
+  const seen = new Set();
+  return base
+    .filter(value => {
+      const key = String(value || '').trim().toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => industryPriority(a) - industryPriority(b));
+}
+
+function industryPriority(value) {
+  const s = String(value || '').toLowerCase();
+  if (/\b(agency|digital|marketing|creative|media|advertising|professional service|consult)/i.test(s)) return 0;
+  if (/\b(outbound|sales|growth|b2b service|smb|founder-led)/i.test(s)) return 1;
+  if (/\b(training|learning|l&d|development)/i.test(s)) return 3;
+  return 2;
 }
 
 function hasIcpSearchScope(icp = {}) {
@@ -347,9 +420,16 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   await assertLlmBudgetOpen(clientId);
 
   const config = await loadSignalConfig(clientId, icp);
+  const zeroSet = await blockedByRepeatedZeroQuerySet(clientId, config.queries);
+  if (zeroSet.blocked) {
+    console.log('[signalHunt] Blocking repeated zero-output query set for today');
+    return [];
+  }
+
   const allSignals = [];
   const leads = [];
   let queriesRun = 0;
+  let rawResultsTotal = 0;
   let paidQueriesRemaining = Number.isFinite(Number(maxPaidQueries))
     ? Math.max(0, Number(maxPaidQueries))
     : null;
@@ -377,9 +457,11 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       const country = q.country || 'MY';
       const geoText = countryNameFromCode(country);
       const results = await searchOpenWeb(q.query, config.max_results_per_query || 5, { country, clientId });
-      if (results.length === 0) continue;
+      const safeResults = Array.isArray(results) ? results : [];
+      rawResultsTotal += safeResults.length;
+      if (safeResults.length === 0) continue;
 
-      const extracted = await extractSignalsFromResults(clientId, results, q.signal_type, geoText);
+      const extracted = await extractSignalsFromResults(clientId, safeResults, q.signal_type, geoText);
       const validSignals = extracted.filter(s => s.company && s.confidence >= 0.5);
 
       // Assign tier from the query config
@@ -398,6 +480,15 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   console.log(`[signalHunt] Total signals extracted: ${allSignals.length}`);
 
   if (allSignals.length === 0) {
+    const blocker = rawResultsTotal === 0 ? 'raw_candidates_zero' : 'signals_zero_after_llm_parse';
+    await rememberZeroQuerySet(clientId, {
+      key: zeroSet.key,
+      hash: zeroSet.hash,
+      queries: config.queries,
+      queriesRun,
+      rawResultsTotal,
+      blocker,
+    }).catch(() => {});
     await logsService.createLog(clientId, {
       agent: 'research_beaver',
       action: 'signal_hunt_complete',
@@ -406,6 +497,8 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         queries_run: queriesRun,
         queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
         paid_query_budget_remaining: paidQueriesRemaining,
+        raw_results_total: rawResultsTotal,
+        blocker,
         total_signals: 0,
         unique_companies: 0,
         leads_with_contacts: 0,
@@ -519,6 +612,8 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       queries_run: queriesRun,
       queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
       paid_query_budget_remaining: paidQueriesRemaining,
+      raw_results_total: rawResultsTotal,
+      blocker: leads.length === 0 ? 'contacts_zero' : null,
       total_signals: allSignals.length,
       unique_companies: uniqueSignals.length,
       leads_with_contacts: leads.length,
@@ -528,6 +623,17 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       }, {}),
     },
   }).catch(() => {});
+
+  if (leads.length === 0) {
+    await rememberZeroQuerySet(clientId, {
+      key: zeroSet.key,
+      hash: zeroSet.hash,
+      queries: config.queries,
+      queriesRun,
+      rawResultsTotal,
+      blocker: 'contacts_zero',
+    }).catch(() => {});
+  }
 
   console.log(`[signalHunt] Returning ${leads.length} leads with decision-makers`);
   return leads;
