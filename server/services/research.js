@@ -15,6 +15,26 @@ function envInt(name, fallback) {
 
 const MAX_PAID_SEARCH_QUERIES_PER_RUN = envInt('RESEARCH_MAX_PAID_QUERIES_PER_RUN', 6);
 
+const RESEARCH_BLOCKERS = Object.freeze([
+  'raw_candidates_zero',
+  'icp_zero_after_company_extract',
+  'decision_maker_zero',
+  'contact_zero',
+  'all_candidates_deduped',
+  'competitor_offer_disqualified',
+  'provider_cap_closed',
+]);
+
+const ORDERED_RESEARCH_ENRICHMENT_STAGES = Object.freeze([
+  'company_evidence',
+  'icp_and_exclusion_checks',
+  'decision_maker_lookup',
+  'hunter',
+  'millionverifier',
+  'contact_gate',
+  'save_with_signal_package',
+]);
+
 async function assertLlmBudgetOpen(clientId) {
   const budget = await checkBudget(clientId);
   if (!budget.allowed) {
@@ -135,6 +155,188 @@ function normaliseLead(partial) {
     short_description: partial.short_description || '',
     metadata:       partial.metadata       || {},
   };
+}
+
+function initResearchStageStats() {
+  return {
+    raw_results_total: 0,
+    raw_candidates_total: 0,
+    companies_extracted: 0,
+    icp_passed: 0,
+    decision_makers_found: 0,
+    contacts_found: 0,
+    saved: 0,
+  };
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    const str = typeof value === 'string' ? value.trim() : value;
+    if (str) return str;
+  }
+  return null;
+}
+
+function evidenceDate(options = {}) {
+  return options.evidenceDate || new Date().toISOString().slice(0, 10);
+}
+
+function buildCompanyEvidence(item = {}, company = {}, companyName = '', domain = '') {
+  const sourceUrl = firstNonEmpty(
+    company.url,
+    company.link,
+    company.linkedin_company_url,
+    company.website ? `https://${String(company.website).replace(/^https?:\/\//i, '')}` : null,
+    domain ? `https://${String(domain).replace(/^https?:\/\//i, '')}` : null
+  );
+  const evidence = firstNonEmpty(
+    company.snippet,
+    company.description,
+    company.title,
+    item.query ? `${companyName || company.company || company.name || 'Company'} matched query: ${item.query}` : null
+  );
+
+  return {
+    source_url: sourceUrl || null,
+    evidence: evidence || null,
+  };
+}
+
+function signalContextFromQueryItem(item = {}, companyName = '', companyEvidence = {}) {
+  return {
+    signal_id: item.signal_id || item.id || item.signal || item.strategy || 'legacy_research_signal',
+    signal_family: item.signal_family || item.family || item.industry || item.strategy || 'legacy_research',
+    source_channel: item.source_channel || item.sourceChannel || item.strategy || 'web_search',
+    source_url: companyEvidence.source_url || null,
+    evidence: companyEvidence.evidence || null,
+    expected_evidence: item.expected_evidence || item.expectedEvidence || [],
+    stop_rules: item.stop_rules || {},
+    reject_rules: item.reject_rules || {},
+    company_icp_fit: {
+      vertical_match: item.industry || item.signal_family || null,
+      geo_match: item.country || countryForQuery(item.query) || null,
+      size_signal: null,
+      reject_rules_checked: Object.keys(item.reject_rules || {}),
+    },
+    why_now: companyEvidence.evidence || (item.query ? `${companyName || 'Company'} matched ${item.query}` : null),
+  };
+}
+
+function buildSignalPackage(lead = {}, options = {}) {
+  const metadata = lead.metadata || {};
+  const existing = metadata.signal_package || {};
+  const decisionMaker = existing.decision_maker || metadata.decision_maker || {
+    name: lead.name || null,
+    title: lead.title || null,
+    source_url: lead.linkedin_url || metadata.decision_maker_source_url || null,
+  };
+  const contact = existing.contact || metadata.contact || {
+    email: lead.email || null,
+    email_verified: lead.email_verified === true,
+    email_source: lead.email_source || null,
+    linkedin_url: lead.linkedin_url || null,
+  };
+  const signalId = firstNonEmpty(existing.signal_id, metadata.signal_id, lead.signal, metadata.company_discovery_strategy, 'legacy_research_signal');
+  const sourceUrl = firstNonEmpty(existing.source_url, metadata.source_url, metadata.linkedin_company_url, lead.linkedin_company_url);
+  const evidence = firstNonEmpty(existing.evidence, metadata.evidence, metadata.company_discovery_snippet, lead.snippet, lead.why_now);
+  const whyNow = firstNonEmpty(existing.why_now, metadata.why_now, lead.why_now, evidence);
+
+  return {
+    signal_id: signalId,
+    signal_family: firstNonEmpty(existing.signal_family, metadata.signal_family, metadata.company_discovery_strategy, 'legacy_research'),
+    source_channel: firstNonEmpty(existing.source_channel, metadata.source_channel, lead.data_source, 'web_search'),
+    source_url: sourceUrl,
+    evidence,
+    evidence_date: existing.evidence_date || metadata.evidence_date || evidenceDate(options),
+    company_icp_fit: existing.company_icp_fit || metadata.company_icp_fit || {
+      vertical_match: metadata.company_discovery_strategy || null,
+      geo_match: lead.country || lead.location || null,
+      size_signal: null,
+      reject_rules_checked: [],
+    },
+    decision_maker: decisionMaker,
+    contact,
+    why_now: whyNow,
+    sales_angle: firstNonEmpty(existing.sales_angle, metadata.sales_angle, `${signalId}: ${whyNow || evidence || 'research-backed outreach angle'}`),
+  };
+}
+
+function attachSignalPackageToLead(lead, options = {}) {
+  const metadata = {
+    ...(lead.metadata || {}),
+  };
+  metadata.signal_package = buildSignalPackage({ ...lead, metadata }, options);
+  return {
+    ...lead,
+    metadata,
+  };
+}
+
+function signalPackageMissingFields(signalPackage = {}) {
+  const missing = [];
+  for (const field of [
+    'signal_id',
+    'signal_family',
+    'source_channel',
+    'source_url',
+    'evidence',
+    'company_icp_fit',
+    'decision_maker',
+    'contact',
+    'why_now',
+    'sales_angle',
+  ]) {
+    if (!signalPackage[field]) missing.push(field);
+  }
+  return missing;
+}
+
+function buildResearchBlockerResult({ blocker, queriesUsed = [], stageStats = initResearchStageStats(), diagnostics = {}, poolStats = null } = {}) {
+  if (!RESEARCH_BLOCKERS.includes(blocker)) {
+    throw new Error(`Unknown research blocker: ${blocker}`);
+  }
+
+  return {
+    leads: [],
+    queriesUsed,
+    source: 'multi',
+    diagnostics: {
+      ...diagnostics,
+      blocked: true,
+      reason: blocker,
+    },
+    stage_stats: { ...stageStats },
+    pool_stats: poolStats || undefined,
+    verification_stats: {
+      candidates: stageStats.raw_candidates_total || 0,
+      candidates_total: stageStats.raw_candidates_total || 0,
+      queries_total: queriesUsed.length,
+      rounds_ran: 0,
+      circuit_breaker_tripped: blocker,
+      verified: 0,
+      rejected: 0,
+      rejection_reasons: [],
+      rejection_summary: {},
+      rejection_samples: [],
+      retries: 0,
+      search_rounds: 0,
+      circuit_breaker: blocker,
+    },
+  };
+}
+
+async function persistResearchBlocker(clientId, blocker, metadata = {}) {
+  if (!clientId || !RESEARCH_BLOCKERS.includes(blocker)) return;
+  try {
+    await pool.query(
+      `INSERT INTO logs (client_id, agent, action, target_type, metadata)
+       VALUES ($1, 'research_beaver', 'research_blocker', 'research', $2::jsonb)`,
+      [clientId, JSON.stringify({ blocker, ...metadata })]
+    );
+  } catch (err) {
+    console.warn('[research] blocker log insert failed:', err.message);
+  }
 }
 
 function countryListFromIcp(icp) {
@@ -1126,6 +1328,61 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
           if (companyKey && seenCompanyKeys.has(companyKey)) continue;
           if (companyKey) seenCompanyKeys.add(companyKey);
 
+          // Phase 3 order: company_evidence -> icp/exclusion checks ->
+          // decision_maker_lookup -> Hunter -> MillionVerifier -> contact_gate.
+          const companyEvidence = buildCompanyEvidence(item, c, companyName, domain);
+          const context = companyDiscoveryContext(item, companyName);
+          const signalContext = signalContextFromQueryItem(item, companyName, companyEvidence);
+
+          // decision_maker_lookup: public LinkedIn-style profile evidence before
+          // Hunter. It is bounded by the fallback profile budget already charged
+          // against the paid-query cap by researchLeads().
+          let decisionMakerProfiles = [];
+          if (companyName && fallbackProfileBudget > 0) {
+            try {
+              fallbackProfileBudget--;
+              const fallbackQuery = `"${companyName}" (${titleHints})`;
+              if (stats) stats.fallbackQueriesUsed.push(fallbackQuery);
+              decisionMakerProfiles = await searchService.searchLinkedInProfiles(fallbackQuery, 3, { country: item.country || 'MY' });
+            } catch (fbErr) {
+              console.warn('[research] Strategy 2 decision-maker lookup failed:', fbErr.message);
+            }
+          }
+
+          for (const r of decisionMakerProfiles) {
+            leads.push(attachSignalPackageToLead(normaliseLead({
+              ...r,
+              company:        companyName || r.company,
+              domain:         domain || '',
+              linkedin_company_url: c.linkedin_company_url || '',
+              data_source:    context.dataSource,
+              email_source:   r.email ? 'brave' : '',
+              signal:         context.signal,
+              why_now:        context.whyNow || signalContext.why_now,
+              snippet:        [r.snippet, c.snippet].filter(Boolean).join(' '),
+              metadata:       {
+                ...signalContext,
+                source_strategy: context.sourceStrategy,
+                company_discovery_query: item.query,
+                company_discovery_strategy: item.strategy || 'company',
+                company_discovery_snippet: c.snippet || '',
+                linkedin_company_url: c.linkedin_company_url || '',
+                source_url: signalContext.source_url || '',
+                evidence: signalContext.evidence || r.snippet || '',
+                decision_maker: {
+                  name: r.name || '',
+                  title: r.title || '',
+                  source_url: r.linkedin_url || '',
+                },
+                contact: {
+                  email: r.email || null,
+                  email_verified: r.email_verified === true,
+                  linkedin_url: r.linkedin_url || null,
+                },
+              },
+            })));
+          }
+
           // Step 2: Hunter domain search when explicitly capped on.
           let hunterLeads = [];
           if (hunterEnabled) {
@@ -1152,8 +1409,7 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
 
           if (filtered.length > 0) {
             for (const h of filtered) {
-              const context = companyDiscoveryContext(item, companyName);
-              leads.push(normaliseLead({
+              leads.push(attachSignalPackageToLead(normaliseLead({
                 name:           `${h.firstName || ''} ${h.lastName || ''}`.trim(),
                 title:          h.title || '',
                 company:        companyName,
@@ -1165,47 +1421,30 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
                 domain:         domain || h.domain || '',
                 linkedin_company_url: c.linkedin_company_url || '',
                 signal:         context.signal,
-                why_now:        context.whyNow,
+                why_now:        context.whyNow || signalContext.why_now,
                 snippet:        [h.snippet, c.snippet].filter(Boolean).join(' '),
                 metadata:       {
+                  ...signalContext,
                   source_strategy: context.sourceStrategy,
                   company_discovery_query: item.query,
                   company_discovery_strategy: item.strategy || 'company',
                   company_discovery_snippet: c.snippet || '',
                   linkedin_company_url: c.linkedin_company_url || '',
-                },
-              }));
-            }
-          } else if (companyName && fallbackProfileBudget > 0) {
-            // Fallback: Brave people search scoped to this company
-            try {
-              fallbackProfileBudget--;
-              const fallbackQuery = `"${companyName}" (${titleHints})`;
-              if (stats) stats.fallbackQueriesUsed.push(fallbackQuery);
-              const fallbackResults = await searchService.searchLinkedInProfiles(fallbackQuery, 3, { country: item.country || 'MY' });
-              for (const r of fallbackResults) {
-                const context = companyDiscoveryContext(item, companyName);
-                leads.push(normaliseLead({
-                  ...r,
-                  company:        companyName || r.company,
-                  domain:         domain || '',
-                  linkedin_company_url: c.linkedin_company_url || '',
-                  data_source:    context.dataSource,
-                  email_source:   r.email ? 'brave' : '',
-                  signal:         context.signal,
-                  why_now:        context.whyNow,
-                  snippet:        [r.snippet, c.snippet].filter(Boolean).join(' '),
-                  metadata:       {
-                    source_strategy: context.sourceStrategy,
-                    company_discovery_query: item.query,
-                    company_discovery_strategy: item.strategy || 'company',
-                    company_discovery_snippet: c.snippet || '',
-                    linkedin_company_url: c.linkedin_company_url || '',
+                  source_url: signalContext.source_url || '',
+                  evidence: signalContext.evidence || h.snippet || '',
+                  decision_maker: {
+                    name: `${h.firstName || ''} ${h.lastName || ''}`.trim(),
+                    title: h.title || '',
+                    source_url: h.linkedin_url || '',
                   },
-                }));
-              }
-            } catch (fbErr) {
-              console.warn('[research] Strategy 2 fallback search failed:', fbErr.message);
+                  contact: {
+                    email: h.email || null,
+                    email_verified: h.confidence >= 70,
+                    email_source: h.email ? 'hunter_domain' : null,
+                    linkedin_url: h.linkedin_url || null,
+                  },
+                },
+              })));
             }
           }
         }
@@ -1231,11 +1470,34 @@ async function strategySignalBased(queryItem, limit) {
   const country = typeof queryItem === 'string' ? 'MY' : (queryItem.country || 'MY');
   try {
     const results = await searchService.searchLinkedInProfiles(query, limit, { country });
-    return results.map(r => normaliseLead({
+    const signalContext = typeof queryItem === 'string'
+      ? null
+      : signalContextFromQueryItem(queryItem, '', {
+        source_url: null,
+        evidence: queryItem.query || null,
+      });
+    return results.map(r => attachSignalPackageToLead(normaliseLead({
       ...r,
       data_source:  'brave_signal',
       email_source: r.email ? 'brave' : '',
-    }));
+      signal: signalContext?.signal_id || '',
+      why_now: r.snippet || signalContext?.why_now || '',
+      metadata: {
+        ...(signalContext || {}),
+        source_url: r.linkedin_url || '',
+        evidence: r.snippet || signalContext?.evidence || '',
+        decision_maker: {
+          name: r.name || '',
+          title: r.title || '',
+          source_url: r.linkedin_url || '',
+        },
+        contact: {
+          email: r.email || null,
+          email_verified: r.email_verified === true,
+          linkedin_url: r.linkedin_url || null,
+        },
+      },
+    })));
   } catch (err) {
     console.warn('[research] Strategy 3 (signal-based) failed:', err.message);
     return [];
@@ -1251,6 +1513,7 @@ async function strategySignalBased(queryItem, limit) {
  */
 async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchIndex = 0, commandOverride = '', maxPaidQueries = MAX_PAID_SEARCH_QUERIES_PER_RUN } = {}) {
   const emptyResult = { leads: [], queriesUsed: [], source: 'multi' };
+  const stageStats = initResearchStageStats();
 
   try {
     try {
@@ -1273,6 +1536,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
           verified: 0,
           rejected: 0,
         },
+        stage_stats: stageStats,
       };
     }
 
@@ -1444,6 +1708,8 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       ...signalResults,       // P2: signal-based
       ...directResults,       // P3: direct people
     ];
+    stageStats.raw_results_total = allLeads.length + (companyFirstStats.companyFilteredOut || 0);
+    stageStats.raw_candidates_total = allLeads.length;
 
     const seen = new Set();
     const deduped = allLeads.filter(lead => {
@@ -1456,6 +1722,9 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       seen.add(key);
       return true;
     });
+    stageStats.companies_extracted = deduped.filter(lead =>
+      lead.company && lead.company !== 'Unknown' && lead.company.length >= 3
+    ).length;
 
     // 8. Pre-filter: reject leads with no company name BEFORE Layer 2
     // This saves Haiku API calls on leads that will be rejected anyway
@@ -1466,7 +1735,14 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
       }
       return true;
     });
+    stageStats.decision_makers_found = preFiltered.filter(lead => lead.name && lead.title).length;
+    stageStats.contacts_found = preFiltered.filter(lead => lead.email || lead.linkedin_url).length;
     console.log(`[research] Pre-filter: ${deduped.length} → ${preFiltered.length} (dropped ${deduped.length - preFiltered.length} with unknown company)`);
+
+    const queriesUsed = [
+      ...picked.map(q => q.query),
+      ...companyFirstStats.fallbackQueriesUsed,
+    ];
 
     // 9. Mark all picked queries as used, save back
     for (const q of picked) {
@@ -1474,12 +1750,51 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     }
     await saveUsedQueries(clientId, usedSet);
 
+    let earlyBlocker = null;
+    if (allLeads.length === 0) {
+      earlyBlocker = 'raw_candidates_zero';
+    } else if (deduped.length === 0) {
+      earlyBlocker = 'all_candidates_deduped';
+    } else if (preFiltered.length === 0) {
+      earlyBlocker = 'icp_zero_after_company_extract';
+    } else if (stageStats.decision_makers_found === 0) {
+      earlyBlocker = 'decision_maker_zero';
+    } else if (stageStats.contacts_found === 0) {
+      earlyBlocker = 'contact_zero';
+    }
+
+    if (earlyBlocker) {
+      await persistResearchBlocker(clientId, earlyBlocker, {
+        stage_stats: stageStats,
+        queries_used: queriesUsed,
+        picked_queries: picked.map(q => ({
+          query: q.query,
+          strategy: q.strategy,
+          signal_id: q.signal_id || null,
+          signal_family: q.signal_family || null,
+          source_channel: q.source_channel || null,
+        })),
+        source_order: ORDERED_RESEARCH_ENRICHMENT_STAGES,
+      });
+      return buildResearchBlockerResult({
+        blocker: earlyBlocker,
+        queriesUsed,
+        stageStats,
+        diagnostics: {
+          source: 'research_beaver',
+          source_order: ORDERED_RESEARCH_ENRICHMENT_STAGES,
+        },
+        poolStats: {
+          total_queries: queryPool.length,
+          unused: unusedQueries.length,
+          used: usedQueries.length,
+          exhaustion_pct: Math.round(exhaustionRate * 100),
+        },
+      });
+    }
+
     // 10. LAYER 2: Verify candidates before returning
     // Retry up to 2 more times if we haven't hit targetCount yet (each retry fetches fresh queries)
-    const queriesUsed = [
-      ...picked.map(q => q.query),
-      ...companyFirstStats.fallbackQueriesUsed,
-    ];
     console.log(`[research] Layer 1 complete: ${preFiltered.length} candidates (from ${deduped.length} raw). Starting Layer 2 verification...`);
 
     const icp = icpMemory || {};
@@ -1652,7 +1967,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
     }
 
     // Mark verified leads
-    const verifiedLeads = verified.slice(0, targetCount * 2).map(lead => ({
+    const verifiedLeads = verified.slice(0, targetCount * 2).map(lead => attachSignalPackageToLead({
       ...lead,
       verified: true,
       metadata: {
@@ -1661,6 +1976,8 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         data_source: 'brave',
       },
     }));
+    stageStats.icp_passed = verified.length;
+    stageStats.saved = verifiedLeads.length;
 
     // ─── Quality scoring (Phase B integration) ───────────────────────
     // Score every verified lead so Sales Beaver can pull top-N by score.
@@ -1741,6 +2058,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         circuit_breaker: circuitBreakerTripped,
         company_filtered_out: companyFilteredOutTotal,
       },
+      stage_stats: stageStats,
       scoring_stats: scoringStats,
     };
   } catch (err) {
@@ -1762,6 +2080,7 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
           verified: 0,
           rejected: 0,
         },
+        stage_stats: stageStats,
       };
     }
     console.warn('[research] researchLeads total failure:', err.message);
@@ -1769,4 +2088,18 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
   }
 }
 
-module.exports = { researchLeads, buildQueryPool, verifyBatch, widenIcp };
+module.exports = {
+  researchLeads,
+  buildQueryPool,
+  verifyBatch,
+  widenIcp,
+  _test: {
+    RESEARCH_BLOCKERS,
+    ORDERED_RESEARCH_ENRICHMENT_STAGES,
+    initResearchStageStats,
+    buildResearchBlockerResult,
+    buildSignalPackage,
+    attachSignalPackageToLead,
+    signalPackageMissingFields,
+  },
+};

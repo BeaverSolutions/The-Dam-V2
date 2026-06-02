@@ -569,6 +569,9 @@ async function persistDraft(clientId, params) {
  * Mirrors the email-enrichment blocks in agents.js:
  *   signal_pipeline: Hunter -> MillionVerifier-backed pattern fallback
  *   kickoff_pipeline: Hunter -> MillionVerifier-backed pattern fallback
+ * Phase 3 signal execution contract: Research must provide company evidence
+ * and decision-maker context before this email enrichment step runs. This
+ * helper remains the Hunter -> MillionVerifier contact layer only.
  *
  * @param {string} clientId
  * @param {object} lead    Has .id, .name, .company, .email, .quality_score

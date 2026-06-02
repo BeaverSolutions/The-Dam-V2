@@ -330,6 +330,7 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
   if (searchQuery)    meta.search_query = searchQuery;
   meta.source = 'db_builder';
   if (lead.data_source) meta.data_source = lead.data_source;
+  if (lead.metadata?.signal_package) meta.signal_package = lead.metadata.signal_package;
 
   // Email enrichment at source time — last chance before the contact gate
   if (!lead.email && enrichContext?.patterns) {
@@ -443,6 +444,7 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
         metadata: {
           lead_tier: leadTier,
           signal_tier: lead.signal_tier || null,
+          signal_package: meta.signal_package || null,
           email_verified: !!lead.email_verified,
           email_source: lead.email_source || null,
           has_linkedin: !!lead.linkedin_url,
@@ -1053,9 +1055,24 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
   const leads = result.leads || [];
   let saved = 0;
   for (const lead of leads) {
+    if ((lead.metadata?.signal_id || lead.signal) && !lead.metadata?.signal_package) {
+      await logsService.createLog(clientId, {
+        agent: 'research_beaver',
+        action: 'research_blocker',
+        target_type: 'research',
+        metadata: {
+          blocker: 'contact_zero',
+          reason: 'missing_signal_package_before_save',
+          lead_name: lead.name || null,
+          lead_company: lead.company || null,
+        },
+      });
+      continue;
+    }
     const savedId = await saveLead(clientId, lead, result.queriesUsed?.join(' | ') || '', { patterns });
     if (savedId) saved++;
   }
+  const stageStats = result.stage_stats ? { ...result.stage_stats, saved } : null;
 
   await logsService.createLog(clientId, {
     agent: 'research_beaver',
@@ -1068,6 +1085,8 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
       neededChannel,
       found: leads.length,
       saved,
+      stage_stats: stageStats,
+      blocker: result.diagnostics?.reason || null,
       maxPaidQueries,
     },
   });

@@ -35,6 +35,15 @@
 const pool = require('../db/pool');
 
 const TIER_B_SCORE_THRESHOLD = 85;
+const PHASE3_BLOCKERS = new Set([
+  'raw_candidates_zero',
+  'icp_zero_after_company_extract',
+  'decision_maker_zero',
+  'contact_zero',
+  'all_candidates_deduped',
+  'competitor_offer_disqualified',
+  'provider_cap_closed',
+]);
 
 // 2026-05-23 P0.5: source-side fake-domain blocklist. Hunter false-positives
 // on these as "verified" (May 13 incident — 2x @independent.com leads, both
@@ -82,6 +91,16 @@ const JUNK_COMPANY_NAMES = new Set([
 function hasUsableCompany(company) {
   const c = String(company || '').trim().toLowerCase();
   return c.length > 0 && !JUNK_COMPANY_NAMES.has(c);
+}
+
+function phase3BlockerForMissReason(missReason) {
+  if (PHASE3_BLOCKERS.has(missReason)) return missReason;
+  if (missReason === 'no_usable_company') return 'icp_zero_after_company_extract';
+  if (missReason === 'no_channels') return 'contact_zero';
+  if (/linkedin_only_below_p1_score/i.test(missReason)) return 'contact_zero';
+  if (missReason === 'unverified_email_no_linkedin_fallback') return 'contact_zero';
+  if (missReason === 'fake_email_domain_at_source') return 'contact_zero';
+  return 'contact_zero';
 }
 
 /**
@@ -151,6 +170,9 @@ async function tryPersistSourcedLead(clientId, candidate, options = {}) {
   } else {
     missReason = 'unclassified';
   }
+  const phase3Blocker = options.phase3Blocker && PHASE3_BLOCKERS.has(options.phase3Blocker)
+    ? options.phase3Blocker
+    : phase3BlockerForMissReason(missReason);
 
   await pool.query(
     `INSERT INTO research_misses
@@ -167,13 +189,13 @@ async function tryPersistSourcedLead(clientId, candidate, options = {}) {
       missReason,
       sourceStrategy,
       queryUsed,
-      JSON.stringify({ ...(candidate.metadata || {}), score }),
+      JSON.stringify({ ...(candidate.metadata || {}), score, phase3_blocker: phase3Blocker }),
     ]
   ).catch(err => {
     console.warn('[contactGate] research_miss insert failed:', err.message);
   });
 
-  return { passed: false, tier: null, missReason };
+  return { passed: false, tier: null, missReason, blockerReason: phase3Blocker };
 }
 
 /**
@@ -219,7 +241,9 @@ module.exports = {
   missRateBy,
   isFakeDomain,
   hasUsableCompany,
+  phase3BlockerForMissReason,
   FAKE_EMAIL_DOMAINS,
+  PHASE3_BLOCKERS,
   JUNK_COMPANY_NAMES,
   TIER_B_SCORE_THRESHOLD,
 };
