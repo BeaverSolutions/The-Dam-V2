@@ -63,7 +63,29 @@ function getLLMHealth() {
 // Per-beaver KPI scorecard (Phase 3, 2026-05-29) lives in its own pure,
 // dependency-free module so it is unit-testable without captainOrchestrator's
 // dependency tree. See server/services/beaverScorecard.js.
-const { buildBeaverScorecard } = require('./beaverScorecard');
+const { buildBeaverScorecard, buildSignalScorecard } = require('./beaverScorecard');
+const { normalizeBuyingSignalsForTenant } = require('../config/buyingSignals');
+const { buildSignalPlan } = require('./signalPlanner');
+
+function list(value) {
+  return Array.isArray(value) ? value.map(v => String(v).trim()).filter(Boolean) : [];
+}
+
+function tenantIcpForSignalConfig(cfg = {}) {
+  const icp = cfg.icp_config || {};
+  const titles = icp.titles || {};
+  return {
+    verticals: list(icp.verticals),
+    personas: [
+      ...list(titles.senior_standalone),
+      ...list(titles.senior_leader),
+      ...list(icp.personas),
+    ],
+    geo: list(icp.geo).length > 0 ? list(icp.geo) : list(icp.countries),
+    exclusions: list(icp.exclusions).length > 0 ? list(icp.exclusions) : list(icp.banned_regex),
+    competitor_offers: list(icp.competitor_offers),
+  };
+}
 
 async function collectTeamKPIs(clientId) {
   const cfg = await tenantConfig.getTenantConfig(clientId);
@@ -347,6 +369,68 @@ async function collectTeamKPIs(clientId) {
   );
 
   const funnelPromise = pipelineTrace.getTodayFunnel(clientId).catch(() => []);
+  const signalScorecardPromise = pool.query(
+    `SELECT
+       signal_id, signal_family, source_channel, stage, blocker_reason,
+       SUM(cnt)::int AS cnt,
+       SUM(raw_candidates)::int AS raw_candidates,
+       SUM(attempted)::int AS attempted
+     FROM (
+       SELECT
+         COALESCE(
+           metadata->'signal_package'->>'signal_id',
+           metadata->>'signal_id',
+           metadata->>'signal',
+           metadata->>'signal_type',
+           'unknown_signal'
+         ) AS signal_id,
+         COALESCE(
+           metadata->'signal_package'->>'signal_family',
+           metadata->>'signal_family'
+         ) AS signal_family,
+         COALESCE(
+           metadata->'signal_package'->>'source_channel',
+           metadata->>'source_channel'
+         ) AS source_channel,
+         stage,
+         COALESCE(reason, metadata->>'blocker', metadata->>'reason', metadata->>'reject_reason') AS blocker_reason,
+         COUNT(*)::int AS cnt,
+         0::int AS raw_candidates,
+         0::int AS attempted
+       FROM pipeline_traces
+       WHERE client_id = $1
+         AND created_at >= ${klTodayStart}
+       GROUP BY signal_id, signal_family, source_channel, stage, blocker_reason
+
+       UNION ALL
+
+       SELECT
+         COALESCE(metadata->>'signal_id', metadata->>'signal', metadata->>'signal_type', 'unknown_signal') AS signal_id,
+         metadata->>'signal_family' AS signal_family,
+         metadata->>'source_channel' AS source_channel,
+         NULL::text AS stage,
+         COALESCE(metadata->>'blocker', metadata->>'reason') AS blocker_reason,
+         COUNT(*)::int AS cnt,
+         SUM(
+           CASE
+             WHEN (metadata->>'raw_candidates_total') ~ '^[0-9]+$' THEN (metadata->>'raw_candidates_total')::int
+             WHEN (metadata->>'raw_results_total') ~ '^[0-9]+$' THEN (metadata->>'raw_results_total')::int
+             ELSE 0
+           END
+         )::int AS raw_candidates,
+         COUNT(*)::int AS attempted
+       FROM logs
+       WHERE client_id = $1
+         AND created_at >= ${klTodayStart}
+         AND action IN ('research_blocker', 'research_no_results', 'signal_hunt_zero_query_set_blocked', 'daily_web_linkedin_topup_empty')
+       GROUP BY signal_id, signal_family, source_channel, blocker_reason
+     ) signal_rows
+     GROUP BY signal_id, signal_family, source_channel, stage, blocker_reason`,
+    [clientId]
+  ).then(res => res.rows).catch(err => {
+    console.warn('[captain] signal scorecard query failed:', err.message);
+    return [];
+  });
 
   // Phase 3 (2026-05-29): MYT-business-day per-beaver counts for the scorecard.
   // Separate from the rolling-24h research/sales/enforcer queries above (which
@@ -367,11 +451,11 @@ async function collectTeamKPIs(clientId) {
   const [research, sales, enforcer, rejectReasons, pipeline,
           dbOk, cronHealth,
           spendToday, spendMtd, meetingsWeek, meetingsMtd,
-          channelMix, targets, spendMaxDay, businessTruth, funnelRows, scorecardRes] = await Promise.all([
+          channelMix, targets, spendMaxDay, businessTruth, funnelRows, scorecardRes, signalScorecardRows] = await Promise.all([
     researchPromise, salesPromise, enforcerPromise, rejectReasonsPromise, pipelinePromise,
     dbCheckPromise, cronHealthPromise,
     spendTodayPromise, spendMtdPromise, meetingsThisWeekPromise, meetingsMtdPromise,
-    channelMixPromise, targetsPromise, spendMaxDayPromise, businessTruthPromise, funnelPromise, scorecardPromise,
+    channelMixPromise, targetsPromise, spendMaxDayPromise, businessTruthPromise, funnelPromise, scorecardPromise, signalScorecardPromise,
   ]);
 
   // Stale jobs derived from cronHealth — jobs in 'stale' state
@@ -399,6 +483,8 @@ async function collectTeamKPIs(clientId) {
       id: cfg.id,
       slug: cfg.slug,
       name: cfg.name,
+      icp: tenantIcpForSignalConfig(cfg),
+      buying_signals: cfg.buying_signals || [],
       daily_quality_lead_floor: cfg.daily_quality_lead_floor,
       vp_threshold_score: cfg.vp_threshold_score,
     },
@@ -513,6 +599,7 @@ async function collectTeamKPIs(clientId) {
       researchFloor: cfg.daily_quality_lead_floor,
       poolSize: Number(r.pool_size) || 0,
     }),
+    signal_scorecard: buildSignalScorecard(signalScorecardRows),
   };
 }
 
@@ -1928,6 +2015,157 @@ Keep it under 200 words. Conversational-tight tone. No fluff.`;
  */
 const directives = require('./directives');
 
+function hasBlocker(scorecard = {}, names = []) {
+  const blockers = scorecard.blocker_reasons || {};
+  return names.some(name => Number(blockers[name] || 0) > 0);
+}
+
+function evaluateSignalDryStop({
+  signal,
+  scorecard = {},
+  spend = {},
+  queue = {},
+  channelReadiness = {},
+} = {}) {
+  const stopRules = signal?.stop_rules || {};
+  const cap = Number(stopRules.max_paid_searches_per_day) || 6;
+  const attempted = Number(scorecard.attempted) || 0;
+  const rawCandidates = Number(scorecard.raw_candidates) || 0;
+  const reasons = [];
+
+  if (stopRules.stop_if_raw_candidates_zero !== false && attempted >= cap && rawCandidates === 0) {
+    reasons.push('raw_candidates_zero_after_approved_cap');
+  }
+  if (hasBlocker(scorecard, ['repeated_zero_output_query_set', 'same_query_set_failed'])) {
+    reasons.push('same_query_set_already_failed');
+  }
+  if (spend.provider_cap_closed || hasBlocker(scorecard, ['provider_cap_closed', 'paid_search_capacity_exhausted'])) {
+    reasons.push('provider_cap_closed');
+  }
+  if (Number(queue.pending_approvals) >= Number(queue.capacity || Infinity)) {
+    reasons.push('downstream_queue_full');
+  }
+  if (channelReadiness.email === false || channelReadiness.linkedin === false) {
+    reasons.push('send_channel_not_ready');
+  }
+
+  return {
+    signal_id: signal?.id || scorecard.signal_id || null,
+    stop_for_today: reasons.length > 0,
+    reasons,
+  };
+}
+
+function signalYield(scorecard = {}) {
+  const raw = Number(scorecard.raw_candidates) || 0;
+  const saved = Number(scorecard.saved_leads) || 0;
+  const sent = Number(scorecard.sent) || 0;
+  if (raw <= 0) return 0;
+  return (saved + sent) / raw;
+}
+
+function selectNextSignal({ tenant, signalScorecard = {}, currentSignalId, stopCurrent, spend, queue, channelReadiness } = {}) {
+  const signals = normalizeBuyingSignalsForTenant(tenant || {}).filter(signal => signal.enabled !== false);
+  const candidates = [];
+
+  for (const signal of signals) {
+    const score = signalScorecard[signal.id] || { signal_id: signal.id, blocker_reasons: {} };
+    const stop = evaluateSignalDryStop({ signal, scorecard: score, spend, queue, channelReadiness });
+    if (signal.id === currentSignalId && stopCurrent?.stop_for_today) continue;
+    if (stop.stop_for_today) continue;
+    candidates.push({ signal, score });
+  }
+
+  candidates.sort((a, b) => {
+    const yieldDelta = signalYield(b.score) - signalYield(a.score);
+    if (yieldDelta !== 0) return yieldDelta;
+    return (Number(a.signal.priority) || 999) - (Number(b.signal.priority) || 999);
+  });
+
+  return candidates[0]?.signal || null;
+}
+
+function buildPlaybookForSignal({ tenant, signal, geo } = {}) {
+  if (!signal) return null;
+  const plan = buildSignalPlan({
+    tenant,
+    signalId: signal.id,
+    geo,
+    sourceChannel: list(signal.source_channels)[0],
+    maxQueries: signal.stop_rules?.max_paid_searches_per_day,
+  });
+  return {
+    signal_id: plan.signalId,
+    signal_family: plan.signalFamily,
+    source_channel: plan.queries[0]?.sourceChannel || plan.sourceChannels[0] || 'web_search',
+    geo: list(geo).length > 0 ? list(geo) : list(tenant?.icp?.geo),
+    cap: plan.queries.length || Number(signal.stop_rules?.max_paid_searches_per_day) || 6,
+    queries: plan.queries,
+  };
+}
+
+function buildCaptainSignalOrchestration({
+  tenant = {},
+  currentSignalId = null,
+  signalScorecard = {},
+  spend = {},
+  queue = {},
+  channelReadiness = {},
+} = {}) {
+  const signals = normalizeBuyingSignalsForTenant(tenant);
+  const currentSignal = signals.find(signal => signal.id === currentSignalId) || signals[0] || null;
+  const currentScore = currentSignal ? signalScorecard[currentSignal.id] : null;
+  const stopCurrent = currentSignal
+    ? evaluateSignalDryStop({ signal: currentSignal, scorecard: currentScore || {}, spend, queue, channelReadiness })
+    : { signal_id: null, stop_for_today: false, reasons: [] };
+  const nextSignal = selectNextSignal({
+    tenant,
+    signalScorecard,
+    currentSignalId: currentSignal?.id || null,
+    stopCurrent,
+    spend,
+    queue,
+    channelReadiness,
+  });
+  const geo = list(tenant?.icp?.geo).length > 0 ? list(tenant.icp.geo) : ['MY'];
+  const nextPlaybook = buildPlaybookForSignal({ tenant, signal: nextSignal, geo });
+
+  const genericSpike = Object.values(signalScorecard).find(score =>
+    Number(score.blocker_reasons?.generic_message || 0) >= 1
+  );
+  const salesRepair = genericSpike
+    ? {
+        signal_family: genericSpike.signal_family || currentSignal?.family || nextSignal?.family || 'unknown_signal_family',
+        reject_reason: 'generic_message',
+      }
+    : null;
+
+  return {
+    stop_current_signal: stopCurrent,
+    next_playbook: nextPlaybook,
+    sales_repair: salesRepair,
+  };
+}
+
+async function writeSignalOrchestrationDirectives(clientId, orchestration, directiveWriter = directives) {
+  const written = [];
+  if (orchestration?.next_playbook) {
+    const d = directiveWriter.buildRunSignalPlaybookDirective(orchestration.next_playbook);
+    written.push(await directiveWriter.writeDirective(clientId, d.target_agent, d.directive_type, d.payload, {
+      reason: `Captain selected ${d.payload.signal_id} via ${d.payload.source_channel} after signal scorecard review`,
+      severity: orchestration.stop_current_signal?.stop_for_today ? 'high' : 'normal',
+    }));
+  }
+  if (orchestration?.sales_repair) {
+    const d = directiveWriter.buildFixSignalCopyDirective(orchestration.sales_repair);
+    written.push(await directiveWriter.writeDirective(clientId, d.target_agent, d.directive_type, d.payload, {
+      reason: `Captain saw ${d.payload.reject_reason} spike for ${d.payload.signal_family}`,
+      severity: 'normal',
+    }));
+  }
+  return written;
+}
+
 async function runDirectiveSweep(clientId) {
   const runStartedAt = new Date();
   const kpis = await collectTeamKPIs(clientId);
@@ -1937,6 +2175,35 @@ async function runDirectiveSweep(clientId) {
   const utcHour = new Date().getUTCHours();
   const isAfterMidday = utcHour >= 4; // 12:00 MYT = 04:00 UTC
   const isLate = utcHour >= 9;        // 17:00 MYT = 09:00 UTC
+  const signalIds = Object.keys(kpis.signal_scorecard || {});
+  const signalOrchestration = buildCaptainSignalOrchestration({
+    tenant: kpis.tenant,
+    currentSignalId: signalIds[0] || null,
+    signalScorecard: kpis.signal_scorecard || {},
+    spend: {
+      provider_cap_closed: kpis.vp.credits_remaining_today <= 0 || kpis.cost.llm_spend_today_usd >= kpis.cost.daily_budget_usd,
+      daily_budget_remaining_usd: Math.max(0, kpis.cost.daily_budget_usd - kpis.cost.llm_spend_today_usd),
+    },
+    queue: {
+      pending_approvals: cm.approvals_pending,
+      capacity: 20,
+    },
+    channelReadiness: {
+      email: !!kpis.dam_health.gmail_oauth_set,
+      linkedin: true,
+    },
+  });
+  if (signalIds.length > 0 && (signalOrchestration.stop_current_signal.stop_for_today || signalOrchestration.sales_repair)) {
+    try {
+      written.push(...await writeSignalOrchestrationDirectives(clientId, signalOrchestration));
+    } catch (err) {
+      console.warn('[directive-sweep] signal orchestration directive failed:', err.message);
+      jobHealth.markDegraded('captain_directive_sweep', 'signal_directive_write_failed', {
+        client_id: clientId,
+        error: err.message,
+      });
+    }
+  }
 
   // ── 1. Email channel: are we on track to hit target_email_sent? ──
   const emailGap = Math.max(0, cm.target_email_sent - cm.email.sent);
@@ -2117,6 +2384,10 @@ async function runDirectiveSweep(clientId) {
   } catch (err) {
     snapshot_error = err.message;
     console.warn('[directive-sweep] dam_kpi_snapshots write failed (non-fatal):', err.message);
+    jobHealth.markDegraded('captain_directive_sweep', 'dam_kpi_snapshot_failed', {
+      client_id: clientId,
+      error: err.message,
+    });
     await pool.query(
       `INSERT INTO logs (client_id, agent, action, target_type, metadata, created_at)
        VALUES ($1, 'captain_orchestrator', 'dam_kpi_snapshot_failed', 'system', $2::jsonb, NOW())`,
@@ -2143,6 +2414,8 @@ async function runDirectiveSweep(clientId) {
         pool_email_ready: cm.pool_email_ready,
         pool_linkedin_only: cm.pool_linkedin_only,
         approvals_pending: cm.approvals_pending,
+        signal_stop_for_today: signalOrchestration.stop_current_signal.stop_for_today,
+        next_signal_id: signalOrchestration.next_playbook?.signal_id || null,
       },
       summary,
       blockers: cm.approvals_pending >= 20 && cm.approvals_oldest_hours >= 4
@@ -2238,4 +2511,9 @@ module.exports = {
   formatPlanForTelegram,
   persistFollowUpPlan,
   ANGLE_TEMPLATES,
+  _test: {
+    evaluateSignalDryStop,
+    buildCaptainSignalOrchestration,
+    writeSignalOrchestrationDirectives,
+  },
 };

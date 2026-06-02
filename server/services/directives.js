@@ -12,6 +12,50 @@
 
 const pool = require('../db/pool');
 
+function buildRunSignalPlaybookDirective({
+  signal_id,
+  source_channel,
+  geo = [],
+  cap = 6,
+} = {}) {
+  return {
+    directive_type: 'run_signal_playbook',
+    target_agent: 'research_beaver',
+    payload: {
+      signal_id,
+      source_channel,
+      geo: Array.isArray(geo) ? geo : [geo].filter(Boolean),
+      cap: Number(cap) || 6,
+    },
+  };
+}
+
+function fixSignalCopyInstruction(signalFamily, rejectReason) {
+  if (signalFamily === 'hiring_capability_build' && rejectReason === 'generic_message') {
+    return 'lead with role hiring implication, not generic company observation';
+  }
+  if (rejectReason === 'generic_message') {
+    return 'lead with the observed buying signal and commercial implication, not a generic company observation';
+  }
+  return `repair copy pattern for ${rejectReason || 'signal rejection'}`;
+}
+
+function buildFixSignalCopyDirective({
+  signal_family,
+  reject_reason,
+  instruction,
+} = {}) {
+  return {
+    directive_type: 'fix_signal_copy',
+    target_agent: 'sales_beaver',
+    payload: {
+      signal_family,
+      reject_reason,
+      instruction: instruction || fixSignalCopyInstruction(signal_family, reject_reason),
+    },
+  };
+}
+
 /**
  * Captain writes a directive for a beaver. UPSERT semantics: only one
  * pending directive per (client, beaver, type) per UTC day — re-issuing
@@ -114,6 +158,8 @@ async function recentDirectives(clientId, hours = 24) {
 }
 
 module.exports = {
+  buildRunSignalPlaybookDirective,
+  buildFixSignalCopyDirective,
   writeDirective,
   readPendingDirectives,
   markConsumed,

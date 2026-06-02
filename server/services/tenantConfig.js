@@ -95,6 +95,7 @@ async function getActiveTenantProfileConfig(clientId) {
     if (!mapped) return null;
     return {
       icp_config: mapped,
+      buying_signals: Array.isArray(rows[0].profile?.buying_signals) ? rows[0].profile.buying_signals : [],
       tenant_profile_content_version: rows[0].content_version,
       tenant_profile_updated_at: rows[0].updated_at,
     };
@@ -138,6 +139,7 @@ async function getTenantConfig(clientId) {
     // Hybrid-default: if column is NULL, use legacy default and flag it.
     // Phase D will warn when a tenant runs on legacy defaults too long.
     icp_config:          profileOverlay?.icp_config || row.icp_config || LEGACY_DEFAULT_ICP,
+    buying_signals:      profileOverlay?.buying_signals || [],
     signal_preferences:  row.signal_preferences || LEGACY_DEFAULT_SIGNALS,
     offering:            row.offering           || null,
     quality_weights:     row.quality_weights    || DEFAULT_QUALITY_WEIGHTS,

@@ -31,6 +31,8 @@ function ensureJob(jobName) {
       lastRunAt: null,
       lastSkippedAt: null,
       lastSkipReason: null,
+      lastDegradedAt: null,
+      lastDegradedReason: null,
       lastErrorAt: null,
       lastError: null,
       lastMeta: null,
@@ -59,6 +61,13 @@ function markError(jobName, errMsg) {
   jobs[jobName].errors++;
   jobs[jobName].lastErrorAt = new Date().toISOString();
   jobs[jobName].lastError = String(errMsg).slice(0, 200);
+}
+
+function markDegraded(jobName, reason, metadata = null) {
+  ensureJob(jobName);
+  jobs[jobName].lastDegradedAt = new Date().toISOString();
+  jobs[jobName].lastDegradedReason = String(reason || 'degraded').slice(0, 200);
+  jobs[jobName].lastMeta = metadata ? { ...metadata, reason: jobs[jobName].lastDegradedReason } : { reason: jobs[jobName].lastDegradedReason };
 }
 
 function utcWindowFor(day, window) {
@@ -130,19 +139,23 @@ function getStatus() {
       : staleThreshold && msSinceRun && msSinceRun > staleThreshold;
     const lastRunMs = data.lastRunAt ? new Date(data.lastRunAt).getTime() : 0;
     const lastSkippedMs = data.lastSkippedAt ? new Date(data.lastSkippedAt).getTime() : 0;
+    const lastDegradedMs = data.lastDegradedAt ? new Date(data.lastDegradedAt).getTime() : 0;
     const latestEventWasSkip = lastSkippedMs > lastRunMs;
+    const latestEventWasDegraded = lastDegradedMs > Math.max(lastRunMs, lastSkippedMs);
     const skippedStatus = latestEventWasSkip
       ? (/disabled/i.test(data.lastSkipReason || '') ? 'disabled' : 'skipped')
       : null;
 
     summary[name] = {
-      status: skippedStatus || (isStale ? 'stale' : (data.runs > 0 ? 'ok' : 'waiting')),
+      status: skippedStatus || (latestEventWasDegraded ? 'degraded' : (isStale ? 'stale' : (data.runs > 0 ? 'ok' : 'waiting'))),
       runs: data.runs,
       skips: data.skips || 0,
       errors: data.errors,
       lastRunAt: data.lastRunAt,
       lastSkippedAt: data.lastSkippedAt,
       lastSkipReason: data.lastSkipReason,
+      lastDegradedAt: data.lastDegradedAt,
+      lastDegradedReason: data.lastDegradedReason,
       lastError: data.lastError,
       lastMeta: data.lastMeta,
     };
@@ -151,4 +164,4 @@ function getStatus() {
   return summary;
 }
 
-module.exports = { markRun, markSkipped, markError, getStatus, isDbBuilderStale };
+module.exports = { markRun, markSkipped, markError, markDegraded, getStatus, isDbBuilderStale };

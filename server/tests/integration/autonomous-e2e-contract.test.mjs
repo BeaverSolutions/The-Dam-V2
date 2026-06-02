@@ -17,6 +17,8 @@ const sendQueueSource = read('services/sendQueueWorker.js');
 const approvalsSource = read('services/approvals.js');
 const kpiSource = read('services/kpi.js');
 const captainSource = read('services/captainOrchestrator.js');
+const directivesSource = read('services/directives.js');
+const tenantConfigSource = read('services/tenantConfig.js');
 const googleCalendarSource = read('services/googleCalendar.js');
 const followupSource = read('services/followupSequence.js');
 
@@ -126,6 +128,14 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(captainSource).toContain('dam_kpi_snapshot_failed');
     expect(captainSource).toContain('snapshot_written');
     expect(captainSource).toContain('snapshot_error');
+    expect(captainSource).toContain('signal_scorecard: buildSignalScorecard');
+    expect(tenantConfigSource).toContain('buying_signals');
+    expect(captainSource).toContain('buying_signals: cfg.buying_signals');
+    expect(captainSource).toContain('buildCaptainSignalOrchestration');
+    expect(captainSource).toContain('writeSignalOrchestrationDirectives');
+    expect(directivesSource).toContain('run_signal_playbook');
+    expect(directivesSource).toContain('fix_signal_copy');
+    expect(captainSource).toContain("jobHealth.markDegraded('captain_directive_sweep'");
     expect(indexSource).toContain('captain_directive_sweep_snapshot_failed');
     expect(autonomousSource).toContain('router.get(\'/system-health\'');
     expect(autonomousSource).toContain('source_truth');
