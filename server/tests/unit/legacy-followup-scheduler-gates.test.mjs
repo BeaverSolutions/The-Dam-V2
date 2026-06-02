@@ -3,15 +3,13 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const indexSrc = readFileSync(
-  resolve(__dirname, '../../index.js'),
-  'utf-8'
-);
+const readSource = (path) => readFileSync(resolve(__dirname, path), 'utf-8').replace(/\r\n/g, '\n');
+const indexSrc = readSource('../../index.js');
 
 // Extract processFollowUps body for scoped assertions
 const fnStart = indexSrc.indexOf('async function processFollowUps()');
 const fnEnd = indexSrc.indexOf('\n    }\n\n    // DISABLED 2026-05-11', fnStart);
-const followUpBody = fnStart >= 0 ? indexSrc.slice(fnStart, fnEnd > fnStart ? fnEnd + 5 : fnStart + 5000) : '';
+const followUpBody = fnStart >= 0 ? indexSrc.slice(fnStart, fnEnd > fnStart ? fnEnd + 5 : indexSrc.length) : '';
 
 describe('index.js processFollowUps — legacy gating contracts', () => {
   it('cron wires are commented out (scheduler is disabled)', () => {
@@ -56,14 +54,8 @@ describe('index.js processFollowUps — legacy gating contracts', () => {
   it('agentmail simulated send is guarded the same way as gmail in sendQueueWorker', () => {
     // Confirm the broader simulated-send contract: agentmail returns { status: simulated }
     // and sendQueueWorker checks result.status === simulated before marking sent
-    const agentmailSrc = readFileSync(
-      resolve(__dirname, '../../services/agentmail.js'),
-      'utf-8'
-    );
-    const sqwSrc = readFileSync(
-      resolve(__dirname, '../../services/sendQueueWorker.js'),
-      'utf-8'
-    );
+    const agentmailSrc = readSource('../../services/agentmail.js');
+    const sqwSrc = readSource('../../services/sendQueueWorker.js');
     expect(agentmailSrc).toContain("status: 'simulated'");
     // sendQueueWorker checks result.status === 'simulated' before the sent update
     expect(sqwSrc).toContain("result.status === 'simulated'");

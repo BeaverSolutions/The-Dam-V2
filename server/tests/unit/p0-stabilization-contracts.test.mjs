@@ -478,6 +478,8 @@ describe('P0 stabilization contracts', () => {
     expect(autonomous).toContain('scheduled_autonomy_paused: scheduledAutonomyPaused');
     expect(autonomous).toContain('autonomy_state: autonomyState');
     expect(postDeployCheck).toContain('SCHEDULED_AUTONOMY_PAUSED');
+    expect(postDeployCheck).toContain('function isPausedOrDisabled');
+    expect(postDeployCheck).toContain("['disabled', 'skipped'].includes(job.status)");
     expect(postDeployCheck).toContain('EXPECT_KPI_GAP_KICKOFF_ENABLED');
     expect(postDeployCheck).toContain("jobStatus(lastHealth, 'kpi_gap_kickoff')");
     expect(postDeployCheck).toContain('WAIT_FOR_DEPLOY_SECONDS');

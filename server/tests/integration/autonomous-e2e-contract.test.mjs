@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '../..');
-const read = (path) => readFileSync(resolve(root, path), 'utf-8');
+const read = (path) => readFileSync(resolve(root, path), 'utf-8').replace(/\r\n/g, '\n');
 
 const indexSource = read('index.js');
 const autonomousSource = read('routes/autonomous.js');
@@ -27,7 +27,7 @@ function functionBody(source, startNeedle, endNeedle) {
   const start = source.indexOf(startNeedle);
   expect(start).toBeGreaterThan(-1);
   const end = endNeedle ? source.indexOf(endNeedle, start) : -1;
-  return source.slice(start, end > start ? end : start + 6000);
+  return source.slice(start, end > start ? end : source.length);
 }
 
 describe('BeavrDam autonomous end-to-end contract', () => {

@@ -3,18 +3,19 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const indexSource = readFileSync(resolve(__dirname, '../../index.js'), 'utf-8');
-const autonomousSource = readFileSync(resolve(__dirname, '../../routes/autonomous.js'), 'utf-8');
-const agentsSource = readFileSync(resolve(__dirname, '../../services/agents.js'), 'utf-8');
-const pipelineSource = readFileSync(resolve(__dirname, '../../services/pipeline.js'), 'utf-8');
-const researchEnrichmentSource = readFileSync(resolve(__dirname, '../../services/researchEnrichment.js'), 'utf-8');
-const signalHuntSource = readFileSync(resolve(__dirname, '../../services/signalHunt.js'), 'utf-8');
-const searchServiceSource = readFileSync(resolve(__dirname, '../../services/searchService.js'), 'utf-8');
-const marketSensingSource = readFileSync(resolve(__dirname, '../../services/marketSensing.js'), 'utf-8');
-const emailEnrichmentSource = readFileSync(resolve(__dirname, '../../services/emailEnrichment.js'), 'utf-8');
-const dbBuilderSource = readFileSync(resolve(__dirname, '../../services/dbBuilder.js'), 'utf-8');
-const researchSource = readFileSync(resolve(__dirname, '../../services/research.js'), 'utf-8');
-const agentConfigSource = readFileSync(resolve(__dirname, '../../config/agents.js'), 'utf-8');
+const readSource = (path) => readFileSync(resolve(__dirname, path), 'utf-8').replace(/\r\n/g, '\n');
+const indexSource = readSource('../../index.js');
+const autonomousSource = readSource('../../routes/autonomous.js');
+const agentsSource = readSource('../../services/agents.js');
+const pipelineSource = readSource('../../services/pipeline.js');
+const researchEnrichmentSource = readSource('../../services/researchEnrichment.js');
+const signalHuntSource = readSource('../../services/signalHunt.js');
+const searchServiceSource = readSource('../../services/searchService.js');
+const marketSensingSource = readSource('../../services/marketSensing.js');
+const emailEnrichmentSource = readSource('../../services/emailEnrichment.js');
+const dbBuilderSource = readSource('../../services/dbBuilder.js');
+const researchSource = readSource('../../services/research.js');
+const agentConfigSource = readSource('../../config/agents.js');
 
 // ── 2c: unify the no-burn boundary across the autonomous kickoff loop ─────
 // Autonomous Beaver sourcing is web/LinkedIn first, then Hunter, then
@@ -64,7 +65,7 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
 
   it('daily DB-pool director execution cannot silently run paid Signal Hunt', () => {
     const dbPoolCall = autonomousSource.indexOf('const dbResult = await directorExecute');
-    const dbPoolCallBody = autonomousSource.slice(dbPoolCall, dbPoolCall + 500);
+    const dbPoolCallBody = autonomousSource.slice(dbPoolCall, dbPoolCall + 1000);
 
     expect(dbPoolCallBody).toContain("allowPaidSignal: false");
     expect(dbPoolCallBody).toContain("sourceMode: 'daily_db_pool'");

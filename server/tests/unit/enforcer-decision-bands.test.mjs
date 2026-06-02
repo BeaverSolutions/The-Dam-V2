@@ -3,7 +3,7 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const service = (p) => readFileSync(resolve(__dirname, '../../', p), 'utf-8');
+const service = (p) => readFileSync(resolve(__dirname, '../../', p), 'utf-8').replace(/\r\n/g, '\n');
 
 describe('applyEnforcerDecision contracts (pipeline.js)', () => {
   const src = service('services/pipeline.js');
