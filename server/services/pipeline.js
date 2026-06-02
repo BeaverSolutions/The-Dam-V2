@@ -58,6 +58,17 @@ function isV2Enabled() {
   return PIPELINE_V2_ENABLED;
 }
 
+function getSignalPackage(source = {}) {
+  const meta = source && typeof source.metadata === 'object' && !Array.isArray(source.metadata)
+    ? source.metadata
+    : {};
+  return source.signal_package
+    || meta.signal_package
+    || source.signalPackage
+    || meta.signalPackage
+    || null;
+}
+
 async function assertLlmBudgetOpen(clientId) {
   const budget = await checkBudget(clientId);
   if (!budget.allowed) {
@@ -118,6 +129,7 @@ async function processLead(clientId, lead, ctx = {}) {
     pipelinePath = 'kickoff_pipeline',
     kickoffId = null,
     command = null,
+    allowPersonalisationSearch = true,
     deps = {},
   } = ctx;
   const {
@@ -170,7 +182,7 @@ async function processLead(clientId, lead, ctx = {}) {
     if (meta.search_query) contextParts.push(`Search context: ${meta.search_query}`);
     if (command) contextParts.push(`Campaign intent: "${command}"`);
 
-    if (typeof searchPersonalisationSignals === 'function') {
+    if (typeof searchPersonalisationSignals === 'function' && allowPersonalisationSearch && getSignalPackage(lead)) {
       await assertLlmBudgetOpen(clientId);
       try {
         const signals = await searchPersonalisationSignals(lead);
@@ -183,6 +195,8 @@ async function processLead(clientId, lead, ctx = {}) {
       } catch (err) {
         console.warn(`[pipeline.processLead] personalisation search skipped for ${lead.name}:`, err.message);
       }
+    } else if (typeof searchPersonalisationSignals === 'function') {
+      console.log(`[pipeline.processLead] Skipping open-web personalization for ${lead.name}: ${allowPersonalisationSearch ? 'missing signal_package' : 'paid signal disabled'}`);
     }
 
     // ── 4. Email enrichment (Hunter -> MillionVerifier-backed pattern fallback) ──
@@ -236,7 +250,9 @@ async function processLead(clientId, lead, ctx = {}) {
       context: contextParts.join('\n') + (hint ? `\n\nCHANNEL INSTRUCTIONS: ${hint}` : ''),
       salesGenerate, rangerDraft, enableEnforcerFallback: true, lead,
       leadAngle: meta.angle, leadFriction: meta.friction,
-      pipeline_path: pipelinePath, defaultDraftSource: 'sales_beaver',
+      pipeline_path: pipelinePath,
+      kickoff_id: kickoffId,
+      defaultDraftSource: 'sales_beaver',
     });
     if (!draft || !draft.body) {
       await trace('draft_failed', 'no_body', { agent: 'sales_beaver', reason: 'no_body', metadata: { channel, enrichment_eligible: !!(lead.company && lead.title) } });
@@ -704,6 +720,7 @@ async function draftWithFallback(clientId, params) {
     leadAngle = null,
     leadFriction = null,
     pipeline_path = 'unknown',
+    kickoff_id = null,
     defaultDraftSource = 'sales_beaver',  // signal_pipeline historically used 'signal_hunt'
     recordRepairRoute: recordRepairRouteFn = recordRepairRoute,
   } = params;
@@ -732,6 +749,7 @@ async function draftWithFallback(clientId, params) {
     console.warn(`${logPrefix} Sales routed lead ${lead_id} to Research repair: ${salesResult.reason || 'needs_more_research'}`);
     await recordRepairRouteFn(clientId, {
       lead_id,
+      kickoff_id,
       pipeline_path,
       agent: 'sales_beaver',
       source: 'sales_preflight',

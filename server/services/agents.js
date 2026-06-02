@@ -2592,9 +2592,10 @@ Return JSON only: {"body":"fixed message body including greeting and sign-off","
  * saved by signal hunt. Skips research, Captain gates, and Hunter enrichment.
  * Returns a summary compatible with directorExecute.
  */
-async function processExistingLeadsPipeline(clientId, plan_id, leads) {
+async function processExistingLeadsPipeline(clientId, plan_id, leads, options = {}) {
   const originalLeadCount = Array.isArray(leads) ? leads.length : 0;
   leads = Array.isArray(leads) ? leads : [];
+  const { allowPersonalisationSearch = true } = options;
 
   // ── Same-day enrolled dedup (MYT calendar day) ──────────────────────────
   // Once enrolled today, never re-enrolled today. Prevents the 75× pattern.
@@ -2713,6 +2714,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       const r = await pipeline.processLead(clientId, lead, {
         pipelinePath: 'signal_pipeline',
         kickoffId: plan_id,
+        allowPersonalisationSearch,
         deps: {
           salesGenerate, rangerReview, rangerDraft, selectChannel, autoFixMessage,
           brandSafetyCheck, searchPersonalisationSignals, recordOutcome, attributionFromLead,
@@ -2767,21 +2769,29 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
       if (!meta.signal && meta.snippet) contextParts.push(`LinkedIn profile snippet: ${meta.snippet}`);
       if (meta.search_query) contextParts.push(`Search context: ${meta.search_query}`);
 
-      // Search for personalisation signals before drafting
-      await assertLlmBudgetOpen(clientId);
-      try {
-        const signals = await searchPersonalisationSignals(lead);
-        if (signals.length > 0) {
-          contextParts.push('');
-          contextParts.push('RECENT SIGNALS (from web search — reference these if relevant):');
-          for (const s of signals) {
-            const dateStr = s.date ? ` (${s.date})` : '';
-            contextParts.push(`- ${s.text}${dateStr} [source: ${s.source}]`);
+      // Search for personalisation signals before drafting only when the run
+      // explicitly allows it and Research has already supplied the V2.1 package.
+      // Otherwise Sales must route to Research repair, not patch missing evidence
+      // with ad hoc open-web queries.
+      const hasSignalPackageForSearch = !!getSignalPackage(lead);
+      if (allowPersonalisationSearch && hasSignalPackageForSearch) {
+        await assertLlmBudgetOpen(clientId);
+        try {
+          const signals = await searchPersonalisationSignals(lead);
+          if (signals.length > 0) {
+            contextParts.push('');
+            contextParts.push('RECENT SIGNALS (from web search — reference these if relevant):');
+            for (const s of signals) {
+              const dateStr = s.date ? ` (${s.date})` : '';
+              contextParts.push(`- ${s.text}${dateStr} [source: ${s.source}]`);
+            }
+            console.log(`[sales-personalise] Found ${signals.length} signals for ${lead.name} at ${lead.company}`);
           }
-          console.log(`[sales-personalise] Found ${signals.length} signals for ${lead.name} at ${lead.company}`);
+        } catch (err) {
+          console.warn(`[sales-personalise] Skipped for ${lead.name}:`, err.message);
         }
-      } catch (err) {
-        console.warn(`[sales-personalise] Skipped for ${lead.name}:`, err.message);
+      } else {
+        console.log(`[sales-personalise] Skipping open-web personalization for ${lead.name}: ${allowPersonalisationSearch ? 'missing signal_package' : 'paid signal disabled'}`);
       }
 
       // ── Email-priority rule ─────────────────────────────────────────────
@@ -2821,7 +2831,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         }).catch(() => {});
         pipelineTrace.traceStage(clientId, {
           lead_id: lead.id, kickoff_id: plan_id,
-          stage: 'channel_exhausted', status: 'linkedin_already_tried',
+          stage: 'skipped', status: 'channel_exhausted',
           agent: 'director', pipeline_path: 'signal_pipeline',
           reason: channelChoice_sp.reason,
           metadata: { lead_name: lead.name, channel },
@@ -2845,7 +2855,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         }).catch(() => {});
         pipelineTrace.traceStage(clientId, {
           lead_id: lead.id, kickoff_id: plan_id,
-          stage: 'channel_blocked', status: 'blocked_no_email',
+          stage: 'skipped', status: 'blocked_no_email',
           agent: 'director', pipeline_path: 'signal_pipeline',
           reason: channelChoice_sp.reason,
           metadata: { lead_name: lead.name },
@@ -2865,7 +2875,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
           console.log(`[signal-pipeline] ${lead.name} — LinkedIn already tried, Hunter found nothing — skipping`);
           pipelineTrace.traceStage(clientId, {
             lead_id: lead.id, kickoff_id: plan_id,
-            stage: 'channel_exhausted', status: 'linkedin_already_tried',
+            stage: 'skipped', status: 'channel_exhausted',
             agent: 'director', pipeline_path: 'signal_pipeline',
             metadata: { lead_name: lead.name, channel },
           }).catch(() => {});
@@ -2932,6 +2942,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads) {
         leadAngle: meta.angle,
         leadFriction: meta.friction,
         pipeline_path: 'signal-pipeline',
+        kickoff_id: plan_id,
         defaultDraftSource: 'signal_hunt',
       });
       if (!draft) {
@@ -3500,7 +3511,9 @@ async function directorExecute(clientId, {
         console.warn('[director] use_existing_leads returned no rows, falling through to cold research');
       } else {
         // Jump directly to Sales/Enforcer pipeline using these leads
-        return await processExistingLeadsPipeline(clientId, plan_id, signalLeads);
+        return await processExistingLeadsPipeline(clientId, plan_id, signalLeads, {
+          allowPersonalisationSearch: allowPaidSignal !== false && Number(maxPaidSignalQueries) !== 0,
+        });
       }
     } catch (err) {
       console.error('[director] Signal-sourced path failed:', err.message);
@@ -3804,7 +3817,9 @@ async function directorExecute(clientId, {
 
       // Completion-driven: process DB leads first, then source only the actual
       // output shortfall. Enrolled/drafted leads do not satisfy MJ's requested count.
-      dbPipelineResult = await processExistingLeadsPipeline(clientId, plan_id, uncontactedLeads)
+      dbPipelineResult = await processExistingLeadsPipeline(clientId, plan_id, uncontactedLeads, {
+        allowPersonalisationSearch: allowPaidSignal !== false && Number(maxPaidSignalQueries) !== 0,
+      })
         .catch(err => {
           console.error('[director] DB-first pipeline failed:', err.message);
           return null;
@@ -4059,7 +4074,9 @@ async function directorExecute(clientId, {
         diagnostics.signal_first_saved = signalLeadsCount;
 
         if (savedSignalLeads.length > 0) {
-          const signalPipelineResult = await processExistingLeadsPipeline(clientId, plan_id, savedSignalLeads)
+          const signalPipelineResult = await processExistingLeadsPipeline(clientId, plan_id, savedSignalLeads, {
+            allowPersonalisationSearch: allowPaidSignal !== false && Number(maxPaidSignalQueries) !== 0,
+          })
             .catch(err => {
               console.error('[director] Signal-first pipeline failed:', err.message);
               return null;
@@ -4926,7 +4943,7 @@ async function directorExecute(clientId, {
         console.log(`[pipeline] ${lead.name} — LinkedIn already tried, no enrichment found — skipping`);
         pipelineTrace.traceStage(clientId, {
           lead_id: lead.id, kickoff_id: plan_id,
-          stage: 'channel_exhausted', status: 'linkedin_already_tried',
+          stage: 'skipped', status: 'channel_exhausted',
           agent: 'director', pipeline_path: 'kickoff_pipeline',
           metadata: { lead_name: lead.name },
         }).catch(() => {});
@@ -4953,7 +4970,7 @@ async function directorExecute(clientId, {
       }).catch(() => {});
       pipelineTrace.traceStage(clientId, {
         lead_id: lead.id, kickoff_id: plan_id,
-        stage: 'channel_exhausted', status: 'linkedin_already_tried',
+        stage: 'skipped', status: 'channel_exhausted',
         agent: 'director', pipeline_path: 'kickoff_pipeline',
         reason: channelReason,
         metadata: { lead_name: lead.name, channel: selectedChannel },
@@ -4977,7 +4994,7 @@ async function directorExecute(clientId, {
       }).catch(() => {});
       pipelineTrace.traceStage(clientId, {
         lead_id: lead.id, kickoff_id: plan_id,
-        stage: 'channel_blocked', status: 'blocked_no_email',
+        stage: 'skipped', status: 'blocked_no_email',
         agent: 'director', pipeline_path: 'kickoff_pipeline',
         reason: channelReason,
         metadata: { lead_name: lead.name },
@@ -5041,6 +5058,7 @@ async function directorExecute(clientId, {
         salesGenerate,
         enableEnforcerFallback: false,
         pipeline_path: 'kickoff_pipeline',
+        kickoff_id: plan_id,
       });
       const salesResult = draft
         ? { body: draft.body, subject: draft.subject, prompt_variant: draft.prompt_variant }

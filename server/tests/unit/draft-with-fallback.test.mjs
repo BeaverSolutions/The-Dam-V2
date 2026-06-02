@@ -67,6 +67,7 @@ describe('draftWithFallback', () => {
 
     const result = await draftWithFallback(CLIENT_ID, {
       ...baseParams,
+      kickoff_id: 'plan-0000-0000-0000-000000000001',
       salesGenerate,
       rangerDraft,
       enableEnforcerFallback: true,
@@ -78,6 +79,7 @@ describe('draftWithFallback', () => {
     expect(rangerDraft).not.toHaveBeenCalled();
     expect(recordRepairRoute).toHaveBeenCalledWith(CLIENT_ID, expect.objectContaining({
       lead_id: LEAD_ID,
+      kickoff_id: 'plan-0000-0000-0000-000000000001',
       repair_route: 'needs_research_repair',
       failed_rule: 'needs_more_research',
     }));

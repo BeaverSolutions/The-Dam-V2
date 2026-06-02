@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -16,6 +16,7 @@ const emailEnrichmentSource = readSource('../../services/emailEnrichment.js');
 const dbBuilderSource = readSource('../../services/dbBuilder.js');
 const researchSource = readSource('../../services/research.js');
 const agentConfigSource = readSource('../../config/agents.js');
+const traceStageMigrationPath = resolve(__dirname, '../../db/migrations/081_v2_1_pipeline_trace_stage_alignment.sql');
 
 // ── 2c: unify the no-burn boundary across the autonomous kickoff loop ─────
 // Autonomous Beaver sourcing is web/LinkedIn first, then Hunter, then
@@ -82,6 +83,48 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
     expect(autonomousSource).toContain("'one_topup_attempt_per_kickoff'");
     expect(agentsSource).toContain("'daily_web_linkedin_topup_already_attempted'");
     expect(agentsSource).toContain("'one_topup_attempt_per_myt_day'");
+  });
+
+  it('controlled existing-lead runs do not run pre-draft open-web personalization when paid signal is disabled', () => {
+    const existingPipelineStart = agentsSource.indexOf('async function processExistingLeadsPipeline');
+    const existingPipelineEnd = agentsSource.indexOf('async function claimDailyPaidSignalAttempt', existingPipelineStart);
+    const existingPipelineBody = agentsSource.slice(existingPipelineStart, existingPipelineEnd);
+    const useExistingStart = agentsSource.indexOf('if (use_existing_leads && Array.isArray(use_existing_leads)');
+    const useExistingEnd = agentsSource.indexOf('// ── Phase 2 V2 Step 8', useExistingStart);
+    const useExistingBody = agentsSource.slice(useExistingStart, useExistingEnd);
+
+    expect(existingPipelineBody).toContain('allowPersonalisationSearch');
+    expect(existingPipelineBody).toContain('Skipping open-web personalization');
+    expect(useExistingBody).toContain('allowPersonalisationSearch: allowPaidSignal !== false');
+  });
+
+  it('chat numeric limits stay bounded and DB-pool chat runs cannot spend paid signal', () => {
+    const chatStart = autonomousSource.indexOf('// ── Intent 2: KICKOFF / EXECUTE');
+    const chatEnd = autonomousSource.indexOf('// ── Intent 3: APPROVALS query', chatStart);
+    const chatBody = autonomousSource.slice(chatStart, chatEnd);
+
+    expect(chatBody).toContain('parseRequestedLeadLimit(message)');
+    expect(chatBody).not.toContain('const effectiveLimit = hasNumber ? undefined : 20');
+    expect(chatBody).toContain('const poolLimit = requestedLimit || 20');
+    expect(chatBody).toContain('limit: poolLeads.length');
+    expect(chatBody).toContain('allowPaidSignal: false');
+    expect(chatBody).toContain("sourceMode: 'chat_db_pool'");
+  });
+
+  it('pipeline traces use valid stages for repair and channel blocks', () => {
+    expect(existsSync(traceStageMigrationPath)).toBe(true);
+    const migration = readFileSync(traceStageMigrationPath, 'utf-8').replace(/\r\n/g, '\n');
+
+    expect(migration).toContain('pipeline_traces_stage_check');
+    expect(migration).toContain('repair_routed');
+    expect(agentsSource).not.toContain("stage: 'channel_exhausted'");
+    expect(agentsSource).not.toContain("stage: 'channel_blocked'");
+    expect(pipelineSource).not.toContain("stage: 'channel_exhausted'");
+    expect(pipelineSource).not.toContain("stage: 'channel_blocked'");
+    expect(pipelineSource).toContain("stage: 'repair_routed'");
+    expect(pipelineSource).toContain('kickoff_id = null');
+    expect(pipelineSource).toContain('kickoff_id,');
+    expect(agentsSource).toContain('kickoff_id: plan_id');
   });
 });
 

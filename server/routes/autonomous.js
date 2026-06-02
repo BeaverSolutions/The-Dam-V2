@@ -75,6 +75,14 @@ const BASIC_OPERATING_SURFACE_V2_1 = Object.freeze({
   tin_city_status: 'inactive_until_gate_passes',
 });
 
+function parseRequestedLeadLimit(message, defaultLimit = 20) {
+  const match = String(message || '').match(/\b(\d{1,3})\b/);
+  if (!match) return defaultLimit;
+  const parsed = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return defaultLimit;
+  return Math.min(parsed, 50);
+}
+
 function basicOperatingSurfaceForTenant(snapshot = {}) {
   return {
     ...BASIC_OPERATING_SURFACE_V2_1,
@@ -222,10 +230,9 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
       }
       const planId = uuidv4();
 
-      // If command has a number (e.g. "find 20 leads"), directorExecute parses it.
-      // If bare "kickoff" with no number, default to 20 leads instead of 5.
-      const hasNumber = /\b\d+\b/.test(message);
-      const effectiveLimit = hasNumber ? undefined : 20;
+      // Keep chat-triggered runs bounded. "Find 5" must not fall through to the
+      // DB-pool default of 20 before Director sees the command.
+      const requestedLimit = parseRequestedLeadLimit(message);
 
       // Phase 2 V2 Step 9 (2026-05-15): no brief is built here. Research is
       // ICP-driven from agent_memory; passing a paragraph as `command` used to
@@ -237,7 +244,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
       // DB-first: check if we already have uncontacted leads in the pool
       let usedDbPool = false;
       try {
-        const poolLimit = effectiveLimit || 20;
+        const poolLimit = requestedLimit || 20;
         const { rows: poolLeads } = await pool.query(
           `SELECT id, name, company, title, signal_tier, email, linkedin_url
            FROM leads
@@ -270,6 +277,8 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
               command: `DB-POOL BATCH: Process ${poolLeads.length} pre-researched leads from the lead pool. Draft outreach using any signal/angle data in their metadata.`,
               use_existing_leads: poolLeads.map(l => l.id),
               limit: poolLeads.length,
+              allowPaidSignal: false,
+              sourceMode: 'chat_db_pool',
             }).catch(err => {
               console.error(`[chat] DB pool directorExecute failed:`, err.message);
             })
@@ -285,7 +294,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
         response.actions_taken.push('triggered_director_execute');
 
         runWithClientContext(client_id, () =>
-          directorExecute(client_id, { plan_id: planId, command: effectiveCommand, limit: effectiveLimit }).catch(err => {
+          directorExecute(client_id, { plan_id: planId, command: effectiveCommand, limit: requestedLimit }).catch(err => {
             console.error(`[chat] directorExecute failed for plan ${planId}:`, err.message);
           })
         );
@@ -4264,3 +4273,4 @@ router.post('/enrich-cold-signals', async (req, res) => {
 
 module.exports = router;
 module.exports.runAutonomousKickoff = runAutonomousKickoff;
+module.exports._test = { parseRequestedLeadLimit };
