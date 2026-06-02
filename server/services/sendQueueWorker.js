@@ -18,6 +18,18 @@ const STALE_SENDING_MINUTES = Number(process.env.SEND_QUEUE_STALE_SENDING_MINUTE
 // Safety: max emails per client per day (prevents rogue agent runs from spamming)
 const MAX_DAILY_SENDS_PER_CLIENT = parseInt(process.env.MAX_DAILY_SENDS || '200', 10);
 
+const BASIC_SEND_POLICY = Object.freeze({
+  mode: 'v2_1_basic',
+  auto_send_channel: 'email',
+  manual_channels: Object.freeze(['linkedin', 'instagram', 'linkedin_dm', 'linkedin_invite']),
+  premium_exclusions: Object.freeze([
+    'managed_linkedin_automation',
+    'auto_connect',
+    'accepted_dm_automation',
+    'email_campaign_system',
+  ]),
+});
+
 // Basic email domain validation — rejects obviously invalid addresses
 const EMAIL_DOMAIN_RE = /^[^@]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 
@@ -95,6 +107,43 @@ async function processJob(job) {
   if (lock.rows.length === 0) return; // Another worker grabbed it
 
   try {
+    const { rows: [queuedMessage] } = await pool.query(
+      `SELECT lead_id, channel FROM messages WHERE id = $1 AND client_id = $2`,
+      [message_id, client_id]
+    );
+
+    if (queuedMessage?.channel && queuedMessage.channel !== BASIC_SEND_POLICY.auto_send_channel) {
+      const reason = `basic_manual_send_channel:${queuedMessage.channel}`;
+      await pool.query(
+        `UPDATE send_queue SET status = 'failed', error_reason = $1, updated_at = NOW()
+         WHERE id = $2`,
+        [reason, id]
+      );
+      await logsService.createLog(client_id, {
+        agent: 'system',
+        action: 'basic_manual_send_channel_blocked',
+        target_type: 'message',
+        target_id: message_id,
+        metadata: {
+          channel: queuedMessage.channel,
+          reason,
+          basic_policy: BASIC_SEND_POLICY,
+        },
+      }).catch(() => {});
+      pipelineTrace.traceStage(client_id, {
+        lead_id: queuedMessage.lead_id,
+        message_id,
+        stage: 'skipped',
+        status: 'basic_manual_send_channel',
+        agent: 'system',
+        reason,
+        pipeline_path: 'sendQueue',
+        metadata: { channel: queuedMessage.channel, basic_policy: BASIC_SEND_POLICY },
+      }).catch(() => {});
+      console.warn(`[send_queue] Blocked non-email auto-send job ${message_id}: ${reason}`);
+      return;
+    }
+
     const sendFn = getSendFn();
     const result = await sendFn(client_id, message_id, 'auto');
 
@@ -343,7 +392,7 @@ async function enqueueMessage(clientId, messageId) {
   const { channel, lead_email } = rows[0];
   if (channel !== 'email') {
     console.log(`[send_queue] Skip enqueue: ${messageId} is ${channel} (manual-send channel)`);
-    return { enqueued: false, reason: `manual_send_channel:${channel}` };
+    return { enqueued: false, reason: `manual_send_channel:${channel}`, basic_policy: 'basic_manual_send_channel' };
   }
   if (!lead_email || lead_email === 'unknown@example.com') {
     console.log(`[send_queue] Skip enqueue: ${messageId} has no lead email`);
@@ -380,4 +429,4 @@ async function enqueueMessage(clientId, messageId) {
   return { enqueued: true, queue_id: inserted.rows[0]?.id };
 }
 
-module.exports = { processSendQueue, enqueueMessage };
+module.exports = { processSendQueue, enqueueMessage, BASIC_SEND_POLICY };

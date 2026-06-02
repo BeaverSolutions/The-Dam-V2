@@ -14,6 +14,7 @@ const signalHuntSource = read('services/signalHunt.js');
 const contactGateSource = read('services/contactGate.js');
 const pipelineSource = read('services/pipeline.js');
 const sendQueueSource = read('services/sendQueueWorker.js');
+const replyDetectorSource = read('services/replyDetector.js');
 const approvalsSource = read('services/approvals.js');
 const kpiSource = read('services/kpi.js');
 const captainSource = read('services/captainOrchestrator.js');
@@ -138,11 +139,24 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(captainSource).toContain("jobHealth.markDegraded('captain_directive_sweep'");
     expect(indexSource).toContain('captain_directive_sweep_snapshot_failed');
     expect(autonomousSource).toContain('router.get(\'/system-health\'');
+    expect(autonomousSource).toContain('basic_operating_surface');
+    expect(autonomousSource).toContain('BASIC_OPERATING_SURFACE_V2_1');
+    expect(autonomousSource).toContain('external_tenant_activation_gate');
     expect(autonomousSource).toContain('source_truth');
     expect(autonomousSource).toContain('daily_kpi_row_present');
     expect(autonomousSource).toContain('approval_queue');
     expect(autonomousSource).toContain('followup_queue');
     expect(autonomousSource).toContain('orphaned_sent_leads');
     expect(googleCalendarSource).toContain('ON CONFLICT (client_id, google_event_id) WHERE google_event_id IS NOT NULL DO UPDATE');
+  });
+
+  it('V2.1 Basic keeps LinkedIn manual-safe and excludes managed automation', () => {
+    expect(autonomousSource).toContain("router.get('/linkedin-queue'");
+    expect(autonomousSource).toContain('manual_linkedin_queue');
+    expect(autonomousSource).toContain("managed_automation: false");
+    expect(autonomousSource).toContain("accepted_dm_automation: false");
+    expect(sendQueueSource).toContain('BASIC_SEND_POLICY');
+    expect(sendQueueSource).toContain('basic_manual_send_channel');
+    expect(replyDetectorSource).toContain('BASIC_REPLY_TRACKING_POLICY');
   });
 });

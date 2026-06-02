@@ -9,6 +9,31 @@ const pool = require('../db/pool');
 const logsService = require('../services/logs');
 const logger = require('../utils/logger');
 
+const BASIC_LEAD_OPERATING_SURFACE = Object.freeze({
+  mode: 'v2_1_basic',
+  manual_actions: Object.freeze([
+    'manual_reply_registration',
+    'manual_meeting_outcome',
+    'manual_deal_outcome',
+    'followup_sequence_visibility',
+    'followup_sequence_pause_resume_stop',
+  ]),
+  safe_channels: Object.freeze([
+    'approval_queue',
+    'manual_linkedin_queue',
+    'email_send_queue',
+    'reply_tracking',
+    'followup_visibility',
+  ]),
+  premium_exclusions: Object.freeze([
+    'marketing_beaver',
+    'email_campaign_system',
+    'managed_linkedin_automation',
+    'auto_connect',
+    'accepted_dm_automation',
+  ]),
+});
+
 // UUID validation middleware for :id param
 const validateId = [param('id').isUUID(), validate];
 
@@ -48,6 +73,18 @@ router.post('/',
     } catch (err) { next(err); }
   }
 );
+
+// GET /api/leads/basic-operating-surface
+// V2.1 Basic contract for UI and beaver callers. This keeps manual-safe lead
+// actions explicit without introducing Marketing Beaver or premium automation.
+router.get('/basic-operating-surface', async (req, res) => {
+  res.json({
+    data: {
+      client_id: req.clientId,
+      ...BASIC_LEAD_OPERATING_SURFACE,
+    },
+  });
+});
 
 // GET /api/leads/:id
 router.get('/:id', validateId, async (req, res, next) => {

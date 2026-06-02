@@ -18,6 +18,70 @@ const autonomyStateService = require('../services/autonomyState');
 // Strict UUID v1-v5 validator — rejects malformed input before it reaches SQL.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+const BASIC_OPERATING_SURFACE_V2_1 = Object.freeze({
+  mode: 'v2_1_basic',
+  safe_channels: Object.freeze([
+    'approval_queue',
+    'manual_linkedin_queue',
+    'email_send_queue',
+    'reply_tracking',
+    'followup_visibility',
+  ]),
+  channel_policy: Object.freeze({
+    approval_queue: Object.freeze({
+      enabled: true,
+      mode: 'manual_review_before_send',
+    }),
+    manual_linkedin_queue: Object.freeze({
+      enabled: true,
+      mode: 'manual_safe',
+      managed_automation: false,
+      auto_connect: false,
+      accepted_dm_automation: false,
+      route: '/api/autonomous/linkedin-queue',
+      completion_route: '/api/autonomous/linkedin-mark-sent',
+      reply_sync_route: '/api/autonomous/linkedin-sync-replies',
+    }),
+    email_send_queue: Object.freeze({
+      enabled: true,
+      mode: 'existing_supported_email_path_only',
+      auto_send_channel: 'email',
+    }),
+    reply_tracking: Object.freeze({
+      enabled: true,
+      mode: 'gmail_agentmail_and_manual_linkedin_reply_tracking',
+    }),
+    followup_visibility: Object.freeze({
+      enabled: true,
+      mode: 'visible_queue_no_marketing_campaigns',
+    }),
+  }),
+  premium_exclusions: Object.freeze([
+    'marketing_beaver',
+    'email_campaign_system',
+    'managed_linkedin_automation',
+    'auto_connect',
+    'accepted_dm_automation',
+  ]),
+  external_tenant_activation_gate: Object.freeze([
+    'v2_1_basic_path_honest',
+    'byok_access_plan_clear',
+    'sender_persona_confirmed',
+    'voice_examples_or_safe_starter_voice',
+    'geo_and_icp_clear',
+    'tenant_specific_signal_config',
+    'no_fresh_red_blocker',
+  ]),
+  tin_city_status: 'inactive_until_gate_passes',
+});
+
+function basicOperatingSurfaceForTenant(snapshot = {}) {
+  return {
+    ...BASIC_OPERATING_SURFACE_V2_1,
+    queue_snapshot: snapshot,
+  };
+}
+
 async function requireInternalKey(req, res, next) {
   const { safeCompare } = require('../utils/crypto');
   const key = req.headers['x-internal-key'];
@@ -2702,6 +2766,13 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
         approved_unsent: approvedUnsentByChannel,
         approval_queue: approvalQueue.rows[0],
         followup_queue: followupHealth.rows[0],
+        basic_operating_surface: basicOperatingSurfaceForTenant({
+          approval_queue: approvalQueue.rows[0],
+          manual_linkedin_queue: { approved_unsent: approvedUnsentByChannel.linkedin || 0 },
+          email_send_queue: queue.rows[0],
+          reply_tracking: { replies_today: kpi.rows[0]?.replies_received || 0 },
+          followup_visibility: followupHealth.rows[0],
+        }),
         lead_pool_remaining: leadPool.rows[0].n,
         research_beaver: researchLog.rows[0],
         integrations: {
@@ -2724,6 +2795,10 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
         captain_daily_kickoff_enabled: !scheduledAutonomyPaused && process.env.CAPTAIN_DAILY_KICKOFF_ENABLED === 'true',
         captain_kpi_gap_kickoff_enabled: !scheduledAutonomyPaused && process.env.CAPTAIN_KPI_GAP_KICKOFF_ENABLED === 'true',
         market_sensing_enabled: !scheduledAutonomyPaused && process.env.MARKET_SENSING_ENABLED === 'true',
+        basic_operating_surface: basicOperatingSurfaceForTenant({
+          tenants: tenants.length,
+          scheduled_autonomy_paused: scheduledAutonomyPaused,
+        }),
         telegram_chat_id_present: !!process.env.TELEGRAM_CHAT_ID,
         telegram_bot_token_present: !!process.env.TELEGRAM_BOT_TOKEN,
         agentmail_configured: !!process.env.AGENTMAIL_API_KEY,
@@ -2783,6 +2858,14 @@ router.get('/linkedin-queue', requireInternalKey, async (req, res) => {
       data: {
         client_id: clientId,
         count: rows.length,
+        basic_operating_surface: {
+          channel: 'manual_linkedin_queue',
+          manual_safe: true,
+          managed_automation: false,
+          auto_connect: false,
+          accepted_dm_automation: false,
+          completion_route: '/api/autonomous/linkedin-mark-sent',
+        },
         queue: rows,
       },
     });
@@ -2894,7 +2977,20 @@ router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
         logger.warn({ msg: '[linkedin-mark-sent] kpi recount failed', client_id, err: err?.message })
       );
 
-      return res.json({ data: { message_id, status: 'sent', sent_at: updated.sent_at } });
+      return res.json({
+        data: {
+          message_id,
+          status: 'sent',
+          sent_at: updated.sent_at,
+          basic_operating_surface: {
+            channel: 'manual_linkedin_queue',
+            manual_safe: true,
+            managed_automation: false,
+            auto_connect: false,
+            accepted_dm_automation: false,
+          },
+        },
+      });
     }
 
     if (action === 'connection_requested') {
@@ -2924,7 +3020,19 @@ router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
         metadata: { channel: 'linkedin', notes: notes || null, awaiting: 'connection_accept' },
       }).catch(() => {});
 
-      return res.json({ data: { message_id, status: 'linkedin_requested' } });
+      return res.json({
+        data: {
+          message_id,
+          status: 'linkedin_requested',
+          basic_operating_surface: {
+            channel: 'manual_linkedin_queue',
+            manual_safe: true,
+            managed_automation: false,
+            auto_connect: false,
+            accepted_dm_automation: false,
+          },
+        },
+      });
     }
 
     // action === 'failed' → just log; status stays 'approved' so it surfaces again
@@ -2943,7 +3051,19 @@ router.post('/linkedin-mark-sent', requireInternalKey, async (req, res) => {
       pipeline_path: 'linkedin_mark_sent',
       metadata: { channel: 'linkedin' },
     }).catch(() => {});
-    return res.json({ data: { message_id, status: 'failed_will_retry' } });
+    return res.json({
+      data: {
+        message_id,
+        status: 'failed_will_retry',
+        basic_operating_surface: {
+          channel: 'manual_linkedin_queue',
+          manual_safe: true,
+          managed_automation: false,
+          auto_connect: false,
+          accepted_dm_automation: false,
+        },
+      },
+    });
   } catch (err) {
     logger.error({ msg: 'linkedin-mark-sent failed', err: err.message });
     res.status(500).json({ error: 'Failed to mark sent', code: 'DB_ERROR' });
@@ -3132,6 +3252,7 @@ router.post('/linkedin-sync-replies', requireInternalKey, async (req, res) => {
             profile_url: r.profile_url,
             snippet: r.last_msg_text.slice(0, 200),
             lead_id: candidate.lead_id,
+            basic_operating_surface: 'reply_tracking',
           },
         });
 
@@ -3211,6 +3332,12 @@ router.post('/linkedin-sync-replies', requireInternalKey, async (req, res) => {
         skipped_outbound_only: skippedOutboundOnly,
         skipped_no_match: skippedNoMatch,
         skipped_stale: skippedStale,
+        basic_operating_surface: {
+          channel: 'manual_linkedin_queue',
+          surface: 'reply_tracking',
+          managed_automation: false,
+          accepted_dm_automation: false,
+        },
         details,
       },
     });

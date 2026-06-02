@@ -209,6 +209,59 @@ describe('onboarding readiness contracts', () => {
     expect(agentsSource).toContain('apolloService.getApiKey(clientId)');
     expect(agentsSource).toContain('!!apolloKey && Number(process.env.APOLLO_DAILY_QUERY_CAP || 0) > 0');
   });
+
+  it('V2.1 Basic exposes only approval, manual-safe LinkedIn, email send, reply, and follow-up surfaces', () => {
+    const autonomousSource = route('autonomous.js');
+    const leadsSource = route('leads.js');
+    const sendQueueSource = service('sendQueueWorker.js');
+    const replyDetectorSource = service('replyDetector.js');
+
+    expect(autonomousSource).toContain('BASIC_OPERATING_SURFACE_V2_1');
+    expect(autonomousSource).toContain('basic_operating_surface');
+    expect(autonomousSource).toContain('approval_queue');
+    expect(autonomousSource).toContain('manual_linkedin_queue');
+    expect(autonomousSource).toContain('email_send_queue');
+    expect(autonomousSource).toContain('reply_tracking');
+    expect(autonomousSource).toContain('followup_visibility');
+
+    expect(leadsSource).toContain('BASIC_LEAD_OPERATING_SURFACE');
+    expect(leadsSource).toContain("router.get('/basic-operating-surface'");
+    expect(leadsSource).toContain('manual_reply_registration');
+    expect(leadsSource).toContain('manual_meeting_outcome');
+
+    expect(sendQueueSource).toContain('BASIC_SEND_POLICY');
+    expect(sendQueueSource).toContain("auto_send_channel: 'email'");
+    expect(sendQueueSource).toContain('basic_manual_send_channel');
+
+    expect(replyDetectorSource).toContain('BASIC_REPLY_TRACKING_POLICY');
+    expect(replyDetectorSource).toContain('reply_tracking');
+  });
+
+  it('V2.1 Basic explicitly excludes Marketing Beaver, campaigns, and managed LinkedIn automation', () => {
+    const autonomousSource = route('autonomous.js');
+
+    expect(autonomousSource).toContain('premium_exclusions');
+    expect(autonomousSource).toContain('marketing_beaver');
+    expect(autonomousSource).toContain('email_campaign_system');
+    expect(autonomousSource).toContain('managed_linkedin_automation');
+    expect(autonomousSource).toContain('auto_connect');
+    expect(autonomousSource).toContain('accepted_dm_automation');
+  });
+
+  it('Tin City and external tenants remain gated until onboarding and Basic proof are honest', () => {
+    const autonomousSource = route('autonomous.js');
+
+    expect(autonomousSource).toContain('external_tenant_activation_gate');
+    expect(autonomousSource).toContain('v2_1_basic_path_honest');
+    expect(autonomousSource).toContain('byok_access_plan_clear');
+    expect(autonomousSource).toContain('sender_persona_confirmed');
+    expect(autonomousSource).toContain('voice_examples_or_safe_starter_voice');
+    expect(autonomousSource).toContain('geo_and_icp_clear');
+    expect(autonomousSource).toContain('tenant_specific_signal_config');
+    expect(autonomousSource).toContain('no_fresh_red_blocker');
+    expect(autonomousSource).toContain('tin_city_status');
+    expect(autonomousSource).toContain('inactive_until_gate_passes');
+  });
 });
 
 describe('auto-approval recovery contracts', () => {

@@ -8,6 +8,14 @@ const pipelineTrace = require('./pipelineTrace');
 const { handleReply } = require('./replyHandler');
 const replyClassifier = require('./replyClassifier');
 
+const BASIC_REPLY_TRACKING_POLICY = Object.freeze({
+  mode: 'v2_1_basic',
+  surface: 'reply_tracking',
+  providers: Object.freeze(['gmail', 'agentmail']),
+  linkedin_replies: 'manual_or_sync_endpoint',
+  marketing_campaign_replies: false,
+});
+
 // 2026-05-23 P0.5 (Contract 1): inbound classification BEFORE setting
 // reply_detected_at. Six categories (spam deferred to v2). Source of truth:
 // MJxClaude/memory/preferences.md 2026-05-21 reply pipeline contracts.
@@ -201,6 +209,7 @@ async function checkRepliesForClient(clientId) {
           snippet: snippet.slice(0, 200),
           lead_id: msg.lead_id,
           source: 'polling',
+          basic_operating_surface: 'reply_tracking',
         },
       });
       // Phase 1 (2026-05-08): pipeline_traces replied — closes funnel survival path to meeting_booked
@@ -215,6 +224,7 @@ async function checkRepliesForClient(clientId) {
           provider: msg.gmail_thread_id ? 'gmail' : 'agentmail',
           thread_id: threadId,
           snippet: snippet.slice(0, 200),
+          basic_operating_surface: 'reply_tracking',
         },
       }).catch(() => {});
 
@@ -578,4 +588,4 @@ async function checkAllClients() {
   }
 }
 
-module.exports = { checkRepliesForClient, checkAllClients };
+module.exports = { checkRepliesForClient, checkAllClients, BASIC_REPLY_TRACKING_POLICY };
