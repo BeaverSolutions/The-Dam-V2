@@ -21,6 +21,7 @@ const pool = require('./db/pool');
 const adminOnly = require('./middleware/adminOnly');
 const superAdminOnly = require('./middleware/superAdminOnly');
 const config = require('./config');
+const autonomyState = require('./services/autonomyState');
 
 const app = express();
 
@@ -172,6 +173,7 @@ app.get('/health', async (req, res) => {
   const jobHealth = require('./services/jobHealth');
   const jobs = jobHealth.getStatus();
   const staleJobs = Object.entries(jobs).filter(([, v]) => v.status === 'stale').map(([k]) => k);
+  const currentAutonomyState = autonomyState.getAutonomyState();
 
   const status = dbOk ? 200 : 503;
   res.status(status).json({
@@ -187,6 +189,7 @@ app.get('/health', async (req, res) => {
       database: dbOk ? 'ok' : 'unreachable',
       encryption_key: encKeyOk ? 'valid' : 'INVALID',
     },
+    autonomy_state: currentAutonomyState,
     jobs,
     stale_jobs: staleJobs,
   });
@@ -261,16 +264,12 @@ async function start() {
     const calendarService = require('./services/googleCalendar');
     const jobHealth = require('./services/jobHealth');
 
-    // Emergency spend brake. Scheduled autonomy stays paused unless production
-    // explicitly sets SCHEDULED_AUTONOMY_PAUSED=false.
     function scheduledAutonomyPaused() {
-      return process.env.SCHEDULED_AUTONOMY_PAUSED !== 'false';
+      return autonomyState.isScheduledAutonomyPaused();
     }
 
     function markScheduledPause(jobName) {
-      jobHealth.markSkipped(jobName, 'SCHEDULED_AUTONOMY_PAUSED default-on emergency spend brake', {
-        paused: true,
-      });
+      autonomyState.markScheduledPause(jobHealth, jobName);
     }
 
     let _replyDetectorRunning = false;

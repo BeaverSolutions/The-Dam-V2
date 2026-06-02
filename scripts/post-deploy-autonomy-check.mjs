@@ -94,6 +94,14 @@ function validateHealth(checks, health) {
   if ((health.stale_jobs || []).length === 0) pass(checks, 'no stale jobs');
   else fail(checks, 'no stale jobs', `stale=${health.stale_jobs.join(',')}`);
 
+  const autonomy = health.autonomy_state || {};
+  if (autonomy.mode) pass(checks, 'public health exposes autonomy state', autonomy.mode);
+  else fail(checks, 'public health exposes autonomy state', 'missing');
+
+  if (autonomy.scheduled_paused === true && !EXPECT_DAILY_KICKOFF_ENABLED) {
+    pass(checks, 'scheduled autonomy pause visible', autonomy.reason || 'paused');
+  }
+
   const daily = jobStatus(health, 'daily_kickoff');
   if (!daily) {
     fail(checks, 'daily kickoff job visible', 'job missing from /health');
@@ -143,6 +151,10 @@ function validateHealth(checks, health) {
 function validateSystemHealth(checks, data) {
   if (data.timezone === 'Asia/Kuala_Lumpur') pass(checks, 'system-health uses MYT');
   else fail(checks, 'system-health uses MYT', `timezone=${data.timezone || 'missing'}`);
+
+  const autonomy = data.autonomy_state || {};
+  if (autonomy.mode) pass(checks, 'system-health exposes autonomy state', autonomy.mode);
+  else fail(checks, 'system-health exposes autonomy state', 'missing');
 
   if (data.enabled_slugs?.includes(CLIENT_SLUG)) pass(checks, 'target tenant enabled', CLIENT_SLUG);
   else fail(checks, 'target tenant enabled', `enabled=${data.enabled_slugs?.join(',') || 'empty'}`);

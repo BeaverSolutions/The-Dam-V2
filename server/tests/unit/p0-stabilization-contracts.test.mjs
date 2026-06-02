@@ -247,11 +247,14 @@ describe('P0 stabilization contracts', () => {
     const index = service('index.js');
     const jobHealth = service('services/jobHealth.js');
     const captain = service('services/captainOrchestrator.js');
+    const autonomyState = service('services/autonomyState.js');
 
     expect(index).toContain("CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'");
     expect(index).toContain("CAPTAIN_KPI_GAP_KICKOFF_ENABLED !== 'true'");
-    expect(index).toContain("process.env.SCHEDULED_AUTONOMY_PAUSED !== 'false'");
-    expect(index).toContain('SCHEDULED_AUTONOMY_PAUSED default-on emergency spend brake');
+    expect(autonomyState).toContain("env.SCHEDULED_AUTONOMY_PAUSED !== 'false'");
+    expect(autonomyState).toContain('SCHEDULED_AUTONOMY_PAUSED default-on emergency spend brake');
+    expect(index).toContain("const autonomyState = require('./services/autonomyState')");
+    expect(index).toContain('autonomy_state: currentAutonomyState');
     expect(index).toContain("markScheduledPause('db_builder')");
     expect(index).toContain("markScheduledPause('linkedin_sweep')");
     expect(index).toContain('CAPTAIN_DAILY_KICKOFF_ENABLED disabled; refusing KPI-gap kickoff');
@@ -473,6 +476,7 @@ describe('P0 stabilization contracts', () => {
     expect(postDeployCheck).toContain("getJson('/api/autonomous/system-health'");
     expect(postDeployCheck).toContain('EXPECT_DAILY_KICKOFF_ENABLED');
     expect(autonomous).toContain('scheduled_autonomy_paused: scheduledAutonomyPaused');
+    expect(autonomous).toContain('autonomy_state: autonomyState');
     expect(postDeployCheck).toContain('SCHEDULED_AUTONOMY_PAUSED');
     expect(postDeployCheck).toContain('EXPECT_KPI_GAP_KICKOFF_ENABLED');
     expect(postDeployCheck).toContain("jobStatus(lastHealth, 'kpi_gap_kickoff')");

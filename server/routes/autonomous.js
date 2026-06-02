@@ -11,6 +11,7 @@ const pipelineTrace = require('../services/pipelineTrace');
 const logger = require('../utils/logger');
 const { leadSelectionFeedbackExclusionSql } = require('../services/founderFeedbackSignals');
 const { checkBudget, isBudgetExceededError } = require('../services/budget');
+const autonomyStateService = require('../services/autonomyState');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
@@ -2491,7 +2492,8 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
     const today = clock.date_kl;
     const klMinutesNow = Number(clock.kl_minutes_now) || 0;
     const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
-    const scheduledAutonomyPaused = process.env.SCHEDULED_AUTONOMY_PAUSED !== 'false';
+    const autonomyState = autonomyStateService.getAutonomyState();
+    const scheduledAutonomyPaused = autonomyState.scheduled_paused;
 
     const { rows: clientRows } = await pool.query(
       `SELECT id, slug, name FROM clients
@@ -2718,6 +2720,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
         kl_minutes_now: klMinutesNow,
         enabled_slugs: enabledSlugs,
         scheduled_autonomy_paused: scheduledAutonomyPaused,
+        autonomy_state: autonomyState,
         captain_daily_kickoff_enabled: !scheduledAutonomyPaused && process.env.CAPTAIN_DAILY_KICKOFF_ENABLED === 'true',
         captain_kpi_gap_kickoff_enabled: !scheduledAutonomyPaused && process.env.CAPTAIN_KPI_GAP_KICKOFF_ENABLED === 'true',
         market_sensing_enabled: !scheduledAutonomyPaused && process.env.MARKET_SENSING_ENABLED === 'true',
