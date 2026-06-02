@@ -100,7 +100,10 @@ function validateHealth(checks, health) {
   } else if (EXPECT_DAILY_KICKOFF_ENABLED) {
     if (daily.status === 'disabled') fail(checks, 'daily kickoff enabled', daily.lastSkipReason || 'disabled');
     else pass(checks, 'daily kickoff enabled', `status=${daily.status}`);
-  } else if (daily.status === 'disabled' && /CAPTAIN_DAILY_KICKOFF_ENABLED disabled/.test(daily.lastSkipReason || '')) {
+  } else if (
+    daily.status === 'disabled'
+    && /(CAPTAIN_DAILY_KICKOFF_ENABLED disabled|SCHEDULED_AUTONOMY_PAUSED)/.test(daily.lastSkipReason || '')
+  ) {
     pass(checks, 'daily kickoff safely disabled', daily.lastSkipReason);
   } else {
     fail(checks, 'daily kickoff safely disabled', `status=${daily.status}, reason=${daily.lastSkipReason || 'none'}`);
@@ -114,7 +117,7 @@ function validateHealth(checks, health) {
     else pass(checks, 'KPI-gap kickoff enabled', `status=${kpiGap.status}`);
   } else if (
     kpiGap.status === 'disabled'
-    && /CAPTAIN_(KPI_GAP|DAILY)_KICKOFF_ENABLED disabled/.test(kpiGap.lastSkipReason || '')
+    && /(?:CAPTAIN_(KPI_GAP|DAILY)_KICKOFF_ENABLED disabled|SCHEDULED_AUTONOMY_PAUSED)/.test(kpiGap.lastSkipReason || '')
   ) {
     pass(checks, 'KPI-gap kickoff safely disabled', kpiGap.lastSkipReason);
   } else {
@@ -127,7 +130,10 @@ function validateHealth(checks, health) {
   } else if (EXPECT_MARKET_SENSING_ENABLED) {
     if (market.status === 'disabled') fail(checks, 'market sensing enabled', market.lastSkipReason || 'disabled');
     else pass(checks, 'market sensing enabled', `status=${market.status}`);
-  } else if (market.status === 'disabled' && /MARKET_SENSING_ENABLED disabled/.test(market.lastSkipReason || '')) {
+  } else if (
+    market.status === 'disabled'
+    && /(MARKET_SENSING_ENABLED disabled|SCHEDULED_AUTONOMY_PAUSED)/.test(market.lastSkipReason || '')
+  ) {
     pass(checks, 'market sensing safely disabled', market.lastSkipReason);
   } else {
     fail(checks, 'market sensing safely disabled', `status=${market.status}, reason=${market.lastSkipReason || 'none'}`);

@@ -2491,6 +2491,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
     const today = clock.date_kl;
     const klMinutesNow = Number(clock.kl_minutes_now) || 0;
     const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
+    const scheduledAutonomyPaused = process.env.SCHEDULED_AUTONOMY_PAUSED !== 'false';
 
     const { rows: clientRows } = await pool.query(
       `SELECT id, slug, name FROM clients
@@ -2668,7 +2669,9 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
       const evidence = kickoffEvidence.rows[0] || {};
       const kickoffWorkProof = !!(evidence.last_log_at || Number(evidence.trace_count) > 0);
       const kickoffMemoryOnlyStarted = !!evidence.memory_written && !kickoffWorkProof;
-      const kickoffState = process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'
+      const kickoffState = scheduledAutonomyPaused
+        ? 'disabled'
+        : process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'
         ? 'disabled'
         : kickoffWorkProof
           ? 'fired'
@@ -2714,9 +2717,10 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
         timezone: 'Asia/Kuala_Lumpur',
         kl_minutes_now: klMinutesNow,
         enabled_slugs: enabledSlugs,
-        captain_daily_kickoff_enabled: process.env.CAPTAIN_DAILY_KICKOFF_ENABLED === 'true',
-        captain_kpi_gap_kickoff_enabled: process.env.CAPTAIN_KPI_GAP_KICKOFF_ENABLED === 'true',
-        market_sensing_enabled: process.env.MARKET_SENSING_ENABLED === 'true',
+        scheduled_autonomy_paused: scheduledAutonomyPaused,
+        captain_daily_kickoff_enabled: !scheduledAutonomyPaused && process.env.CAPTAIN_DAILY_KICKOFF_ENABLED === 'true',
+        captain_kpi_gap_kickoff_enabled: !scheduledAutonomyPaused && process.env.CAPTAIN_KPI_GAP_KICKOFF_ENABLED === 'true',
+        market_sensing_enabled: !scheduledAutonomyPaused && process.env.MARKET_SENSING_ENABLED === 'true',
         telegram_chat_id_present: !!process.env.TELEGRAM_CHAT_ID,
         telegram_bot_token_present: !!process.env.TELEGRAM_BOT_TOKEN,
         agentmail_configured: !!process.env.AGENTMAIL_API_KEY,

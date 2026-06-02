@@ -260,6 +260,19 @@ async function start() {
     const { checkAllClients } = require('./services/replyDetector');
     const calendarService = require('./services/googleCalendar');
     const jobHealth = require('./services/jobHealth');
+
+    // Emergency spend brake. Scheduled autonomy stays paused unless production
+    // explicitly sets SCHEDULED_AUTONOMY_PAUSED=false.
+    function scheduledAutonomyPaused() {
+      return process.env.SCHEDULED_AUTONOMY_PAUSED !== 'false';
+    }
+
+    function markScheduledPause(jobName) {
+      jobHealth.markSkipped(jobName, 'SCHEDULED_AUTONOMY_PAUSED default-on emergency spend brake', {
+        paused: true,
+      });
+    }
+
     let _replyDetectorRunning = false;
     setInterval(() => {
       // Skip if previous run hasn't finished — prevents overlap under slow Gmail API
@@ -473,6 +486,10 @@ async function start() {
 
     async function runAutoApprovalRecovery() {
       if (_autoApprovalRecoveryRunning) return;
+      if (scheduledAutonomyPaused()) {
+        markScheduledPause('auto_approval_recovery');
+        return;
+      }
       _autoApprovalRecoveryRunning = true;
       try {
         if (process.env.AUTO_APPROVAL_RECOVERY_ENABLED !== 'true') {
@@ -533,6 +550,10 @@ async function start() {
     let _poolEmailEnrichmentRunning = false;
     async function runPoolEmailEnrichmentCron() {
       if (_poolEmailEnrichmentRunning) return;
+      if (scheduledAutonomyPaused()) {
+        markScheduledPause('pool_email_enrichment');
+        return;
+      }
       if (process.env.POOL_EMAIL_ENRICHMENT_ENABLED !== 'true') {
         jobHealth.markSkipped('pool_email_enrichment', 'POOL_EMAIL_ENRICHMENT_ENABLED not true; no enrichment, no spend', { disabled: true });
         return;
@@ -607,6 +628,10 @@ async function start() {
     let _dbBuilderLastFiredKey = null;
     setTimeout(() => {
       setInterval(() => {
+        if (scheduledAutonomyPaused()) {
+          markScheduledPause('db_builder');
+          return;
+        }
         const now = new Date();
         const utcHour = now.getUTCHours();
         const utcMin = now.getUTCMinutes();
@@ -1611,6 +1636,24 @@ none from this broken report; check app truth before approving batches.`;
 
     // Poll every 10 minutes — each function self-guards against running outside its window
     setInterval(() => {
+      if (scheduledAutonomyPaused()) {
+        [
+          'research_enrichment',
+          'morning_brief',
+          'weekly_review',
+          'daily_reflections',
+          'daily_kickoff',
+          'captain_eod_brief',
+          'stuck_state_monitor',
+          'market_sensing',
+          'quality_tuner',
+          'soft_reject_purge',
+          'enforcer_teaching',
+          'captain_directive_sweep',
+          'kpi_gap_kickoff',
+        ].forEach(markScheduledPause);
+        return;
+      }
       runResearchEnrichment()
         .then(result => {
           if (result?.blocked) jobHealth.markSkipped('research_enrichment', result.reason || 'research enrichment blocked', result);
@@ -1832,6 +1875,11 @@ Return JSON: {"subject":"...","body":"..."}`,
     // MYT) and before Research Beaver's 08:30 run, so stale leads clear first
     // without spending from yesterday's LLM budget window.
     function scheduleLinkedInSweep() {
+      if (scheduledAutonomyPaused()) {
+        markScheduledPause('linkedin_sweep');
+        logger.warn({ msg: 'LinkedIn stale sweep not scheduled because SCHEDULED_AUTONOMY_PAUSED is active' });
+        return;
+      }
       const now = new Date();
       const myt = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur' }));
       const target = new Date(myt);

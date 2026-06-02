@@ -250,6 +250,10 @@ describe('P0 stabilization contracts', () => {
 
     expect(index).toContain("CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'");
     expect(index).toContain("CAPTAIN_KPI_GAP_KICKOFF_ENABLED !== 'true'");
+    expect(index).toContain("process.env.SCHEDULED_AUTONOMY_PAUSED !== 'false'");
+    expect(index).toContain('SCHEDULED_AUTONOMY_PAUSED default-on emergency spend brake');
+    expect(index).toContain("markScheduledPause('db_builder')");
+    expect(index).toContain("markScheduledPause('linkedin_sweep')");
     expect(index).toContain('CAPTAIN_DAILY_KICKOFF_ENABLED disabled; refusing KPI-gap kickoff');
     expect(index).toContain("MARKET_SENSING_ENABLED !== 'true'");
     expect(service('../.env.example')).toContain('CAPTAIN_KPI_GAP_KICKOFF_ENABLED=false');
@@ -468,6 +472,8 @@ describe('P0 stabilization contracts', () => {
     expect(postDeployCheck).toContain("getJson('/health')");
     expect(postDeployCheck).toContain("getJson('/api/autonomous/system-health'");
     expect(postDeployCheck).toContain('EXPECT_DAILY_KICKOFF_ENABLED');
+    expect(autonomous).toContain('scheduled_autonomy_paused: scheduledAutonomyPaused');
+    expect(postDeployCheck).toContain('SCHEDULED_AUTONOMY_PAUSED');
     expect(postDeployCheck).toContain('EXPECT_KPI_GAP_KICKOFF_ENABLED');
     expect(postDeployCheck).toContain("jobStatus(lastHealth, 'kpi_gap_kickoff')");
     expect(postDeployCheck).toContain('WAIT_FOR_DEPLOY_SECONDS');
