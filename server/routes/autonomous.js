@@ -1685,9 +1685,12 @@ async function _runAutonomousKickoffInner(clientId) {
             [lead_id, clientId]
           );
 
+          const escalationFirstName = escalation.lead_name?.split(' ')[0] || 'there';
           const channelInstructions = escalation.new_channel === 'email'
-            ? `FORMAT (email — new channel intro): Hi ${escalation.lead_name?.split(' ')[0]}, {body — max 60 words}. Regards, {sender}. This is the FIRST email to this person (previous outreach was on ${escalation.original_channel}). Reference that you've reached out before but keep it natural, not desperate.`
-            : `FORMAT (${escalation.new_channel} DM — new channel intro): {body — max 40 words. No greeting, no sign-off.} This is a NEW channel (previous was ${escalation.original_channel}). Keep it fresh, not a copy of the ${escalation.original_channel} messages.`;
+            ? `FORMAT (email — new channel intro): Hi ${escalationFirstName}, {body — max 60 words}. Regards, {sender}. This is the FIRST email to this person (previous outreach was on ${escalation.original_channel}). Reference that you've reached out before but keep it natural, not desperate.`
+            : escalation.new_channel === 'linkedin'
+              ? `FORMAT (LinkedIn DM — new channel intro): Hi ${escalationFirstName}, saw you {specific signal or observable context}. {body — max 40 words total, end with one diagnostic question. No sign-off.} This is a NEW channel (previous was ${escalation.original_channel}). Keep it fresh, not a copy of the ${escalation.original_channel} messages.`
+              : `FORMAT (${escalation.new_channel} DM — new channel intro): {body — max 40 words. No greeting, no sign-off.} This is a NEW channel (previous was ${escalation.original_channel}). Keep it fresh, not a copy of the ${escalation.original_channel} messages.`;
 
           const previousSummary = prevMessages.map((m, i) =>
             `Message ${i + 1} (${m.channel}): ${(m.body || '').substring(0, 120)}`

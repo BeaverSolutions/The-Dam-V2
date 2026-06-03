@@ -1,6 +1,6 @@
 'use strict';
 
-// Runtime loader for the v1.0 cold-outreach rules + approved proof numbers.
+// Runtime loader for the v1.1 cold-outreach rules + approved proof numbers.
 // Read at module-init, cached for the life of the process. Server restart
 // picks up rule edits. reloadRules() is exposed for dev workflows that want
 // to repull without a restart.

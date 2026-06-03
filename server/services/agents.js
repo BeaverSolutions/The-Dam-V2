@@ -28,7 +28,7 @@ const { parseRequestedLeadCount } = require('../utils/requestedLeadCount');
 // pipeline paths now reference this single definition.
 const CHANNEL_HINTS = {
   email: 'Write a cold email following the MANDATORY DAY 0 TEMPLATE exactly. Must have: subject line "{company_name} x {lead_company}", "Hi {first_name}," greeting, congratulation/hook paragraph, pain bridge paragraph, one question. Do NOT write your own sign-off — end the body at the question; the system appends the "Regards," / sender-name close deterministically. Under 80 words body.',
-  linkedin: 'Write a SHORT LinkedIn DM (NOT an email). 2-3 sentences max, under 50 words total. No subject line. No greeting like "Hi Name,". No sign-off (no "Regards,", no name at end). Just a casual peer-to-peer message ending with one question.',
+  linkedin: 'Write a SHORT LinkedIn DM (NOT an email). Exactly 3 lines, under 50 words total. No subject line. Start line 1 with "Hi {first_name}, saw you {specific signal}." Line 2 is short outbound context. Line 3 is one diagnostic question. No sign-off (no "Regards,", no name at end). End on the question.',
   instagram: 'Write a casual Instagram DM. 1-2 sentences, under 30 words. No greeting, no sign-off. Reference something about their company. End with a casual question. Most informal channel.',
 };
 
@@ -947,7 +947,7 @@ function buildSalesSignalContext({ lead = {}, channel = 'email' } = {}) {
   const signalPackage = getSignalPackage(lead);
   if (!signalPackage) return '';
   const channelLine = channel === 'linkedin'
-    ? 'Channel limit: LinkedIn DM, 2-3 sentences, under 50 words, no subject, no sign-off.'
+    ? 'Channel limit: LinkedIn DM, exactly 3 lines, under 50 words, start with "Hi [first name], saw you [specific signal].", no subject, no sign-off, end on one diagnostic question.'
     : channel === 'instagram'
       ? 'Channel limit: Instagram DM, 1-2 sentences, under 30 words, no sign-off.'
       : 'Channel limit: Email body under 80 words, system appends the sign-off.';
@@ -2357,6 +2357,7 @@ async function rangerDraft(clientId, { lead_name, lead_company, lead_title, lead
 
     const rangerSenderName = resolveSenderName(clientId, persona) || 'there';
     const isEmail = channel === 'email';
+    const isLinkedIn = channel === 'linkedin';
 
     const channelInstructions = isEmail
       ? `Write a Day 0 cold EMAIL that passes ALL your own gates:
@@ -2371,6 +2372,19 @@ async function rangerDraft(clientId, { lead_name, lead_company, lead_title, lead
 - Reads like a human, not a vendor
 - No banned phrases
 - Close the email with "Regards," on one line, then "${rangerSenderName}" on the next line.`
+      : isLinkedIn
+        ? `Write a Day 0 cold LinkedIn DM that passes ALL your own gates:
+- Exactly 3 lines, under 50 words total
+- Line 1 starts with: Hi [first name only], saw you [specific signal].
+- Line 2 gives short outbound context tied to one approved pain
+- Line 3 is exactly 1 diagnostic question and the message ends there
+- NO subject line
+- NO sign-off, no "Regards,", no name at the end
+- No em dashes (—), no bullet points
+- No product or service name in the opener
+- No soft CTAs, no banned phrases
+- Specific reference to a real signal about this company
+- Casual peer-to-peer voice, not a vendor`
       : `Write a SHORT ${channel} DM (this is a ${channel} message, NOT an email) that passes ALL your own gates:
 - 2-3 sentences, under 50 words total
 - NO subject line. NO "Hi [name]," greeting.
@@ -2384,6 +2398,8 @@ async function rangerDraft(clientId, { lead_name, lead_company, lead_title, lead
 
     const jsonShape = isEmail
       ? `Return JSON only: {"subject":"Subject line (max 6 words, no em dashes)","body":"Full email: Hi [name] greeting, body, one question, then close with Regards, then ${rangerSenderName}"}`
+      : isLinkedIn
+        ? `Return JSON only: {"subject":null,"body":"The three-line LinkedIn DM text: Hi [name], saw you [specific signal]. Then one short outbound-context line. Then one diagnostic question. No sign-off."}`
       : `Return JSON only: {"subject":null,"body":"The ${channel} DM text — 2-3 sentences, no greeting, no sign-off, ending on the question"}`;
 
     const result = await callAgent(

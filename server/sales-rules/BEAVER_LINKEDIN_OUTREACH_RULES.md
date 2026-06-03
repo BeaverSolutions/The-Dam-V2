@@ -1,12 +1,12 @@
 <!-- DEPLOYED COPY. Edit MJxClaude/sales-assets/ first, then sync here. -->
 <!-- Sync direction: MJxClaude/sales-assets/ → beavrdam/server/sales-rules/ -->
-<!-- Last sync: 2026-05-06 -->
+<!-- Last sync: 2026-06-04 -->
 
-# Beaver Solutions / BeavrDam LinkedIn Outreach Rules — v1.0
+# Beaver Solutions / BeavrDam LinkedIn Outreach Rules - v1.1
 
 > For use by the Sales Beaver agent (BeavrDam) when drafting any LinkedIn message on behalf of MJ / Beaver Solutions.
-> v1.0 mirrors Emplifive Outreach Rules v2.3 structure, adapted for BeavrDam's pain set (outbound itself) and pre-proof state.
-> Last updated: 2026-05-06
+> v1.1 keeps the Emplifive Outreach Rules v2.3 proof discipline, adapted for BeavrDam's pain set (outbound itself), and applies MJ's three-line LinkedIn DM standard.
+> Last updated: 2026-06-04
 > **MANDATORY: Cowork-Beaver and the Sales Beaver agent must Read this file at every session start / every drafting cycle, before generating any DM.**
 
 ---
@@ -19,7 +19,17 @@
 - Used "Most founders I talk to..." (recognised cold-outreach tell)
 - Asked an essay-question ("At what point does the time spent...") that requires reflection, not a 5-second reply
 
-v1.0 imports the Emplifive v2.3 structural framework (verifiable trigger + Path A/Path B split + opt-out + validators) and adapts it to BeavrDam's product reality: BeavrDam sells outbound automation, so every value hook anchors to outbound pain (not the prospect's vertical-specific pain).
+v1.0 imported the Emplifive v2.3 structural framework (verifiable trigger + Path A/Path B split + validators) and adapted it to BeavrDam's product reality: BeavrDam sells outbound automation, so every value hook anchors to outbound pain (not the prospect's vertical-specific pain).
+
+## v1.1 update (2026-06-04)
+
+Cold LinkedIn DMs now use MJ's live approval standard:
+
+1. Open with `Hi [First Name], saw you [specific signal].`
+2. Add one short outbound-context line tied to an approved BeavrDam pain.
+3. End with one diagnostic question only.
+
+No extra opt-out line. No second ask. No sign-off. The DM ends on the question.
 
 ### Two key differences from Emplifive v2.3
 
@@ -34,9 +44,9 @@ Every message moves the conversation toward a booked discovery call OR a qualifi
 
 ---
 
-## The 4-part Cold Message Structure
+## The Cold LinkedIn DM Structure
 
-Every cold first message has four parts. If any required part is missing, regenerate.
+Every cold LinkedIn first message has one three-line structure. If any required part is missing, regenerate.
 
 ### Part 1 — Trigger anchor (mandatory)
 
@@ -69,7 +79,22 @@ When the file is populated, the rule mirrors Emplifive v2.3:
 
 For now, every cold DM goes Path B.
 
-### Part 3 — The ask (Path A or Path B)
+### Three-line LinkedIn DM standard
+
+```
+Hi [First Name], saw you [specific signal].
+[Short outbound context tied to one approved BeavrDam pain.]
+[One diagnostic question only]?
+```
+
+Rules:
+- Line 1 MUST start with `Hi [First Name], saw you`.
+- The signal can be a verified recent trigger or a real observable company/role fact from the provided context.
+- Line 2 must connect that signal to outbound, prospecting, pipeline, or founder/SDR time pressure.
+- Line 3 must be one diagnostic question only.
+- No extra opt-out line. No sign-off. End on the question.
+
+### Part 3 - The ask (Path A or Path B)
 
 #### Path A — Deliverable-led (DISABLED for Beaver until Path 2 has a real asset)
 "Mind if I send the [real asset]?" Currently no Beaver assets in production. Skip.
@@ -92,14 +117,11 @@ Approved Path B question patterns for Beaver:
 - "What reply rate are you seeing on cold LinkedIn templates lately?"
 - "How often does outbound become a Friday afternoon problem, weekly or rarely?"
 
-### Part 4 — Opt-out clause (varied)
+### Opt-out clause
 
-Approved variants (rotate across batch — never the same closer twice in a row):
-- "If outbound isn't a 2026 priority, no worries."
-- "Happy to drop it here, no obligation."
-- "If pipeline's full, no rush."
-- "If timing's off, no need to reply."
-- Implicit (omit when the question is already low-cost)
+Cold LinkedIn DMs do not use a separate opt-out clause. The diagnostic question is already the low-pressure close.
+
+For email or later follow-ups only, a pressure-relief line may be used when it does not add a second ask.
 
 ---
 
@@ -132,11 +154,11 @@ Warmth = specificity + acknowledgment, NOT particles. At most one light marker i
 
 ### DM shape (LinkedIn, Instagram, WhatsApp)
 Three lines:
-1. Specific observation about THEM (proves you looked).
-2. The one relevant thing you noticed/do.
-3. Low-friction ask.
+1. `Hi [First Name], saw you [specific signal].`
+2. Short outbound context tied to one approved BeavrDam pain.
+3. One diagnostic question only.
 
-No formal greeting line ("Hi Name —" inline opener acceptable). NO sign-off. End on the ask.
+No extra opt-out line. NO sign-off. End on the question.
 
 ### Email shape
 ```
@@ -181,11 +203,11 @@ If the writer agent generates a hook that anchors to the prospect's vertical-spe
 
 ### GOOD — DM (LinkedIn)
 
-> Hi Sarah — saw your team's running campaigns across 4 markets manually.
-> We automate the repetitive 80%, keep the judgment calls human.
-> How many hours a week is the team losing to the cross-market coordination?
+> Hi Sarah, saw your team running campaigns across 4 markets manually.
+> Cross-market work usually pushes outbound into spare hours.
+> How many hours a week is the team losing to outreach now?
 
-Three lines. Specific observation (4 markets, manual). One relevant thing (automate 80%, keep judgment human). RELATABLE diagnostic question (hours/week — answerable in 1-3 words). No greeting line break. No sign-off. ≤12 words/sentence. **Not** "Worth a look?" — that's lazy yes/no.
+Three lines. Specific observation (4 markets, manual). Outbound-context line tied to team-time pain. RELATABLE diagnostic question (hours/week, answerable in 1-3 words). No extra opt-out line. No sign-off. End on the question. **Not** "Worth a look?" - that's lazy yes/no.
 
 ### GOOD — Email
 
@@ -399,7 +421,7 @@ After FU3 with no reply: move to nurture, stop. Re-engage only on a fresh trigge
 | 0 | LinkedIn connection request + note | ≤300 chars, observation only, no ask |
 | 0 (same day) | Email if Hunter-verified | Full 4-part Path B structure |
 | 2 (after LI accept) | LinkedIn DM | Reference connection accept + light nudge on email |
-| 4 | LinkedIn DM | Different trigger angle, full Path B |
+| 4 | LinkedIn DM | Different trigger angle, same three-line DM standard |
 | 7 | WhatsApp if number publicly available | Casual one-liner, mobile formatting |
 | 14 | LinkedIn DM | FU3 (escalate or value-leave) |
 
@@ -491,14 +513,14 @@ After stopping, re-engage ONLY on a fresh trigger event.
 
 ---
 
-## v1.0 in one sentence
+## v1.1 in one sentence
 
-Every cold message: verifiable trigger from their last 60 days + Path B (1-3-word-answerable diagnostic question grounded in one of the 5 approved outbound pains) + varied opt-out. All numbers from `BEAVER_PROOF_NUMBERS.md`. All drafts pass the banned-phrase regex. Path A (proof anchor) stays disabled until at least one client outcome is VERIFIED. If the required-input contract isn't satisfied, drop the prospect — never fall back to generic.
+Every cold LinkedIn DM: `Hi [First Name], saw you [specific signal].` + short outbound context tied to one approved BeavrDam pain + one diagnostic question only. No extra opt-out line; end on the question. All numbers from `BEAVER_PROOF_NUMBERS.md`. All drafts pass the banned-phrase regex. Path A (proof anchor) stays disabled until at least one client outcome is VERIFIED. If the required-input contract isn't satisfied, drop the prospect - never fall back to generic.
 
 ---
 
 ## Roadmap
 
-- **v1.1 (when first client outcome verified):** enable Path A. Update BEAVER_PROOF_NUMBERS.md with first VERIFIED entry. Path A still gated on segment match.
-- **v1.2 (when 3+ assets in production library):** enable real-deliverable Path A asks. Until then, no "mind if I send the walkthrough" without a real walkthrough URL.
+- **v1.2 (when first client outcome verified):** enable Path A. Update BEAVER_PROOF_NUMBERS.md with first VERIFIED entry. Path A still gated on segment match.
+- **v1.3 (when 3+ assets in production library):** enable real-deliverable Path A asks. Until then, no "mind if I send the walkthrough" without a real walkthrough URL.
 - **v2.0 (when 50+ paying clients):** review whether to maintain Path B as default or shift to Path A primary.
