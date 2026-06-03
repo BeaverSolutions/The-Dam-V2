@@ -254,6 +254,13 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).toContain('the lead company is the agency/provider');
   });
 
+  it('normalises ICP title fields before decision-maker lookup', () => {
+    expect(src).toContain('function titlesFromIcp');
+    expect(src).toContain('const icpTitles = titlesFromIcp(icp)');
+    expect(src).not.toContain("(icp.job_titles || icp.who || '').split");
+    expect(src).not.toContain('(icp.job_titles || icp.who || "").split');
+  });
+
   it('keeps explicit industry prioritization helpers for deterministic ordering', () => {
     expect(src).toContain('function industryPriority');
     expect(src).toContain('professional service');
@@ -425,6 +432,16 @@ describe('countriesFromIcp', () => {
   it('extracts SG from Singapore text', () => {
     const r = countriesFromIcp({ countries: ['Singapore'] });
     expect(r.some(c => c.code === 'SG')).toBe(true);
+  });
+});
+
+describe('titlesFromIcp', () => {
+  it('normalises array and comma-separated ICP title fields without crashing', () => {
+    expect(signalHunt._test.titlesFromIcp({
+      job_titles: ['Founder', 'CEO'],
+      target_titles: 'Managing Director, Owner',
+      who: ['Head of Sales'],
+    })).toEqual(['Founder', 'CEO', 'Managing Director', 'Owner', 'Head of Sales']);
   });
 });
 

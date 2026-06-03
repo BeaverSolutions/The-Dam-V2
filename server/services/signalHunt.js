@@ -191,6 +191,17 @@ function industriesFromIcp(icp = {}) {
     .sort((a, b) => industryPriority(a) - industryPriority(b));
 }
 
+function titlesFromIcp(icp = {}) {
+  return [
+    ...listFrom(icp.job_titles),
+    ...listFrom(icp.target_titles),
+    ...listFrom(icp.titles),
+    ...listFrom(icp.who),
+  ]
+    .map(v => String(v).trim())
+    .filter(Boolean);
+}
+
 function industryPriority(value) {
   const s = String(value || '').toLowerCase();
   if (/\b(agency|digital|marketing|creative|media|advertising|professional service|consult)/i.test(s)) return 0;
@@ -846,7 +857,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   });
 
   // Step 4: For each signal, find the decision-maker
-  const icpTitles = (icp.job_titles || icp.who || '').split(',').map(t => t.trim()).filter(Boolean);
+  const icpTitles = titlesFromIcp(icp);
 
   for (const signal of uniqueSignals.slice(0, maxLeads * 2)) {
     if (leads.length >= maxLeads) break;
@@ -1075,6 +1086,7 @@ module.exports = {
     signalFamilyForType,
     buildSignalQueriesFromIcp,
     sourceAwareQueriesForCountry,
+    titlesFromIcp,
     signalQuerySetHash,
   },
 };
