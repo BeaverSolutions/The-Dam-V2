@@ -232,31 +232,50 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
   const joinedIndustries = industries.join(' ').toLowerCase();
   const wantsAgency = /agency|digital|marketing|creative|media|advertising|content studio|pr firm/.test(joinedIndustries);
   const wantsTraining = /training|learning|l&d|coaching|skills|development/.test(joinedIndustries);
+  const currentYear = new Date().getUTCFullYear();
   const queries = [];
 
   if (wantsAgency && (code === 'MY' || code === 'SG')) {
     queries.push({
-      query: `site:marketingmagazine.com.my "${name}" ("agency" OR "independent agency" OR "agency of the year") ("founder" OR "CEO" OR "Managing Director")`,
+      query: `site:marketing-interactive.com "${name}" ("social media agency" OR "PR agency" OR "creative agency" OR "media agency") ("appointed" OR "retainer" OR "pitch") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
-      signal_id: 'agency_growth_publication',
+      signal_id: 'agency_client_win_or_growth',
       signal_family: 'expansion_growth',
       source_channel: 'industry_publication',
       tier: 'P1',
       country: code,
     });
     queries.push({
-      query: `site:marketing-interactive.com "${name}" ("independent agency" OR "agency of the year" OR "appointed" OR "launches")`,
+      query: `site:marketing-interactive.com "${name}" ("agency" OR "communications") ("launches" OR "expands" OR "enters" OR "names new leader") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
-      signal_id: 'agency_growth_publication',
+      signal_id: 'agency_client_win_or_growth',
       signal_family: 'expansion_growth',
       source_channel: 'industry_publication',
       tier: 'P1',
       country: code,
     });
     queries.push({
-      query: `site:campaignasia.com "${name}" ("independent agency" OR "agency of the year" OR "growth" OR "appointed")`,
+      query: `site:marketingmagazine.com.my "${name}" ("agency" OR "communications") ("appoints" OR "promotes" OR "general manager" OR "CEO") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
-      signal_id: 'agency_growth_publication',
+      signal_id: 'agency_client_win_or_growth',
+      signal_family: 'leadership_org_change',
+      source_channel: 'industry_publication',
+      tier: 'P1',
+      country: code,
+    });
+    queries.push({
+      query: `site:marketingmagazine.com.my "${name}" ("agency" OR "communications") ("wins" OR "appointed" OR "retainer" OR "launches") ${currentYear}`,
+      signal_type: 'industry_publication_agency_signal',
+      signal_id: 'agency_client_win_or_growth',
+      signal_family: 'expansion_growth',
+      source_channel: 'industry_publication',
+      tier: 'P1',
+      country: code,
+    });
+    queries.push({
+      query: `site:campaignasia.com "${name}" ("agency" OR "independent agency" OR "growth" OR "40 Under 40") ${currentYear}`,
+      signal_type: 'industry_publication_agency_signal',
+      signal_id: 'agency_client_win_or_growth',
       signal_family: 'expansion_growth',
       source_channel: 'industry_publication',
       tier: 'P1',
@@ -266,7 +285,7 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
 
   if (wantsTraining && code === 'MY') {
     queries.push({
-      query: `site:digitalnewsasia.com "${name}" ("training" OR "upskilling" OR "skills") ("launches" OR "expands" OR "partners")`,
+      query: `site:digitalnewsasia.com "${name}" ("training" OR "upskilling" OR "skills") ("launches" OR "expands" OR "partners") ${currentYear}`,
       signal_type: 'training_growth_signal',
       signal_id: 'training_growth_publication',
       signal_family: 'expansion_growth',
@@ -572,11 +591,35 @@ async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null
   };
 }
 
+function signalExtractionGuidance(query = {}) {
+  const signalType = String(query.signal_type || '').toLowerCase();
+  const sourceChannel = String(query.source_channel || '').toLowerCase();
+  if (sourceChannel === 'industry_publication' || /agency|publication/.test(signalType)) {
+    return `
+Agency-publication extraction guidance:
+- If a result says a brand appointed, retained, reappointed, or picked an agency/PR/social/creative/media partner, extract the appointed agency as the company, not the brand client.
+- Treat agency client wins, retainer appointments, market entry, new office/team launch, senior leadership appointments, and named growth/capability expansion as real buying signals.
+- Do not reject a signal merely because the source is an industry publication instead of the company's own site.
+- Prefer current-year and dated results. If the result date is stale and there is no ongoing appointment/retainer/expansion, skip it.
+- For multi-company roundups, include only companies with a named event and source URL.`;
+  }
+  if (/training|upskilling|skills|learning/.test(signalType)) {
+    return `
+Training-publication extraction guidance:
+- Extract the training, coaching, upskilling, L&D, or skills provider as the company when it launches, expands, partners, or announces a new programme.
+- Skip conference listings, generic education articles, and government-only programmes unless a named private provider is clearly involved.`;
+  }
+  return '';
+}
+
 /**
  * Extract companies + signal data through the budgeted Research Beaver path.
  */
-async function extractSignalsFromResults(clientId, results, signal_type, geoText = 'the configured target geographies') {
+async function extractSignalsFromResults(clientId, results, queryContext = {}, geoText = 'the configured target geographies') {
   if (!results || results.length === 0) return [];
+  const query = typeof queryContext === 'string' ? { signal_type: queryContext } : (queryContext || {});
+  const signal_type = query.signal_type || 'buying_signal';
+  const extractionGuidance = signalExtractionGuidance(query);
 
   const snippetsForBudgetedAgent = results.map((r, i) =>
     `[${i + 1}] ${r.title}\n${r.snippet}\nURL: ${r.link}${r.date ? `\nDate: ${r.date}` : ''}`
@@ -589,6 +632,8 @@ Signal type: ${signal_type}
 
 Search results:
 ${snippetsForBudgetedAgent}
+
+${extractionGuidance}
 
 For each result containing a REAL buying signal from a company in ${geoText}, return JSON array:
 [{
@@ -606,7 +651,9 @@ For each result containing a REAL buying signal from a company in ${geoText}, re
 Rules:
 - Only include REAL signals from companies in ${geoText}
 - Ignore generic articles, listicles, job boards with no specific company
+- For agency/client-win articles, the lead company is the agency/provider being appointed or expanding, not the brand that hired them
 - Confidence 0.9 = very clear specific company + event, 0.5 = weak
+- Use the result date as signal_date when available; use empty string if no date is visible
 - If no real signals found, return []
 - Return ONLY the JSON array, nothing else`, { clientId });
     if (Array.isArray(parsed)) return parsed;
@@ -687,6 +734,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
 
   const allSignals = [];
   const leads = [];
+  const rawSample = [];
   let queriesRun = 0;
   let rawResultsTotal = 0;
   let paidQueriesRemaining = Number.isFinite(Number(maxPaidQueries))
@@ -718,9 +766,19 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       const results = await searchOpenWeb(q.query, config.max_results_per_query || 5, { country, clientId });
       const safeResults = Array.isArray(results) ? results : [];
       rawResultsTotal += safeResults.length;
+      for (const result of safeResults.slice(0, 2)) {
+        if (rawSample.length >= 12) break;
+        rawSample.push({
+          query: q.query,
+          title: String(result.title || '').slice(0, 160),
+          url: String(result.link || '').slice(0, 240),
+          source: String(result.source || '').slice(0, 80),
+          date: result.date || null,
+        });
+      }
       if (safeResults.length === 0) continue;
 
-      const extracted = await extractSignalsFromResults(clientId, safeResults, q.signal_type, geoText);
+      const extracted = await extractSignalsFromResults(clientId, safeResults, q, geoText);
       const validSignals = extracted.filter(s => s.company && s.confidence >= 0.5);
 
       // Assign tier from the query config
@@ -761,6 +819,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
         paid_query_budget_remaining: paidQueriesRemaining,
         raw_results_total: rawResultsTotal,
+        raw_sample: rawSample,
         blocker,
         total_signals: 0,
         unique_companies: 0,
@@ -885,6 +944,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
       paid_query_budget_remaining: paidQueriesRemaining,
       raw_results_total: rawResultsTotal,
+      raw_sample: rawSample,
       blocker: leads.length === 0 ? 'contacts_zero' : null,
       total_signals: allSignals.length,
       unique_companies: uniqueSignals.length,
