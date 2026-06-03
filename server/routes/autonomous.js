@@ -1114,6 +1114,99 @@ router.get('/running', requireInternalKey, (req, res) => {
   return res.json({ data: { running: _runningKickoffs.has(client_id), client_id } });
 });
 
+/* ─── POST /api/autonomous/v2-1/research-proof ─────────────
+ * Bounded V2.1 validation trigger. This proves fresh Research can create
+ * signal_package-backed leads without handing them to Sales, Enforcer, or send.
+ *
+ * Body: { client_id }
+ * Auth: x-internal-key
+ */
+router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
+  const clientId = req.body?.client_id;
+  if (!clientId) {
+    return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+  }
+
+  const proofLimit = 5;
+  const proofCounts = async () => {
+    const { rows: [row] } = await pool.query(
+      `WITH bounds AS (
+         SELECT
+           (date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') AS start_at,
+           ((date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') + INTERVAL '1 day') AS end_at
+       )
+       SELECT
+         (SELECT COUNT(*)::int FROM leads
+           WHERE client_id = $1 AND deleted_at IS NULL) AS leads_total,
+         (SELECT COUNT(*)::int FROM leads l, bounds b
+           WHERE l.client_id = $1 AND l.deleted_at IS NULL
+             AND l.created_at >= b.start_at AND l.created_at < b.end_at) AS leads_created_today,
+         (SELECT COUNT(*)::int FROM leads l, bounds b
+           WHERE l.client_id = $1 AND l.deleted_at IS NULL
+             AND l.created_at >= b.start_at AND l.created_at < b.end_at
+             AND COALESCE(l.metadata, '{}'::jsonb) ? 'signal_package') AS packaged_leads_created_today,
+         (SELECT COUNT(*)::int FROM messages
+           WHERE client_id = $1) AS messages_total,
+         (SELECT COUNT(*)::int FROM approvals
+           WHERE client_id = $1) AS approvals_total,
+         (SELECT COUNT(*)::int FROM send_queue
+           WHERE client_id = $1) AS send_queue_total`,
+      [clientId]
+    );
+    return row || {};
+  };
+  const n = value => Number(value) || 0;
+
+  try {
+    const { rows: icpRows } = await pool.query(
+      `SELECT content FROM agent_memory
+        WHERE client_id = $1 AND agent = 'director' AND key = 'icp'
+        LIMIT 1`,
+      [clientId]
+    );
+    const icp = icpRows[0]?.content || {};
+    const before = await proofCounts();
+    const { runSignalHunt, saveSignalLeads } = require('../services/signalHunt');
+    const leads = await runWithClientContext(clientId, () => runSignalHunt(clientId, {
+      maxLeads: proofLimit,
+      icp,
+      maxPaidQueries: proofLimit,
+    }));
+    const saved = await saveSignalLeads(clientId, leads);
+    const after = await proofCounts();
+
+    return res.json({
+      data: {
+        client_id: clientId,
+        mode: 'v2_1_research_proof',
+        requested_limit: proofLimit,
+        candidates: Array.isArray(leads) ? leads.length : 0,
+        saved: saved.length,
+        saved_leads: saved.map(l => ({
+          id: l.id,
+          name: l.name,
+          company: l.company,
+          signal_tier: l.signal_tier,
+          has_signal_package: !!l.metadata?.signal_package,
+        })),
+        before,
+        after,
+        deltas: {
+          leads_delta: n(after.leads_total) - n(before.leads_total),
+          leads_created_today_delta: n(after.leads_created_today) - n(before.leads_created_today),
+          packaged_leads_created_today_delta: n(after.packaged_leads_created_today) - n(before.packaged_leads_created_today),
+          messages_delta: n(after.messages_total) - n(before.messages_total),
+          approvals_delta: n(after.approvals_total) - n(before.approvals_total),
+          send_queue_delta: n(after.send_queue_total) - n(before.send_queue_total),
+        },
+      },
+    });
+  } catch (err) {
+    logger.error({ msg: 'v2-1 research proof failed', client_id: clientId, err: err.message });
+    return res.status(500).json({ error: err.message, code: 'V2_1_RESEARCH_PROOF_FAILED' });
+  }
+});
+
 /* ─── GET /api/autonomous/vp-schema — Explorium tool catalog (diagnostic) ── */
 router.get('/vp-schema', requireInternalKey, async (req, res) => {
   const { client_id } = req.query;
