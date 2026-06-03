@@ -18,8 +18,19 @@
 
 const pool = require('../db/pool');
 
+function todayKualaLumpurDate() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kuala_Lumpur',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const byType = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${byType.year}-${byType.month}-${byType.day}`;
+}
+
 async function recountKpi(clientId, date = null) {
-  const today = date || new Date().toISOString().split('T')[0];
+  const today = date || todayKualaLumpurDate();
 
   // Instrumentation: log entry so we can verify the function is being hit
   // (separate connection so it works even if the main pool path is blocked)
@@ -43,35 +54,50 @@ async function recountKpi(clientId, date = null) {
     // kpi_met is a GENERATED column (outreach_sent >= target) — DO NOT update it.
     // Postgres rejects with "column kpi_met can only be updated to DEFAULT" otherwise.
     const updateRes = await client.query(
-      `UPDATE daily_kpi SET
+      `WITH bounds AS (
+         SELECT
+           $2::date AS kpi_date,
+           ($2::date::timestamp AT TIME ZONE 'Asia/Kuala_Lumpur') AS start_at,
+           (($2::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Kuala_Lumpur') AS end_at
+       )
+       UPDATE daily_kpi SET
          outreach_sent = (
-           SELECT COUNT(*) FROM messages
-           WHERE client_id = $1 AND status = 'sent'
-             AND DATE(COALESCE(sent_at, updated_at)) = $2
+            SELECT COUNT(*) FROM messages
+            WHERE client_id = $1 AND status = 'sent'
+              AND sent_at IS NOT NULL
+              AND sent_at >= bounds.start_at
+              AND sent_at < bounds.end_at
          ),
          outreach_email = (
-           SELECT COUNT(*) FROM messages
-           WHERE client_id = $1 AND status = 'sent' AND channel = 'email'
-             AND DATE(COALESCE(sent_at, updated_at)) = $2
+            SELECT COUNT(*) FROM messages
+            WHERE client_id = $1 AND status = 'sent' AND channel = 'email'
+              AND sent_at IS NOT NULL
+              AND sent_at >= bounds.start_at
+              AND sent_at < bounds.end_at
          ),
          outreach_linkedin = (
-           SELECT COUNT(*) FROM messages
-           WHERE client_id = $1 AND status = 'sent' AND channel = 'linkedin'
-             AND DATE(COALESCE(sent_at, updated_at)) = $2
+            SELECT COUNT(*) FROM messages
+            WHERE client_id = $1 AND status = 'sent' AND channel = 'linkedin'
+              AND sent_at IS NOT NULL
+              AND sent_at >= bounds.start_at
+              AND sent_at < bounds.end_at
          ),
          leads_found = (
-           SELECT COUNT(*) FROM leads
-           WHERE client_id = $1
-             AND deleted_at IS NULL
-             AND DATE(created_at) = $2
+            SELECT COUNT(*) FROM leads
+            WHERE client_id = $1
+              AND deleted_at IS NULL
+              AND created_at >= bounds.start_at
+              AND created_at < bounds.end_at
          ),
          replies_received = (
-           SELECT COUNT(*) FROM messages
-           WHERE client_id = $1 AND reply_detected_at IS NOT NULL
-             AND DATE(reply_detected_at) = $2
+            SELECT COUNT(*) FROM messages
+            WHERE client_id = $1 AND reply_detected_at IS NOT NULL
+              AND reply_detected_at >= bounds.start_at
+              AND reply_detected_at < bounds.end_at
          ),
          updated_at = NOW()
-       WHERE client_id = $1 AND date = $2`,
+       FROM bounds
+       WHERE client_id = $1 AND date = bounds.kpi_date`,
       [clientId, today]
     );
 
@@ -98,4 +124,4 @@ async function recountKpi(clientId, date = null) {
   }
 }
 
-module.exports = { recountKpi };
+module.exports = { recountKpi, todayKualaLumpurDate };
