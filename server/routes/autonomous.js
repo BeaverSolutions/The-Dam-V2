@@ -251,13 +251,49 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
              AND status = 'new'
              AND (first_contacted_at IS NULL OR first_contacted_at < NOW() - INTERVAL '14 days')
              AND deleted_at IS NULL
+             AND NULLIF(BTRIM(name), '') IS NOT NULL
+             AND NULLIF(BTRIM(company), '') IS NOT NULL
+             AND LOWER(BTRIM(company)) NOT IN ('unknown', 'unknown company', 'independent', 'self-employed', 'self employed', 'stealth', 'confidential')
+             AND (email IS NOT NULL OR linkedin_url IS NOT NULL)
+             AND (
+               (email IS NOT NULL AND (email_verified IS TRUE OR email_source = 'hunter'))
+               OR (
+                 linkedin_url IS NOT NULL
+                 AND NOT EXISTS (
+                   SELECT 1 FROM messages ml
+                    WHERE ml.client_id = leads.client_id
+                      AND ml.lead_id = leads.id
+                      AND ml.channel = 'linkedin'
+                      AND ml.status NOT IN ('deleted')
+                 )
+               )
+             )
+             AND (
+               SELECT COUNT(*)::int
+                 FROM messages mr
+                WHERE mr.client_id = leads.client_id
+                  AND mr.lead_id = leads.id
+                  AND mr.status IN ('rejected', 'ranger_rejected')
+             ) < 2
              AND NOT EXISTS (
                SELECT 1 FROM messages m WHERE m.lead_id = leads.id AND m.client_id = leads.client_id
-                 AND m.status IN ('pending_ranger', 'pending_approval', 'approved', 'pending_send', 'sending', 'sent')
+                  AND m.status IN (
+                    'pending_ranger', 'pending_approval', 'approved',
+                    'pending_send', 'sending', 'sent', 'delivered',
+                    'linkedin_requested', 'awaiting_accept'
+                  )
              )
-           ORDER BY
-             CASE WHEN signal_tier = 'P1' THEN 1 WHEN signal_tier = 'P2' THEN 2 ELSE 3 END,
-             CASE WHEN email IS NOT NULL THEN 0 ELSE 1 END,
+             AND NOT EXISTS (
+               SELECT 1 FROM pipeline_traces pt
+                WHERE pt.client_id = leads.client_id AND pt.lead_id = leads.id
+                  AND pt.stage = 'enrolled'
+                  AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date =
+                      (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date
+             )
+             ${leadSelectionFeedbackExclusionSql('leads')}
+            ORDER BY
+              CASE WHEN signal_tier = 'P1' THEN 1 WHEN signal_tier = 'P2' THEN 2 ELSE 3 END,
+              CASE WHEN email IS NOT NULL THEN 0 ELSE 1 END,
              score DESC
            LIMIT $2`,
           [client_id, poolLimit]
