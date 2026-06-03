@@ -356,6 +356,9 @@ async function handleNonReply(clientId, ctx) {
         await pool.query(
           `UPDATE leads
            SET email_verified = false,
+               sequence_status = 'completed',
+               sequence_completed_at = NOW(),
+               next_followup_at = NULL,
                lead_tier = CASE WHEN linkedin_url IS NOT NULL AND linkedin_url <> '' THEN 'B' ELSE lead_tier END,
                metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
                updated_at = NOW()
@@ -367,6 +370,13 @@ async function handleNonReply(clientId, ctx) {
             }),
             leadId, clientId,
           ]
+        );
+
+        await pool.query(
+          `UPDATE followup_queue
+           SET status = 'cancelled', updated_at = NOW()
+           WHERE lead_id = $1 AND client_id = $2 AND status = 'pending'`,
+          [leadId, clientId]
         );
       }
 
