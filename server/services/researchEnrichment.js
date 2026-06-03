@@ -31,6 +31,7 @@ const { scoreAndPersist } = require('./qualityScorer');
 const { getTenantConfig } = require('./tenantConfig');
 const { checkBudget, isBudgetExceededError } = require('./budget');
 const { CAPS, providerUsageToday } = require('./spendGuard');
+const repairPolicy = require('./repairPolicy');
 
 const ENRICHMENT_STALE_DAYS = 7;
 function envNumber(name, fallback) {
@@ -393,7 +394,7 @@ RULES:
 - "strength": "rich" ONLY for a dated recent (<3mo) trigger event; otherwise "lite".
 
 Return JSON ONLY:
-{"signal": "<one specific verifiable fact about this prospect/company>", "why_now": "<one sentence>", "angle": "<one-line angle tying it to an AI outbound-sales tool>", "signal_type": "<one of: ${COLD_SIGNAL_TYPES.join(', ')}>", "strength": "rich|lite"}`;
+{"signal": "<one specific verifiable fact about this prospect/company>", "why_now": "<one sentence>", "angle": "<one-line angle tying it to an AI outbound-sales tool>", "signal_type": "<one of: ${COLD_SIGNAL_TYPES.join(', ')}>", "strength": "rich|lite", "source_url": "<best source URL from the snippets, or null>"}`;
 
   try {
     const result = await callAgent('research_beaver', prompt, { clientId });
@@ -407,6 +408,8 @@ Return JSON ONLY:
       if (parsed.strength !== 'rich') parsed.strength = 'lite';
       parsed.found = true;
       parsed.source = (hits && hits.length) ? 'research_beaver_web_enrichment' : 'research_beaver_role_inference';
+      parsed.source_url = parsed.source_url || hits?.[0]?.link || null;
+      parsed.evidence = parsed.evidence || parsed.signal || hits?.[0]?.snippet || null;
       return parsed;
     }
     // LLM returned nothing usable — fall through to the deterministic floor.
@@ -446,8 +449,12 @@ Return JSON ONLY:
  * Returns { enriched:true, ... } or { enriched:false, reason }.
  */
 async function enrichColdLeadSignal(clientId, lead, tenantConfig) {
+  return enrichColdLeadSignalWithOptions(clientId, lead, tenantConfig, {});
+}
+
+async function enrichColdLeadSignalWithOptions(clientId, lead, tenantConfig, options = {}) {
   const meta = lead.metadata || {};
-  if (meta.signal) return { enriched: false, reason: 'already_has_signal' };
+  if (meta.signal && options.force !== true) return { enriched: false, reason: 'already_has_signal' };
   // No `already_attempted` short-circuit: the synth now always produces a real
   // angle, so a prior attempt that left no signal (old give-up logic) MUST be
   // retried, not skipped. The meta.signal guard above already prevents re-spend
@@ -459,7 +466,9 @@ async function enrichColdLeadSignal(clientId, lead, tenantConfig) {
 
   // Web search is best-effort. An empty result is NOT a dead end — the synth
   // falls back to a verifiable role/company angle from the lead's own record.
-  const searchResult = await searchFreshSignals(lead, { clientId, maxQueries: 1 });
+  const searchResult = options.maxQueries === undefined
+    ? await searchFreshSignals(lead, { clientId, maxQueries: 1 })
+    : await searchFreshSignals(lead, { clientId, maxQueries: Math.max(1, Number(options.maxQueries || 1) || 1) });
   if (searchResult?._quota_exhausted) return { enriched: false, reason: 'brave_quota_exhausted' };
 
   const syn = await synthesizeColdSignal(clientId, lead, searchResult?.hits || []);
@@ -478,7 +487,20 @@ async function enrichColdLeadSignal(clientId, lead, tenantConfig) {
   }
 
   const nowIso = new Date().toISOString();
+  const bestHit = Array.isArray(searchResult?.hits) ? searchResult.hits.find(h => h?.link || h?.snippet || h?.title) : null;
+  const sourceUrl = syn.source_url || bestHit?.link || lead.linkedin_url || meta.source_url || null;
+  const evidence = syn.evidence || syn.signal || bestHit?.snippet || bestHit?.title || `${lead.name || 'Prospect'} is ${lead.title || 'a decision-maker'} at ${company}.`;
   const signalFields = {
+    signal_id: syn.signal_type || meta.signal_id || 'cold_lead_repair_signal',
+    signal_family: syn.signal_type || meta.signal_family || 'cold_lead_repair',
+    source_channel: syn.source || meta.source_channel || 'research_beaver_repair',
+    source_url: sourceUrl,
+    evidence,
+    decision_maker: {
+      name: lead.name || null,
+      title: lead.title || null,
+      source_url: lead.linkedin_url || sourceUrl || null,
+    },
     signal: syn.signal,
     why_now: syn.why_now || '',
     angle: syn.angle || '',
@@ -510,7 +532,171 @@ async function enrichColdLeadSignal(clientId, lead, tenantConfig) {
     }
   }
 
-  return { enriched: true, signal_type: syn.signal_type, strength: syn.strength, signal: syn.signal };
+  return { enriched: true, signal_type: syn.signal_type, strength: syn.strength, signal: syn.signal, metadata: signalFields };
+}
+
+async function repairLeadSignalPackage(clientId, payload = {}) {
+  const leadId = payload.lead_id || payload.leadId;
+  if (!clientId || !leadId) return { repaired: false, reason: 'missing_client_or_lead_id' };
+
+  const { rows } = await pool.query(
+    `SELECT id, name, company, title, linkedin_url, metadata, email, email_verified, email_source, lead_tier, pipeline_stage
+     FROM leads WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL LIMIT 1`,
+    [leadId, clientId]
+  );
+  const lead = rows[0];
+  if (!lead) return { repaired: false, reason: 'lead_not_found' };
+
+  const meta = lead.metadata || {};
+  const repairState = repairPolicy.researchRepairState({
+    repair_attempt: meta.research_repair?.attempt || 0,
+    max_repair_attempts: payload.max_repair_attempts || 1,
+  });
+  if (repairPolicy.researchRepairExhausted(repairState)) {
+    await logsServiceSafe(clientId, {
+      action: 'research_repair_skipped',
+      target_id: leadId,
+      metadata: { reason: 'max_repair_attempts_reached', directive_payload: payload },
+    });
+    return { repaired: false, reason: 'max_repair_attempts_reached' };
+  }
+
+  let tenantCfg = null;
+  try { tenantCfg = await getTenantConfig(clientId); } catch { /* re-score skipped */ }
+
+  const enrichment = await enrichColdLeadSignalWithOptions(clientId, lead, tenantCfg, {
+    force: true,
+    maxQueries: Math.max(1, Number(payload.max_paid_queries || payload.maxPaidQueries || 1) || 1),
+  });
+
+  if (!enrichment.enriched) {
+    await stampResearchRepair(clientId, lead, {
+      status: 'failed',
+      attempt: repairState.repairAttempt + 1,
+      maxAttempts: repairState.maxRepairAttempts,
+      reason: enrichment.reason || 'not_enriched',
+      payload,
+    });
+    return { repaired: false, reason: enrichment.reason || 'not_enriched' };
+  }
+
+  const research = require('./research');
+  const repairedMeta = {
+    ...meta,
+    ...(enrichment.metadata || {}),
+  };
+  const signalPackage = research.buildSignalPackage({ ...lead, metadata: repairedMeta }, {
+    evidenceDate: new Date().toISOString().slice(0, 10),
+  });
+  const missingFields = research.signalPackageMissingFields(signalPackage);
+  const newHash = repairPolicy.signalPackageHash(signalPackage);
+  const originalHash = payload.original_signal_package_hash || payload.do_not_repeat?.signal_package_hash || null;
+
+  if (originalHash && newHash === originalHash) {
+    await stampResearchRepair(clientId, lead, {
+      status: 'same_package_blocked',
+      attempt: repairState.repairAttempt + 1,
+      maxAttempts: repairState.maxRepairAttempts,
+      reason: 'research_repair_same_package_blocked',
+      payload,
+      signalPackage,
+      packageHash: newHash,
+      missingFields,
+    });
+    await logsServiceSafe(clientId, {
+      action: 'research_repair_same_package_blocked',
+      target_id: leadId,
+      metadata: { original_signal_package_hash: originalHash, package_hash: newHash, missing_fields: missingFields },
+    });
+    return { repaired: false, reason: 'same_signal_package', missing_fields: missingFields };
+  }
+
+  if (missingFields.length > 0) {
+    await stampResearchRepair(clientId, lead, {
+      status: 'failed',
+      attempt: repairState.repairAttempt + 1,
+      maxAttempts: repairState.maxRepairAttempts,
+      reason: 'signal_package_still_incomplete',
+      payload,
+      signalPackage,
+      packageHash: newHash,
+      missingFields,
+    });
+    return { repaired: false, reason: 'signal_package_still_incomplete', missing_fields: missingFields };
+  }
+
+  await stampResearchRepair(clientId, lead, {
+    status: 'repaired',
+    attempt: repairState.repairAttempt + 1,
+    maxAttempts: repairState.maxRepairAttempts,
+    reason: 'signal_package_repaired',
+    payload,
+    signalPackage,
+    packageHash: newHash,
+    missingFields,
+  });
+  await logsServiceSafe(clientId, {
+    action: 'research_repair_completed',
+    target_id: leadId,
+    metadata: {
+      directive_id: payload.directive_id || null,
+      package_hash: newHash,
+      original_signal_package_hash: originalHash,
+      repair_attempt: repairState.repairAttempt + 1,
+      max_repair_attempts: repairState.maxRepairAttempts,
+    },
+  });
+
+  return { repaired: true, signal_package: signalPackage, package_hash: newHash };
+}
+
+async function stampResearchRepair(clientId, lead, {
+  status,
+  attempt,
+  maxAttempts,
+  reason,
+  payload,
+  signalPackage = null,
+  packageHash = null,
+  missingFields = [],
+} = {}) {
+  const originalHash = payload.original_signal_package_hash || payload.do_not_repeat?.signal_package_hash || null;
+  const patch = {
+    ...(signalPackage ? { signal_package: signalPackage } : {}),
+    research_repair: {
+      status,
+      attempt,
+      max_attempts: maxAttempts,
+      reason,
+      missing_fields: missingFields,
+      original_signal_package_hash: originalHash,
+      package_hash: packageHash,
+      repaired_at: new Date().toISOString(),
+      failed_rule: payload.failed_rule || null,
+      repair_route: payload.repair_route || 'needs_research_repair',
+      do_not_repeat: payload.do_not_repeat || {},
+    },
+  };
+  await pool.query(
+    `UPDATE leads
+     SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
+         updated_at = NOW()
+     WHERE id = $2 AND client_id = $3`,
+    [JSON.stringify(patch), lead.id, clientId]
+  );
+}
+
+async function logsServiceSafe(clientId, { action, target_id = null, metadata = {} } = {}) {
+  try {
+    const logsService = require('./logs');
+    await logsService.createLog(clientId, {
+      agent: 'research_beaver',
+      action,
+      target_type: target_id ? 'lead' : 'system',
+      target_id,
+      metadata,
+    });
+  } catch { /* non-critical */ }
 }
 
 /**
@@ -858,6 +1044,7 @@ module.exports = {
   ENRICHMENT_STALE_DAYS,
   synthesizeColdSignal,
   enrichColdLeadSignal,
+  repairLeadSignalPackage,
   ensureLeadAngle,
   runColdPoolSignalEnrichment,
   runPoolEmailEnrichment,

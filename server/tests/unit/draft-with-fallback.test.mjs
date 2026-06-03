@@ -85,6 +85,44 @@ describe('draftWithFallback', () => {
     }));
   });
 
+  it('uses Captain fallback when Sales still needs Research after the bounded repair attempt', async () => {
+    const salesGenerate = vi.fn().mockResolvedValue({
+      status: 'needs_more_research',
+      repair_route: 'needs_research_repair',
+      missing_fields: ['source_url'],
+      repair_attempt: 1,
+      max_repair_attempts: 1,
+      signal_package: { signal_id: 'hiring_sales_roles', evidence: ['Hiring BDR'] },
+    });
+    const rangerDraft = vi.fn().mockResolvedValue({ body: 'Should not be used.' });
+    const captainDraft = vi.fn().mockResolvedValue({ body: 'Captain manual-review draft.', subject: 'Captain subject' });
+    const recordRepairRoute = vi.fn().mockResolvedValue({ recorded: true, repair_exhausted: true });
+
+    const result = await draftWithFallback(CLIENT_ID, {
+      ...baseParams,
+      salesGenerate,
+      rangerDraft,
+      captainDraft,
+      enableEnforcerFallback: true,
+      lead: baseLead,
+      recordRepairRoute,
+    });
+
+    expect(result).toMatchObject({
+      body: 'Captain manual-review draft.',
+      subject: 'Captain subject',
+      draftSource: 'captain_fallback',
+      prompt_variant: 'captain_fallback',
+      manualReview: true,
+    });
+    expect(rangerDraft).not.toHaveBeenCalled();
+    expect(captainDraft).toHaveBeenCalledWith(CLIENT_ID, expect.objectContaining({
+      lead: baseLead,
+      lead_id: LEAD_ID,
+      missing_fields: ['source_url'],
+    }));
+  });
+
   it('returns null when both Sales and Enforcer return no body', async () => {
     const salesGenerate = vi.fn().mockResolvedValue(null);
     const rangerDraft = vi.fn().mockResolvedValue({ body: '' });

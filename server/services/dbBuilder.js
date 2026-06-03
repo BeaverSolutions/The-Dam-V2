@@ -669,6 +669,59 @@ async function runDbBuilder() {
             }
           }
 
+          const repairSignalPackageDirectives = researchDirectives.filter(d => d.directive_type === 'repair_signal_package');
+          if (repairSignalPackageDirectives.length > 0) {
+            const { repairLeadSignalPackage } = require('./researchEnrichment');
+
+            for (const directive of repairSignalPackageDirectives) {
+              const payload = { ...(directive.payload || {}), directive_id: directive.id };
+              if (!payload.lead_id) {
+                consumedDirectiveIds.push(directive.id);
+                await logsService.createLog(client.id, {
+                  agent: 'research_beaver',
+                  action: 'research_repair_skipped',
+                  target_type: 'system',
+                  metadata: { reason: 'missing_lead_id', directive_id: directive.id, payload },
+                }).catch(() => {});
+                continue;
+              }
+
+              const budget = await checkBudget(client.id);
+              if (!budget.allowed) {
+                logger.info({ msg: '[db-builder] Budget exhausted, keeping repair_signal_package pending', lead_id: payload.lead_id });
+                break;
+              }
+
+              try {
+                logger.info({ msg: '[db-builder] Processing repair_signal_package', lead_id: payload.lead_id, directive_id: directive.id });
+                const result = await repairLeadSignalPackage(client.id, payload);
+                await logsService.createLog(client.id, {
+                  agent: 'research_beaver',
+                  action: result.repaired ? 'research_repair_consumed' : 'research_repair_not_completed',
+                  target_type: 'lead',
+                  target_id: payload.lead_id,
+                  metadata: {
+                    directive_id: directive.id,
+                    repaired: result.repaired === true,
+                    reason: result.reason || null,
+                    package_hash: result.package_hash || null,
+                    missing_fields: result.missing_fields || [],
+                  },
+                }).catch(() => {});
+                consumedDirectiveIds.push(directive.id);
+              } catch (err) {
+                logger.warn({ msg: '[db-builder] repair_signal_package failed', lead_id: payload.lead_id, err: err.message });
+                await logsService.createLog(client.id, {
+                  agent: 'research_beaver',
+                  action: 'research_repair_error',
+                  target_type: 'lead',
+                  target_id: payload.lead_id,
+                  metadata: { directive_id: directive.id, error: err.message },
+                }).catch(() => {});
+              }
+            }
+          }
+
           const signalPlaybookDirectives = researchDirectives.filter(d => d.directive_type === 'run_signal_playbook');
           if (signalPlaybookDirectives.length > 0) {
             const { runSignalHunt, saveSignalLeads } = require('./signalHunt');

@@ -11,6 +11,7 @@
  */
 
 const pool = require('../db/pool');
+const repairPolicy = require('./repairPolicy');
 
 function buildRunSignalPlaybookDirective({
   signal_id,
@@ -53,6 +54,48 @@ function buildFixSignalCopyDirective({
       reject_reason,
       instruction: instruction || fixSignalCopyInstruction(signal_family, reject_reason),
     },
+  };
+}
+
+function buildRepairSignalPackageDirective({
+  leadId = null,
+  messageId = null,
+  kickoffId = null,
+  channel = null,
+  pipelinePath = 'unknown',
+  failedRule = null,
+  reason = null,
+  missingFields = [],
+  requiredRepair = null,
+  repairAttempt = 0,
+  maxRepairAttempts = repairPolicy.DEFAULT_MAX_RESEARCH_REPAIR_ATTEMPTS,
+  signalPackage = null,
+  sourceUrl = null,
+  sourceChannel = null,
+  querySetHash = null,
+  evidenceDecision = null,
+} = {}) {
+  return {
+    directive_type: 'repair_signal_package',
+    target_agent: 'research_beaver',
+    payload: repairPolicy.buildResearchRepairPayload({
+      leadId,
+      messageId,
+      kickoffId,
+      channel,
+      pipelinePath,
+      failedRule,
+      reason,
+      missingFields,
+      requiredRepair,
+      repairAttempt,
+      maxRepairAttempts,
+      signalPackage,
+      sourceUrl,
+      sourceChannel,
+      querySetHash,
+      evidenceDecision,
+    }),
   };
 }
 
@@ -160,6 +203,7 @@ async function recentDirectives(clientId, hours = 24) {
 module.exports = {
   buildRunSignalPlaybookDirective,
   buildFixSignalCopyDirective,
+  buildRepairSignalPackageDirective,
   writeDirective,
   readPendingDirectives,
   markConsumed,

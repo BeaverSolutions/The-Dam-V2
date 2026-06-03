@@ -17,6 +17,7 @@ const { evaluateLeadQuality } = require('../utils/leadQuality');
 const { recordOutcome, attributionFromLead } = require('./outcomeTracker');
 const { LEAD_SELECTION_REJECTION_SQL, leadSelectionFeedbackExclusionSql } = require('./founderFeedbackSignals');
 const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
+const repairPolicy = require('./repairPolicy');
 
 // Channel-specific drafting instructions injected into the Sales Beaver prompt.
 // Module scope (2026-05-16, Jules F-03): was a local const inside
@@ -993,6 +994,8 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
     context,
   });
   if (!signalPreflight.ok) {
+    const repairState = repairPolicy.researchRepairState(salesLead || {});
+    const signalPackage = getSignalPackage(salesLead || {});
     await logsService.createLog(clientId, {
       agent: 'sales_beaver',
       action: 'needs_more_research',
@@ -1004,6 +1007,9 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         missing_fields: signalPreflight.missing_fields,
         reason: signalPreflight.reason,
         repair_route: signalPreflight.repair_route,
+        repair_attempt: repairState.repairAttempt,
+        max_repair_attempts: repairState.maxRepairAttempts,
+        signal_package_hash: repairPolicy.signalPackageHash(signalPackage),
       },
     }).catch(() => {});
     return {
@@ -1016,6 +1022,9 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
       reason: signalPreflight.reason,
       repair_route: signalPreflight.repair_route,
       required_repair: signalPreflight.required_repair,
+      repair_attempt: repairState.repairAttempt,
+      max_repair_attempts: repairState.maxRepairAttempts,
+      signal_package: signalPackage,
     };
   }
 
@@ -1909,6 +1918,12 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
   });
   if (!evidenceGate.bypassed && !evidenceGate.approved) {
     console.warn(`[enforcer] Evidence-gate reject: ${evidenceGate.failed_rule}`);
+    const repairState = repairPolicy.researchRepairState({
+      repair_attempt: lead_context?.repair_attempt,
+      max_repair_attempts: lead_context?.max_repair_attempts,
+      metadata: { research_repair: lead_context?.research_repair || {} },
+    });
+    const signalPackage = getSignalPackage(lead_context);
     if (typeof pipeline.recordRepairRoute === 'function') {
       pipeline.recordRepairRoute(clientId, {
         lead_id: lead_context?.lead_id || null,
@@ -1920,18 +1935,42 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
         repair_route: evidenceGate.repair_route,
         failed_rule: evidenceGate.failed_rule,
         reason: evidenceGate.notes || evidenceGate.required_repair,
+        repair_attempt: repairState.repairAttempt,
+        max_repair_attempts: repairState.maxRepairAttempts,
+        signal_package: signalPackage,
         metadata: {
           evidence_decision: evidenceGate.evidence_decision,
           failed_phrase: evidenceGate.failed_phrase,
           required_repair: evidenceGate.required_repair,
+          missing_fields: evidenceGate.missing_fields || evidenceGate.issues || [],
         },
       }).catch(() => {});
+    }
+    let captainFallback = null;
+    const repairExhausted = evidenceGate.repair_route === 'needs_research_repair'
+      && repairPolicy.researchRepairExhausted(repairState);
+    if (repairExhausted) {
+      captainFallback = await captainFallbackDraft(clientId, {
+        lead: {
+          id: lead_context?.lead_id || null,
+          name: lead_context?.name,
+          company: lead_context?.company,
+          title: lead_context?.title,
+        },
+        channel: reviewChannel || lead_context?.channel || 'email',
+        reason: evidenceGate.required_repair || evidenceGate.notes,
+        missing_fields: evidenceGate.missing_fields || evidenceGate.issues || [],
+        rejected_body: fixedBody,
+        signal_package: signalPackage,
+      });
     }
     return {
       ...evidenceGate,
       message_id,
       body: fixedBody,
       fixes_applied: fixesApplied,
+      repair_exhausted: repairExhausted,
+      captain_fallback: captainFallback,
     };
   }
 
@@ -2049,6 +2088,92 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
   };
 }
 
+function fallbackFirstName(name = '') {
+  const clean = String(name || '').trim().replace(/[,()]/g, ' ');
+  return clean.split(/\s+/).find(Boolean) || 'there';
+}
+
+function deterministicCaptainFallback({ lead = {}, channel = 'email', reason = null } = {}) {
+  const first = fallbackFirstName(lead.name);
+  const company = lead.company || 'your company';
+  const rolePhrase = lead.title ? `the ${lead.title}` : 'a decision-maker';
+  if (channel === 'linkedin' || channel === 'instagram') {
+    return {
+      subject: null,
+      body: `Noticed you are ${rolePhrase} at ${company}. I could not verify a stronger timing signal, so keeping this direct: is outbound execution currently on your plate?`,
+    };
+  }
+  return {
+    subject: `${company}`,
+    body: `Hi ${first},\n\nNoticed you are ${rolePhrase} at ${company}. I could not verify a stronger timing signal, so keeping this direct: is outbound execution currently on your plate?`,
+    reason,
+  };
+}
+
+async function captainFallbackDraft(clientId, {
+  lead = {},
+  channel = 'email',
+  reason = null,
+  missing_fields = [],
+  rejected_body = '',
+  signal_package = null,
+} = {}) {
+  await logsService.createLog(clientId, {
+    agent: 'captain',
+    action: 'captain_fallback_requested',
+    target_type: 'lead',
+    target_id: lead.id || null,
+    metadata: { channel, reason, missing_fields, draftSource: 'captain_fallback' },
+  }).catch(() => {});
+
+  if (callAgent) {
+    try {
+      const prompt = `Research repair for this lead has already hit its bounded retry limit. Captain must write the manual-review draft now. Do not call Enforcer fallback. Do not invent missing evidence.
+
+LEAD:
+- Name: ${lead.name || 'Unknown'}
+- Company: ${lead.company || 'Unknown'}
+- Title: ${lead.title || 'Unknown'}
+- Channel: ${channel}
+
+FAILED RESEARCH REPAIR:
+- Reason: ${reason || 'research_repair_exhausted'}
+- Missing fields: ${Array.isArray(missing_fields) ? missing_fields.join(', ') : String(missing_fields || '')}
+- Signal package: ${signal_package ? JSON.stringify(signal_package) : 'missing'}
+
+LAST REJECTED BODY:
+${rejected_body || '(none)'}
+
+Write a conservative ${channel === 'email' ? 'cold email' : `${channel} DM`} that is honest about the limited timing evidence, asks exactly one diagnostic question, and is safe for MJ to review manually. Return JSON only: {"subject":null|string,"body":"..."}`;
+      const result = await callAgent('captain_orchestrator', prompt, { clientId, mode: 'captain_fallback_draft' });
+      const raw = typeof result === 'string'
+        ? result
+        : (result?.brief || result?.summary || result?.body || JSON.stringify(result));
+      const cleaned = String(raw || '').replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+      const parsed = JSON.parse(cleaned);
+      if (parsed?.body && typeof parsed.body === 'string') {
+        return {
+          subject: parsed.subject || null,
+          body: stripEmDashes(parsed.body),
+          draftSource: 'captain_fallback',
+          prompt_variant: 'captain_fallback',
+          reason,
+        };
+      }
+    } catch (err) {
+      console.warn('[captain-fallback] Captain draft failed, using deterministic manual-review floor:', err.message);
+    }
+  }
+
+  const fallback = deterministicCaptainFallback({ lead, channel, reason });
+  return {
+    ...fallback,
+    body: stripEmDashes(fallback.body),
+    draftSource: 'captain_fallback',
+    prompt_variant: 'captain_fallback',
+  };
+}
+
 /**
  * NEVER BURN A SOURCED LEAD (rule restored 2026-05-18, per MJ).
  *
@@ -2061,31 +2186,40 @@ async function rangerReview(clientId, { message_id, message_body, lead_context =
  * edit or approve it himself. Worst case is "needs your eyes", never "lost".
  * Returns true if the lead was surfaced.
  */
-async function surfaceUnrewrittenDraft(clientId, { messageId, body, subject, reason }) {
+async function surfaceUnrewrittenDraft(clientId, {
+  messageId,
+  body,
+  subject,
+  reason,
+  requestedBy = 'enforcer_rewrite_failed',
+  agent = 'enforcer_beaver',
+  action = 'lead_surfaced_unrewritten',
+  note = null,
+} = {}) {
   if (!messageId || !body || typeof body !== 'string') return false;
   try {
+    const reviewNote = note
+      || `Needs your review — Sales Beaver was rejected by the Enforcer and the auto-rewrite could not complete (${reason || 'quality gate'}). Edit or approve; the lead is preserved, not discarded.`;
     await pool.query(
       `UPDATE messages SET body = $1, subject = COALESCE($2, subject),
          status = 'pending_approval', ranger_score = COALESCE(ranger_score, 0),
          ranger_notes = $3, updated_at = NOW()
        WHERE id = $4 AND client_id = $5`,
-      [body, subject ?? null,
-       `Needs your review — Sales Beaver was rejected by the Enforcer and the auto-rewrite could not complete (${reason || 'quality gate'}). Edit or approve; the lead is preserved, not discarded.`,
-       messageId, clientId]
+      [body, subject ?? null, reviewNote, messageId, clientId]
     );
     await pool.query(
       `INSERT INTO approvals (client_id, message_id, requested_by, status)
-       VALUES ($1, $2, 'enforcer_rewrite_failed', 'pending')`,
-      [clientId, messageId]
+       VALUES ($1, $2, $3, 'pending')`,
+      [clientId, messageId, requestedBy]
     );
     await writeApprovalAuditForMessage(clientId, messageId, {
       decision: 'manual_pending',
       reason: reason || 'enforcer_rewrite_failed',
     });
     await logsService.createLog(clientId, {
-      agent: 'enforcer_beaver', action: 'lead_surfaced_unrewritten',
+      agent, action,
       target_type: 'message', target_id: messageId,
-      metadata: { reason: reason || null },
+      metadata: { reason: reason || null, requested_by: requestedBy },
     }).catch(() => {});
     return true;
   } catch (err) {
@@ -2716,7 +2850,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         kickoffId: plan_id,
         allowPersonalisationSearch,
         deps: {
-          salesGenerate, rangerReview, rangerDraft, selectChannel, autoFixMessage,
+          salesGenerate, rangerReview, rangerDraft, captainDraft: captainFallbackDraft, selectChannel, autoFixMessage,
           brandSafetyCheck, searchPersonalisationSignals, recordOutcome, attributionFromLead,
           stripEmDashes, applyIcpV2Filter, hunterService,
           channelHints: CHANNEL_HINTS,
@@ -2937,6 +3071,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         context: contextParts.join('\n') + (CHANNEL_HINTS[channel] ? `\n\nCHANNEL INSTRUCTIONS: ${CHANNEL_HINTS[channel]}` : ''),
         salesGenerate,
         rangerDraft,
+        captainDraft: captainFallbackDraft,
         enableEnforcerFallback: true,
         lead,
         leadAngle: meta.angle,
@@ -2961,6 +3096,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
       const draftBody = draft.body;
       const draftSubject = draft.subject;
       const draftSource = draft.draftSource;
+      const draftRequiresManualReview = draft.manualReview === true || draftSource === 'captain_fallback';
 
       // Phase 2 Step 2 (2026-05-08): persistDraft is the single source of truth
       // for INSERT INTO messages. Composes metadata (source, signal, prompt_variant,
@@ -2971,10 +3107,11 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         channel,
         subject: draftSubject,
         body: draftBody,
-        status: kickoffMessageStatus,
+        status: draftRequiresManualReview ? 'pending_approval' : kickoffMessageStatus,
         draft_source: draftSource,
         prompt_variant: salesResult?.prompt_variant,
         signal: meta.signal,
+        metadata: draftRequiresManualReview ? { captain_fallback_reason: draft.reason || null } : {},
         kickoff_id: plan_id,
         pipeline_path: 'signal_pipeline',
       });
@@ -2986,17 +3123,33 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         messageId: msg.id,
         channel,
         ...attributionFromLead(lead),
-        eventData: { source_path: 'signal_pipeline', status: kickoffMessageStatus, draft_source: draftSource },
+        eventData: { source_path: 'signal_pipeline', status: draftRequiresManualReview ? 'pending_approval' : kickoffMessageStatus, draft_source: draftSource },
       });
 
       // (Phase 2 Step 2: drafted trace now emitted internally by pipeline.persistDraft above)
 
-      // If blocked, skip Ranger and downstream processing — message is on hold for enrichment.
-      if (kickoffMessageStatus === 'blocked_no_email') {
-        messagesDrafted++;
+      messagesDrafted++;
+
+      if (draftRequiresManualReview) {
+        await pool.query(
+          `INSERT INTO approvals (client_id, message_id, requested_by, status)
+           VALUES ($1, $2, 'captain_fallback', 'pending')`,
+          [clientId, msg.id]
+        ).catch(() => {});
+        await logsService.createLog(clientId, {
+          agent: 'captain',
+          action: 'captain_fallback_draft',
+          target_type: 'message',
+          target_id: msg.id,
+          metadata: { lead_name: lead.name, channel, reason: draft.reason || null, pipeline_path: 'signal_pipeline' },
+        }).catch(() => {});
         continue;
       }
-      messagesDrafted++;
+
+      // If blocked, skip Ranger and downstream processing — message is on hold for enrichment.
+      if (kickoffMessageStatus === 'blocked_no_email') {
+        continue;
+      }
 
       // Run auto-fix + Enforcer
       const fixed = autoFixMessage(msg.body, { touchNumber: 0, maxWords: 80 });
@@ -3051,6 +3204,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
             email: lead.email, lead_id: lead.id,
             signal: meta.signal, angle: meta.angle, why_now: meta.why_now,
             signal_package: meta.signal_package,
+            research_repair: meta.research_repair,
             channel,
             pipeline_path: 'signal_pipeline',
           },
@@ -3094,6 +3248,27 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         });
         approvedCount++;
       } else {
+        if (rangerResult?.repair_route === 'needs_research_repair') {
+          if (rangerResult?.captain_fallback?.body) {
+            await surfaceUnrewrittenDraft(clientId, {
+              messageId: msg.id,
+              body: rangerResult.captain_fallback.body,
+              subject: rangerResult.captain_fallback.subject || finalSubject,
+              reason: rangerResult?.notes || 'research_repair_exhausted',
+              requestedBy: 'captain_fallback',
+              agent: 'captain',
+              action: 'captain_fallback_draft',
+              note: 'Captain fallback — Research repair already exhausted. Review before sending.',
+            });
+          } else {
+            await pool.query(
+              `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1 WHERE id = $2 AND client_id = $3`,
+              [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair; Sales redraft and Enforcer fallback skipped.', msg.id, clientId]
+            );
+          }
+          continue;
+        }
+
         const MAX_SIGNAL_RANGER_RETRIES = 2;
         for (let retryAttempt = 0; retryAttempt < MAX_SIGNAL_RANGER_RETRIES && !rangerResult?.approved; retryAttempt++) {
           const rejectionFeedback = rangerResult?.reject_reason || rangerResult?.notes || 'Message did not pass quality gates';
@@ -3145,6 +3320,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
               email: lead.email, lead_id: lead.id,
               signal: meta.signal, angle: meta.angle, why_now: meta.why_now,
               signal_package: meta.signal_package,
+              research_repair: meta.research_repair,
               channel,
               pipeline_path: 'signal_pipeline',
             },
@@ -3185,6 +3361,26 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
             source: 'signal_pipeline',
           });
           approvedCount++;
+          continue;
+        }
+        if (rangerResult?.repair_route === 'needs_research_repair') {
+          if (rangerResult?.captain_fallback?.body) {
+            await surfaceUnrewrittenDraft(clientId, {
+              messageId: msg.id,
+              body: rangerResult.captain_fallback.body,
+              subject: rangerResult.captain_fallback.subject || finalSubject,
+              reason: rangerResult?.notes || 'research_repair_exhausted',
+              requestedBy: 'captain_fallback',
+              agent: 'captain',
+              action: 'captain_fallback_draft',
+              note: 'Captain fallback — Research repair already exhausted. Review before sending.',
+            });
+          } else {
+            await pool.query(
+              `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1 WHERE id = $2 AND client_id = $3`,
+              [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair after Sales redraft.', msg.id, clientId]
+            );
+          }
           continue;
         }
         // Enforcer rejected — try once more with Enforcer writing it himself
@@ -4809,7 +5005,7 @@ async function directorExecute(clientId, {
         kickoffId: plan_id,
         command,
         deps: {
-          salesGenerate, rangerReview, rangerDraft, selectChannel, autoFixMessage,
+          salesGenerate, rangerReview, rangerDraft, captainDraft: captainFallbackDraft, selectChannel, autoFixMessage,
           brandSafetyCheck, searchPersonalisationSignals, recordOutcome, attributionFromLead,
           stripEmDashes, applyIcpV2Filter, hunterService,
           channelHints: CHANNEL_HINTS,
@@ -5056,13 +5252,16 @@ async function directorExecute(clientId, {
         channel: selectedChannel,
         context: contextParts.join('\n') + `\n\nCHANNEL INSTRUCTIONS: ${hint}`,
         salesGenerate,
+        captainDraft: captainFallbackDraft,
         enableEnforcerFallback: false,
+        lead,
         pipeline_path: 'kickoff_pipeline',
         kickoff_id: plan_id,
       });
       const salesResult = draft
         ? { body: draft.body, subject: draft.subject, prompt_variant: draft.prompt_variant }
         : { body: null, subject: null, prompt_variant: null };
+      const draftRequiresManualReview = draft?.manualReview === true || draft?.draftSource === 'captain_fallback';
 
       if (!salesResult?.body) {
         console.warn(`[pipeline] Sales draft failed for ${lead.name} (${selectedChannel}): no body`);
@@ -5086,9 +5285,10 @@ async function directorExecute(clientId, {
           channel: selectedChannel,
           subject: salesResult.subject || null,
           body: salesResult.body,
-          status: kickoffMessageStatus,
-          draft_source: 'sales_beaver',
+          status: draftRequiresManualReview ? 'pending_approval' : kickoffMessageStatus,
+          draft_source: draft?.draftSource || 'sales_beaver',
           prompt_variant: salesResult.prompt_variant,
+          metadata: draftRequiresManualReview ? { captain_fallback_reason: draft.reason || null } : {},
           kickoff_id: plan_id,
           pipeline_path: 'kickoff_pipeline',
         });
@@ -5111,8 +5311,24 @@ async function directorExecute(clientId, {
           messageId: message.id,
           channel: selectedChannel,
           ...attributionFromLead(lead),
-          eventData: { source_path: 'kickoff_pipeline', status: kickoffMessageStatus, reason: channelReason },
+          eventData: { source_path: 'kickoff_pipeline', status: draftRequiresManualReview ? 'pending_approval' : kickoffMessageStatus, reason: channelReason },
         });
+
+        if (draftRequiresManualReview) {
+          await pool.query(
+            `INSERT INTO approvals (client_id, message_id, requested_by, status)
+             VALUES ($1, $2, 'captain_fallback', 'pending')`,
+            [clientId, message.id]
+          ).catch(() => {});
+          await logsService.createLog(clientId, {
+            agent: 'captain',
+            action: 'captain_fallback_draft',
+            target_type: 'message',
+            target_id: message.id,
+            metadata: { lead_name: lead.name, channel: selectedChannel, reason: draft.reason || null, pipeline_path: 'kickoff_pipeline' },
+          }).catch(() => {});
+          return;
+        }
 
         // If blocked, skip Enforcer — message is on hold for enrichment.
         if (kickoffMessageStatus === 'blocked_no_email') {
@@ -5207,6 +5423,7 @@ async function directorExecute(clientId, {
           friction: lead.metadata?.friction,
           why_now: lead.metadata?.why_now,
           signal_package: lead.metadata?.signal_package,
+          research_repair: lead.metadata?.research_repair,
           channel: msg.channel,
           pipeline_path: 'kickoff_pipeline',
           touch_number: touchNumber,
@@ -5230,6 +5447,31 @@ async function directorExecute(clientId, {
     }
 
     if (!rangerResult?.approved) {
+      if (rangerResult?.repair_route === 'needs_research_repair') {
+        if (rangerResult?.captain_fallback?.body) {
+          await surfaceUnrewrittenDraft(clientId, {
+            messageId: msg.id,
+            body: rangerResult.captain_fallback.body,
+            subject: rangerResult.captain_fallback.subject || currentSubject,
+            reason: rangerResult?.notes || 'research_repair_exhausted',
+            requestedBy: 'captain_fallback',
+            agent: 'captain',
+            action: 'captain_fallback_draft',
+            note: 'Captain fallback — Research repair already exhausted. Review before sending.',
+          });
+        } else {
+          await pool.query(
+            `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW()
+             WHERE id = $2 AND client_id = $3`,
+            [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair; Sales redraft and Enforcer fallback skipped.', msg.id, clientId]
+          );
+          rejectedCount++;
+          execStatus.beavers.enforcer.rejected++;
+        }
+        execStatus.beavers.enforcer.status = 'done';
+        return;
+      }
+
       // ── Rejection feedback loop: Sales redrafts with Enforcer's specific feedback ──
       // Get current attempt count from DB
       const attemptRow = await pool.query(
@@ -5296,6 +5538,7 @@ async function directorExecute(clientId, {
                 friction: lead.metadata?.friction,
                 why_now: lead.metadata?.why_now,
                 signal_package: lead.metadata?.signal_package,
+                research_repair: lead.metadata?.research_repair,
                 channel: msg.channel,
                 pipeline_path: 'kickoff_pipeline',
                 touch_number: touchNumber,
@@ -5319,6 +5562,30 @@ async function directorExecute(clientId, {
 
             // If still rejected after redraft → Enforcer drafts it himself
             if (!rangerResult?.approved) {
+              if (rangerResult?.repair_route === 'needs_research_repair') {
+                if (rangerResult?.captain_fallback?.body) {
+                  await surfaceUnrewrittenDraft(clientId, {
+                    messageId: msg.id,
+                    body: rangerResult.captain_fallback.body,
+                    subject: rangerResult.captain_fallback.subject || currentSubject,
+                    reason: rangerResult?.notes || 'research_repair_exhausted',
+                    requestedBy: 'captain_fallback',
+                    agent: 'captain',
+                    action: 'captain_fallback_draft',
+                    note: 'Captain fallback — Research repair already exhausted. Review before sending.',
+                  });
+                } else {
+                  await pool.query(
+                    `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW()
+                     WHERE id = $2 AND client_id = $3`,
+                    [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair after Sales redraft.', msg.id, clientId]
+                  );
+                  rejectedCount++;
+                  execStatus.beavers.enforcer.rejected++;
+                }
+                execStatus.beavers.enforcer.status = 'done';
+                return;
+              }
               const enforcerDraft = await rangerDraft(clientId, {
                 lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
                 lead_angle: lead.metadata?.angle, lead_friction: lead.metadata?.friction,
@@ -5382,6 +5649,30 @@ async function directorExecute(clientId, {
 
       // Final rejection — Sales exhausted all retries, Enforcer drafts his own version
       if (!rangerResult?.approved) {
+        if (rangerResult?.repair_route === 'needs_research_repair') {
+          if (rangerResult?.captain_fallback?.body) {
+            await surfaceUnrewrittenDraft(clientId, {
+              messageId: msg.id,
+              body: rangerResult.captain_fallback.body,
+              subject: rangerResult.captain_fallback.subject || currentSubject,
+              reason: rangerResult?.notes || 'research_repair_exhausted',
+              requestedBy: 'captain_fallback',
+              agent: 'captain',
+              action: 'captain_fallback_draft',
+              note: 'Captain fallback — Research repair already exhausted. Review before sending.',
+            });
+          } else {
+            await pool.query(
+              `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW()
+               WHERE id = $2 AND client_id = $3`,
+              [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair after Sales retries exhausted.', msg.id, clientId]
+            );
+            rejectedCount++;
+            execStatus.beavers.enforcer.rejected++;
+          }
+          execStatus.beavers.enforcer.status = 'done';
+          return;
+        }
         const enforcerDraft = await rangerDraft(clientId, {
           lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
           lead_angle: lead.metadata?.angle, lead_friction: lead.metadata?.friction,
@@ -5936,6 +6227,7 @@ module.exports = {
   salesProposal,
   rangerReview,
   rangerDraft,
+  captainFallbackDraft,
   directorPlan,
   directorExecute,
   directorBrief,
@@ -5966,6 +6258,7 @@ module.exports = {
     signalDraftGuidance,
     buildSalesSignalContext,
     enforcerEvidenceGate,
+    captainFallbackDraft,
     getSignalPackage,
     signalPackageMissingFields,
   },

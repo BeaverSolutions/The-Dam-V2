@@ -47,6 +47,8 @@
 const pool = require('../db/pool');
 const pipelineTrace = require('./pipelineTrace');
 const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
+const directivesSvc = require('./directives');
+const repairPolicy = require('./repairPolicy');
 
 // ─── Feature flag ──────────────────────────────────────────────────────────
 // During Phase 2 migration both code paths coexist in the repo. Flip via
@@ -133,7 +135,7 @@ async function processLead(clientId, lead, ctx = {}) {
     deps = {},
   } = ctx;
   const {
-    salesGenerate, rangerReview, rangerDraft, selectChannel,
+    salesGenerate, rangerReview, rangerDraft, captainDraft, selectChannel,
     autoFixMessage, brandSafetyCheck, searchPersonalisationSignals,
     recordOutcome, attributionFromLead, stripEmDashes, applyIcpV2Filter,
     hunterService, channelHints = {},
@@ -248,7 +250,7 @@ async function processLead(clientId, lead, ctx = {}) {
     const draft = await draftWithFallback(clientId, {
       lead_id: lead.id, channel,
       context: contextParts.join('\n') + (hint ? `\n\nCHANNEL INSTRUCTIONS: ${hint}` : ''),
-      salesGenerate, rangerDraft, enableEnforcerFallback: true, lead,
+      salesGenerate, rangerDraft, captainDraft, enableEnforcerFallback: true, lead,
       leadAngle: meta.angle, leadFriction: meta.friction,
       pipeline_path: pipelinePath,
       kickoff_id: kickoffId,
@@ -259,18 +261,38 @@ async function processLead(clientId, lead, ctx = {}) {
       return { outcome: 'draft_failed' };
     }
 
+    const draftRequiresManualReview = draft.manualReview === true || draft.draftSource === 'captain_fallback';
+
     // ── 9. Persist draft ──
     const msg = await persistDraft(clientId, {
       lead_id: lead.id, channel, subject: draft.subject, body: draft.body,
-      status: messageStatus, draft_source: draft.draftSource || 'sales_beaver',
+      status: draftRequiresManualReview ? 'pending_approval' : messageStatus,
+      draft_source: draft.draftSource || 'sales_beaver',
       prompt_variant: draft.prompt_variant, signal: meta.signal,
+      metadata: draftRequiresManualReview ? { captain_fallback_reason: draft.reason || null } : {},
       kickoff_id: kickoffId, pipeline_path: pipelinePath,
     });
     recordOutcome(clientId, {
       outcome: 'drafted', leadId: lead.id, messageId: msg.id, channel,
       ...attributionFromLead(lead),
-      eventData: { source_path: pipelinePath, status: messageStatus, draft_source: draft.draftSource },
+      eventData: { source_path: pipelinePath, status: draftRequiresManualReview ? 'pending_approval' : messageStatus, draft_source: draft.draftSource },
     });
+    if (draftRequiresManualReview) {
+      await pool.query(
+        `INSERT INTO approvals (client_id, message_id, requested_by, status) VALUES ($1, $2, 'captain_fallback', 'pending')`,
+        [clientId, msg.id]
+      ).catch(() => {});
+      await logsService.createLog(clientId, {
+        agent: 'captain', action: 'captain_fallback_draft', target_type: 'message', target_id: msg.id,
+        metadata: { channel, lead_name: lead.name, reason: draft.reason || null, pipeline_path: pipelinePath },
+      }).catch(() => {});
+      await trace('reviewed', 'captain_fallback_manual_review', {
+        message_id: msg.id, agent: 'captain', reason: draft.reason || 'research_repair_exhausted',
+        metadata: { channel },
+      });
+      return { outcome: 'manual_review', messageId: msg.id, channel, viaCaptainFallback: true };
+    }
+
     if (messageStatus === 'blocked_no_email') {
       return { outcome: 'blocked_no_email', messageId: msg.id, channel };
     }
@@ -308,6 +330,9 @@ async function processLead(clientId, lead, ctx = {}) {
           name: lead.name, company: lead.company, title: lead.title, email: lead.email,
           lead_id: lead.id, signal: meta.signal, angle: meta.angle, friction: meta.friction,
           why_now: meta.why_now, touch_number: touchNumber,
+          signal_package: meta.signal_package,
+          research_repair: meta.research_repair,
+          pipeline_path: pipelinePath,
         },
       });
       if (rangerResult?.body) currentBody = rangerResult.body;
@@ -321,6 +346,31 @@ async function processLead(clientId, lead, ctx = {}) {
 
     // ── 12. Rejection → 2-attempt Sales redraft loop, then Enforcer fallback ──
     if (!rangerResult?.approved) {
+      if (rangerResult?.repair_route === 'needs_research_repair') {
+        if (rangerResult?.captain_fallback?.body) {
+          currentBody = rangerResult.captain_fallback.body;
+          currentSubject = rangerResult.captain_fallback.subject || currentSubject || `${lead.company}`;
+          await pool.query(
+            `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval', ranger_score = 0, ranger_notes = $3, updated_at = NOW() WHERE id = $4 AND client_id = $5`,
+            [currentBody, currentSubject, 'Captain fallback — Research repair already exhausted. Review before sending.', msg.id, clientId]
+          );
+          await pool.query(
+            `INSERT INTO approvals (client_id, message_id, requested_by, status) VALUES ($1, $2, 'captain_fallback', 'pending')`,
+            [clientId, msg.id]
+          ).catch(() => {});
+          await logsService.createLog(clientId, {
+            agent: 'captain', action: 'captain_fallback_draft', target_type: 'message', target_id: msg.id,
+            metadata: { channel, lead_name: lead.name, reason: rangerResult?.notes || null },
+          }).catch(() => {});
+          return { outcome: 'manual_review', messageId: msg.id, channel, viaCaptainFallback: true };
+        }
+        await pool.query(
+          `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
+          [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair. No Sales redraft or Enforcer fallback until Research repairs the lead.', msg.id, clientId]
+        );
+        return { outcome: 'needs_research_repair', messageId: msg.id, channel };
+      }
+
       const attemptRow = await pool.query(
         `SELECT ranger_attempt_count FROM messages WHERE id = $1 AND client_id = $2`, [msg.id, clientId]
       );
@@ -348,7 +398,12 @@ async function processLead(clientId, lead, ctx = {}) {
             );
             rangerResult = await rangerReview(clientId, {
               message_id: msg.id, message_body: currentBody,
-              lead_context: { name: lead.name, company: lead.company, title: lead.title, email: lead.email, lead_id: lead.id, signal: meta.signal, angle: meta.angle, friction: meta.friction, why_now: meta.why_now },
+              lead_context: {
+                name: lead.name, company: lead.company, title: lead.title, email: lead.email,
+                lead_id: lead.id, signal: meta.signal, angle: meta.angle, friction: meta.friction,
+                why_now: meta.why_now, signal_package: meta.signal_package,
+                research_repair: meta.research_repair, pipeline_path: pipelinePath,
+              },
             });
             if (beaverState && typeof beaverState.recordImprovementAfterFeedback === 'function') {
               beaverState.recordImprovementAfterFeedback(clientId, {
@@ -362,6 +417,27 @@ async function processLead(clientId, lead, ctx = {}) {
           rangerResult = rangerResult || { approved: false };
           rangerResult.approved = false;
         }
+      }
+
+      if (!rangerResult?.approved && rangerResult?.repair_route === 'needs_research_repair') {
+        if (rangerResult?.captain_fallback?.body) {
+          currentBody = rangerResult.captain_fallback.body;
+          currentSubject = rangerResult.captain_fallback.subject || currentSubject || `${lead.company}`;
+          await pool.query(
+            `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval', ranger_score = 0, ranger_notes = $3, updated_at = NOW() WHERE id = $4 AND client_id = $5`,
+            [currentBody, currentSubject, 'Captain fallback — Research repair already exhausted. Review before sending.', msg.id, clientId]
+          );
+          await pool.query(
+            `INSERT INTO approvals (client_id, message_id, requested_by, status) VALUES ($1, $2, 'captain_fallback', 'pending')`,
+            [clientId, msg.id]
+          ).catch(() => {});
+          return { outcome: 'manual_review', messageId: msg.id, channel, viaCaptainFallback: true };
+        }
+        await pool.query(
+          `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
+          [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair after Sales redraft.', msg.id, clientId]
+        );
+        return { outcome: 'needs_research_repair', messageId: msg.id, channel };
       }
 
       // Still rejected → Enforcer drafts its own version
@@ -547,7 +623,9 @@ async function persistDraft(clientId, params) {
     kickoff_id,
     stage: 'drafted',
     status,
-    agent: draft_source === 'enforcer_fallback' ? 'enforcer_beaver' : 'sales_beaver',
+    agent: draft_source === 'enforcer_fallback'
+      ? 'enforcer_beaver'
+      : (draft_source === 'captain_fallback' ? 'captain' : 'sales_beaver'),
     score: ranger_score,
     pipeline_path,
     metadata: { channel, draft_source, signal },
@@ -578,6 +656,7 @@ async function persistDraft(clientId, params) {
 //   - hunterService:      { findEmail }
 //   - salesGenerate:      fn(clientId, {lead_id,channel,context}) -> {body,subject,prompt_variant}|null
 //   - rangerDraft:        fn(clientId, {lead_name,...}) -> {body,subject}|null   (optional, for fallback)
+//   - captainDraft:       fn(clientId, {lead,...}) -> {body,subject}|null       (bounded research fallback)
 
 /**
  * Enrich a lead's email if missing. Mutates `lead` in place and writes to DB.
@@ -698,6 +777,7 @@ function isVerifiedEmailReadyLead(lead = {}) {
  *   - context          required, the prompt context string for Sales Beaver
  *   - salesGenerate    required, fn(clientId, {lead_id,channel,context}) -> {body,subject,prompt_variant}|null
  *   - rangerDraft      optional, fn(clientId, {lead_name,...}) -> {body,subject}|null. Required if enableEnforcerFallback.
+ *   - captainDraft     optional, used after the bounded Research repair loop is exhausted.
  *   - enableEnforcerFallback  default false (kickoff/director_cold). signal_pipeline passes true.
  *   - lead             required if enableEnforcerFallback (rangerDraft needs name/company/title)
  *   - leadAngle, leadFriction  optional metadata for rangerDraft
@@ -715,6 +795,7 @@ async function draftWithFallback(clientId, params) {
     context,
     salesGenerate,
     rangerDraft = null,
+    captainDraft = null,
     enableEnforcerFallback = false,
     lead = null,
     leadAngle = null,
@@ -747,6 +828,13 @@ async function draftWithFallback(clientId, params) {
 
   if (salesResult?.status === 'needs_more_research') {
     console.warn(`${logPrefix} Sales routed lead ${lead_id} to Research repair: ${salesResult.reason || 'needs_more_research'}`);
+    const signalPackage = salesResult.signal_package || getSignalPackage(lead || {}) || null;
+    const repairAttempt = Number(salesResult.repair_attempt ?? salesResult.repairAttempt ?? 0) || 0;
+    const maxRepairAttempts = Math.max(
+      1,
+      Number(salesResult.max_repair_attempts ?? salesResult.maxRepairAttempts ?? repairPolicy.DEFAULT_MAX_RESEARCH_REPAIR_ATTEMPTS)
+        || repairPolicy.DEFAULT_MAX_RESEARCH_REPAIR_ATTEMPTS
+    );
     await recordRepairRouteFn(clientId, {
       lead_id,
       kickoff_id,
@@ -757,11 +845,39 @@ async function draftWithFallback(clientId, params) {
       repair_route: salesResult.repair_route || 'needs_research_repair',
       failed_rule: salesResult.reason || 'needs_more_research',
       reason: salesResult.required_repair || salesResult.reason || 'needs_more_research',
+      repair_attempt: repairAttempt,
+      max_repair_attempts: maxRepairAttempts,
+      signal_package: signalPackage,
       metadata: {
         missing_fields: salesResult.missing_fields || [],
         status: salesResult.status,
+        required_repair: salesResult.required_repair || null,
       },
     }).catch(() => {});
+    if (repairPolicy.researchRepairExhausted({ repairAttempt, maxRepairAttempts }) && captainDraft && lead) {
+      const captainResult = await captainDraft(clientId, {
+        lead,
+        lead_id,
+        channel,
+        context,
+        signal_package: signalPackage,
+        reason: salesResult.required_repair || salesResult.reason || 'research_repair_exhausted',
+        missing_fields: salesResult.missing_fields || [],
+      }).catch((err) => {
+        console.warn(`${logPrefix} Captain fallback failed for lead ${lead_id}: ${err.message}`);
+        return null;
+      });
+      if (captainResult?.body && typeof captainResult.body === 'string') {
+        return {
+          body: captainResult.body,
+          subject: captainResult.subject || null,
+          draftSource: 'captain_fallback',
+          prompt_variant: 'captain_fallback',
+          manualReview: true,
+          reason: salesResult.required_repair || salesResult.reason || 'research_repair_exhausted',
+        };
+      }
+    }
     return null;
   }
 
@@ -812,15 +928,29 @@ async function recordRepairRoute(clientId, {
   repair_route = 'manual_review',
   failed_rule = null,
   reason = null,
+  repair_attempt = null,
+  max_repair_attempts = null,
+  signal_package = null,
   metadata = {},
 } = {}) {
   if (!clientId) return { recorded: false, reason: 'missing_client_id' };
+  const repairState = repairPolicy.researchRepairState({
+    repair_attempt,
+    max_repair_attempts,
+    metadata,
+  });
+  const repairExhausted = repairPolicy.researchRepairExhausted(repairState);
+  const signalPackageHash = repairPolicy.signalPackageHash(signal_package);
   const repairMetadata = {
     ...metadata,
     repair_route,
     failed_rule,
     source,
     channel,
+    repair_attempt: repairState.repairAttempt,
+    max_repair_attempts: repairState.maxRepairAttempts,
+    repair_exhausted: repairExhausted,
+    signal_package_hash: signalPackageHash,
   };
 
   await logsService.createLog(clientId, {
@@ -845,7 +975,39 @@ async function recordRepairRoute(clientId, {
     }).catch(() => {});
   }
 
-  return { recorded: true, repair_route };
+  let directiveWritten = false;
+  if (repair_route === 'needs_research_repair' && lead_id && !repairExhausted) {
+    try {
+      const directive = directivesSvc.buildRepairSignalPackageDirective({
+        leadId: lead_id,
+        messageId: message_id,
+        kickoffId: kickoff_id,
+        channel,
+        pipelinePath: pipeline_path,
+        failedRule: failed_rule,
+        reason,
+        missingFields: metadata.missing_fields || metadata.issues || [],
+        requiredRepair: metadata.required_repair || reason,
+        repairAttempt: repairState.repairAttempt,
+        maxRepairAttempts: repairState.maxRepairAttempts,
+        signalPackage: signal_package,
+        sourceUrl: metadata.source_url || signal_package?.source_url || null,
+        sourceChannel: metadata.source_channel || signal_package?.source_channel || null,
+        querySetHash: metadata.query_set_hash || null,
+        evidenceDecision: metadata.evidence_decision || null,
+      });
+      await directivesSvc.writeDirective(clientId, 'research_beaver', 'repair_signal_package', directive.payload, {
+        reason: reason || failed_rule || 'Research must repair signal_package before Sales retries.',
+        severity: 'high',
+        expiresInHours: 12,
+      });
+      directiveWritten = true;
+    } catch (err) {
+      console.warn('[pipeline.repair-route] failed to write Research repair directive:', err.message);
+    }
+  }
+
+  return { recorded: true, repair_route, repair_exhausted: repairExhausted, directive_written: directiveWritten };
 }
 
 // ─── STEP 4 (this commit): ICP gate (soft-delete shape) ────────────────────

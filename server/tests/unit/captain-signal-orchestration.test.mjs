@@ -171,6 +171,39 @@ describe('Captain signal orchestration (V2.1 Phase 5)', () => {
     });
   });
 
+  it('builds one-shot Research repair directives with no-repeat memory', () => {
+    const repairDirective = directiveBus.buildRepairSignalPackageDirective({
+      leadId: 'lead-1',
+      messageId: 'message-1',
+      kickoffId: 'plan-1',
+      channel: 'email',
+      pipelinePath: 'signal_pipeline',
+      failedRule: 'thin_evidence',
+      missingFields: ['source_url', 'decision_maker'],
+      signalPackage: {
+        signal_id: 'hiring_sales_roles',
+        evidence: ['Hiring BDR'],
+        why_now: 'Outbound capacity build',
+      },
+    });
+
+    expect(repairDirective.directive_type).toBe('repair_signal_package');
+    expect(repairDirective.target_agent).toBe('research_beaver');
+    expect(repairDirective.payload).toMatchObject({
+      lead_id: 'lead-1',
+      message_id: 'message-1',
+      kickoff_id: 'plan-1',
+      channel: 'email',
+      pipeline_path: 'signal_pipeline',
+      repair_route: 'needs_research_repair',
+      failed_rule: 'thin_evidence',
+      missing_fields: ['source_url', 'decision_maker'],
+      repair_attempt: 1,
+      max_repair_attempts: 1,
+    });
+    expect(repairDirective.payload.do_not_repeat.signal_package_hash).toBe(repairDirective.payload.original_signal_package_hash);
+  });
+
   it('marks Captain health degraded when snapshot or directive truth layers fail', () => {
     jobHealth.markDegraded('captain_directive_sweep', 'dam_kpi_snapshot_failed', { client_id: 'client-1' });
     const status = jobHealth.getStatus();

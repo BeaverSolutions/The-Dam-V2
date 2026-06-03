@@ -108,6 +108,18 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(pipelineSource).toContain("stage: isBorderline ? 'reviewed' : 'approved'");
   });
 
+  it('routes thin research through a bounded repair loop before Captain fallback', () => {
+    expect(directivesSource).toContain('repair_signal_package');
+    expect(pipelineSource).toContain("writeDirective(clientId, 'research_beaver', 'repair_signal_package'");
+    expect(dbBuilderSource).toContain("directive_type === 'repair_signal_package'");
+    expect(dbBuilderSource).toContain('repairLeadSignalPackage');
+    expect(agentsSource).toContain('async function captainFallbackDraft');
+    expect(agentsSource).toContain("draftSource: 'captain_fallback'");
+    expect(agentsSource).toContain("'captain_fallback'");
+    expect(agentsSource).toContain('researchRepairExhausted');
+    expect(agentsSource).toContain("repair_route === 'needs_research_repair'");
+  });
+
   it('send, manual-send, KPI, follow-up, and learning loops are wired after real sends', () => {
     expect(sendQueueSource).toContain("result.status === 'simulated'");
     expect(sendQueueSource).toContain("UPDATE send_queue SET status = 'sent'");
