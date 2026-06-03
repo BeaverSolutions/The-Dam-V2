@@ -49,6 +49,29 @@ function industryPriority(value) {
   if (/\b(training|learning|l&d|development)/i.test(s)) return 3;
   return 2;
 }
+function industryBucket(value) {
+  const s = String(value || '').toLowerCase();
+  if (/\b(training|learning|l&d|coaching|skills development)/i.test(s)) return 'training';
+  if (/\b(agency|digital|marketing|creative|media|advertising|content studio|pr firm|professional service|consult)/i.test(s)) return 'agency';
+  return 'other';
+}
+function diversifyIndustriesForQueryRun(industries = []) {
+  const buckets = { training: [], agency: [], other: [] };
+  for (const industry of industries) buckets[industryBucket(industry)].push(industry);
+  const diversified = [];
+  const order = ['training', 'agency', 'other'];
+  for (let i = 0; diversified.length < industries.length; i++) {
+    let moved = false;
+    for (const bucket of order) {
+      if (buckets[bucket][i]) {
+        diversified.push(buckets[bucket][i]);
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return diversified;
+}
 function industriesFromIcp(icp = {}) {
   const raw = [...listFrom(icp.industries), ...listFrom(icp.verticals), ...listFrom(icp.segments)];
   const base = raw.length > 0 ? raw : ['B2B corporate training', 'digital agency'];
@@ -64,10 +87,10 @@ function industriesFromIcp(icp = {}) {
 }
 function buildSignalQueriesFromIcp(icp = {}) {
   const countries = countriesFromIcp(icp);
-  const finalIndustries = industriesFromIcp(icp);
+  const finalIndustries = diversifyIndustriesForQueryRun(industriesFromIcp(icp));
   const queries = [];
-  for (const industry of finalIndustries) {
-    for (const country of countries) {
+  for (const country of countries) {
+    for (const industry of finalIndustries) {
       queries.push({ query: `"${industry}" "${country.name}" "hiring" "sales"`, signal_type: 'hiring_sales', tier: 'P1', country: country.code });
       queries.push({ query: `"${industry}" "${country.name}" ("expanding" OR "launched" OR "growth") founder OR CEO`, signal_type: 'growth_signal', tier: 'P1', country: country.code });
     }
@@ -113,7 +136,30 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(industriesFn).not.toContain('.slice(0, 3)');
   });
 
-  it('prioritizes agency/professional-services terms ahead of training terms', () => {
+  it('diversifies bounded query windows across training and agency ICP buckets', () => {
+    const queries = signalHunt._test.buildSignalQueriesFromIcp({
+      industries: [
+        'B2B corporate training',
+        'professional training',
+        'L&D providers',
+        'executive coaching',
+        'sales coaching',
+        'skills development',
+        'digital agencies',
+        'marketing agencies',
+        'content studios',
+        'PR firms',
+        'creative studios',
+      ],
+      geographies: 'Malaysia, Singapore, United States',
+    });
+    const firstSix = queries.slice(0, 6).map(q => q.query.toLowerCase()).join('\n');
+
+    expect(firstSix).toMatch(/training|l&d|coaching|skills development/);
+    expect(firstSix).toMatch(/agenc|content studio|pr firm|creative studio/);
+  });
+
+  it('keeps explicit industry prioritization helpers for deterministic ordering', () => {
     expect(src).toContain('function industryPriority');
     expect(src).toContain('professional service');
     expect(src).toContain('training');
@@ -134,6 +180,14 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).toContain("'contacts_zero'");
     expect(src).toContain('raw_results_total');
     expect(src).toContain('ON CONFLICT (client_id, agent, key) DO NOTHING');
+  });
+
+  it('exposes a no-spend query plan preview for paid proof preflight', () => {
+    expect(src).toContain('async function previewSignalHuntPlan');
+    expect(src).toContain('query_set_hash');
+    expect(src).toContain('executable_queries');
+    expect(src).toContain('repeated_zero_blocked');
+    expect(src).toContain('previewSignalHuntPlan');
   });
 
   it('saveSignalLeads routes through contactGate.tryPersistSourcedLead', () => {
@@ -298,15 +352,14 @@ describe('buildSignalQueriesFromIcp', () => {
     expect(r.some(q => q.query.includes('"digital agency"'))).toBe(true);
   });
 
-  it('places agency/professional-services queries before training queries', () => {
+  it('does not allow one vertical bucket to consume the entire first proof window', () => {
     const r = buildSignalQueriesFromIcp({
       verticals: ['B2B corporate training', 'professional training', 'digital agency', 'professional services'],
       geographies: ['Malaysia'],
     });
-    expect(r[0].query).toContain('"digital agency"');
-    expect(r.findIndex(q => q.query.includes('"B2B corporate training"'))).toBeGreaterThan(
-      r.findIndex(q => q.query.includes('"digital agency"'))
-    );
+    const firstFour = r.slice(0, 4).map(q => q.query.toLowerCase()).join('\n');
+    expect(firstFour).toContain('digital agency');
+    expect(firstFour).toContain('b2b corporate training');
   });
 });
 

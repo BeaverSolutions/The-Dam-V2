@@ -406,8 +406,12 @@ describe('P0 stabilization contracts', () => {
     expect(autonomous).toContain("KICKOFF_ALL_ENABLED !== 'true'");
     expect(autonomous).toContain("KICKOFF_FORCE_OVERRIDE_ENABLED !== 'true'");
     expect(autonomous).toContain('KICKOFF_ALL_DISABLED');
+    expect(autonomous).toContain('AUTONOMOUS_ENABLED_CLIENTS empty — fanout routes resolve to zero clients');
+    expect(autonomous).not.toContain("const { rows } = await pool.query('SELECT id FROM clients')");
     expect(service('../.env.example')).toContain('KICKOFF_ALL_ENABLED=false');
+    expect(service('../.env.example')).toContain('AUTONOMOUS_ENABLED_CLIENTS=beaver-solutions');
     expect(service('../.env.production.example')).toContain('KICKOFF_FORCE_OVERRIDE_ENABLED=false');
+    expect(service('../.env.production.example')).toContain('AUTONOMOUS_ENABLED_CLIENTS=beaver-solutions');
     expect(trigger).toContain('Missing env: CLIENT_SLUG. Refusing all-tenant kickoff.');
     expect(trigger).toContain('/api/autonomous/kickoff');
     expect(trigger).not.toContain('/api/autonomous/kickoff-all');

@@ -123,8 +123,8 @@ async function requireInternalKey(req, res, next) {
 // Resolve the client IDs the autonomous system may fan out to. Honours the
 // AUTONOMOUS_ENABLED_CLIENTS slug whitelist (audit A6-1/A6-2: /kickoff-all and
 // /weekly-review previously fanned out to EVERY client, ignoring the gate).
-// When the whitelist is unset, returns all clients — preserves single-tenant
-// behaviour today; the moment a 2nd tenant onboards, set the env var.
+// Empty whitelist returns no clients. Single-tenant manual work should use the
+// explicit /kickoff client_id route; fanout must be consciously scoped.
 async function getEnabledClientIds() {
   const whitelist = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '')
     .split(',').map(s => s.trim()).filter(Boolean);
@@ -132,8 +132,8 @@ async function getEnabledClientIds() {
     const { rows } = await pool.query('SELECT id FROM clients WHERE slug = ANY($1)', [whitelist]);
     return rows.map(r => r.id);
   }
-  const { rows } = await pool.query('SELECT id FROM clients');
-  return rows.map(r => r.id);
+  logger.warn('[autonomous] AUTONOMOUS_ENABLED_CLIENTS empty — fanout routes resolve to zero clients');
+  return [];
 }
 
 // Defense-in-depth: apply auth at router level so no future route skips it.
@@ -152,7 +152,7 @@ router.use(requireInternalKey);
  *   - status/kpi   → live DB query, returns sent/pending/leads_today
  *   - kickoff/run  → fires directorExecute in background, returns plan_id
  *   - approvals    → lists pending approvals with ranger scores
- *   - signal hunt  → fires runSignalHunt in background
+ *   - signal hunt  → gated bounded Research-only signal hunt
  *   - research     → fires Research Beaver only with custom brief
  *   - pause/resume → pauses send queue or specific leads
  *   - fallback     → help text
@@ -319,7 +319,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
 
     // ── Intent 4: SIGNAL HUNT ────────────────────────────────────────
     else if (/\b(signal|hunt|hiring|funding|trigger|buying)\b/i.test(lowerMsg)) {
-      const { runSignalHunt, saveSignalLeads } = require('../services/signalHunt');
+      const { runSignalHunt, saveSignalLeads, previewSignalHuntPlan } = require('../services/signalHunt');
 
       // Load ICP for signal hunt
       const { rows: icpRows } = await pool.query(
@@ -327,26 +327,46 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
         [client_id]
       );
       const icp = icpRows[0]?.content || {};
+      const signalLimit = Math.max(1, Math.min(
+        Number(req.body?.signal_limit || req.body?.limit || parseRequestedLeadLimit(message, 5)) || 5,
+        5
+      ));
+      const plan = await previewSignalHuntPlan(client_id, {
+        icp,
+        maxPaidQueries: signalLimit,
+      });
 
-      response.reply = `Running signal hunt in the background — scanning news + LinkedIn jobs for buying triggers. Target: 20 P1/P2 leads. Check back with "status" in 2-3 minutes.`;
+      if (req.body?.allow_paid_signal_hunt !== true) {
+        response.reply = 'Signal Hunt is gated. Review the query plan first, then call again with allow_paid_signal_hunt=true.';
+        response.actions_taken.push('signal_hunt_paid_gate_required');
+        response.data = {
+          mode: 'signal_hunt_preview',
+          max_limit: 5,
+          required_flag: 'allow_paid_signal_hunt=true',
+          query_plan: plan,
+        };
+        return res.json(response);
+      }
+
+      response.reply = `Running bounded signal hunt in the background. Target: ${signalLimit} Research-only lead${signalLimit === 1 ? '' : 's'}. No Sales, Enforcer, approvals, or send queue will be triggered from this chat branch.`;
       response.actions_taken.push('triggered_signal_hunt');
+      response.data = {
+        mode: 'bounded_signal_hunt_research_only',
+        requested_limit: signalLimit,
+        query_plan: plan,
+      };
 
       runWithClientContext(client_id, () =>
         (async () => {
           try {
-            const leads = await runSignalHunt(client_id, { maxLeads: 20, icp });
+            const leads = await runSignalHunt(client_id, {
+              maxLeads: signalLimit,
+              icp,
+              maxPaidQueries: signalLimit,
+            });
             if (leads.length > 0) {
               const saved = await saveSignalLeads(client_id, leads);
               console.log(`[chat] Signal hunt saved ${saved.length} leads for ${client_id}`);
-
-              // Auto-trigger outreach on signal-sourced leads
-              if (saved.length > 0) {
-                await directorExecute(client_id, {
-                  plan_id: uuidv4(),
-                  command: `SIGNAL-SOURCED BATCH: Process ${saved.length} pre-qualified leads already saved with P1/P2 signals.`,
-                  use_existing_leads: saved.map(l => l.id),
-                });
-              }
             }
           } catch (err) {
             console.error('[chat] Signal hunt background failed:', err.message);
@@ -1166,7 +1186,45 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
     );
     const icp = icpRows[0]?.content || {};
     const before = await proofCounts();
-    const { runSignalHunt, saveSignalLeads } = require('../services/signalHunt');
+    const { runSignalHunt, saveSignalLeads, previewSignalHuntPlan } = require('../services/signalHunt');
+    const queryPlan = await previewSignalHuntPlan(clientId, {
+      icp,
+      maxPaidQueries: proofLimit,
+    });
+    const confirmHash = String(req.body?.confirm_query_plan_hash || '').trim();
+    const dryRun = req.body?.dry_run === true;
+
+    if (dryRun || !confirmHash) {
+      return res.status(dryRun ? 200 : 409).json({
+        data: {
+          client_id: clientId,
+          mode: 'v2_1_research_proof_query_plan',
+          dry_run: true,
+          requested_limit: proofLimit,
+          before,
+          query_plan: queryPlan,
+          required_confirmation: 'Inspect query_plan.executable_queries, then rerun with confirm_query_plan_hash equal to query_plan.query_set_hash.',
+        },
+      });
+    }
+    if (confirmHash !== queryPlan.query_set_hash) {
+      return res.status(409).json({
+        error: 'query plan hash mismatch',
+        code: 'QUERY_PLAN_CONFIRMATION_MISMATCH',
+        data: {
+          expected_hash: queryPlan.query_set_hash,
+          received_hash: confirmHash,
+          query_plan: queryPlan,
+        },
+      });
+    }
+    if (queryPlan.repeated_zero_blocked) {
+      return res.status(409).json({
+        error: 'query plan already produced zero output today',
+        code: 'REPEATED_ZERO_QUERY_SET',
+        data: { query_plan: queryPlan },
+      });
+    }
     const leads = await runWithClientContext(clientId, () => runSignalHunt(clientId, {
       maxLeads: proofLimit,
       icp,
@@ -1180,6 +1238,7 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
         client_id: clientId,
         mode: 'v2_1_research_proof',
         requested_limit: proofLimit,
+        query_plan: queryPlan,
         candidates: Array.isArray(leads) ? leads.length : 0,
         saved: saved.length,
         saved_leads: saved.map(l => ({

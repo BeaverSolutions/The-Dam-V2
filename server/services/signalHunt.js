@@ -199,6 +199,33 @@ function industryPriority(value) {
   return 2;
 }
 
+function industryBucket(value) {
+  const s = String(value || '').toLowerCase();
+  if (/\b(training|learning|l&d|coaching|skills development)/i.test(s)) return 'training';
+  if (/\b(agency|digital|marketing|creative|media|advertising|content studio|pr firm|professional service|consult)/i.test(s)) return 'agency';
+  return 'other';
+}
+
+function diversifyIndustriesForQueryRun(industries = []) {
+  const buckets = { training: [], agency: [], other: [] };
+  for (const industry of industries) {
+    buckets[industryBucket(industry)].push(industry);
+  }
+  const diversified = [];
+  const order = ['training', 'agency', 'other'];
+  for (let i = 0; diversified.length < industries.length; i++) {
+    let moved = false;
+    for (const bucket of order) {
+      if (buckets[bucket][i]) {
+        diversified.push(buckets[bucket][i]);
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return diversified;
+}
+
 function hasIcpSearchScope(icp = {}) {
   return [
     ...listFrom(icp.industries),
@@ -214,10 +241,10 @@ function hasIcpSearchScope(icp = {}) {
 
 function buildSignalQueriesFromIcp(icp = {}) {
   const countries = countriesFromIcp(icp);
-  const industries = industriesFromIcp(icp);
+  const industries = diversifyIndustriesForQueryRun(industriesFromIcp(icp));
   const queries = [];
-  for (const industry of industries) {
-    for (const country of countries) {
+  for (const country of countries) {
+    for (const industry of industries) {
       queries.push({
         query: `"${industry}" "${country.name}" "hiring" "sales"`,
         signal_type: 'hiring_sales',
@@ -447,6 +474,47 @@ async function loadSignalConfig(clientId, icp = {}) {
     max_results_per_query: Number.isFinite(requestedResults) && requestedResults > 0
       ? Math.min(requestedResults, MAX_SIGNAL_RESULTS_PER_QUERY)
       : MAX_SIGNAL_RESULTS_PER_QUERY,
+  };
+}
+
+async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null, signalPlaybook = null } = {}) {
+  let config = await loadSignalConfig(clientId, icp);
+  config = applySignalPlaybookToConfig(config, signalPlaybook);
+  const hash = signalQuerySetHash(config.queries);
+  const key = `signal_hunt_zero_query_set_${klDateString()}_${hash}`;
+  const paidQueryBudget = Number.isFinite(Number(maxPaidQueries))
+    ? Math.max(0, Number(maxPaidQueries))
+    : null;
+  const executableQueryCount = paidQueryBudget === null
+    ? config.queries.length
+    : Math.min(config.queries.length, paidQueryBudget);
+  const { rows } = await pool.query(
+    `SELECT content FROM agent_memory
+     WHERE client_id = $1 AND agent = 'research_beaver' AND key = $2
+     LIMIT 1`,
+    [clientId, key]
+  );
+  const shapeQuery = q => ({
+    query: q.query,
+    signal_type: q.signal_type,
+    tier: q.tier,
+    country: q.country,
+    signal_id: q.signal_id || null,
+    source_channel: q.source_channel || null,
+  });
+
+  return {
+    query_source: config.query_source,
+    max_results_per_query: config.max_results_per_query,
+    query_set_hash: hash,
+    query_set_key: key,
+    repeated_zero_blocked: rows.length > 0,
+    previous_zero_output: rows[0]?.content || null,
+    paid_query_budget: paidQueryBudget,
+    total_queries: config.queries.length,
+    executable_query_count: executableQueryCount,
+    queries: config.queries.map(shapeQuery),
+    executable_queries: config.queries.slice(0, executableQueryCount).map(shapeQuery),
   };
 }
 
@@ -883,10 +951,13 @@ module.exports = {
   runSignalHunt,
   saveSignalLeads,
   loadSignalConfig,
+  previewSignalHuntPlan,
   _test: {
     applySignalPlaybookToConfig,
     attachSignalPackageToSignalLead,
     signalPackageMissingFields,
     signalFamilyForType,
+    buildSignalQueriesFromIcp,
+    signalQuerySetHash,
   },
 };
