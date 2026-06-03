@@ -658,6 +658,15 @@ function normaliseExtractedSignals(items = [], fallbackSignalType = 'buying_sign
     }));
 }
 
+function extractedSignalItems(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  const keys = ['signals', 'data', 'opportunities', 'leads', 'companies', 'items', 'results', 'buying_signals'];
+  for (const key of keys) {
+    if (Array.isArray(parsed?.[key])) return parsed[key];
+  }
+  return null;
+}
+
 /**
  * Extract companies + signal data through the budgeted signal parser path.
  */
@@ -703,10 +712,8 @@ Rules:
 - Use the result date as signal_date when available; use empty string if no date is visible
 - If no real signals found, return []
 - Return ONLY the JSON array, nothing else`, { clientId });
-    if (Array.isArray(parsed)) return normaliseExtractedSignals(parsed, signal_type);
-    if (Array.isArray(parsed?.signals)) return normaliseExtractedSignals(parsed.signals, signal_type);
-    if (Array.isArray(parsed?.data)) return normaliseExtractedSignals(parsed.data, signal_type);
-    if (Array.isArray(parsed?.opportunities)) return normaliseExtractedSignals(parsed.opportunities, signal_type);
+    const parsedItems = extractedSignalItems(parsed);
+    if (parsedItems) return normaliseExtractedSignals(parsedItems, signal_type);
     if (typeof parsed?.raw === 'string') {
       const jsonMatch = parsed.raw.match(/\[[\s\S]*\]/);
       if (jsonMatch) return normaliseExtractedSignals(JSON.parse(jsonMatch[0]), signal_type);
@@ -1126,6 +1133,7 @@ module.exports = {
     titlesFromIcp,
     signalExtractionAgent,
     normaliseExtractedSignals,
+    extractedSignalItems,
     signalQuerySetHash,
   },
 };

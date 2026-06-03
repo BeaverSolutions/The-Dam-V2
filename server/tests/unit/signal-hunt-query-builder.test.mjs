@@ -482,6 +482,18 @@ describe('signal extraction helpers', () => {
       angle: 'New PR mandate means founder-led pipeline pressure can surface.',
     }]);
   });
+
+  it('accepts OpenAI json_object wrappers around extracted signal arrays', () => {
+    expect(signalHunt._test.extractedSignalItems({
+      leads: [{ company: 'Kingdom Digital' }],
+    })).toEqual([{ company: 'Kingdom Digital' }]);
+    expect(signalHunt._test.extractedSignalItems({
+      companies: [{ company: 'GO Communications' }],
+    })).toEqual([{ company: 'GO Communications' }]);
+    expect(signalHunt._test.extractedSignalItems({
+      buying_signals: [{ company: 'Mad Hat Asia' }],
+    })).toEqual([{ company: 'Mad Hat Asia' }]);
+  });
 });
 
 describe('buildSignalQueriesFromIcp', () => {
