@@ -77,7 +77,7 @@ async function blockedByRepeatedZeroQuerySet(clientId, queries = []) {
 async function rememberZeroQuerySet(clientId, { key, hash, queries, queriesRun, rawResultsTotal, blocker }) {
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
-     VALUES ($1, 'research_beaver', $2, $3::jsonb, 'state', NOW())
+     VALUES ($1, 'research_beaver', $2, $3::jsonb, 'pattern', NOW())
      ON CONFLICT (client_id, agent, key) DO NOTHING`,
     [
       clientId,
@@ -226,6 +226,59 @@ function diversifyIndustriesForQueryRun(industries = []) {
   return diversified;
 }
 
+function sourceAwareQueriesForCountry(country = {}, industries = []) {
+  const name = country.name || countryNameFromCode(country.code);
+  const code = country.code || countryCodeFromText(name) || 'MY';
+  const joinedIndustries = industries.join(' ').toLowerCase();
+  const wantsAgency = /agency|digital|marketing|creative|media|advertising|content studio|pr firm/.test(joinedIndustries);
+  const wantsTraining = /training|learning|l&d|coaching|skills|development/.test(joinedIndustries);
+  const queries = [];
+
+  if (wantsAgency && (code === 'MY' || code === 'SG')) {
+    queries.push({
+      query: `site:marketingmagazine.com.my "${name}" ("agency" OR "independent agency" OR "agency of the year") ("founder" OR "CEO" OR "Managing Director")`,
+      signal_type: 'industry_publication_agency_signal',
+      signal_id: 'agency_growth_publication',
+      signal_family: 'expansion_growth',
+      source_channel: 'industry_publication',
+      tier: 'P1',
+      country: code,
+    });
+    queries.push({
+      query: `site:marketing-interactive.com "${name}" ("independent agency" OR "agency of the year" OR "appointed" OR "launches")`,
+      signal_type: 'industry_publication_agency_signal',
+      signal_id: 'agency_growth_publication',
+      signal_family: 'expansion_growth',
+      source_channel: 'industry_publication',
+      tier: 'P1',
+      country: code,
+    });
+    queries.push({
+      query: `site:campaignasia.com "${name}" ("independent agency" OR "agency of the year" OR "growth" OR "appointed")`,
+      signal_type: 'industry_publication_agency_signal',
+      signal_id: 'agency_growth_publication',
+      signal_family: 'expansion_growth',
+      source_channel: 'industry_publication',
+      tier: 'P1',
+      country: code,
+    });
+  }
+
+  if (wantsTraining && code === 'MY') {
+    queries.push({
+      query: `site:digitalnewsasia.com "${name}" ("training" OR "upskilling" OR "skills") ("launches" OR "expands" OR "partners")`,
+      signal_type: 'training_growth_signal',
+      signal_id: 'training_growth_publication',
+      signal_family: 'expansion_growth',
+      source_channel: 'industry_publication',
+      tier: 'P1',
+      country: code,
+    });
+  }
+
+  return queries;
+}
+
 function hasIcpSearchScope(icp = {}) {
   return [
     ...listFrom(icp.industries),
@@ -244,6 +297,7 @@ function buildSignalQueriesFromIcp(icp = {}) {
   const industries = diversifyIndustriesForQueryRun(industriesFromIcp(icp));
   const queries = [];
   for (const country of countries) {
+    queries.push(...sourceAwareQueriesForCountry(country, industries));
     for (const industry of industries) {
       queries.push({
         query: `"${industry}" "${country.name}" "hiring" "sales"`,
@@ -619,7 +673,7 @@ async function findDecisionMaker(companyName, icpTitles = [], country = 'MY') {
  * @param {object} options.icp - ICP memory for seniority ranking
  * @returns {Promise<Array<Lead>>}
  */
-async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries = null, signalPlaybook = null } = {}) {
+async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries = null, signalPlaybook = null, plan_id = null } = {}) {
   console.log(`[signalHunt] Starting signal hunt for client ${clientId} (target: ${maxLeads})`);
   await assertLlmBudgetOpen(clientId);
 
@@ -701,6 +755,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       agent: 'research_beaver',
       action: 'signal_hunt_complete',
       metadata: {
+        plan_id,
         query_source: config.query_source,
         queries_run: queriesRun,
         queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
@@ -824,6 +879,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     agent: 'research_beaver',
     action: 'signal_hunt_complete',
     metadata: {
+      plan_id,
       query_source: config.query_source,
       queries_run: queriesRun,
       queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
@@ -958,6 +1014,7 @@ module.exports = {
     signalPackageMissingFields,
     signalFamilyForType,
     buildSignalQueriesFromIcp,
+    sourceAwareQueriesForCountry,
     signalQuerySetHash,
   },
 };

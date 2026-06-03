@@ -4271,6 +4271,7 @@ async function directorExecute(clientId, {
         maxLeads: remainingTarget,
         icp: icpMemory,
         maxPaidQueries: signalBudget,
+        plan_id,
       });
       diagnostics.signal_first_raw = Array.isArray(signalLeads) ? signalLeads.length : 0;
 
