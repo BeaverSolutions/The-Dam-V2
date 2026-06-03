@@ -37,6 +37,7 @@ function envInt(name, fallback) {
 
 const MAX_SIGNAL_QUERIES_PER_RUN = envInt('SIGNAL_HUNT_MAX_QUERIES', 6);
 const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
+const SIGNAL_HUNT_PARSER_VERSION = 'market_sensor_publication_v1';
 
 function klDateString() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -47,7 +48,7 @@ function signalQuerySetHash(queries = []) {
     .map(q => `${String(q.country || '').toUpperCase()}|${String(q.signal_type || '')}|${String(q.query || '').trim().toLowerCase()}`)
     .sort()
     .join('\n');
-  return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+  return crypto.createHash('sha256').update(`${SIGNAL_HUNT_PARSER_VERSION}\n${canonical}`).digest('hex').slice(0, 16);
 }
 
 async function blockedByRepeatedZeroQuerySet(clientId, queries = []) {
@@ -67,6 +68,7 @@ async function blockedByRepeatedZeroQuerySet(clientId, queries = []) {
     metadata: {
       key,
       query_set_hash: hash,
+      parser_version: SIGNAL_HUNT_PARSER_VERSION,
       blocker: 'repeated_zero_output_query_set',
       previous: rows[0].content || null,
     },
@@ -85,6 +87,7 @@ async function rememberZeroQuerySet(clientId, { key, hash, queries, queriesRun, 
       JSON.stringify({
         query_set_hash: hash,
         blocker,
+        parser_version: SIGNAL_HUNT_PARSER_VERSION,
         queries_run: queriesRun,
         raw_results_total: rawResultsTotal,
         queries_preview: queries.map(q => q.query).slice(0, queriesRun),
@@ -594,6 +597,7 @@ async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null
     query_set_key: key,
     repeated_zero_blocked: rows.length > 0,
     previous_zero_output: rows[0]?.content || null,
+    parser_version: SIGNAL_HUNT_PARSER_VERSION,
     paid_query_budget: paidQueryBudget,
     total_queries: config.queries.length,
     executable_query_count: executableQueryCount,

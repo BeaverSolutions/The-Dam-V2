@@ -281,6 +281,8 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
 
   it('logs raw-zero blockers and blocks repeated zero-output query sets per day', () => {
     expect(src).toContain('function signalQuerySetHash');
+    expect(src).toContain('SIGNAL_HUNT_PARSER_VERSION');
+    expect(src).toContain('parser_version');
     expect(src).toContain('signal_hunt_zero_query_set_');
     expect(src).toContain("'signal_hunt_zero_query_set_blocked'");
     expect(src).toContain("'repeated_zero_output_query_set'");
