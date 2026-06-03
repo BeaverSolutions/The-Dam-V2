@@ -60,10 +60,14 @@ function isV2Enabled() {
   return PIPELINE_V2_ENABLED;
 }
 
-function getSignalPackage(source = {}) {
-  const meta = source && typeof source.metadata === 'object' && !Array.isArray(source.metadata)
+function getMetadata(source = {}) {
+  return source && typeof source.metadata === 'object' && !Array.isArray(source.metadata)
     ? source.metadata
     : {};
+}
+
+function getSignalPackage(source = {}) {
+  const meta = getMetadata(source);
   return source.signal_package
     || meta.signal_package
     || source.signalPackage
@@ -275,14 +279,27 @@ async function processLead(clientId, lead, ctx = {}) {
     }
 
     const draftRequiresManualReview = draft.manualReview === true || draft.draftSource === 'captain_fallback';
+    const reviewLead = draft.lead && typeof draft.lead === 'object' ? draft.lead : lead;
+    const reviewMeta = getMetadata(reviewLead);
+    const effectiveSignalPackage = draft.signal_package || reviewMeta.signal_package || meta.signal_package || null;
+    const effectiveResearchRepair = draft.research_repair || reviewMeta.research_repair || meta.research_repair || null;
+    const effectiveSignal = reviewMeta.signal || meta.signal || null;
+    const effectiveWhyNow = reviewMeta.why_now || meta.why_now || null;
+    const evidenceMetadata = {
+      ...(effectiveSignalPackage ? { signal_package: effectiveSignalPackage } : {}),
+      ...(effectiveResearchRepair ? { research_repair: effectiveResearchRepair } : {}),
+    };
 
     // ── 9. Persist draft ──
     const msg = await persistDraft(clientId, {
       lead_id: lead.id, channel, subject: draft.subject, body: draft.body,
       status: draftRequiresManualReview ? 'pending_approval' : messageStatus,
       draft_source: draft.draftSource || 'sales_beaver',
-      prompt_variant: draft.prompt_variant, signal: meta.signal,
-      metadata: draftRequiresManualReview ? { captain_fallback_reason: draft.reason || null } : {},
+      prompt_variant: draft.prompt_variant, signal: effectiveSignal,
+      metadata: {
+        ...(draftRequiresManualReview ? { captain_fallback_reason: draft.reason || null } : {}),
+        ...evidenceMetadata,
+      },
       kickoff_id: kickoffId, pipeline_path: pipelinePath,
     });
     recordOutcome(clientId, {
@@ -322,8 +339,8 @@ async function processLead(clientId, lead, ctx = {}) {
       );
     }
     const safety = brandSafetyCheck(currentBody, {
-      name: lead.name, company: lead.company, title: lead.title,
-      signal: meta.signal, why_now: meta.why_now,
+      name: reviewLead.name || lead.name, company: reviewLead.company || lead.company, title: reviewLead.title || lead.title,
+      signal: effectiveSignal, why_now: effectiveWhyNow,
     });
     if (!safety.safe) {
       await pool.query(
@@ -340,11 +357,11 @@ async function processLead(clientId, lead, ctx = {}) {
       rangerResult = await rangerReview(clientId, {
         message_id: msg.id, message_body: currentBody,
         lead_context: {
-          name: lead.name, company: lead.company, title: lead.title, email: lead.email,
-          lead_id: lead.id, signal: meta.signal, angle: meta.angle, friction: meta.friction,
-          why_now: meta.why_now, touch_number: touchNumber,
-          signal_package: meta.signal_package,
-          research_repair: meta.research_repair,
+          name: reviewLead.name || lead.name, company: reviewLead.company || lead.company, title: reviewLead.title || lead.title, email: reviewLead.email || lead.email,
+          lead_id: lead.id, signal: effectiveSignal, angle: reviewMeta.angle || meta.angle, friction: reviewMeta.friction || meta.friction,
+          why_now: effectiveWhyNow, touch_number: touchNumber,
+          signal_package: effectiveSignalPackage,
+          research_repair: effectiveResearchRepair,
           pipeline_path: pipelinePath,
         },
       });
@@ -413,9 +430,9 @@ async function processLead(clientId, lead, ctx = {}) {
               message_id: msg.id, message_body: currentBody,
               lead_context: {
                 name: lead.name, company: lead.company, title: lead.title, email: lead.email,
-                lead_id: lead.id, signal: meta.signal, angle: meta.angle, friction: meta.friction,
-                why_now: meta.why_now, signal_package: meta.signal_package,
-                research_repair: meta.research_repair, pipeline_path: pipelinePath,
+                lead_id: lead.id, signal: effectiveSignal, angle: reviewMeta.angle || meta.angle, friction: reviewMeta.friction || meta.friction,
+                why_now: effectiveWhyNow, signal_package: effectiveSignalPackage,
+                research_repair: effectiveResearchRepair, pipeline_path: pipelinePath,
               },
             });
             if (beaverState && typeof beaverState.recordImprovementAfterFeedback === 'function') {
@@ -458,8 +475,8 @@ async function processLead(clientId, lead, ctx = {}) {
         let enforcerDraft = null;
         try {
           enforcerDraft = await rangerDraft(clientId, {
-            lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
-            lead_angle: meta.angle, lead_friction: meta.friction, rejected_body: currentBody,
+            lead_name: reviewLead.name || lead.name, lead_company: reviewLead.company || lead.company, lead_title: reviewLead.title || lead.title,
+            lead_angle: reviewMeta.angle || meta.angle, lead_friction: reviewMeta.friction || meta.friction, rejected_body: currentBody,
             rejection_notes: rangerResult?.notes,
           });
         } catch (err) {
@@ -499,7 +516,7 @@ async function processLead(clientId, lead, ctx = {}) {
 
     // ── 14. Enforcer approved → shared auto-approve / borderline / manual decision ──
     await applyEnforcerDecision(clientId, {
-      msg, lead, rangerResult, finalBody: currentBody, subject: currentSubject,
+      msg, lead: reviewLead, rangerResult, finalBody: currentBody, subject: currentSubject,
       kickoffId, pipelinePath, source: pipelinePath,
     });
     return { outcome: 'approved', messageId: msg.id, channel };
@@ -834,11 +851,15 @@ async function draftWithFallback(clientId, params) {
   const salesResult = await salesGenerate(clientId, { lead_id, channel, context });
 
   if (salesResult?.body) {
+    const leadMeta = getMetadata(lead || {});
     return {
       body: salesResult.body,
       subject: salesResult.subject || null,
       draftSource: defaultDraftSource,
       prompt_variant: salesResult.prompt_variant || null,
+      signal_package: salesResult.signal_package || getSignalPackage(lead || {}) || null,
+      research_repair: salesResult.research_repair || leadMeta.research_repair || null,
+      lead,
     };
   }
 
@@ -903,11 +924,19 @@ async function draftWithFallback(clientId, params) {
       if (repairResult?.repaired) {
         const retryResult = await salesGenerate(clientId, { lead_id, channel, context });
         if (retryResult?.body) {
+          const leadMeta = getMetadata(leadForFallback || {});
+          const retrySignalPackage = retryResult.signal_package
+            || repairResult.signal_package
+            || getSignalPackage(leadForFallback || {})
+            || null;
           return {
             body: retryResult.body,
             subject: retryResult.subject || null,
             draftSource: defaultDraftSource,
             prompt_variant: retryResult.prompt_variant || null,
+            signal_package: retrySignalPackage,
+            research_repair: retryResult.research_repair || leadMeta.research_repair || null,
+            lead: leadForFallback,
           };
         }
         if (retryResult?.status === 'needs_more_research') {
@@ -951,6 +980,7 @@ async function draftWithFallback(clientId, params) {
           return null;
         });
         if (captainResult?.body && typeof captainResult.body === 'string') {
+          const leadMeta = getMetadata(leadForFallback || {});
           return {
             body: captainResult.body,
             subject: captainResult.subject || null,
@@ -958,6 +988,9 @@ async function draftWithFallback(clientId, params) {
             prompt_variant: 'captain_fallback',
             manualReview: true,
             reason: repairResult?.reason || salesResult.required_repair || salesResult.reason || 'research_repair_failed',
+            signal_package: repairResult?.signal_package || getSignalPackage(leadForFallback || {}) || signalPackage,
+            research_repair: leadMeta.research_repair || null,
+            lead: leadForFallback,
           };
         }
       }
@@ -978,6 +1011,7 @@ async function draftWithFallback(clientId, params) {
         return null;
       });
       if (captainResult?.body && typeof captainResult.body === 'string') {
+        const leadMeta = getMetadata(lead || {});
         return {
           body: captainResult.body,
           subject: captainResult.subject || null,
@@ -985,6 +1019,9 @@ async function draftWithFallback(clientId, params) {
           prompt_variant: 'captain_fallback',
           manualReview: true,
           reason: salesResult.required_repair || salesResult.reason || 'research_repair_exhausted',
+          signal_package: signalPackage,
+          research_repair: leadMeta.research_repair || null,
+          lead,
         };
       }
     }

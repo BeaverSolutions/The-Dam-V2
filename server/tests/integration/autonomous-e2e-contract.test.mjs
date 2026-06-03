@@ -113,6 +113,11 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(pipelineSource).toContain("writeDirective(clientId, 'research_beaver', 'repair_signal_package'");
     expect(dbBuilderSource).toContain("directive_type === 'repair_signal_package'");
     expect(dbBuilderSource).toContain('repairLeadSignalPackage');
+    expect(pipelineSource).toContain('signal_package: retrySignalPackage');
+    expect(pipelineSource).toContain('lead: leadForFallback');
+    expect(agentsSource).toContain('const effectiveSignalPackage = draft.signal_package');
+    expect((agentsSource.match(/signal_package: effectiveSignalPackage/g) || []).length).toBeGreaterThanOrEqual(2);
+    expect((agentsSource.match(/\.\.\.evidenceMetadata/g) || []).length).toBeGreaterThanOrEqual(2);
     expect(agentsSource).toContain('async function captainFallbackDraft');
     expect(agentsSource).toContain("draftSource: 'captain_fallback'");
     expect(agentsSource).toContain("'captain_fallback'");

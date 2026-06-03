@@ -132,7 +132,10 @@ describe('draftWithFallback', () => {
       subject: 'BDR hiring',
       draftSource: 'sales_beaver',
       prompt_variant: 'signal_rich_v2',
+      signal_package: { signal_id: 'hiring_sales_roles', source_url: 'https://example.com/job', evidence: ['Hiring BDR'] },
+      research_repair: { attempt: 1, max_attempts: 1, status: 'repaired' },
     });
+    expect(result.lead?.metadata?.signal_package?.source_url).toBe('https://example.com/job');
     expect(salesGenerate).toHaveBeenCalledTimes(2);
     expect(repairSignalPackage).toHaveBeenCalledWith(CLIENT_ID, expect.objectContaining({
       lead_id: LEAD_ID,

@@ -1189,6 +1189,8 @@ ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}${found
           body:    finalBody,
           status:  'pending_ranger',
           prompt_variant: SALES_PROMPT_VARIANT,
+          signal_package: signalPreflight.signal_package || getSignalPackage(salesLead || {}) || null,
+          research_repair: salesLead?.metadata?.research_repair || null,
         };
       }
 
@@ -1216,6 +1218,8 @@ ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}${found
               return channel === 'email' ? `${stripped}\n\nRegards,\n${senderName}` : stripped;
             })(),
             status:  'pending_ranger',
+            signal_package: signalPreflight.signal_package || getSignalPackage(salesLead || {}) || null,
+            research_repair: salesLead?.metadata?.research_repair || null,
           };
         }
 
@@ -1234,6 +1238,8 @@ ${personaContext}${fileContext}${rangerContext}${captainDirectiveContext}${found
               return channel === 'email' ? `${stripped}\n\nRegards,\n${senderName}` : stripped;
             })(),
             status:  'pending_ranger',
+            signal_package: signalPreflight.signal_package || getSignalPackage(salesLead || {}) || null,
+            research_repair: salesLead?.metadata?.research_repair || null,
           };
         }
 
@@ -3097,6 +3103,16 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
       const draftSubject = draft.subject;
       const draftSource = draft.draftSource;
       const draftRequiresManualReview = draft.manualReview === true || draftSource === 'captain_fallback';
+      const effectiveLead = draft.lead && typeof draft.lead === 'object' ? draft.lead : lead;
+      const effectiveMeta = safeJsonObject(effectiveLead.metadata);
+      const effectiveSignalPackage = draft.signal_package || effectiveMeta.signal_package || meta.signal_package || null;
+      const effectiveResearchRepair = draft.research_repair || effectiveMeta.research_repair || meta.research_repair || null;
+      const effectiveSignal = effectiveMeta.signal || meta.signal || null;
+      const effectiveWhyNow = effectiveMeta.why_now || meta.why_now || null;
+      const evidenceMetadata = {
+        ...(effectiveSignalPackage ? { signal_package: effectiveSignalPackage } : {}),
+        ...(effectiveResearchRepair ? { research_repair: effectiveResearchRepair } : {}),
+      };
 
       // Phase 2 Step 2 (2026-05-08): persistDraft is the single source of truth
       // for INSERT INTO messages. Composes metadata (source, signal, prompt_variant,
@@ -3110,8 +3126,11 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         status: draftRequiresManualReview ? 'pending_approval' : kickoffMessageStatus,
         draft_source: draftSource,
         prompt_variant: salesResult?.prompt_variant,
-        signal: meta.signal,
-        metadata: draftRequiresManualReview ? { captain_fallback_reason: draft.reason || null } : {},
+        signal: effectiveSignal,
+        metadata: {
+          ...(draftRequiresManualReview ? { captain_fallback_reason: draft.reason || null } : {}),
+          ...evidenceMetadata,
+        },
         kickoff_id: plan_id,
         pipeline_path: 'signal_pipeline',
       });
@@ -3122,7 +3141,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         leadId: lead.id,
         messageId: msg.id,
         channel,
-        ...attributionFromLead(lead),
+        ...attributionFromLead(effectiveLead),
         eventData: { source_path: 'signal_pipeline', status: draftRequiresManualReview ? 'pending_approval' : kickoffMessageStatus, draft_source: draftSource },
       });
 
@@ -3161,8 +3180,8 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
       }
 
       const safety = brandSafetyCheck(fixed.body, {
-        name: lead.name, company: lead.company, title: lead.title,
-        signal: meta.signal, why_now: meta.why_now,
+        name: effectiveLead.name || lead.name, company: effectiveLead.company || lead.company, title: effectiveLead.title || lead.title,
+        signal: effectiveSignal, why_now: effectiveWhyNow,
       });
 
       if (!safety.safe) {
@@ -3200,11 +3219,11 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
           message_id: msg.id,
           message_body: fixed.body,
           lead_context: {
-            name: lead.name, company: lead.company, title: lead.title,
-            email: lead.email, lead_id: lead.id,
-            signal: meta.signal, angle: meta.angle, why_now: meta.why_now,
-            signal_package: meta.signal_package,
-            research_repair: meta.research_repair,
+            name: effectiveLead.name || lead.name, company: effectiveLead.company || lead.company, title: effectiveLead.title || lead.title,
+            email: effectiveLead.email || lead.email, lead_id: lead.id,
+            signal: effectiveSignal, angle: effectiveMeta.angle || meta.angle, why_now: effectiveWhyNow,
+            signal_package: effectiveSignalPackage,
+            research_repair: effectiveResearchRepair,
             channel,
             pipeline_path: 'signal_pipeline',
           },
@@ -3238,7 +3257,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         // is now pipeline.applyEnforcerDecision — one definition, both pipelines.
         await pipeline.applyEnforcerDecision(clientId, {
           msg,
-          lead,
+          lead: effectiveLead,
           rangerResult,
           finalBody,
           subject: finalSubject,
@@ -3318,9 +3337,9 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
             lead_context: {
               name: lead.name, company: lead.company, title: lead.title,
               email: lead.email, lead_id: lead.id,
-              signal: meta.signal, angle: meta.angle, why_now: meta.why_now,
-              signal_package: meta.signal_package,
-              research_repair: meta.research_repair,
+              signal: effectiveSignal, angle: effectiveMeta.angle || meta.angle, why_now: effectiveWhyNow,
+              signal_package: effectiveSignalPackage,
+              research_repair: effectiveResearchRepair,
               channel,
               pipeline_path: 'signal_pipeline',
             },
@@ -3352,7 +3371,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         if (rangerResult?.approved) {
           await pipeline.applyEnforcerDecision(clientId, {
             msg,
-            lead,
+            lead: effectiveLead,
             rangerResult,
             finalBody: rangerResult?.body || finalBody,
             subject: finalSubject,
@@ -5262,6 +5281,14 @@ async function directorExecute(clientId, {
         ? { body: draft.body, subject: draft.subject, prompt_variant: draft.prompt_variant }
         : { body: null, subject: null, prompt_variant: null };
       const draftRequiresManualReview = draft?.manualReview === true || draft?.draftSource === 'captain_fallback';
+      const effectiveLead = draft?.lead && typeof draft.lead === 'object' ? draft.lead : lead;
+      const effectiveMeta = safeJsonObject(effectiveLead.metadata);
+      const effectiveSignalPackage = draft?.signal_package || effectiveMeta.signal_package || null;
+      const effectiveResearchRepair = draft?.research_repair || effectiveMeta.research_repair || null;
+      const evidenceMetadata = {
+        ...(effectiveSignalPackage ? { signal_package: effectiveSignalPackage } : {}),
+        ...(effectiveResearchRepair ? { research_repair: effectiveResearchRepair } : {}),
+      };
 
       if (!salesResult?.body) {
         console.warn(`[pipeline] Sales draft failed for ${lead.name} (${selectedChannel}): no body`);
@@ -5288,11 +5315,15 @@ async function directorExecute(clientId, {
           status: draftRequiresManualReview ? 'pending_approval' : kickoffMessageStatus,
           draft_source: draft?.draftSource || 'sales_beaver',
           prompt_variant: salesResult.prompt_variant,
-          metadata: draftRequiresManualReview ? { captain_fallback_reason: draft.reason || null } : {},
+          signal: effectiveMeta.signal || null,
+          metadata: {
+            ...(draftRequiresManualReview ? { captain_fallback_reason: draft.reason || null } : {}),
+            ...evidenceMetadata,
+          },
           kickoff_id: plan_id,
           pipeline_path: 'kickoff_pipeline',
         });
-        const msgWithMeta = { ...message, lead_name: lead.name, lead_company: lead.company };
+        const msgWithMeta = { ...message, lead_name: effectiveLead.name || lead.name, lead_company: effectiveLead.company || lead.company };
         savedMessages.push(msgWithMeta);
 
         await logsService.createLog(clientId, {
@@ -5300,7 +5331,7 @@ async function directorExecute(clientId, {
           action: 'message_created',
           target_type: 'message',
           target_id: message.id,
-          metadata: { lead_id: lead.id, lead_name: lead.name, channel: selectedChannel, status: kickoffMessageStatus, reason: channelReason },
+          metadata: { lead_id: lead.id, lead_name: effectiveLead.name || lead.name, channel: selectedChannel, status: kickoffMessageStatus, reason: channelReason },
         });
         // (Phase 2 Step 2: drafted trace now emitted internally by pipeline.persistDraft above)
 
@@ -5310,7 +5341,7 @@ async function directorExecute(clientId, {
           leadId: lead.id,
           messageId: message.id,
           channel: selectedChannel,
-          ...attributionFromLead(lead),
+          ...attributionFromLead(effectiveLead),
           eventData: { source_path: 'kickoff_pipeline', status: draftRequiresManualReview ? 'pending_approval' : kickoffMessageStatus, reason: channelReason },
         });
 
@@ -5325,7 +5356,7 @@ async function directorExecute(clientId, {
             action: 'captain_fallback_draft',
             target_type: 'message',
             target_id: message.id,
-            metadata: { lead_name: lead.name, channel: selectedChannel, reason: draft.reason || null, pipeline_path: 'kickoff_pipeline' },
+            metadata: { lead_name: effectiveLead.name || lead.name, channel: selectedChannel, reason: draft.reason || null, pipeline_path: 'kickoff_pipeline' },
           }).catch(() => {});
           return;
         }
@@ -5344,7 +5375,7 @@ async function directorExecute(clientId, {
         // will be removed in Phase 2 Step 7 cleanup.
 
         // ── Enforcer review pipeline (server gates + AI Enforcer) ──
-        await runRangerPipeline(lead, msgWithMeta);
+        await runRangerPipeline(effectiveLead, msgWithMeta);
       }
     } catch (err) {
       console.error('[pipeline] Sales draft/save failed for lead:', lead.name, selectedChannel, err.message);
