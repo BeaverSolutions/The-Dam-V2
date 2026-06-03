@@ -37,7 +37,7 @@ function envInt(name, fallback) {
 
 const MAX_SIGNAL_QUERIES_PER_RUN = envInt('SIGNAL_HUNT_MAX_QUERIES', 6);
 const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
-const SIGNAL_HUNT_PARSER_VERSION = 'market_sensor_publication_v2';
+const SIGNAL_HUNT_PARSER_VERSION = 'market_sensor_publication_v3';
 
 function klDateString() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -636,12 +636,17 @@ function signalExtractionAgent(query = {}) {
   return 'research_beaver';
 }
 
-function normaliseSignalConfidence(value) {
+function normaliseSignalConfidence(value, item = {}) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   const text = String(value || '').toLowerCase();
   if (text === 'high') return 0.9;
   if (text === 'medium') return 0.7;
   if (text === 'low') return 0.5;
+  if ((item.company || item.company_name || item.name)
+    && (item.signal_summary || item.summary || item.why_now || item.outreach_angle || item.angle)
+    && (item.source_url || item.url || item.link)) {
+    return 0.6;
+  }
   return 0;
 }
 
@@ -649,20 +654,41 @@ function normaliseExtractedSignals(items = [], fallbackSignalType = 'buying_sign
   return (Array.isArray(items) ? items : [])
     .map(item => ({
       ...item,
+      company: item.company || item.company_name || item.name || '',
       signal_type: item.signal_type || fallbackSignalType,
-      source_url: item.source_url || item.url || '',
+      source_url: item.source_url || item.url || item.link || '',
       signal_summary: item.signal_summary || item.summary || '',
-      why_now: item.why_now || item.signal_summary || item.outreach_angle || item.angle || '',
-      angle: item.angle || item.outreach_angle || '',
-      confidence: normaliseSignalConfidence(item.confidence),
+      why_now: item.why_now || item.signal_summary || item.summary || item.outreach_angle || item.angle || '',
+      angle: item.angle || item.outreach_angle || item.suggested_angle || '',
+      confidence: normaliseSignalConfidence(item.confidence, item),
     }));
 }
 
 function extractedSignalItems(parsed) {
   if (Array.isArray(parsed)) return parsed;
+  if (parsed?.company || parsed?.company_name || parsed?.name) return [parsed];
   const keys = ['signals', 'data', 'opportunities', 'leads', 'companies', 'items', 'results', 'buying_signals'];
   for (const key of keys) {
     if (Array.isArray(parsed?.[key])) return parsed[key];
+    if (parsed?.[key] && typeof parsed[key] === 'object' && (parsed[key].company || parsed[key].company_name || parsed[key].name)) {
+      return [parsed[key]];
+    }
+    if (typeof parsed?.[key] === 'string') {
+      try {
+        const nested = JSON.parse(parsed[key]);
+        const nestedItems = extractedSignalItems(nested);
+        if (nestedItems) return nestedItems;
+      } catch { /* leave unmatched */ }
+    }
+  }
+  if (parsed && typeof parsed === 'object') {
+    for (const value of Object.values(parsed)) {
+      if (Array.isArray(value) && value.some(item => item?.company || item?.company_name || item?.name)) return value;
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const nestedItems = extractedSignalItems(value);
+        if (nestedItems) return nestedItems;
+      }
+    }
   }
   return null;
 }
@@ -715,6 +741,10 @@ Rules:
     const parsedItems = extractedSignalItems(parsed);
     if (parsedItems) return normaliseExtractedSignals(parsedItems, signal_type);
     if (typeof parsed?.raw === 'string') {
+      try {
+        const rawItems = extractedSignalItems(JSON.parse(parsed.raw));
+        if (rawItems) return normaliseExtractedSignals(rawItems, signal_type);
+      } catch { /* fall through to bracket extraction */ }
       const jsonMatch = parsed.raw.match(/\[[\s\S]*\]/);
       if (jsonMatch) return normaliseExtractedSignals(JSON.parse(jsonMatch[0]), signal_type);
     }

@@ -483,6 +483,23 @@ describe('signal extraction helpers', () => {
     }]);
   });
 
+  it('normalises single-object market-sensor variants into complete Signal Hunt signals', () => {
+    expect(signalHunt._test.normaliseExtractedSignals([{
+      company_name: 'PRecious Communications',
+      summary: 'PRecious Communications appointed its first regional COO with a Malaysia remit.',
+      url: 'https://example.com/precious',
+      suggested_angle: 'Ask how regional leadership is scaling pipeline across Malaysia.',
+    }], 'industry_publication_agency_signal')).toMatchObject([{
+      company: 'PRecious Communications',
+      signal_type: 'industry_publication_agency_signal',
+      source_url: 'https://example.com/precious',
+      signal_summary: 'PRecious Communications appointed its first regional COO with a Malaysia remit.',
+      why_now: 'PRecious Communications appointed its first regional COO with a Malaysia remit.',
+      angle: 'Ask how regional leadership is scaling pipeline across Malaysia.',
+      confidence: 0.6,
+    }]);
+  });
+
   it('accepts OpenAI json_object wrappers around extracted signal arrays', () => {
     expect(signalHunt._test.extractedSignalItems({
       leads: [{ company: 'Kingdom Digital' }],
@@ -493,6 +510,27 @@ describe('signal extraction helpers', () => {
     expect(signalHunt._test.extractedSignalItems({
       buying_signals: [{ company: 'Mad Hat Asia' }],
     })).toEqual([{ company: 'Mad Hat Asia' }]);
+  });
+
+  it('accepts OpenAI single-object and stringified wrappers around extracted signals', () => {
+    expect(signalHunt._test.extractedSignalItems({
+      company_name: 'GO Communications',
+      summary: 'GO Communications won a PR mandate.',
+    })).toEqual([{
+      company_name: 'GO Communications',
+      summary: 'GO Communications won a PR mandate.',
+    }]);
+    expect(signalHunt._test.extractedSignalItems({
+      data: { company_name: 'Kingdom Digital' },
+    })).toEqual([{ company_name: 'Kingdom Digital' }]);
+    expect(signalHunt._test.extractedSignalItems({
+      signals: JSON.stringify([{ company_name: 'PRecious Communications' }]),
+    })).toEqual([{ company_name: 'PRecious Communications' }]);
+    expect(signalHunt._test.extractedSignalItems({
+      payload: {
+        opportunities: [{ company_name: 'Ruder Finn Malaysia' }],
+      },
+    })).toEqual([{ company_name: 'Ruder Finn Malaysia' }]);
   });
 });
 
