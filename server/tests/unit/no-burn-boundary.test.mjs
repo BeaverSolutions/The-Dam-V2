@@ -112,6 +112,8 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
     const chatBody = autonomousSource.slice(chatStart, chatEnd);
 
     expect(chatBody).toContain('parseRequestedLeadLimit(message)');
+    expect(chatBody).toContain('const explicitRequestedLimit = parseRequestedLeadLimit(message, null)');
+    expect(chatBody).toContain('const maxPaidSignalQueries = boundedChatSignalQueryCap(explicitRequestedLimit)');
     expect(chatBody).not.toContain('const effectiveLimit = hasNumber ? undefined : 20');
     expect(chatBody).toContain('const poolLimit = requestedLimit || 20');
     expect(chatBody).toContain('pipeline_traces pt');
@@ -120,6 +122,9 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
     expect(chatBody).toContain('limit: poolLeads.length');
     expect(chatBody).toContain('allowPaidSignal: false');
     expect(chatBody).toContain("sourceMode: 'chat_db_pool'");
+    expect(chatBody).toContain('maxPaidSignalQueries,');
+    expect(autonomousSource).toContain('function boundedChatSignalQueryCap(requestedLimit)');
+    expect(autonomousSource).toContain('return Math.max(3, Math.min(10, Math.ceil(n) * 2))');
   });
 
   it('pipeline traces use valid stages for repair and channel blocks', () => {

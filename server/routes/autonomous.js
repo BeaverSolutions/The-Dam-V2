@@ -81,6 +81,12 @@ function parseRequestedLeadLimit(message, defaultLimit = 20) {
   return parseRequestedLeadCount(message, defaultLimit);
 }
 
+function boundedChatSignalQueryCap(requestedLimit) {
+  const n = Number(requestedLimit);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.max(3, Math.min(10, Math.ceil(n) * 2));
+}
+
 function basicOperatingSurfaceForTenant(snapshot = {}) {
   return {
     ...BASIC_OPERATING_SURFACE_V2_1,
@@ -231,6 +237,8 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
       // Keep chat-triggered runs bounded. "Find 5" must not fall through to the
       // DB-pool default of 20 before Director sees the command.
       const requestedLimit = parseRequestedLeadLimit(message);
+      const explicitRequestedLimit = parseRequestedLeadLimit(message, null);
+      const maxPaidSignalQueries = boundedChatSignalQueryCap(explicitRequestedLimit);
 
       // Phase 2 V2 Step 9 (2026-05-15): no brief is built here. Research is
       // ICP-driven from agent_memory; passing a paragraph as `command` used to
@@ -328,7 +336,12 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
         response.actions_taken.push('triggered_director_execute');
 
         runWithClientContext(client_id, () =>
-          directorExecute(client_id, { plan_id: planId, command: effectiveCommand, limit: requestedLimit }).catch(err => {
+          directorExecute(client_id, {
+            plan_id: planId,
+            command: effectiveCommand,
+            limit: requestedLimit,
+            maxPaidSignalQueries,
+          }).catch(err => {
             console.error(`[chat] directorExecute failed for plan ${planId}:`, err.message);
           })
         );
@@ -4476,4 +4489,4 @@ router.post('/enrich-cold-signals', async (req, res) => {
 
 module.exports = router;
 module.exports.runAutonomousKickoff = runAutonomousKickoff;
-module.exports._test = { parseRequestedLeadLimit };
+module.exports._test = { parseRequestedLeadLimit, boundedChatSignalQueryCap };
