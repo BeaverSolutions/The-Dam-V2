@@ -95,7 +95,15 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
 
     expect(existingPipelineBody).toContain('allowPersonalisationSearch');
     expect(existingPipelineBody).toContain('Skipping open-web personalization');
-    expect(useExistingBody).toContain('allowPersonalisationSearch: allowPaidSignal !== false');
+    expect(useExistingBody).toContain('allowPersonalisationSearch: allowsPaidPersonalisation(allowPaidSignal, maxPaidSignalQueries)');
+  });
+
+  it('omitted manual-campaign paid query caps use computed capacity, while explicit zero still blocks spend', () => {
+    expect(agentsSource).toContain('function normalisePaidSignalCap(maxPaidSignalQueries)');
+    expect(agentsSource).toContain('maxPaidSignalQueries === null || maxPaidSignalQueries === undefined');
+    expect(agentsSource).toContain('return normalisePaidSignalCap(maxPaidSignalQueries) !== 0');
+    expect(agentsSource).not.toContain('Number(maxPaidSignalQueries) !== 0');
+    expect(agentsSource).not.toContain('Number.isFinite(Number(maxPaidSignalQueries))');
   });
 
   it('chat numeric limits stay bounded and DB-pool chat runs cannot spend paid signal', () => {

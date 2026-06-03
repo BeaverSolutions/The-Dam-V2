@@ -2515,6 +2515,19 @@ function minPaidQueriesForExternalTarget(target) {
   return Math.max(4, n * 4);
 }
 
+function normalisePaidSignalCap(maxPaidSignalQueries) {
+  if (maxPaidSignalQueries === null || maxPaidSignalQueries === undefined || maxPaidSignalQueries === '') {
+    return null;
+  }
+  const n = Number(maxPaidSignalQueries);
+  return Number.isFinite(n) ? Math.max(0, n) : null;
+}
+
+function allowsPaidPersonalisation(allowPaidSignal, maxPaidSignalQueries) {
+  if (allowPaidSignal === false) return false;
+  return normalisePaidSignalCap(maxPaidSignalQueries) !== 0;
+}
+
 async function directorPlan(clientId, { command, source }) {
   // Pre-screen before calling AI or building a plan
   const rejection = screenCommand(command);
@@ -3707,7 +3720,7 @@ async function directorExecute(clientId, {
       } else {
         // Jump directly to Sales/Enforcer pipeline using these leads
         return await processExistingLeadsPipeline(clientId, plan_id, signalLeads, {
-          allowPersonalisationSearch: allowPaidSignal !== false && Number(maxPaidSignalQueries) !== 0,
+          allowPersonalisationSearch: allowsPaidPersonalisation(allowPaidSignal, maxPaidSignalQueries),
         });
       }
     } catch (err) {
@@ -4013,7 +4026,7 @@ async function directorExecute(clientId, {
       // Completion-driven: process DB leads first, then source only the actual
       // output shortfall. Enrolled/drafted leads do not satisfy MJ's requested count.
       dbPipelineResult = await processExistingLeadsPipeline(clientId, plan_id, uncontactedLeads, {
-        allowPersonalisationSearch: allowPaidSignal !== false && Number(maxPaidSignalQueries) !== 0,
+        allowPersonalisationSearch: allowsPaidPersonalisation(allowPaidSignal, maxPaidSignalQueries),
       })
         .catch(err => {
           console.error('[director] DB-first pipeline failed:', err.message);
@@ -4110,9 +4123,7 @@ async function directorExecute(clientId, {
 
   const searchCapacity = await getSearchProviderCapacity(clientId);
   diagnostics.search_capacity = searchCapacity;
-  const paidSignalCap = Number.isFinite(Number(maxPaidSignalQueries))
-    ? Math.max(0, Number(maxPaidSignalQueries))
-    : null;
+  const paidSignalCap = normalisePaidSignalCap(maxPaidSignalQueries);
   const minimumPaidQueriesNeeded = paidSignalCap !== null
     ? Math.min(paidSignalCap, minPaidQueriesForExternalTarget(remainingTarget))
     : minPaidQueriesForExternalTarget(remainingTarget);
@@ -4270,7 +4281,7 @@ async function directorExecute(clientId, {
 
         if (savedSignalLeads.length > 0) {
           const signalPipelineResult = await processExistingLeadsPipeline(clientId, plan_id, savedSignalLeads, {
-            allowPersonalisationSearch: allowPaidSignal !== false && Number(maxPaidSignalQueries) !== 0,
+            allowPersonalisationSearch: allowsPaidPersonalisation(allowPaidSignal, maxPaidSignalQueries),
           })
             .catch(err => {
               console.error('[director] Signal-first pipeline failed:', err.message);
