@@ -261,6 +261,13 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).not.toContain('(icp.job_titles || icp.who || "").split');
   });
 
+  it('uses the market-sensor parser for industry publication snippets', () => {
+    expect(src).toContain('function signalExtractionAgent');
+    expect(src).toContain("return 'market_sensor'");
+    expect(src).toContain('const agentKey = signalExtractionAgent(query)');
+    expect(src).toContain('callAgent(agentKey');
+  });
+
   it('keeps explicit industry prioritization helpers for deterministic ordering', () => {
     expect(src).toContain('function industryPriority');
     expect(src).toContain('professional service');
@@ -442,6 +449,36 @@ describe('titlesFromIcp', () => {
       target_titles: 'Managing Director, Owner',
       who: ['Head of Sales'],
     })).toEqual(['Founder', 'CEO', 'Managing Director', 'Owner', 'Head of Sales']);
+  });
+});
+
+describe('signal extraction helpers', () => {
+  it('routes industry publication parsing away from Research Beaver lead-output rules', () => {
+    expect(signalHunt._test.signalExtractionAgent({
+      signal_type: 'industry_publication_agency_signal',
+      source_channel: 'industry_publication',
+    })).toBe('market_sensor');
+    expect(signalHunt._test.signalExtractionAgent({
+      signal_type: 'hiring_sales',
+      source_channel: 'web_search',
+    })).toBe('research_beaver');
+  });
+
+  it('normalises market-sensor opportunities into Signal Hunt signal shape', () => {
+    expect(signalHunt._test.normaliseExtractedSignals([{
+      company: 'GO Communications',
+      signal_type: 'new_client_win',
+      signal_summary: 'Food & Drinks Malaysia appointed GO Communications for PR duties.',
+      url: 'https://example.com/go',
+      confidence: 'high',
+      outreach_angle: 'New PR mandate means founder-led pipeline pressure can surface.',
+    }], 'industry_publication_agency_signal')).toMatchObject([{
+      company: 'GO Communications',
+      signal_type: 'new_client_win',
+      source_url: 'https://example.com/go',
+      confidence: 0.9,
+      angle: 'New PR mandate means founder-led pipeline pressure can surface.',
+    }]);
   });
 });
 

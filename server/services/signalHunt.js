@@ -623,21 +623,53 @@ Training-publication extraction guidance:
   return '';
 }
 
+function signalExtractionAgent(query = {}) {
+  const signalType = String(query.signal_type || '').toLowerCase();
+  const sourceChannel = String(query.source_channel || '').toLowerCase();
+  if (sourceChannel === 'industry_publication' || /agency|publication|training_growth/.test(signalType)) {
+    return 'market_sensor';
+  }
+  return 'research_beaver';
+}
+
+function normaliseSignalConfidence(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const text = String(value || '').toLowerCase();
+  if (text === 'high') return 0.9;
+  if (text === 'medium') return 0.7;
+  if (text === 'low') return 0.5;
+  return 0;
+}
+
+function normaliseExtractedSignals(items = [], fallbackSignalType = 'buying_signal') {
+  return (Array.isArray(items) ? items : [])
+    .map(item => ({
+      ...item,
+      signal_type: item.signal_type || fallbackSignalType,
+      source_url: item.source_url || item.url || '',
+      signal_summary: item.signal_summary || item.summary || '',
+      why_now: item.why_now || item.signal_summary || item.outreach_angle || item.angle || '',
+      angle: item.angle || item.outreach_angle || '',
+      confidence: normaliseSignalConfidence(item.confidence),
+    }));
+}
+
 /**
- * Extract companies + signal data through the budgeted Research Beaver path.
+ * Extract companies + signal data through the budgeted signal parser path.
  */
 async function extractSignalsFromResults(clientId, results, queryContext = {}, geoText = 'the configured target geographies') {
   if (!results || results.length === 0) return [];
   const query = typeof queryContext === 'string' ? { signal_type: queryContext } : (queryContext || {});
   const signal_type = query.signal_type || 'buying_signal';
   const extractionGuidance = signalExtractionGuidance(query);
+  const agentKey = signalExtractionAgent(query);
 
   const snippetsForBudgetedAgent = results.map((r, i) =>
     `[${i + 1}] ${r.title}\n${r.snippet}\nURL: ${r.link}${r.date ? `\nDate: ${r.date}` : ''}`
   ).join('\n\n');
 
   try {
-    const parsed = await callAgent('research_beaver', `You are a buying signal detector. Analyse these search results and extract real buying signals for B2B outreach.
+    const parsed = await callAgent(agentKey, `You are a buying signal detector. Analyse these search results and extract real buying signals for B2B outreach.
 
 Signal type: ${signal_type}
 
@@ -667,12 +699,13 @@ Rules:
 - Use the result date as signal_date when available; use empty string if no date is visible
 - If no real signals found, return []
 - Return ONLY the JSON array, nothing else`, { clientId });
-    if (Array.isArray(parsed)) return parsed;
-    if (Array.isArray(parsed?.signals)) return parsed.signals;
-    if (Array.isArray(parsed?.data)) return parsed.data;
+    if (Array.isArray(parsed)) return normaliseExtractedSignals(parsed, signal_type);
+    if (Array.isArray(parsed?.signals)) return normaliseExtractedSignals(parsed.signals, signal_type);
+    if (Array.isArray(parsed?.data)) return normaliseExtractedSignals(parsed.data, signal_type);
+    if (Array.isArray(parsed?.opportunities)) return normaliseExtractedSignals(parsed.opportunities, signal_type);
     if (typeof parsed?.raw === 'string') {
       const jsonMatch = parsed.raw.match(/\[[\s\S]*\]/);
-      if (jsonMatch) return JSON.parse(jsonMatch[0]);
+      if (jsonMatch) return normaliseExtractedSignals(JSON.parse(jsonMatch[0]), signal_type);
     }
   } catch (err) {
     if (isBudgetExceededError(err)) {
@@ -1087,6 +1120,8 @@ module.exports = {
     buildSignalQueriesFromIcp,
     sourceAwareQueriesForCountry,
     titlesFromIcp,
+    signalExtractionAgent,
+    normaliseExtractedSignals,
     signalQuerySetHash,
   },
 };
