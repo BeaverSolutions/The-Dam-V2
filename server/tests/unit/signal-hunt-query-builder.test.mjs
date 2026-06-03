@@ -532,6 +532,77 @@ describe('signal extraction helpers', () => {
       },
     })).toEqual([{ company_name: 'Ruder Finn Malaysia' }]);
   });
+
+  it('deterministically extracts obvious industry-publication signals the LLM can miss', () => {
+    const results = [
+      {
+        title: 'Food & Drinks Malaysia Dishes Out PR Duties To GO Communications | MARKETING Magazine Asia',
+        link: 'https://marketingmagazine.com.my/food-drinks-malaysia-dishes-out-pr-duties-to-go-communications/',
+        date: '1 month ago',
+      },
+      {
+        title: 'Malaysia Airlines Appoints Kingdom Digital as Creative Automation Agency to PowerScalable Global Campaigns | MARKETING Magazine Asia',
+        link: 'https://marketingmagazine.com.my/malaysia-airlines-appoints-kingdom-digital-as-creative-automation-agency-to-powerscalable-global-campaigns/',
+        date: 'April 15, 2026',
+      },
+      {
+        title: 'PRecious Communications names first regional COO, expands leadership remit in Malaysia | Marketing-Interactive',
+        link: 'https://www.marketing-interactive.com/precious-communications-names-first-regional-coo-expands-leadership-remit-in-malaysia',
+        date: 'November 6, 2025',
+      },
+      {
+        title: 'Ruder Finn Asia Group Appoints General Manager of Ruder Finn Malaysia - MARKETING Magazine Asia',
+        link: 'https://archive.marketingmagazine.com.my/ruder-finn-asia-group-appoints-general-manager-of-ruder-finn-malaysia/',
+      },
+      {
+        title: 'How VLT Malaysia became SEA independent agency of the year | Campaign Asia',
+        link: 'https://www.campaignasia.com/article/how-vlt-malaysia-became-seas-independent-agency-of-the-year/haybke73tzcgrbset5x0sevvj5',
+      },
+      {
+        title: 'Digital skills transformation company, General Assembly launches in Malaysia, will accelerate upskilling of workforce | Digital News Asia',
+        link: 'https://www.digitalnewsasia.com/digital-economy/digital-skills-transformation-company-general-assembly-launches-malaysia-will',
+        date: 'January 24, 2020',
+      },
+    ];
+
+    const signals = signalHunt._test.deterministicPublicationSignals(results, {
+      signal_type: 'industry_publication_agency_signal',
+      source_channel: 'industry_publication',
+    });
+
+    expect(signals.map(s => s.company)).toEqual([
+      'GO Communications',
+      'Kingdom Digital',
+      'PRecious Communications',
+      'Ruder Finn Malaysia',
+      'VLT Malaysia',
+    ]);
+    expect(signals.every(s => s.confidence >= 0.5 && s.source_url)).toBe(true);
+  });
+
+  it('merges deterministic publication fallback without duplicating parser output', () => {
+    expect(signalHunt._test.mergeExtractedSignalSets([{
+      company: 'Kingdom Digital',
+      source_url: 'https://example.com/kingdom',
+      confidence: 0.9,
+    }], [{
+      company: 'Kingdom Digital',
+      source_url: 'https://example.com/kingdom',
+      confidence: 0.62,
+    }, {
+      company: 'GO Communications',
+      source_url: 'https://example.com/go',
+      confidence: 0.62,
+    }])).toEqual([{
+      company: 'Kingdom Digital',
+      source_url: 'https://example.com/kingdom',
+      confidence: 0.9,
+    }, {
+      company: 'GO Communications',
+      source_url: 'https://example.com/go',
+      confidence: 0.62,
+    }]);
+  });
 });
 
 describe('buildSignalQueriesFromIcp', () => {

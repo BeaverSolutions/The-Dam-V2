@@ -37,7 +37,7 @@ function envInt(name, fallback) {
 
 const MAX_SIGNAL_QUERIES_PER_RUN = envInt('SIGNAL_HUNT_MAX_QUERIES', 6);
 const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
-const SIGNAL_HUNT_PARSER_VERSION = 'market_sensor_publication_v3';
+const SIGNAL_HUNT_PARSER_VERSION = 'market_sensor_publication_v4';
 
 function klDateString() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -693,6 +693,110 @@ function extractedSignalItems(parsed) {
   return null;
 }
 
+function isIndustryPublicationQuery(query = {}) {
+  const signalType = String(query.signal_type || '').toLowerCase();
+  const sourceChannel = String(query.source_channel || '').toLowerCase();
+  return sourceChannel === 'industry_publication' || /agency|publication|training_growth/.test(signalType);
+}
+
+function publicationTitle(result = {}) {
+  return String(result.title || result.name || '')
+    .replace(/\s+\|\s+.*$/, '')
+    .replace(/\s+-\s+MARKETING\s+Magazine.*$/i, '')
+    .trim();
+}
+
+function publicationYear(value = '') {
+  const match = String(value || '').match(/\b(20\d{2})\b/);
+  return match ? Number(match[1]) : null;
+}
+
+function publicationResultIsStale(result = {}) {
+  const year = publicationYear(`${result.date || ''} ${result.title || ''} ${result.snippet || ''}`);
+  if (!year) return false;
+  const currentYear = Number(klDateString().slice(0, 4));
+  return year < currentYear - 1;
+}
+
+function cleanPublicationCompanyName(value = '') {
+  let company = String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[.!?]+$/g, '')
+    .trim();
+
+  company = company
+    .replace(/\s+(?:as|for|after|with|from|in)\b.*$/i, '')
+    .replace(/\s+(?:PR|creative|media|social media|automation|retainer|agency|partner)$/i, '')
+    .trim();
+
+  if (!company || company.length < 3 || company.length > 80) return '';
+  if (/\b(open rfp|nominations?|awards?|winners?|conference|event|review)\b/i.test(company)) return '';
+  if (/^(puma group malaysia|mdec|astro|malaysia airlines|food & drinks malaysia|cmo awards|campaign asia)$/i.test(company)) return '';
+  return company;
+}
+
+function publicationCompanyFromResult(result = {}) {
+  const title = publicationTitle(result);
+  const text = `${title}. ${result.snippet || ''}`.replace(/\s+/g, ' ');
+  const patterns = [
+    /\b(?:appoints|appointed|reappointed|retains|retained|selects|selected|picks|picked|names|named)\s+([A-Z][A-Za-z0-9&.' ,-]{2,80})\s+(?:as|for|to handle|to lead)\b/i,
+    /\b(?:duties|mandate|retainer|account|brief)\s+to\s+([A-Z][A-Za-z0-9&.' ,-]{2,80})$/i,
+    /\bgeneral manager of\s+([A-Z][A-Za-z0-9&.' ,-]{2,80})\b/i,
+    /^([A-Z][A-Za-z0-9&.' ,-]{2,80})\s+(?:names|appoints|promotes)\s+(?:first\s+)?(?:regional\s+)?(?:coo|ceo|md|general manager|managing director)\b/i,
+    /\bhow\s+([A-Z][A-Za-z0-9&.' ,-]{2,80})\s+became\b/i,
+    /^([A-Z][A-Za-z0-9&.' ,-]{2,80})\s+(?:launches|expands|enters|opens|wins|became|becomes)\b/i,
+    /\bcompany,\s+([A-Z][A-Za-z0-9&.' ,-]{2,80})\s+(?:launches|expands|partners|enters)\b/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const company = cleanPublicationCompanyName(match?.[1]);
+    if (company) return company;
+  }
+
+  return '';
+}
+
+function deterministicPublicationSignals(results = [], query = {}) {
+  if (!isIndustryPublicationQuery(query)) return [];
+
+  return (Array.isArray(results) ? results : [])
+    .filter(result => result && !publicationResultIsStale(result))
+    .map(result => {
+      const company = publicationCompanyFromResult(result);
+      if (!company) return null;
+      const title = publicationTitle(result);
+      const sourceUrl = result.link || result.url || '';
+      return {
+        company,
+        signal_type: query.signal_type || 'industry_publication_agency_signal',
+        source_url: sourceUrl,
+        signal_summary: `${company} has a current industry-publication signal: ${title}.`,
+        why_now: `A current industry publication gives Sales Beaver a timely opening to contact ${company}.`,
+        angle: `Open with the published trigger and ask how ${company} is scaling outbound around it.`,
+        signal_date: publicationYear(result.date) ? String(result.date || '') : '',
+        raw_snippet: result.snippet || title,
+        confidence: 0.62,
+      };
+    })
+    .filter(Boolean);
+}
+
+function mergeExtractedSignalSets(primary = [], fallback = []) {
+  const merged = [];
+  const seen = new Set();
+  for (const item of [...primary, ...fallback]) {
+    const company = String(item?.company || item?.company_name || item?.name || '').toLowerCase().trim();
+    const sourceUrl = String(item?.source_url || item?.url || item?.link || '').toLowerCase().trim();
+    const key = `${company}|${sourceUrl}`;
+    if (!company || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+  return merged;
+}
+
 /**
  * Extract companies + signal data through the budgeted signal parser path.
  */
@@ -702,6 +806,7 @@ async function extractSignalsFromResults(clientId, results, queryContext = {}, g
   const signal_type = query.signal_type || 'buying_signal';
   const extractionGuidance = signalExtractionGuidance(query);
   const agentKey = signalExtractionAgent(query);
+  const deterministicSignals = deterministicPublicationSignals(results, query);
 
   const snippetsForBudgetedAgent = results.map((r, i) =>
     `[${i + 1}] ${r.title}\n${r.snippet}\nURL: ${r.link}${r.date ? `\nDate: ${r.date}` : ''}`
@@ -739,14 +844,14 @@ Rules:
 - If no real signals found, return []
 - Return ONLY the JSON array, nothing else`, { clientId });
     const parsedItems = extractedSignalItems(parsed);
-    if (parsedItems) return normaliseExtractedSignals(parsedItems, signal_type);
+    if (parsedItems) return mergeExtractedSignalSets(normaliseExtractedSignals(parsedItems, signal_type), deterministicSignals);
     if (typeof parsed?.raw === 'string') {
       try {
         const rawItems = extractedSignalItems(JSON.parse(parsed.raw));
-        if (rawItems) return normaliseExtractedSignals(rawItems, signal_type);
+        if (rawItems) return mergeExtractedSignalSets(normaliseExtractedSignals(rawItems, signal_type), deterministicSignals);
       } catch { /* fall through to bracket extraction */ }
       const jsonMatch = parsed.raw.match(/\[[\s\S]*\]/);
-      if (jsonMatch) return normaliseExtractedSignals(JSON.parse(jsonMatch[0]), signal_type);
+      if (jsonMatch) return mergeExtractedSignalSets(normaliseExtractedSignals(JSON.parse(jsonMatch[0]), signal_type), deterministicSignals);
     }
   } catch (err) {
     if (isBudgetExceededError(err)) {
@@ -756,7 +861,7 @@ Rules:
     console.warn('[signalHunt] budgeted signal parsing failed:', err.message);
   }
 
-  return [];
+  return deterministicSignals;
 
 }
 
@@ -1164,6 +1269,8 @@ module.exports = {
     signalExtractionAgent,
     normaliseExtractedSignals,
     extractedSignalItems,
+    deterministicPublicationSignals,
+    mergeExtractedSignalSets,
     signalQuerySetHash,
   },
 };
