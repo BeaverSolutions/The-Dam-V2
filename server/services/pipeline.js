@@ -136,8 +136,8 @@ async function processLead(clientId, lead, ctx = {}) {
   // changes nothing in production until the flag is flipped + validated.
   //
   // Rejection strategy: unified on the kickoff path's 2-attempt Sales-redraft
-  // loop (the "sharpen the clone" coaching loop) — strictly better than the
-  // signal path's single Enforcer-fallback. The signal path is upgraded.
+  // loop (the "sharpen the clone" coaching loop). If Sales still fails,
+  // Captain writes the manual-review fallback; Enforcer remains the reviewer.
   //
   // Returns { outcome, messageId?, channel?, reason? }. The caller maps the
   // outcome onto its own counters / execStatus — processLead never touches
@@ -262,7 +262,7 @@ async function processLead(clientId, lead, ctx = {}) {
       return { outcome: 'dedup_skip' };
     }
 
-    // ── 8. Draft (Sales Beaver + Enforcer fallback) ──
+    // ── 8. Draft (Sales Beaver + Captain fallback) ──
     const hint = channelHints[channel];
     const draft = await draftWithFallback(clientId, {
       lead_id: lead.id, channel,
@@ -313,11 +313,11 @@ async function processLead(clientId, lead, ctx = {}) {
         [clientId, msg.id]
       ).catch(() => {});
       await logsService.createLog(clientId, {
-        agent: 'captain', action: 'captain_fallback_draft', target_type: 'message', target_id: msg.id,
+        agent: 'captain_beaver', action: 'captain_fallback_draft', target_type: 'message', target_id: msg.id,
         metadata: { channel, lead_name: lead.name, reason: draft.reason || null, pipeline_path: pipelinePath },
       }).catch(() => {});
       await trace('reviewed', 'captain_fallback_manual_review', {
-        message_id: msg.id, agent: 'captain', reason: draft.reason || 'research_repair_exhausted',
+        message_id: msg.id, agent: 'captain_beaver', reason: draft.reason || 'research_repair_exhausted',
         metadata: { channel },
       });
       return { outcome: 'manual_review', messageId: msg.id, channel, viaCaptainFallback: true };
@@ -374,7 +374,7 @@ async function processLead(clientId, lead, ctx = {}) {
       reason: rangerResult?.notes || null, metadata: { channel },
     });
 
-    // ── 12. Rejection → 2-attempt Sales redraft loop, then Enforcer fallback ──
+    // ── 12. Rejection → 2-attempt Sales redraft loop, then Captain fallback ──
     if (!rangerResult?.approved) {
       if (rangerResult?.repair_route === 'needs_research_repair') {
         if (rangerResult?.captain_fallback?.body) {
@@ -389,14 +389,14 @@ async function processLead(clientId, lead, ctx = {}) {
             [clientId, msg.id]
           ).catch(() => {});
           await logsService.createLog(clientId, {
-            agent: 'captain', action: 'captain_fallback_draft', target_type: 'message', target_id: msg.id,
+            agent: 'captain_beaver', action: 'captain_fallback_draft', target_type: 'message', target_id: msg.id,
             metadata: { channel, lead_name: lead.name, reason: rangerResult?.notes || null },
           }).catch(() => {});
           return { outcome: 'manual_review', messageId: msg.id, channel, viaCaptainFallback: true };
         }
         await pool.query(
           `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
-          [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair. No Sales redraft or Enforcer fallback until Research repairs the lead.', msg.id, clientId]
+          [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair. No Sales redraft until Research repairs the lead.', msg.id, clientId]
         );
         return { outcome: 'needs_research_repair', messageId: msg.id, channel };
       }
@@ -470,42 +470,49 @@ async function processLead(clientId, lead, ctx = {}) {
         return { outcome: 'needs_research_repair', messageId: msg.id, channel };
       }
 
-      // Still rejected → Enforcer drafts its own version
+      // Still rejected -> Captain writes the manual-review fallback.
       if (!rangerResult?.approved) {
-        let enforcerDraft = null;
-        try {
-          enforcerDraft = await rangerDraft(clientId, {
-            lead_name: reviewLead.name || lead.name, lead_company: reviewLead.company || lead.company, lead_title: reviewLead.title || lead.title,
-            lead_angle: reviewMeta.angle || meta.angle, lead_friction: reviewMeta.friction || meta.friction, rejected_body: currentBody,
-            rejection_notes: rangerResult?.notes,
+        const finalRejectReason = rangerResult?.notes || 'Sales Beaver failed after bounded redrafts';
+        let captainResult = null;
+        if (captainDraft) {
+          captainResult = await captainDraft(clientId, {
+            lead: reviewLead || lead,
+            lead_id: lead.id,
+            channel,
+            context: '',
+            signal_package: effectiveSignalPackage,
+            reason: finalRejectReason,
+            missing_fields: [],
+            rejected_body: currentBody,
+          }).catch((err) => {
+            console.warn('[pipeline.processLead] Captain fallback failed:', err.message);
+            return null;
           });
-        } catch (err) {
-          console.warn('[pipeline.processLead] rangerDraft fallback failed:', err.message);
         }
-        if (enforcerDraft?.body && typeof enforcerDraft.body === 'string') {
-          currentBody = enforcerDraft.body;
-          currentSubject = enforcerDraft.subject || currentSubject || `${lead.company}`;
+        if (captainResult?.body && typeof captainResult.body === 'string') {
+          currentBody = captainResult.body;
+          currentSubject = captainResult.subject || currentSubject || `${lead.company}`;
           await pool.query(
             `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval', ranger_score = 0, ranger_notes = $3, updated_at = NOW() WHERE id = $4 AND client_id = $5`,
-            [currentBody, currentSubject, 'Enforcer-drafted fallback — Sales Beaver failed quality gates. Review before sending.', msg.id, clientId]
+            [currentBody, currentSubject, 'Captain fallback - Sales Beaver failed after bounded redrafts. Review before sending.', msg.id, clientId]
           );
           await pool.query(
-            `INSERT INTO approvals (client_id, message_id, requested_by, status) VALUES ($1, $2, 'enforcer_fallback', 'pending')`,
+            `INSERT INTO approvals (client_id, message_id, requested_by, status) VALUES ($1, $2, 'captain_fallback', 'pending')`,
             [clientId, msg.id]
           ).catch(() => {});
           await logsService.createLog(clientId, {
-            agent: 'enforcer_beaver', action: 'enforcer_fallback_draft', target_type: 'message', target_id: msg.id,
-            metadata: { channel, lead_name: lead.name },
+            agent: 'captain_beaver', action: 'captain_fallback_draft', target_type: 'message', target_id: msg.id,
+            metadata: { channel, lead_name: lead.name, original_rejection: finalRejectReason },
           }).catch(() => {});
-          await trace('reviewed', 'manual_review', { message_id: msg.id, agent: 'enforcer_beaver', score: 0, metadata: { channel, viaEnforcerFallback: true } });
-          return { outcome: 'manual_review', messageId: msg.id, channel, viaEnforcerFallback: true };
+          await trace('reviewed', 'captain_fallback_manual_review', { message_id: msg.id, agent: 'captain_beaver', score: 0, reason: finalRejectReason, metadata: { channel } });
+          return { outcome: 'manual_review', messageId: msg.id, channel, viaCaptainFallback: true };
         }
-        // Last resort — both Sales and Enforcer failed
+        // Last resort - Sales failed and Captain fallback was unavailable.
         await pool.query(
           `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
-          ['Sales and Enforcer both failed to produce a passing draft. Manual message required.', msg.id, clientId]
+          ['Sales failed after bounded redrafts and Captain fallback did not produce a draft. Manual message required.', msg.id, clientId]
         );
-        await trace('rejected', 'enforcer_no_fallback', { message_id: msg.id, agent: 'enforcer_beaver', score: rangerResult?.score ?? null, reason: rangerResult?.notes || null, metadata: { channel } });
+        await trace('rejected', 'captain_fallback_failed', { message_id: msg.id, agent: 'captain_beaver', score: rangerResult?.score ?? null, reason: finalRejectReason, metadata: { channel } });
         return { outcome: 'rejected', messageId: msg.id, channel };
       }
     }
@@ -569,13 +576,12 @@ async function checkActiveMessage(clientId, lead_id) {
  *   - body              Message body string.
  *   - status            'pending_ranger' | 'pending_approval' | 'blocked_no_email' | etc.
  *                       Constrained by messages_status_check.
- *   - ranger_score      Optional. Set when caller is the Enforcer fallback path
- *                       (fallback INSERT pre-scores at 70 because Enforcer drafted it).
+ *   - ranger_score      Optional. Set when caller needs a manual-review score.
  *                       Otherwise null and review pass writes it via UPDATE.
  *   - ranger_notes      Optional, paired with ranger_score.
  *   - metadata          jsonb merged into the row's metadata column.
- *   - draft_source      'sales_beaver' | 'enforcer_fallback' (for trace + metadata).
- *   - prompt_variant    Sales Beaver prompt variant tag (or 'enforcer_fallback').
+ *   - draft_source      'sales_beaver' | 'captain_fallback' (for trace + metadata).
+ *   - prompt_variant    Sales Beaver prompt variant tag (or 'captain_fallback').
  *   - signal            (optional) signal slug from the lead, for metadata.
  *   - kickoff_id        (optional) for the trace.
  *   - pipeline_path     'signal_pipeline' | 'kickoff_pipeline' for the trace.
@@ -607,13 +613,13 @@ async function persistDraft(clientId, params) {
   }
 
   // Compose metadata. Keys we always tag for downstream analysis:
-  //   source         — sales_beaver vs enforcer_fallback (matters for KPI calc)
+  //   source         — sales_beaver vs captain_fallback (matters for KPI calc)
   //   prompt_variant — for reply-rate-by-variant slicing (Wave 3 requirement)
   //   signal         — copy of lead's trigger, useful when joining traces
   //   blocked_reason — only when status = blocked_no_email
   const finalMetadata = {
     source: draft_source,
-    prompt_variant: prompt_variant || (draft_source === 'enforcer_fallback' ? 'enforcer_fallback' : null),
+    prompt_variant: prompt_variant || (draft_source === 'captain_fallback' ? 'captain_fallback' : null),
     signal,
     kickoff_id,
     pipeline_path,
@@ -621,7 +627,7 @@ async function persistDraft(clientId, params) {
     ...metadata,
   };
 
-  // Two SQL shapes: with ranger_score (Enforcer fallback path) vs without.
+  // Two SQL shapes: with ranger_score (manual-review path) vs without.
   // Keep this branch — splitting into two SQL strings is simpler than COALESCE
   // gymnastics and matches the existing sites verbatim.
   let row;
@@ -653,9 +659,7 @@ async function persistDraft(clientId, params) {
     kickoff_id,
     stage: 'drafted',
     status,
-    agent: draft_source === 'enforcer_fallback'
-      ? 'enforcer_beaver'
-      : (draft_source === 'captain_fallback' ? 'captain' : 'sales_beaver'),
+    agent: draft_source === 'captain_fallback' ? 'captain_beaver' : 'sales_beaver',
     score: ranger_score,
     pipeline_path,
     metadata: { channel, draft_source, signal },
@@ -669,13 +673,13 @@ async function persistDraft(clientId, params) {
 // Step 3 of the Phase 2 plan is "extract pipeline.draft (Sales Beaver + email
 // enrichment + dedup) — ~150 lines moved". The literal one-shot extraction risks
 // behaviour drift because the 4 call sites differ in real ways (signal has
-// Enforcer fallback, kickoff injects CHANNEL_HINTS).
+// Captain fallback, kickoff injects CHANNEL_HINTS).
 //
 // Risk-correct path tonight: extract the two helpers with the highest
 // line-for-line duplication and zero behaviour change:
 //
 //   - enrichEmail(clientId, lead, options)         — Hunter -> MillionVerifier
-//   - draftWithFallback(clientId, params)          — Sales Beaver + optional Enforcer fallback
+//   - draftWithFallback(clientId, params)          — Sales Beaver + optional Captain fallback
 //
 // Caller wiring stays. Channel selection, dedup, Captain-validate, persistDraft
 // remain in agents.js. Step 7 will compose pipeline.processLead from these
@@ -790,14 +794,14 @@ function isVerifiedEmailReadyLead(lead = {}) {
 }
 
 /**
- * Draft a message body via Sales Beaver, with optional Enforcer fallback if
+ * Draft a message body via Sales Beaver, with optional Captain fallback if
  * Sales Beaver returns no body.
  *
  * Mirrors the Sales+fallback block in agents.js:
- *   signal_pipeline: lines 1746-1770   (with Enforcer fallback)
+ *   signal_pipeline: lines 1746-1770   (with Captain fallback)
  *   kickoff_pipeline: lines 3061-3083  (no fallback — kickoff treats no-body as draft_failed)
  *
- * Returns null when both Sales Beaver and the optional Enforcer fallback fail.
+ * Returns null when both Sales Beaver and the optional Captain fallback fail.
  * Caller decides whether to log/trace draft_failed and continue.
  *
  * @param {string} clientId
@@ -806,15 +810,14 @@ function isVerifiedEmailReadyLead(lead = {}) {
  *   - channel          required ('email'|'linkedin'|...)
  *   - context          required, the prompt context string for Sales Beaver
  *   - salesGenerate    required, fn(clientId, {lead_id,channel,context}) -> {body,subject,prompt_variant}|null
- *   - rangerDraft      optional, fn(clientId, {lead_name,...}) -> {body,subject}|null. Required if enableEnforcerFallback.
+ *   - rangerDraft      legacy optional, no longer used as a writer fallback.
  *   - captainDraft     optional, used after the bounded Research repair loop is exhausted.
- *   - enableEnforcerFallback  default false (kickoff/director_cold). signal_pipeline passes true.
- *   - lead             required if enableEnforcerFallback (rangerDraft needs name/company/title)
- *   - leadAngle, leadFriction  optional metadata for rangerDraft
+ *   - enableEnforcerFallback  legacy flag. When true, Captain fallback is required.
+ *   - lead             required if enableEnforcerFallback.
  *   - pipeline_path    default 'unknown', for log prefix
  *
  * @returns {Promise<{body,subject,draftSource,prompt_variant}|null>}
- *   draftSource = 'sales_beaver' (default) | 'enforcer_fallback'
+ *   draftSource = 'sales_beaver' (default) | 'captain_fallback'
  *   Caller's callers historically used 'signal_hunt' for default — we preserve
  *   that via params.defaultDraftSource if the caller wants the legacy label.
  */
@@ -1033,34 +1036,40 @@ async function draftWithFallback(clientId, params) {
     return null;
   }
 
-  // Enforcer fallback path (signal_pipeline behaviour).
-  if (!rangerDraft) {
-    throw new Error('draftWithFallback: rangerDraft is required when enableEnforcerFallback=true');
-  }
   if (!lead) {
     throw new Error('draftWithFallback: lead is required when enableEnforcerFallback=true');
   }
+  if (!captainDraft) {
+    throw new Error('draftWithFallback: captainDraft is required when enableEnforcerFallback=true');
+  }
 
-  console.warn(`${logPrefix} Sales draft failed for ${lead.name} — Enforcer drafting fallback`);
-  const enforcerDraft = await rangerDraft(clientId, {
-    lead_name: lead.name,
-    lead_company: lead.company,
-    lead_title: lead.title,
-    lead_angle: leadAngle,
-    lead_friction: leadFriction,
+  console.warn(`${logPrefix} Sales draft failed for ${lead.name} - Captain drafting fallback`);
+  const captainResult = await captainDraft(clientId, {
+    lead,
+    lead_id,
+    channel,
+    context,
+    signal_package: getSignalPackage(lead || {}) || null,
+    reason: 'sales_returned_no_body',
+    missing_fields: [],
     rejected_body: '',
   });
 
-  if (!enforcerDraft?.body || typeof enforcerDraft.body !== 'string') {
-    console.warn(`${logPrefix} Enforcer fallback also failed for ${lead.name} — skipping`);
+  if (!captainResult?.body || typeof captainResult.body !== 'string') {
+    console.warn(`${logPrefix} Captain fallback also failed for ${lead.name} - skipping`);
     return null;
   }
 
   return {
-    body: enforcerDraft.body,
-    subject: enforcerDraft.subject || `${lead.company}`,
-    draftSource: 'enforcer_fallback',
-    prompt_variant: null,
+    body: captainResult.body,
+    subject: captainResult.subject || `${lead.company}`,
+    draftSource: 'captain_fallback',
+    prompt_variant: 'captain_fallback',
+    manualReview: true,
+    reason: 'sales_returned_no_body',
+    signal_package: getSignalPackage(lead || {}) || null,
+    research_repair: getMetadata(lead || {}).research_repair || null,
+    lead,
   };
 }
 
@@ -1573,7 +1582,7 @@ module.exports = {
   persistDraft,          // Step 1 — concrete
   checkActiveMessage,    // Step 1 — concrete
   enrichEmail,           // Step 3 — concrete (Hunter + optional VP)
-  draftWithFallback,     // Step 3 — concrete (Sales Beaver + optional Enforcer fallback)
+  draftWithFallback,     // Step 3 - concrete (Sales Beaver + optional Captain fallback)
   recordRepairRoute,     // Phase 4 — concrete (repair route traces/logs)
   icpGateSoftDelete,     // Step 4 — concrete (applyIcpV2Filter + soft-delete + audit + trace)
   leadReadinessGate,     // Phase 3 pivot — concrete (pre-draft data-integrity check)

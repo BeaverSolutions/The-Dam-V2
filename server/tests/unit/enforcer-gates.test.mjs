@@ -61,10 +61,23 @@ function brandSafetyCheck(body, leadContext = {}) {
   }
 
   if (leadContext?.name) {
-    const firstName = leadContext.name.trim().split(/\s+/)[0];
-    if (firstName && firstName.length >= 3) {
-      const greetMatch = body.match(/^Hi\s+(\w+)/i);
-      if (greetMatch && greetMatch[1].toLowerCase() !== firstName.toLowerCase()) {
+    const leadTokens = String(leadContext.name || '').trim().split(/\s+/).filter(Boolean);
+    const normaliseNameToken = (value = '') => String(value)
+      .trim()
+      .replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '')
+      .toLowerCase();
+    const honorifics = new Set(['dr', 'mr', 'mrs', 'ms', 'prof', 'professor']);
+    const firstName = leadTokens[0] || '';
+    const allowedGreetingTokens = new Set();
+    const normalisedFirst = normaliseNameToken(firstName);
+    if (normalisedFirst) allowedGreetingTokens.add(normalisedFirst);
+    if (honorifics.has(normalisedFirst) && leadTokens[1]) {
+      allowedGreetingTokens.add(normaliseNameToken(leadTokens[1]));
+    }
+    if ([...allowedGreetingTokens].some(token => token.length >= 3 || honorifics.has(token))) {
+      const greetMatch = body.match(/^Hi\s+([A-Za-z][A-Za-z.'-]*)/i);
+      const greeted = normaliseNameToken(greetMatch?.[1] || '');
+      if (greeted && !allowedGreetingTokens.has(greeted)) {
         return { safe: false, reason: `name_mismatch: greeted "${greetMatch[1]}" but lead is "${firstName}"` };
       }
     }
@@ -248,6 +261,11 @@ describe('Brand Safety Check', () => {
 
     it('passes correct greeting name', () => {
       const result = brandSafetyCheck('Hi Ahmad,\n\nGreat to connect.', { name: 'Ahmad Razak' });
+      expect(result.safe).toBe(true);
+    });
+
+    it('passes honorific greetings with punctuation-normalized lead names', () => {
+      const result = brandSafetyCheck('Hi Dr. Harpreet,\n\nGreat to connect.', { name: 'Dr. Harpreet Singh' });
       expect(result.safe).toBe(true);
     });
   });

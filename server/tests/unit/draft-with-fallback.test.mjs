@@ -46,17 +46,20 @@ describe('draftWithFallback', () => {
     expect(result).toBeNull();
   });
 
-  it('falls through to Enforcer draft when salesGenerate returns null and enableEnforcerFallback=true', async () => {
+  it('falls through to Captain draft when salesGenerate returns null and fallback is enabled', async () => {
     const salesGenerate = vi.fn().mockResolvedValue(null);
-    const rangerDraft = vi.fn().mockResolvedValue({ body: 'Enforcer-drafted body.', subject: 'Enforcer subject' });
-    const result = await draftWithFallback(CLIENT_ID, { ...baseParams, salesGenerate, rangerDraft, enableEnforcerFallback: true, lead: baseLead });
+    const rangerDraft = vi.fn().mockResolvedValue({ body: 'Should not be used.', subject: 'Enforcer subject' });
+    const captainDraft = vi.fn().mockResolvedValue({ body: 'Captain manual-review body.', subject: 'Captain subject' });
+    const result = await draftWithFallback(CLIENT_ID, { ...baseParams, salesGenerate, rangerDraft, captainDraft, enableEnforcerFallback: true, lead: baseLead });
     expect(result).not.toBeNull();
-    expect(result.draftSource).toBe('enforcer_fallback');
-    expect(result.body).toBe('Enforcer-drafted body.');
-    expect(result.prompt_variant).toBeNull();
+    expect(result.draftSource).toBe('captain_fallback');
+    expect(result.body).toBe('Captain manual-review body.');
+    expect(result.prompt_variant).toBe('captain_fallback');
+    expect(result.manualReview).toBe(true);
+    expect(rangerDraft).not.toHaveBeenCalled();
   });
 
-  it('does not fall through to Enforcer fallback when Sales routes thin evidence to Research', async () => {
+  it('does not fall through to writer fallback when Sales routes thin evidence to Research', async () => {
     const salesGenerate = vi.fn().mockResolvedValue({
       status: 'needs_more_research',
       repair_route: 'needs_research_repair',
@@ -190,29 +193,32 @@ describe('draftWithFallback', () => {
     }));
   });
 
-  it('returns null when both Sales and Enforcer return no body', async () => {
+  it('returns null when both Sales and Captain return no body', async () => {
     const salesGenerate = vi.fn().mockResolvedValue(null);
     const rangerDraft = vi.fn().mockResolvedValue({ body: '' });
-    const result = await draftWithFallback(CLIENT_ID, { ...baseParams, salesGenerate, rangerDraft, enableEnforcerFallback: true, lead: baseLead });
+    const captainDraft = vi.fn().mockResolvedValue({ body: '' });
+    const result = await draftWithFallback(CLIENT_ID, { ...baseParams, salesGenerate, rangerDraft, captainDraft, enableEnforcerFallback: true, lead: baseLead });
     expect(result).toBeNull();
+    expect(rangerDraft).not.toHaveBeenCalled();
   });
 
   it('throws when salesGenerate is missing', async () => {
     await expect(draftWithFallback(CLIENT_ID, { ...baseParams })).rejects.toThrow('salesGenerate is required');
   });
 
-  it('throws when rangerDraft is missing and enableEnforcerFallback=true', async () => {
+  it('throws when captainDraft is missing and fallback is enabled', async () => {
     const salesGenerate = vi.fn().mockResolvedValue(null);
     await expect(
       draftWithFallback(CLIENT_ID, { ...baseParams, salesGenerate, enableEnforcerFallback: true, lead: baseLead })
-    ).rejects.toThrow('rangerDraft is required');
+    ).rejects.toThrow('captainDraft is required');
   });
 
   it('throws when lead is missing and enableEnforcerFallback=true', async () => {
     const salesGenerate = vi.fn().mockResolvedValue(null);
     const rangerDraft = vi.fn();
+    const captainDraft = vi.fn();
     await expect(
-      draftWithFallback(CLIENT_ID, { ...baseParams, salesGenerate, rangerDraft, enableEnforcerFallback: true })
+      draftWithFallback(CLIENT_ID, { ...baseParams, salesGenerate, rangerDraft, captainDraft, enableEnforcerFallback: true })
     ).rejects.toThrow('lead is required');
   });
 

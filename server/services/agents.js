@@ -1470,11 +1470,24 @@ function brandSafetyCheck(body, leadContext = {}) {
 
   // 4. Wrong name mismatch (if lead context provided)
   if (leadContext?.name) {
-    const firstName = leadContext.name.trim().split(/\s+/)[0];
-    if (firstName && firstName.length >= 3) {
+    const leadTokens = String(leadContext.name || '').trim().split(/\s+/).filter(Boolean);
+    const normaliseNameToken = (value = '') => String(value)
+      .trim()
+      .replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '')
+      .toLowerCase();
+    const honorifics = new Set(['dr', 'mr', 'mrs', 'ms', 'prof', 'professor']);
+    const firstName = leadTokens[0] || '';
+    const allowedGreetingTokens = new Set();
+    const normalisedFirst = normaliseNameToken(firstName);
+    if (normalisedFirst) allowedGreetingTokens.add(normalisedFirst);
+    if (honorifics.has(normalisedFirst) && leadTokens[1]) {
+      allowedGreetingTokens.add(normaliseNameToken(leadTokens[1]));
+    }
+    if ([...allowedGreetingTokens].some(token => token.length >= 3 || honorifics.has(token))) {
       // Look for "Hi <OtherName>," pattern and check it matches
-      const greetMatch = body.match(/^Hi\s+(\w+)/i);
-      if (greetMatch && greetMatch[1].toLowerCase() !== firstName.toLowerCase()) {
+      const greetMatch = body.match(/^Hi\s+([A-Za-z][A-Za-z.'-]*)/i);
+      const greeted = normaliseNameToken(greetMatch?.[1] || '');
+      if (greeted && !allowedGreetingTokens.has(greeted)) {
         return { safe: false, reason: `name_mismatch: greeted "${greetMatch[1]}" but lead is "${firstName}"` };
       }
     }
@@ -2127,7 +2140,7 @@ async function captainFallbackDraft(clientId, {
   signal_package = null,
 } = {}) {
   await logsService.createLog(clientId, {
-    agent: 'captain',
+    agent: 'captain_beaver',
     action: 'captain_fallback_requested',
     target_type: 'lead',
     target_id: lead.id || null,
@@ -2136,7 +2149,7 @@ async function captainFallbackDraft(clientId, {
 
   if (callAgent) {
     try {
-      const prompt = `Research repair for this lead has already hit its bounded retry limit. Captain must write the manual-review draft now. Do not call Enforcer fallback. Do not invent missing evidence.
+      const prompt = `Research repair for this lead has already hit its bounded retry limit. Captain must write the manual-review draft now. Do not ask Enforcer to write the rescue draft. Do not invent missing evidence.
 
 LEAD:
 - Name: ${lead.name || 'Unknown'}
@@ -2234,6 +2247,41 @@ async function surfaceUnrewrittenDraft(clientId, {
     console.warn('[never-burn] surfaceUnrewrittenDraft failed:', err.message);
     return false;
   }
+}
+
+async function surfaceCaptainFallbackDraft(clientId, {
+  messageId,
+  lead,
+  channel = 'email',
+  reason,
+  rejectedBody,
+  subject,
+  signalPackage = null,
+  note = 'Captain fallback - Sales Beaver failed after bounded redrafts. Review before sending.',
+} = {}) {
+  if (!messageId || !lead) return false;
+  const captainDraft = await captainFallbackDraft(clientId, {
+    lead,
+    channel,
+    reason: reason || 'sales_redraft_exhausted',
+    missing_fields: [],
+    rejected_body: rejectedBody || '',
+    signal_package: signalPackage,
+  }).catch((err) => {
+    console.warn(`[captain-fallback] Captain fallback draft failed for ${lead?.name || 'lead'}:`, err.message);
+    return null;
+  });
+  if (!captainDraft?.body || typeof captainDraft.body !== 'string') return false;
+  return surfaceUnrewrittenDraft(clientId, {
+    messageId,
+    body: captainDraft.body,
+    subject: captainDraft.subject || subject,
+    reason: reason || captainDraft.reason || 'sales_redraft_exhausted',
+    requestedBy: 'captain_fallback',
+    agent: 'captain_beaver',
+    action: 'captain_fallback_draft',
+    note,
+  });
 }
 
 async function getFounderLeadSelectionDirectives(clientId) {
@@ -2843,6 +2891,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
 
   let approvedCount = 0;
   let rejectedCount = 0;
+  let captainFallbackCount = 0;
   let messagesDrafted = 0;
   let skippedCount = 0;
   let channelExhaustedCount = 0;
@@ -2864,7 +2913,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         },
       });
       if (r.outcome === 'approved') { approvedCount++; messagesDrafted++; }
-      else if (r.outcome === 'manual_review') { messagesDrafted++; }
+      else if (r.outcome === 'manual_review') { messagesDrafted++; if (r.viaCaptainFallback) captainFallbackCount++; }
       else if (r.outcome === 'rejected' || r.outcome === 'brand_safety_rejected') { rejectedCount++; messagesDrafted++; }
       else if (r.outcome === 'blocked_no_email') { messagesDrafted++; }
       continue;
@@ -3068,7 +3117,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         continue;
       }
 
-      // Sales Beaver + Enforcer fallback via pipeline.draftWithFallback.
+      // Sales Beaver + Captain fallback via pipeline.draftWithFallback.
       const draft = await pipeline.draftWithFallback(clientId, {
         lead_id: lead.id,
         channel,
@@ -3156,7 +3205,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
           [clientId, msg.id]
         ).catch(() => {});
         await logsService.createLog(clientId, {
-          agent: 'captain',
+          agent: 'captain_beaver',
           action: 'captain_fallback_draft',
           target_type: 'message',
           target_id: msg.id,
@@ -3275,14 +3324,14 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
               subject: rangerResult.captain_fallback.subject || finalSubject,
               reason: rangerResult?.notes || 'research_repair_exhausted',
               requestedBy: 'captain_fallback',
-              agent: 'captain',
+              agent: 'captain_beaver',
               action: 'captain_fallback_draft',
               note: 'Captain fallback — Research repair already exhausted. Review before sending.',
             });
           } else {
             await pool.query(
               `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1 WHERE id = $2 AND client_id = $3`,
-              [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair; Sales redraft and Enforcer fallback skipped.', msg.id, clientId]
+              [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair; Sales redraft skipped until Research repairs the lead.', msg.id, clientId]
             );
           }
           continue;
@@ -3390,7 +3439,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
               subject: rangerResult.captain_fallback.subject || finalSubject,
               reason: rangerResult?.notes || 'research_repair_exhausted',
               requestedBy: 'captain_fallback',
-              agent: 'captain',
+              agent: 'captain_beaver',
               action: 'captain_fallback_draft',
               note: 'Captain fallback — Research repair already exhausted. Review before sending.',
             });
@@ -3402,11 +3451,13 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
           }
           continue;
         }
-        // Enforcer rejected — try once more with Enforcer writing it himself
-        console.warn(`[signal-pipeline] Enforcer rejected ${lead.name}: ${rangerResult?.notes || 'unknown'} — Enforcer drafting fallback`);
+        // Sales exhausted its bounded redraft loop. Captain owns the final
+        // manual-review salvage; Enforcer remains a reviewer, not the writer.
+        const finalRejectReason = rangerResult?.notes || 'Sales Beaver failed after bounded redrafts';
+        console.warn(`[signal-pipeline] Enforcer rejected ${lead.name}: ${finalRejectReason} — Captain drafting fallback`);
         await pool.query(
           `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1 WHERE id = $2`,
-          [rangerResult?.notes || 'Rejected by Enforcer', msg.id]
+          [finalRejectReason, msg.id]
         );
         // Phase 5.5: log hard rejects (score < 60) to mistake_memory for cross-agent context
         if ((rangerResult?.score ?? 100) < 60) {
@@ -3425,101 +3476,29 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
           ).catch(() => {});
         }
 
-        try {
-          const enforcerDraft = await rangerDraft(clientId, {
-            lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
-            lead_angle: meta.angle, lead_friction: meta.friction,
-            rejected_body: finalBody, rejection_notes: rangerResult?.notes, channel,
-          });
-          // rangerDraft returns {subject, body} — pass the STRING body to SQL, never the whole object
-          if (enforcerDraft?.body && typeof enforcerDraft.body === 'string') {
-            const enfSubject = enforcerDraft.subject || draftSubject || lead.company;
-            // Phase 2 Step 2 (2026-05-08): NEW message via pipeline.persistDraft
-            // (don't overwrite the rejected one). Pre-scored at 70 by Enforcer.
-            const enfMsg = await pipeline.persistDraft(clientId, {
-              lead_id: lead.id,
-              channel,
-              subject: enfSubject,
-              body: enforcerDraft.body,
-              status: 'pending_approval',
-              ranger_score: 0,
-              ranger_notes: enforcerDraft.gateReason
-                ? `Enforcer fallback FAILED code gates (${enforcerDraft.gateReason}) — needs manual rewrite before sending.`
-                : 'Enforcer-drafted fallback — Sales Beaver hard-rejected. Review before sending.',
-              metadata: { original_rejection: rangerResult?.notes },
-              draft_source: 'enforcer_fallback',
-              signal: meta.signal,
-              kickoff_id: plan_id,
-              pipeline_path: 'signal_pipeline',
-            });
-
-            // Phase D piece 2 — outcome attribution: drafted event (Enforcer fallback)
-            recordOutcome(clientId, {
-              outcome: 'drafted',
-              leadId: lead.id,
-              messageId: enfMsg.id,
-              channel,
-              ...attributionFromLead(lead),
-              eventData: { source_path: 'enforcer_fallback', original_rejection: rangerResult?.notes },
-            });
-
-            await pool.query(
-              `INSERT INTO approvals (client_id, message_id, requested_by, status) VALUES ($1, $2, 'enforcer_fallback', 'pending')`,
-              [clientId, enfMsg.id]
-            );
-            await writeApprovalAuditForMessage(clientId, enfMsg.id, {
-              decision: 'manual_pending',
-              reason: 'enforcer_fallback',
-            });
-            await logsService.createLog(clientId, {
-              agent: 'enforcer_beaver', action: 'enforcer_drafted_fallback',
-              target_type: 'message', target_id: enfMsg.id,
-              metadata: { lead_name: lead.name, original_rejection: rangerResult?.notes },
-            }).catch(() => {});
-            // (Phase 2 Step 2: drafted trace now emitted internally by pipeline.persistDraft above —
-            //  agent='enforcer_beaver' inferred from draft_source='enforcer_fallback')
-            console.log(`[signal-pipeline] Enforcer fallback draft for ${lead.name} → pending_approval`);
-          } else {
-            // NEVER BURN A LEAD: Enforcer rewrite produced no body. Surface the
-            // Sales Beaver draft to MJ's approval queue instead of discarding.
-            const surfaced = await surfaceUnrewrittenDraft(clientId, {
-              messageId: msg.id, body: finalBody, subject: draftSubject,
-              reason: rangerResult?.notes || 'enforcer produced no fallback body',
-            });
-            pipelineTrace.traceStage(clientId, {
-              lead_id: lead.id,
-              message_id: msg.id,
-              kickoff_id: plan_id,
-              stage: surfaced ? 'reviewed' : 'rejected',
-              status: surfaced ? 'surfaced_unrewritten' : 'enforcer_no_fallback',
-              agent: 'enforcer_beaver',
-              score: rangerResult?.score ?? null,
-              reason: rangerResult?.notes || null,
-              pipeline_path: 'signal_pipeline',
-              metadata: { channel },
-            }).catch(() => {});
-            if (!surfaced) rejectedCount++;
-          }
-        } catch (fallbackErr) {
-          console.warn(`[signal-pipeline] Enforcer fallback failed for ${lead.name}:`, fallbackErr.message);
-          // NEVER BURN A LEAD: the rewrite threw. Surface the draft to MJ.
-          const surfaced = await surfaceUnrewrittenDraft(clientId, {
-            messageId: msg.id, body: finalBody, subject: draftSubject,
-            reason: `enforcer rewrite error: ${fallbackErr.message}`,
-          });
-          pipelineTrace.traceStage(clientId, {
-            lead_id: lead.id,
-            message_id: msg.id,
-            kickoff_id: plan_id,
-            stage: surfaced ? 'reviewed' : 'rejected',
-            status: surfaced ? 'surfaced_unrewritten' : 'enforcer_fallback_error',
-            agent: 'enforcer_beaver',
-            reason: fallbackErr.message,
-            pipeline_path: 'signal_pipeline',
-            metadata: { channel },
-          }).catch(() => {});
-          if (!surfaced) rejectedCount++;
-        }
+        const surfaced = await surfaceCaptainFallbackDraft(clientId, {
+          messageId: msg.id,
+          lead: effectiveLead,
+          channel,
+          reason: finalRejectReason,
+          rejectedBody: finalBody,
+          subject: finalSubject || draftSubject,
+          signalPackage: effectiveSignalPackage,
+        });
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id,
+          message_id: msg.id,
+          kickoff_id: plan_id,
+          stage: surfaced ? 'reviewed' : 'rejected',
+          status: surfaced ? 'captain_fallback_manual_review' : 'captain_fallback_failed',
+          agent: 'captain_beaver',
+          score: rangerResult?.score ?? null,
+          reason: finalRejectReason,
+          pipeline_path: 'signal_pipeline',
+          metadata: { channel, redraft_attempts: MAX_SIGNAL_RANGER_RETRIES },
+        }).catch(() => {});
+        if (surfaced) captainFallbackCount++;
+        else rejectedCount++;
       }
     } catch (err) {
       if (isBudgetExceededError(err)) {
@@ -3553,7 +3532,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
   await logsService.createLog(clientId, {
     agent: 'director',
     action: 'signal_pipeline_completed',
-    metadata: { plan_id, leads: leads.length, drafted: messagesDrafted, approved: approvedCount, rejected: rejectedCount, skipped: skippedCount, channel_exhausted: channelExhaustedCount, original_lead_count: originalLeadCount, skipped_same_day: skippedSameDay },
+    metadata: { plan_id, leads: leads.length, drafted: messagesDrafted, approved: approvedCount, captain_fallback: captainFallbackCount, rejected: rejectedCount, skipped: skippedCount, channel_exhausted: channelExhaustedCount, original_lead_count: originalLeadCount, skipped_same_day: skippedSameDay },
   });
 
   // ── Phase 1 (2026-05-08): emit pipeline_traces summary so funnel survival rate
@@ -3569,6 +3548,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
       total_leads: leads.length,
       drafted: messagesDrafted,
       approved: approvedCount,
+      captain_fallback: captainFallbackCount,
       rejected: rejectedCount,
       icp_audit_rejected: icpAuditRejected,
       skipped_same_day: skippedSameDay,
@@ -3613,7 +3593,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
     plan_id,
     status: 'completed',
     leads: leads.length,
-    summary: { leads_found: leads.length, messages_drafted: messagesDrafted, approved: approvedCount, rejected: rejectedCount, skipped: skippedCount, channel_exhausted: channelExhaustedCount },
+    summary: { leads_found: leads.length, messages_drafted: messagesDrafted, approved: approvedCount, captain_fallback: captainFallbackCount, rejected: rejectedCount, skipped: skippedCount, channel_exhausted: channelExhaustedCount },
     source: 'signal_hunt',
   };
 }
@@ -5352,7 +5332,7 @@ async function directorExecute(clientId, {
             [clientId, message.id]
           ).catch(() => {});
           await logsService.createLog(clientId, {
-            agent: 'captain',
+            agent: 'captain_beaver',
             action: 'captain_fallback_draft',
             target_type: 'message',
             target_id: message.id,
@@ -5465,7 +5445,7 @@ async function directorExecute(clientId, {
     } catch (err) {
       console.warn('[pipeline] AI Enforcer unavailable, REJECTING for manual review (fail-closed):', err.message);
       // Fail-CLOSED 2026-05-13: cannot validate without Enforcer. Triggers existing
-      // rejection flow (Sales redraft up to 2x, then Enforcer-drafted fallback,
+      // rejection flow (Sales redraft up to 2x, then Captain fallback,
       // then ranger_rejected status if all attempts fail).
       rangerResult = {
         approved: false,
@@ -5486,7 +5466,7 @@ async function directorExecute(clientId, {
             subject: rangerResult.captain_fallback.subject || currentSubject,
             reason: rangerResult?.notes || 'research_repair_exhausted',
             requestedBy: 'captain_fallback',
-            agent: 'captain',
+            agent: 'captain_beaver',
             action: 'captain_fallback_draft',
             note: 'Captain fallback — Research repair already exhausted. Review before sending.',
           });
@@ -5494,7 +5474,7 @@ async function directorExecute(clientId, {
           await pool.query(
             `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW()
              WHERE id = $2 AND client_id = $3`,
-            [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair; Sales redraft and Enforcer fallback skipped.', msg.id, clientId]
+            [rangerResult?.required_repair || rangerResult?.notes || 'Routed to Research repair; Sales redraft skipped until Research repairs the lead.', msg.id, clientId]
           );
           rejectedCount++;
           execStatus.beavers.enforcer.rejected++;
@@ -5591,7 +5571,7 @@ async function directorExecute(clientId, {
               }).catch(() => {});
             } catch (_) { /* non-fatal */ }
 
-            // If still rejected after redraft → Enforcer drafts it himself
+            // If still rejected after redraft, Captain writes the manual-review fallback.
             if (!rangerResult?.approved) {
               if (rangerResult?.repair_route === 'needs_research_repair') {
                 if (rangerResult?.captain_fallback?.body) {
@@ -5601,7 +5581,7 @@ async function directorExecute(clientId, {
                     subject: rangerResult.captain_fallback.subject || currentSubject,
                     reason: rangerResult?.notes || 'research_repair_exhausted',
                     requestedBy: 'captain_fallback',
-                    agent: 'captain',
+                    agent: 'captain_beaver',
                     action: 'captain_fallback_draft',
                     note: 'Captain fallback — Research repair already exhausted. Review before sending.',
                   });
@@ -5617,55 +5597,27 @@ async function directorExecute(clientId, {
                 execStatus.beavers.enforcer.status = 'done';
                 return;
               }
-              const enforcerDraft = await rangerDraft(clientId, {
-                lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
-                lead_angle: lead.metadata?.angle, lead_friction: lead.metadata?.friction,
-                rejected_body: currentBody, channel: msg.channel,
+              const finalRejectReason = rangerResult?.notes || 'Sales Beaver failed after bounded redrafts';
+              const surfaced = await surfaceCaptainFallbackDraft(clientId, {
+                messageId: msg.id,
+                lead,
+                channel: msg.channel,
+                reason: finalRejectReason,
+                rejectedBody: currentBody,
+                subject: currentSubject,
+                signalPackage: lead.metadata?.signal_package || null,
+                note: 'Captain fallback - Sales Beaver failed after bounded redrafts. Review before sending.',
               });
-              // rangerDraft returns {subject, body} — extract the STRING body
-              if (enforcerDraft?.body && typeof enforcerDraft.body === 'string') {
-                currentBody = enforcerDraft.body;
-                currentSubject = enforcerDraft.subject || currentSubject || `${lead.company}`;
-                await pool.query(
-                  `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval',
-                   ranger_score = $6, ranger_notes = $3, updated_at = NOW()
-                   WHERE id = $4 AND client_id = $5`,
-                  [currentBody, currentSubject,
-                   enforcerDraft.gateReason
-                     ? `Enforcer fallback FAILED code gates (${enforcerDraft.gateReason}) — needs manual rewrite.`
-                     : 'Enforcer-drafted fallback — Sales Beaver failed after 2 attempts. Review before sending.',
-                   msg.id, clientId, 0]
-                );
-                await pool.query(
-                  `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'enforcer_fallback')`,
-                  [clientId, msg.id]
-                );
-                await writeApprovalAuditForMessage(clientId, msg.id, {
-                  decision: 'manual_pending',
-                  reason: 'enforcer_fallback',
-                });
-                await logsService.createLog(clientId, {
-                  agent: 'enforcer_beaver', action: 'enforcer_fallback_draft',
-                  target_type: 'message', target_id: msg.id,
-                  metadata: { channel: msg.channel, lead_name: lead.name, attempts: attemptCount + 1 },
-                }).catch(() => {});
+              if (surfaced) {
                 execStatus.beavers.enforcer.status = 'done';
                 return;
               } else {
-                // NEVER BURN A LEAD: Enforcer rewrite failed. Surface the Sales
-                // Beaver draft to MJ's approval queue instead of discarding it.
-                const surfaced = await surfaceUnrewrittenDraft(clientId, {
-                  messageId: msg.id, body: currentBody, subject: currentSubject,
-                  reason: `Sales Beaver failed ${attemptCount + 1} attempts; Enforcer rewrite also failed`,
-                });
-                if (!surfaced) {
-                  await pool.query(
-                    `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
-                    [`Sales Beaver failed ${attemptCount + 1} attempts; Enforcer draft also failed.`, msg.id]
-                  );
-                  rejectedCount++;
-                  execStatus.beavers.enforcer.rejected++;
-                }
+                await pool.query(
+                  `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
+                  [`Sales Beaver failed ${attemptCount + 1} attempts; Captain fallback also failed.`, msg.id]
+                );
+                rejectedCount++;
+                execStatus.beavers.enforcer.rejected++;
                 execStatus.beavers.enforcer.status = 'done';
                 return;
               }
@@ -5678,7 +5630,7 @@ async function directorExecute(clientId, {
         }
       }
 
-      // Final rejection — Sales exhausted all retries, Enforcer drafts his own version
+      // Final rejection - Sales exhausted all retries, Captain writes manual-review fallback.
       if (!rangerResult?.approved) {
         if (rangerResult?.repair_route === 'needs_research_repair') {
           if (rangerResult?.captain_fallback?.body) {
@@ -5688,7 +5640,7 @@ async function directorExecute(clientId, {
               subject: rangerResult.captain_fallback.subject || currentSubject,
               reason: rangerResult?.notes || 'research_repair_exhausted',
               requestedBy: 'captain_fallback',
-              agent: 'captain',
+              agent: 'captain_beaver',
               action: 'captain_fallback_draft',
               note: 'Captain fallback — Research repair already exhausted. Review before sending.',
             });
@@ -5704,56 +5656,27 @@ async function directorExecute(clientId, {
           execStatus.beavers.enforcer.status = 'done';
           return;
         }
-        const enforcerDraft = await rangerDraft(clientId, {
-          lead_name: lead.name, lead_company: lead.company, lead_title: lead.title,
-          lead_angle: lead.metadata?.angle, lead_friction: lead.metadata?.friction,
-          rejected_body: currentBody, channel: msg.channel,
+        const finalRejectReason = rangerResult?.notes || 'Sales Beaver failed after bounded redrafts';
+        const surfaced = await surfaceCaptainFallbackDraft(clientId, {
+          messageId: msg.id,
+          lead,
+          channel: msg.channel,
+          reason: finalRejectReason,
+          rejectedBody: currentBody,
+          subject: currentSubject,
+          signalPackage: lead.metadata?.signal_package || null,
+          note: 'Captain fallback - Sales Beaver failed after bounded redrafts. Review before sending.',
         });
-        // rangerDraft returns {subject, body} — extract the STRING body
-        if (enforcerDraft?.body && typeof enforcerDraft.body === 'string') {
-          currentBody = enforcerDraft.body;
-          currentSubject = enforcerDraft.subject || currentSubject || `${lead.company}`;
-          await pool.query(
-            `UPDATE messages SET body = $1, subject = $2, status = 'pending_approval',
-             ranger_score = $6, ranger_notes = $3, updated_at = NOW()
-             WHERE id = $4 AND client_id = $5`,
-            [currentBody, currentSubject,
-             enforcerDraft.gateReason
-               ? `Enforcer fallback FAILED code gates (${enforcerDraft.gateReason}) — needs manual rewrite.`
-               : 'Enforcer-drafted fallback — Sales Beaver failed all attempts. Review before sending.',
-             msg.id, clientId, 0]
-          );
-          await pool.query(
-            `INSERT INTO approvals (client_id, message_id, requested_by) VALUES ($1, $2, 'enforcer_fallback')`,
-            [clientId, msg.id]
-          );
-          await writeApprovalAuditForMessage(clientId, msg.id, {
-            decision: 'manual_pending',
-            reason: 'enforcer_fallback',
-          });
-          await logsService.createLog(clientId, {
-            agent: 'enforcer_beaver', action: 'enforcer_fallback_draft',
-            target_type: 'message', target_id: msg.id,
-            metadata: { channel: msg.channel, lead_name: lead.name, method: 'enforcer_fallback' },
-          }).catch(() => {});
+        if (surfaced) {
           execStatus.beavers.enforcer.status = 'done';
           return;
         } else {
-          // NEVER BURN A LEAD: both Sales and Enforcer failed to produce a clean
-          // draft. Surface the last draft to MJ's approval queue rather than
-          // discarding a lead we paid to source.
-          const surfaced = await surfaceUnrewrittenDraft(clientId, {
-            messageId: msg.id, body: currentBody, subject: currentSubject,
-            reason: 'Sales Beaver and Enforcer both failed to produce a clean draft',
-          });
-          if (!surfaced) {
-            await pool.query(
-              `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
-              ['Sales and Enforcer both failed to draft. Manual message required.', msg.id]
-            );
-            rejectedCount++;
-            execStatus.beavers.enforcer.rejected++;
-          }
+          await pool.query(
+            `UPDATE messages SET status = 'ranger_rejected', ranger_notes = $1, updated_at = NOW() WHERE id = $2`,
+            ['Sales failed after bounded redrafts and Captain fallback did not produce a draft. Manual message required.', msg.id]
+          );
+          rejectedCount++;
+          execStatus.beavers.enforcer.rejected++;
           execStatus.beavers.enforcer.status = 'done';
           return;
         }

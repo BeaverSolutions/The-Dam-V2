@@ -129,7 +129,9 @@ describe('P0 stabilization contracts', () => {
     expect(agents).toContain('approved_after_redraft');
     expect(agents).toContain('rejected_after_redraft');
     expect(agents).toContain('Do NOT repeat the same product-pitch structure');
-    expect(agents).toContain("requested_by, status) VALUES ($1, $2, 'enforcer_fallback', 'pending')");
+    expect(agents).toContain("requestedBy: 'captain_fallback'");
+    expect(agents).toContain('captain_fallback_manual_review');
+    expect(agents).not.toContain("requested_by, status) VALUES ($1, $2, 'enforcer_fallback', 'pending')");
   });
 
   it('message UI separates rejected drafts from live leads with replacement drafts', () => {

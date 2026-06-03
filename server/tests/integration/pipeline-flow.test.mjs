@@ -116,15 +116,15 @@ describe('Pipeline Flow Integration', () => {
       expect(finalMetadata.signal).toBe('hiring_signal');
     });
 
-    it('enforcer_fallback sets source and prompt_variant correctly', () => {
-      const draft_source = 'enforcer_fallback';
+    it('captain_fallback sets source and prompt_variant correctly', () => {
+      const draft_source = 'captain_fallback';
       const finalMetadata = {
         source: draft_source,
-        prompt_variant: draft_source === 'enforcer_fallback' ? 'enforcer_fallback' : null,
+        prompt_variant: draft_source === 'captain_fallback' ? 'captain_fallback' : null,
         signal: null,
       };
-      expect(finalMetadata.source).toBe('enforcer_fallback');
-      expect(finalMetadata.prompt_variant).toBe('enforcer_fallback');
+      expect(finalMetadata.source).toBe('captain_fallback');
+      expect(finalMetadata.prompt_variant).toBe('captain_fallback');
     });
   });
 });

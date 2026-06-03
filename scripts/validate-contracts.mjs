@@ -273,9 +273,11 @@ const signalRetryBeforeFallback = agents.includes('MAX_SIGNAL_RANGER_RETRIES = 2
   && agents.includes('approved_after_redraft')
   && agents.includes('rejected_after_redraft')
   && agents.includes('Do NOT repeat the same product-pitch structure')
-  && agents.includes("'enforcer_fallback', 'pending'");
+  && agents.includes('captain_fallback_manual_review')
+  && agents.includes('captainFallbackCount')
+  && !agents.includes("'enforcer_fallback', 'pending'");
 check('Signal pipeline retries rejected drafts before fallback', signalRetryBeforeFallback,
-  signalRetryBeforeFallback ? 'signal path has bounded Sales redrafts before Enforcer fallback' : 'signal path may skip straight from rejection to fallback');
+  signalRetryBeforeFallback ? 'signal path has bounded Sales redrafts before Captain fallback' : 'signal path may skip straight from rejection to fallback or still use Enforcer fallback');
 
 // 23. Missed auto-approval recovery must preserve Enforcer gates and send safety.
 const autoApprovalRecoveryGuarded = autoApprovalRecovery.includes("AUTO_APPROVAL_RECOVERY_ENABLED === 'true'")
