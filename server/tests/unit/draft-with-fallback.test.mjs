@@ -73,6 +73,7 @@ describe('draftWithFallback', () => {
       enableEnforcerFallback: true,
       lead: baseLead,
       recordRepairRoute,
+      inlineResearchRepair: false,
     });
 
     expect(result).toBeNull();
@@ -82,6 +83,68 @@ describe('draftWithFallback', () => {
       kickoff_id: 'plan-0000-0000-0000-000000000001',
       repair_route: 'needs_research_repair',
       failed_rule: 'needs_more_research',
+    }));
+  });
+
+  it('runs bounded inline Research repair and retries Sales once when Sales routes thin evidence to Research', async () => {
+    const salesGenerate = vi.fn()
+      .mockResolvedValueOnce({
+        status: 'needs_more_research',
+        repair_route: 'needs_research_repair',
+        missing_fields: ['source_url'],
+        required_repair: 'Find a source URL for the timing signal.',
+        signal_package: { signal_id: 'hiring_sales_roles', evidence: ['Hiring BDR'] },
+      })
+      .mockResolvedValueOnce({
+        body: 'Hi Ahmad,\n\nSaw the BDR hiring push. Is outbound execution the current bottleneck?\n\nRegards,\nMichael',
+        subject: 'BDR hiring',
+        prompt_variant: 'signal_rich_v2',
+      });
+    const rangerDraft = vi.fn().mockResolvedValue({ body: 'Should not be used.' });
+    const recordRepairRoute = vi.fn().mockResolvedValue({ recorded: true, directive_written: false });
+    const repairSignalPackage = vi.fn().mockResolvedValue({
+      repaired: true,
+      signal_package: { signal_id: 'hiring_sales_roles', source_url: 'https://example.com/job', evidence: ['Hiring BDR'] },
+    });
+    const reloadLead = vi.fn().mockResolvedValue({
+      ...baseLead,
+      id: LEAD_ID,
+      metadata: {
+        signal_package: { signal_id: 'hiring_sales_roles', source_url: 'https://example.com/job', evidence: ['Hiring BDR'] },
+        research_repair: { attempt: 1, max_attempts: 1, status: 'repaired' },
+      },
+    });
+
+    const result = await draftWithFallback(CLIENT_ID, {
+      ...baseParams,
+      kickoff_id: 'plan-0000-0000-0000-000000000001',
+      salesGenerate,
+      rangerDraft,
+      enableEnforcerFallback: true,
+      lead: { ...baseLead, id: LEAD_ID },
+      recordRepairRoute,
+      repairSignalPackage,
+      reloadLead,
+    });
+
+    expect(result).toMatchObject({
+      body: 'Hi Ahmad,\n\nSaw the BDR hiring push. Is outbound execution the current bottleneck?\n\nRegards,\nMichael',
+      subject: 'BDR hiring',
+      draftSource: 'sales_beaver',
+      prompt_variant: 'signal_rich_v2',
+    });
+    expect(salesGenerate).toHaveBeenCalledTimes(2);
+    expect(repairSignalPackage).toHaveBeenCalledWith(CLIENT_ID, expect.objectContaining({
+      lead_id: LEAD_ID,
+      repair_route: 'needs_research_repair',
+      repair_attempt: 1,
+      max_repair_attempts: 1,
+    }));
+    expect(reloadLead).toHaveBeenCalledWith(CLIENT_ID, LEAD_ID);
+    expect(rangerDraft).not.toHaveBeenCalled();
+    expect(recordRepairRoute).toHaveBeenCalledWith(CLIENT_ID, expect.objectContaining({
+      lead_id: LEAD_ID,
+      write_directive: false,
     }));
   });
 
@@ -106,6 +169,7 @@ describe('draftWithFallback', () => {
       enableEnforcerFallback: true,
       lead: baseLead,
       recordRepairRoute,
+      inlineResearchRepair: false,
     });
 
     expect(result).toMatchObject({

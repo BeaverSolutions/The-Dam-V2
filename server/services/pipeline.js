@@ -71,6 +71,19 @@ function getSignalPackage(source = {}) {
     || null;
 }
 
+async function defaultRepairSignalPackage(clientId, payload) {
+  const { repairLeadSignalPackage } = require('./researchEnrichment');
+  return repairLeadSignalPackage(clientId, payload);
+}
+
+async function defaultReloadLead(clientId, leadId) {
+  const { rows } = await pool.query(
+    `SELECT * FROM leads WHERE client_id = $1 AND id = $2 AND deleted_at IS NULL LIMIT 1`,
+    [clientId, leadId]
+  );
+  return rows[0] || null;
+}
+
 async function assertLlmBudgetOpen(clientId) {
   const budget = await checkBudget(clientId);
   if (!budget.allowed) {
@@ -804,6 +817,9 @@ async function draftWithFallback(clientId, params) {
     kickoff_id = null,
     defaultDraftSource = 'sales_beaver',  // signal_pipeline historically used 'signal_hunt'
     recordRepairRoute: recordRepairRouteFn = recordRepairRoute,
+    repairSignalPackage = defaultRepairSignalPackage,
+    reloadLead = defaultReloadLead,
+    inlineResearchRepair = true,
   } = params;
 
   if (!salesGenerate) {
@@ -835,6 +851,24 @@ async function draftWithFallback(clientId, params) {
       Number(salesResult.max_repair_attempts ?? salesResult.maxRepairAttempts ?? repairPolicy.DEFAULT_MAX_RESEARCH_REPAIR_ATTEMPTS)
         || repairPolicy.DEFAULT_MAX_RESEARCH_REPAIR_ATTEMPTS
     );
+    const repairExhausted = repairPolicy.researchRepairExhausted({ repairAttempt, maxRepairAttempts });
+    const canInlineRepair = inlineResearchRepair && !repairExhausted && typeof repairSignalPackage === 'function';
+    const repairPayload = repairPolicy.buildResearchRepairPayload({
+      leadId: lead_id,
+      kickoffId: kickoff_id,
+      channel,
+      pipelinePath: pipeline_path,
+      failedRule: salesResult.reason || 'needs_more_research',
+      reason: salesResult.required_repair || salesResult.reason || 'needs_more_research',
+      missingFields: salesResult.missing_fields || [],
+      requiredRepair: salesResult.required_repair || null,
+      repairAttempt,
+      maxRepairAttempts,
+      signalPackage,
+      sourceUrl: signalPackage?.source_url || null,
+      sourceChannel: signalPackage?.source_channel || null,
+      evidenceDecision: salesResult.evidence_decision || null,
+    });
     await recordRepairRouteFn(clientId, {
       lead_id,
       kickoff_id,
@@ -848,13 +882,89 @@ async function draftWithFallback(clientId, params) {
       repair_attempt: repairAttempt,
       max_repair_attempts: maxRepairAttempts,
       signal_package: signalPackage,
+      write_directive: !canInlineRepair,
       metadata: {
         missing_fields: salesResult.missing_fields || [],
         status: salesResult.status,
         required_repair: salesResult.required_repair || null,
       },
     }).catch(() => {});
-    if (repairPolicy.researchRepairExhausted({ repairAttempt, maxRepairAttempts }) && captainDraft && lead) {
+
+    if (canInlineRepair) {
+      const repairResult = await repairSignalPackage(clientId, repairPayload).catch((err) => {
+        console.warn(`${logPrefix} Inline Research repair failed for lead ${lead_id}: ${err.message}`);
+        return { repaired: false, reason: err.message };
+      });
+      const repairedLead = typeof reloadLead === 'function'
+        ? await reloadLead(clientId, lead_id).catch(() => null)
+        : null;
+      const leadForFallback = repairedLead || lead;
+
+      if (repairResult?.repaired) {
+        const retryResult = await salesGenerate(clientId, { lead_id, channel, context });
+        if (retryResult?.body) {
+          return {
+            body: retryResult.body,
+            subject: retryResult.subject || null,
+            draftSource: defaultDraftSource,
+            prompt_variant: retryResult.prompt_variant || null,
+          };
+        }
+        if (retryResult?.status === 'needs_more_research') {
+          await recordRepairRouteFn(clientId, {
+            lead_id,
+            kickoff_id,
+            pipeline_path,
+            agent: 'sales_beaver',
+            source: 'sales_preflight_after_inline_repair',
+            channel,
+            repair_route: retryResult.repair_route || 'needs_research_repair',
+            failed_rule: retryResult.reason || 'needs_more_research',
+            reason: retryResult.required_repair || retryResult.reason || 'research_repair_exhausted',
+            repair_attempt: maxRepairAttempts,
+            max_repair_attempts: maxRepairAttempts,
+            signal_package: retryResult.signal_package || repairResult.signal_package || getSignalPackage(leadForFallback || {}) || null,
+            write_directive: false,
+            metadata: {
+              missing_fields: retryResult.missing_fields || [],
+              status: retryResult.status,
+              required_repair: retryResult.required_repair || null,
+              inline_repair_result: repairResult.reason || 'repaired',
+            },
+          }).catch(() => {});
+        }
+      }
+
+      if (captainDraft && leadForFallback) {
+        const captainResult = await captainDraft(clientId, {
+          lead: leadForFallback,
+          lead_id,
+          channel,
+          context,
+          signal_package: repairResult?.signal_package || getSignalPackage(leadForFallback || {}) || signalPackage,
+          reason: repairResult?.repaired
+            ? 'research_repair_retry_still_failed'
+            : (repairResult?.reason || salesResult.required_repair || salesResult.reason || 'research_repair_failed'),
+          missing_fields: repairResult?.missing_fields || salesResult.missing_fields || [],
+        }).catch((err) => {
+          console.warn(`${logPrefix} Captain fallback failed for lead ${lead_id}: ${err.message}`);
+          return null;
+        });
+        if (captainResult?.body && typeof captainResult.body === 'string') {
+          return {
+            body: captainResult.body,
+            subject: captainResult.subject || null,
+            draftSource: 'captain_fallback',
+            prompt_variant: 'captain_fallback',
+            manualReview: true,
+            reason: repairResult?.reason || salesResult.required_repair || salesResult.reason || 'research_repair_failed',
+          };
+        }
+      }
+      return null;
+    }
+
+    if (repairExhausted && captainDraft && lead) {
       const captainResult = await captainDraft(clientId, {
         lead,
         lead_id,
@@ -931,6 +1041,7 @@ async function recordRepairRoute(clientId, {
   repair_attempt = null,
   max_repair_attempts = null,
   signal_package = null,
+  write_directive = true,
   metadata = {},
 } = {}) {
   if (!clientId) return { recorded: false, reason: 'missing_client_id' };
@@ -976,7 +1087,7 @@ async function recordRepairRoute(clientId, {
   }
 
   let directiveWritten = false;
-  if (repair_route === 'needs_research_repair' && lead_id && !repairExhausted) {
+  if (write_directive && repair_route === 'needs_research_repair' && lead_id && !repairExhausted) {
     try {
       const directive = directivesSvc.buildRepairSignalPackageDirective({
         leadId: lead_id,
