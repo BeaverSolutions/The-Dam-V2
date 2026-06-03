@@ -13,6 +13,7 @@ const { leadSelectionFeedbackExclusionSql } = require('../services/founderFeedba
 const { checkBudget, isBudgetExceededError } = require('../services/budget');
 const autonomyStateService = require('../services/autonomyState');
 const { todayInMalaysia } = require('../utils/businessDay');
+const { parseRequestedLeadCount } = require('../utils/requestedLeadCount');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
@@ -77,11 +78,7 @@ const BASIC_OPERATING_SURFACE_V2_1 = Object.freeze({
 });
 
 function parseRequestedLeadLimit(message, defaultLimit = 20) {
-  const match = String(message || '').match(/\b(\d{1,3})\b/);
-  if (!match) return defaultLimit;
-  const parsed = Number.parseInt(match[1], 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return defaultLimit;
-  return Math.min(parsed, 50);
+  return parseRequestedLeadCount(message, defaultLimit);
 }
 
 function basicOperatingSurfaceForTenant(snapshot = {}) {

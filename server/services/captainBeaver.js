@@ -35,6 +35,7 @@ const { callAgentWithTools } = require('./claude');
 const { searchOpenWeb } = require('./searchService');
 const { getLegacyIcpForClient } = require('./tenantContext');
 const { todayInMalaysia } = require('../utils/businessDay');
+const { parseRequestedLeadCount } = require('../utils/requestedLeadCount');
 const {
   processExistingLeadsPipeline,
   autoFixMessage,
@@ -961,9 +962,7 @@ async function toolQueryLogs(clientId, { agent, action, hours, limit } = {}) {
 }
 
 function campaignTargetFromCommand(command) {
-  const match = String(command || '').match(/\b(\d{1,3})\b/);
-  const target = match ? parseInt(match[1], 10) : 50;
-  return Math.max(1, Math.min(target, 50));
+  return parseRequestedLeadCount(command, 50);
 }
 
 function minPaidQueriesForExternalTarget(target) {

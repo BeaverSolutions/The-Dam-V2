@@ -19,6 +19,7 @@ const { LEAD_SELECTION_REJECTION_SQL, leadSelectionFeedbackExclusionSql } = requ
 const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
 const repairPolicy = require('./repairPolicy');
 const { todayInMalaysia } = require('../utils/businessDay');
+const { parseRequestedLeadCount } = require('../utils/requestedLeadCount');
 
 // Channel-specific drafting instructions injected into the Sales Beaver prompt.
 // Module scope (2026-05-16, Jules F-03): was a local const inside
@@ -2483,13 +2484,11 @@ async function directorPlan(clientId, { command, source }) {
     };
   }
 
-  // Extract requested lead count from command — e.g. "Find 3 leads" → 3
+  // Extract requested lead count from command — e.g. "Find 3 leads" → 3.
+  // Ignore version/date/time fragments such as V2.1 before looking for counts.
   // Default: pull daily target from DB, fallback to 50 if not set.
-  const countMatch = command.match(/\b(\d+)\b/);
-  let requestedCount;
-  if (countMatch) {
-    requestedCount = parseInt(countMatch[1], 10);
-  } else {
+  let requestedCount = parseRequestedLeadCount(command, null);
+  if (requestedCount === null) {
     // Use daily KPI target as default lead count for bare "kickoff"
     try {
       const today = todayInMalaysia();
@@ -3931,8 +3930,8 @@ async function directorExecute(clientId, {
   // Check for existing leads that haven't had messages drafted yet.
   // Process fresh DB leads first, then source only the approval-ready output
   // shortfall. This keeps "find 5" tied to delivered approvals, not attempts.
-  const cmdCountMatch = command && command.match(/\b(\d+)\b/);
-  const targetLimit = limit || (cmdCountMatch ? parseInt(cmdCountMatch[1], 10) : 50);
+  const commandTarget = parseRequestedLeadCount(command, null);
+  const targetLimit = limit || commandTarget || 50;
   const campaignRequested = Number(requestedTarget) || targetLimit;
 
   let dbLeadsCount = 0;
