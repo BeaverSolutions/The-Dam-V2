@@ -22,6 +22,7 @@ const adminOnly = require('./middleware/adminOnly');
 const superAdminOnly = require('./middleware/superAdminOnly');
 const config = require('./config');
 const autonomyState = require('./services/autonomyState');
+const { todayInMalaysia } = require('./utils/businessDay');
 
 const app = express();
 
@@ -329,7 +330,8 @@ async function start() {
         // Get all clients with due follow-ups
         const { rows: clients } = await pool.query(
           `SELECT DISTINCT client_id FROM followup_queue
-           WHERE status = 'pending' AND scheduled_for <= CURRENT_DATE`
+           WHERE status = 'pending'
+             AND scheduled_for <= (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date`
         );
 
         for (const { client_id } of clients) {
@@ -1161,8 +1163,8 @@ none from this broken report; check app truth before approving batches.`;
                 // Per-day dedupe: respects MJ's "morning brief / EOD / impromptu only"
                 // policy. The "impromptu" channel fires once per day per issue type, not
                 // every hour the condition holds.
-                const todayUtc = new Date().toISOString().slice(0, 10);
-                const dedupeKey = `escalation_${issue.type}_${todayUtc}`;
+                const today = todayInMalaysia();
+                const dedupeKey = `escalation_${issue.type}_${today}`;
                 const { rows: alreadyFired } = await pool.query(
                   `SELECT 1 FROM agent_memory
                    WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2 LIMIT 1`,
@@ -1413,7 +1415,7 @@ none from this broken report; check app truth before approving batches.`;
       let fired = 0;
       for (const client of clients) {
         try {
-          const today = now.toISOString().split('T')[0];
+          const today = todayInMalaysia(now);
 
           // Email-only KPI gate (2026-05-20): Captain stops when email target is hit.
           // LinkedIn is acceptance-gated and variable — excluded from Captain's stop
@@ -1423,7 +1425,8 @@ none from this broken report; check app truth before approving batches.`;
           const { rows: [{ email_sent_today }] } = await pool.query(
             `SELECT COUNT(*)::int AS email_sent_today FROM messages
              WHERE client_id = $1 AND status = 'sent' AND channel = 'email'
-               AND DATE(sent_at) = $2`,
+               AND sent_at IS NOT NULL
+               AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date`,
             [client.id, today]
           );
           if (email_sent_today >= EMAIL_TARGET) {

@@ -24,6 +24,7 @@ const pool = require('../db/pool');
 const logger = require('../utils/logger');
 const { callAgent } = require('./claude');
 const spendGuard = require('./spendGuard');
+const { todayInMalaysia } = require('../utils/businessDay');
 const { checkBudget, BudgetExceededError } = require('./budget');
 
 // MY + SEA-agency news sources for v1. Mix of MY-general business/tech
@@ -303,7 +304,7 @@ Respond with the JSON array only — no markdown fences, no preamble.`;
  * the same day overwrite cleanly (cron has time-gate + dedup separately).
  */
 async function persistMarketSignals(clientId, payload) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayInMalaysia();
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
      VALUES ($1, 'market_sensor', $2, $3::jsonb, 'config')

@@ -14,6 +14,7 @@
 const pool = require('../db/pool');
 const { callAgent } = require('./claude');
 const logger = require('../utils/logger');
+const { todayInMalaysia } = require('../utils/businessDay');
 
 // ─── Memory upsert helper ──────────────────────────────────────────────────
 
@@ -87,7 +88,7 @@ const DAILY_REFLECTION_MIN_ACTIVITY = 3;
 
 async function generateAgentDailySummary(clientId, agent) {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayInMalaysia();
 
     // Idempotent: skip if today's reflection for this agent is already written
     const existing = await getMemory(clientId, 'shared', `daily_${agent}_${today}`);
@@ -99,10 +100,10 @@ async function generateAgentDailySummary(clientId, agent) {
          FROM logs
         WHERE client_id = $1
           AND agent = $2
-          AND created_at >= CURRENT_DATE
+          AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $3::date
         ORDER BY created_at ASC
         LIMIT 100`,
-      [clientId, agent]
+      [clientId, agent, today]
     );
 
     if (activity.length < DAILY_REFLECTION_MIN_ACTIVITY) {
@@ -180,7 +181,7 @@ async function saveTelegramHistory(clientId, chatId, history) {
  */
 async function postSessionLearning(clientId, { command, toolsUsed = [], outcome = 'ok' }) {
   try {
-    const dateKey = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const dateKey = todayInMalaysia();
     const existing = await getMemory(clientId, 'captain', `chat_sessions_${dateKey}`);
     const sessions = Array.isArray(existing) ? existing : [];
 

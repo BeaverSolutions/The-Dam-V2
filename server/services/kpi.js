@@ -17,17 +17,9 @@
 // release + instrumentation logs make the recount auditable in the logs table.
 
 const pool = require('../db/pool');
+const { todayInMalaysia } = require('../utils/businessDay');
 
-function todayKualaLumpurDate() {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Kuala_Lumpur',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(new Date());
-  const byType = Object.fromEntries(parts.map(part => [part.type, part.value]));
-  return `${byType.year}-${byType.month}-${byType.day}`;
-}
+const todayKualaLumpurDate = todayInMalaysia;
 
 async function recountKpi(clientId, date = null) {
   const today = date || todayKualaLumpurDate();

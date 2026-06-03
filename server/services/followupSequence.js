@@ -2,6 +2,7 @@
 
 const pool = require('../db/pool');
 const { callAgent } = require('./claude');
+const { addDaysToDateKey, nextBusinessDate, todayInMalaysia } = require('../utils/businessDay');
 
 // 2026-05-23: post-process strip duplicated from agents.js (lines 110-118)
 // to avoid circular require. Sales Beaver writes drafts that often include
@@ -47,22 +48,8 @@ const holidaySet = new Set(MY_HOLIDAYS_2026);
  * Mutates nothing — returns a new Date.
  */
 function nextBusinessDay(date) {
-  const d = new Date(date);
-  let guard = 0;
-  while (guard++ < 365) {
-    const day = d.getDay();
-    if (day === 6) d.setDate(d.getDate() + 2);      // Saturday → Monday
-    else if (day === 0) d.setDate(d.getDate() + 1);  // Sunday  → Monday
-
-    const iso = d.toISOString().split('T')[0];
-    if (holidaySet.has(iso)) {
-      d.setDate(d.getDate() + 1); // skip holiday, re-check
-      continue;
-    }
-    break;
-  }
-  if (guard >= 365) throw new Error(`nextBusinessDay: exceeded 365 iterations from ${date}`);
-  return d;
+  const dateKey = typeof date === 'string' ? date.slice(0, 10) : todayInMalaysia(date);
+  return new Date(`${nextBusinessDate(dateKey, holidaySet)}T00:00:00.000Z`);
 }
 
 /**
@@ -118,7 +105,8 @@ async function scheduleFollowUps(clientId, leadId, firstContactDate) {
     return { scheduled: false, reason: 'no_delivery_proof_for_touch_1' };
   }
 
-  const base = new Date(firstContactDate);
+  const firstContact = firstContactDate ? new Date(firstContactDate) : new Date();
+  const baseDate = todayInMalaysia(Number.isNaN(firstContact.getTime()) ? new Date() : firstContact);
 
   // Extended cadence (Day 0 = initial, not scheduled here):
   // Day 2  — FU1: different angle on same pain
@@ -134,11 +122,14 @@ async function scheduleFollowUps(clientId, leadId, firstContactDate) {
     { touch: 6, daysAfter: 30 },
   ];
 
+  let previousDate = null;
   for (const { touch, daysAfter } of schedule) {
-    const scheduledFor = new Date(base);
-    scheduledFor.setDate(scheduledFor.getDate() + daysAfter);
-    const adjusted = nextBusinessDay(scheduledFor);
-    const dateStr = adjusted.toISOString().split('T')[0];
+    const scheduledFor = addDaysToDateKey(baseDate, daysAfter);
+    let dateStr = nextBusinessDate(scheduledFor, holidaySet);
+    while (previousDate && dateStr <= previousDate) {
+      dateStr = nextBusinessDate(addDaysToDateKey(previousDate, 1), holidaySet);
+    }
+    previousDate = dateStr;
 
     await pool.query(
       `INSERT INTO followup_queue (client_id, lead_id, touch_number, scheduled_for)
@@ -148,9 +139,7 @@ async function scheduleFollowUps(clientId, leadId, firstContactDate) {
     );
   }
 
-  const touch2Date = nextBusinessDay(
-    new Date(base.getTime() + 2 * 86400000)
-  );
+  const touch2Date = nextBusinessDate(addDaysToDateKey(baseDate, 2), holidaySet);
 
   await pool.query(
     `UPDATE leads SET
@@ -248,7 +237,7 @@ async function remainingFollowUpCapacity(clientId) {
  * follow-up drafts/day.
  */
 async function getDueFollowUps(clientId) {
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayInMalaysia();
   const capRemaining = await remainingFollowUpCapacity(clientId);
   if (capRemaining <= 0) {
     console.warn(`[FollowUp] Daily draft cap reached for client ${clientId} (cap=${FOLLOWUP_DAILY_DRAFT_CAP}); deferring remaining due follow-ups to tomorrow.`);
@@ -325,7 +314,7 @@ async function getLeadSequence(clientId, leadId) {
  * Returns an array of { ...followup, lead: {...}, previous_messages: [...], rejection_history: [...] }
  */
 async function getDueFollowUpsWithContext(clientId) {
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayInMalaysia();
 
   // Daily cap (see getDueFollowUps): plan only what can still be drafted today,
   // net of follow-ups already drafted, so Captain doesn't propose angles for a

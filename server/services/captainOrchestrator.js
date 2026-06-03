@@ -27,6 +27,7 @@ const { callAgent } = require('./claude');
 const { getMonthlyBudget } = require('./budget');
 const tenantConfig = require('./tenantConfig');
 const jobHealth = require('./jobHealth');
+const { todayInMalaysia } = require('../utils/businessDay');
 const pipelineTrace = require('./pipelineTrace');
 
 function getLLMHealth() {
@@ -1032,7 +1033,7 @@ async function generateEmergencyMorningBrief(clientId, err) {
  * can read Captain's directives during their own loops.
  */
 async function persistMorningBrief(clientId, brief) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayInMalaysia();
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
      VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
@@ -1157,7 +1158,7 @@ function renderPlainEodBrief(k, actions) {
 
 async function runEodBrief(clientId) {
   const brief = await generateEodBrief(clientId);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayInMalaysia();
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
      VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
@@ -1200,7 +1201,7 @@ const ANGLE_TEMPLATES = [
  */
 async function planFollowUps(clientId) {
   const followupSequence = require('./followupSequence');
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayInMalaysia();
 
   // 1. Load all due follow-ups with full context
   const dueWithContext = await followupSequence.getDueFollowUpsWithContext(clientId);
@@ -1706,7 +1707,7 @@ async function checkAgentLiveness(clientId, targetAgent, freshnessHours = 2) {
  * every 30 min. Returns true if a new escalation was recorded.
  */
 async function recordOfflineEscalation(clientId, targetAgent, hoursSince) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayInMalaysia();
   const key = `agent_offline_${targetAgent}_${today}`;
   try {
     const { rowCount } = await pool.query(

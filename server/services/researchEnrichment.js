@@ -29,6 +29,7 @@ const { searchOpenWeb } = require('./searchService');
 const logger = require('../utils/logger');
 const { scoreAndPersist } = require('./qualityScorer');
 const { getTenantConfig } = require('./tenantConfig');
+const { todayInMalaysia } = require('../utils/businessDay');
 const { checkBudget, isBudgetExceededError } = require('./budget');
 const { CAPS, providerUsageToday } = require('./spendGuard');
 const repairPolicy = require('./repairPolicy');
@@ -205,7 +206,7 @@ async function enrichLeadForFollowUp(clientId, lead, { maxQueriesPerLead = 1 } =
  * Returns: { processed, enriched, skipped, errors, quota_exhausted_at }
  */
 async function runDailyEnrichmentPass(clientId) {
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayInMalaysia();
   const budget = await checkBudget(clientId);
   if (!budget.allowed) {
     return {
@@ -586,7 +587,7 @@ async function repairLeadSignalPackage(clientId, payload = {}) {
     ...(enrichment.metadata || {}),
   };
   const signalPackage = research.buildSignalPackage({ ...lead, metadata: repairedMeta }, {
-    evidenceDate: new Date().toISOString().slice(0, 10),
+    evidenceDate: todayInMalaysia(),
   });
   const missingFields = research.signalPackageMissingFields(signalPackage);
   const newHash = repairPolicy.signalPackageHash(signalPackage);
@@ -802,7 +803,7 @@ async function runColdPoolSignalEnrichment(clientId, opts = {}) {
 
   // Log the run for visibility (same pattern as the follow-up pass).
   try {
-    const dayKey = new Date().toISOString().split('T')[0];
+    const dayKey = todayInMalaysia();
     await pool.query(
       `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
        VALUES ($1, 'research_beaver', $2, $3::jsonb, 'journal', NOW())
@@ -1020,7 +1021,7 @@ async function runPoolEmailEnrichment(clientId, opts = {}) {
   }
 
   try {
-    const dayKey = nowIso.split('T')[0];
+    const dayKey = todayInMalaysia(new Date(nowIso));
     await pool.query(
       `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
        VALUES ($1, 'research_beaver', $2, $3::jsonb, 'journal', NOW())

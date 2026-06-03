@@ -5,6 +5,7 @@ const searchService = require('./searchService');
 const hunterService = require('./hunter');
 const { checkBudget } = require('./budget');
 const signalPlanner = require('./signalPlanner');
+const { todayInMalaysia } = require('../utils/businessDay');
 
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -179,7 +180,7 @@ function firstNonEmpty(...values) {
 }
 
 function evidenceDate(options = {}) {
-  return options.evidenceDate || new Date().toISOString().slice(0, 10);
+  return options.evidenceDate || todayInMalaysia();
 }
 
 function buildCompanyEvidence(item = {}, company = {}, companyName = '', domain = '') {

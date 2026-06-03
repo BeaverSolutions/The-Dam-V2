@@ -18,6 +18,7 @@ const { recordOutcome, attributionFromLead } = require('./outcomeTracker');
 const { LEAD_SELECTION_REJECTION_SQL, leadSelectionFeedbackExclusionSql } = require('./founderFeedbackSignals');
 const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
 const repairPolicy = require('./repairPolicy');
+const { todayInMalaysia } = require('../utils/businessDay');
 
 // Channel-specific drafting instructions injected into the Sales Beaver prompt.
 // Module scope (2026-05-16, Jules F-03): was a local const inside
@@ -2491,7 +2492,7 @@ async function directorPlan(clientId, { command, source }) {
   } else {
     // Use daily KPI target as default lead count for bare "kickoff"
     try {
-      const today = new Date().toISOString().split('T')[0];
+      const today = todayInMalaysia();
       const { rows } = await pool.query(
         `SELECT target FROM daily_kpi WHERE client_id = $1 AND date = $2 LIMIT 1`,
         [clientId, today]
@@ -3697,7 +3698,7 @@ async function directorExecute(clientId, {
 
     // Also surface today's market signals (Phase E) so Sales Beaver can
     // reference them as personalization seeds when drafting.
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayInMalaysia();
     const marketRes = await pool.query(
       `SELECT content FROM agent_memory
         WHERE client_id = $1 AND agent = 'market_sensor' AND key = $2

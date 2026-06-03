@@ -22,6 +22,7 @@
 const pool = require('../db/pool');
 const logger = require('../utils/logger');
 const { logCaptainAction } = require('./beaverState');
+const { todayInMalaysia } = require('../utils/businessDay');
 
 const DEFAULT_LOOKBACK_DAYS = 14;
 const DEFAULT_MIN_SENT      = 20;        // Need this many sent at the chosen threshold
@@ -182,7 +183,7 @@ async function tuneVpThreshold(clientId, options = {}) {
  * useful signal — Captain can surface "still building data" in the brief).
  */
 async function persistTuningRun(clientId, result) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayInMalaysia();
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
      VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')

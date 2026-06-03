@@ -34,6 +34,7 @@ const { getDatabaseExportSummary } = require('./databaseExport');
 const { callAgentWithTools } = require('./claude');
 const { searchOpenWeb } = require('./searchService');
 const { getLegacyIcpForClient } = require('./tenantContext');
+const { todayInMalaysia } = require('../utils/businessDay');
 const {
   processExistingLeadsPipeline,
   autoFixMessage,
@@ -504,20 +505,20 @@ async function toolSearchInternalLeads(clientId, { industry, location, signal_ti
 }
 
 async function toolGetPipelineStatus(clientId) {
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayInMalaysia();
   const [counts, leadCounts, kpiRow] = await Promise.all([
     pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE status = 'sent' AND DATE(sent_at) = $2)                AS sent_today,
-         COUNT(*) FILTER (WHERE status = 'pending_approval' AND DATE(created_at) = $2) AS pending,
-         COUNT(*) FILTER (WHERE status = 'approved' AND DATE(created_at) = $2)         AS approved_awaiting_send,
-         COUNT(*) FILTER (WHERE status = 'ranger_rejected' AND DATE(created_at) = $2)  AS rejected,
+         COUNT(*) FILTER (WHERE status = 'sent' AND sent_at IS NOT NULL AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS sent_today,
+         COUNT(*) FILTER (WHERE status = 'pending_approval' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date)          AS pending,
+         COUNT(*) FILTER (WHERE status = 'approved' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date)                  AS approved_awaiting_send,
+         COUNT(*) FILTER (WHERE status = 'ranger_rejected' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date)           AS rejected,
          COUNT(*) FILTER (WHERE status = 'replied')                                    AS total_replied
        FROM messages WHERE client_id = $1`,
       [clientId, today]
     ),
     pool.query(
-      `SELECT COUNT(*) FILTER (WHERE DATE(created_at) = $2) AS leads_today,
+      `SELECT COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS leads_today,
               COUNT(*) AS leads_total
        FROM leads WHERE client_id = $1 AND deleted_at IS NULL`,
       [clientId, today]
@@ -1430,7 +1431,7 @@ async function toolDraftEmailForLeads(clientId, { lead_ids, note } = {}) {
       `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
        VALUES ($1, 'captain', $2, $3::jsonb, 'journal', NOW())
        ON CONFLICT (client_id, agent, key) DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
-      [clientId, `email_fallback_${new Date().toISOString().slice(0,10)}`, JSON.stringify({ note, lead_ids, ts: new Date().toISOString() })]
+      [clientId, `email_fallback_${todayInMalaysia()}`, JSON.stringify({ note, lead_ids, ts: new Date().toISOString() })]
     ).catch(() => {});
   }
 
@@ -1460,7 +1461,7 @@ async function toolPlanFollowUpsNow(clientId) {
 }
 
 async function toolReadFollowUpPlan(clientId, { date } = {}) {
-  const planDate = date || new Date().toISOString().slice(0, 10);
+  const planDate = date || todayInMalaysia();
   const { rows } = await pool.query(
     `SELECT content FROM agent_memory
      WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2
@@ -1477,7 +1478,7 @@ async function toolReadFollowUpPlan(clientId, { date } = {}) {
 }
 
 async function toolExecuteFollowUpPlan(clientId, { lead_ids, date, angle_overrides } = {}) {
-  const planDate = date || new Date().toISOString().slice(0, 10);
+  const planDate = date || todayInMalaysia();
   const { rows } = await pool.query(
     `SELECT content FROM agent_memory
      WHERE client_id = $1 AND agent = 'captain_orchestrator' AND key = $2

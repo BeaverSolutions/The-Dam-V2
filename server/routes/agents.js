@@ -5,6 +5,7 @@ const { body, param } = require('express-validator');
 const validate = require('../middleware/validate');
 const agentsService = require('../services/agents');
 const pool = require('../db/pool');
+const { todayInMalaysia } = require('../utils/businessDay');
 
 router.post('/research/search',
   [body('query').notEmpty().trim(), validate],
@@ -310,7 +311,7 @@ router.post('/memory/journal',
   [body('text').notEmpty().trim(), validate],
   async (req, res, next) => {
     try {
-      const today = new Date().toISOString().slice(0, 10);
+      const today = todayInMalaysia();
       const content = JSON.stringify({ text: req.body.text, created_at: new Date().toISOString() });
       const result = await pool.query(
         `INSERT INTO agent_memory (client_id, agent, memory_type, key, content)

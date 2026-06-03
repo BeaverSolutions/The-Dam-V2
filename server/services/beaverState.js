@@ -18,8 +18,9 @@
  */
 
 const pool = require('../db/pool');
+const { todayInMalaysia } = require('../utils/businessDay');
 
-const TODAY = () => new Date().toISOString().slice(0, 10);
+const TODAY = () => todayInMalaysia();
 
 /* ─── Captain's morning brief ─────────────────────────────────────── */
 

@@ -1,4 +1,8 @@
-// Inline the business-day logic from followupSequence.js for isolated testing
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { addDaysToDateKey, nextBusinessDate } = require('../../utils/businessDay');
+
 const MY_HOLIDAYS_2026 = [
   '2026-01-01', '2026-01-29', '2026-02-17', '2026-02-18',
   '2026-03-17', '2026-03-29', '2026-03-30', '2026-05-01',
@@ -10,20 +14,8 @@ const MY_HOLIDAYS_2026 = [
 const holidaySet = new Set(MY_HOLIDAYS_2026);
 
 function nextBusinessDay(date) {
-  const d = new Date(date);
-  while (true) {
-    const day = d.getDay();
-    if (day === 6) d.setDate(d.getDate() + 2);
-    else if (day === 0) d.setDate(d.getDate() + 1);
-
-    const iso = d.toISOString().split('T')[0];
-    if (holidaySet.has(iso)) {
-      d.setDate(d.getDate() + 1);
-      continue;
-    }
-    break;
-  }
-  return d;
+  const dateKey = typeof date === 'string' ? date : date.toISOString().slice(0, 10);
+  return new Date(`${nextBusinessDate(dateKey, holidaySet)}T00:00:00.000Z`);
 }
 
 const SCHEDULE = [
@@ -35,12 +27,15 @@ const SCHEDULE = [
 ];
 
 function scheduleAllTouches(firstContactDate) {
-  const base = new Date(firstContactDate);
+  let previousDate = null;
   return SCHEDULE.map(({ touch, daysAfter }) => {
-    const raw = new Date(base);
-    raw.setDate(raw.getDate() + daysAfter);
-    const adjusted = nextBusinessDay(raw);
-    return { touch, raw: raw.toISOString().split('T')[0], adjusted: adjusted.toISOString().split('T')[0] };
+    const raw = addDaysToDateKey(firstContactDate, daysAfter);
+    let adjusted = nextBusinessDate(raw, holidaySet);
+    while (previousDate && adjusted <= previousDate) {
+      adjusted = nextBusinessDate(addDaysToDateKey(previousDate, 1), holidaySet);
+    }
+    previousDate = adjusted;
+    return { touch, raw, adjusted };
   });
 }
 
@@ -190,6 +185,12 @@ describe('Follow-up scheduling for all 174 touches', () => {
         expect(new Date(touches[i].adjusted).getTime())
           .toBeGreaterThan(new Date(touches[i - 1].adjusted).getTime());
       }
+    });
+
+    it('does not collapse touch 2 and touch 3 onto the same day after a holiday weekend', () => {
+      const touches = scheduleAllTouches('2026-06-03'); // Day+2 is Hari Raya Haji; Day+5 is Monday
+      expect(touches[0].adjusted).toBe('2026-06-08');
+      expect(touches[1].adjusted).toBe('2026-06-09');
     });
   });
 });

@@ -20,6 +20,7 @@ const logger = require('../utils/logger');
 const { evaluateLeadQuality } = require('../utils/leadQuality');
 const { searchEmailDomain } = require('./searchService');
 const spendGuard = require('./spendGuard');
+const { todayInMalaysia } = require('../utils/businessDay');
 
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -902,12 +903,13 @@ async function runDbBuilder() {
           // Upsert: morning fire writes initial, midday fire updates with
           // top-up numbers under the same key.
           try {
-            const todayUtc = new Date().toISOString().slice(0, 10);
+            const today = todayInMalaysia();
             const { rows: [missRow] } = await pool.query(
               `SELECT COUNT(*)::int AS n FROM research_misses
-               WHERE client_id = $1 AND created_at >= CURRENT_DATE
+               WHERE client_id = $1
+                 AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
                  AND source_strategy = 'db_builder_icp_v2_gate'`,
-              [client.id]
+              [client.id, today]
             );
             await pool.query(
               `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
@@ -916,9 +918,9 @@ async function runDbBuilder() {
                  SET content = EXCLUDED.content, updated_at = NOW()`,
               [
                 client.id,
-                `daily_brief_${todayUtc}`,
+                `daily_brief_${today}`,
                 JSON.stringify({
-                  date: todayUtc,
+                  date: today,
                   target: 40,
                   saved_today: totalSaved,
                   email_pool_now: newHealth.withEmail,

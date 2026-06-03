@@ -21,17 +21,24 @@ router.get('/stats', async (req, res, next) => {
     const [statsRes, calRes, integrationsResult] = await Promise.all([
       pool.query(`
         WITH
+          kl AS (
+            SELECT
+              (date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') AS today_start,
+              ((date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') + INTERVAL '1 day') AT TIME ZONE 'Asia/Kuala_Lumpur') AS today_end,
+              (date_trunc('week', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') AS week_start,
+              ((date_trunc('week', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') + INTERVAL '7 days') AT TIME ZONE 'Asia/Kuala_Lumpur') AS week_end
+          ),
           leads_by_stage AS (
             SELECT pipeline_stage, COUNT(*) AS cnt
             FROM leads WHERE client_id = $1 AND deleted_at IS NULL
             GROUP BY pipeline_stage
           ),
           msgs_sent_all AS (
-            SELECT COUNT(*) AS total FROM messages WHERE client_id = $1 AND status = 'sent'
+            SELECT COUNT(*) AS total FROM messages WHERE client_id = $1 AND status = 'sent' AND sent_at IS NOT NULL
           ),
           msgs_sent_30d AS (
             SELECT COUNT(*) AS total FROM messages
-            WHERE client_id = $1 AND status = 'sent' AND sent_at >= NOW() - INTERVAL '30 days'
+            WHERE client_id = $1 AND status = 'sent' AND sent_at IS NOT NULL AND sent_at >= NOW() - INTERVAL '30 days'
           ),
           replies_all AS (
             SELECT COUNT(DISTINCT lead_id) AS total
@@ -87,17 +94,18 @@ router.get('/stats', async (req, res, next) => {
           sourced_today AS (
             SELECT COUNT(*) AS total FROM leads
             WHERE client_id = $1 AND deleted_at IS NULL
-              AND created_at::date = CURRENT_DATE
+              AND created_at >= (SELECT today_start FROM kl)
+              AND created_at < (SELECT today_end FROM kl)
           ),
           in_flight AS (
             SELECT COUNT(DISTINCT lead_id) AS total FROM messages
-            WHERE client_id = $1 AND status = 'sent' AND reply_detected_at IS NULL
+            WHERE client_id = $1 AND status = 'sent' AND sent_at IS NOT NULL AND reply_detected_at IS NULL
           ),
           meetings_this_week AS (
             SELECT COUNT(*) AS total FROM calendar_events
             WHERE client_id = $1
-              AND start_time >= date_trunc('week', CURRENT_DATE)
-              AND start_time < date_trunc('week', CURRENT_DATE) + INTERVAL '7 days'
+              AND start_time >= (SELECT week_start FROM kl)
+              AND start_time < (SELECT week_end FROM kl)
           ),
           meetings_next_7d AS (
             SELECT COUNT(*) AS total FROM calendar_events
@@ -108,31 +116,37 @@ router.get('/stats', async (req, res, next) => {
           sourced_this_week AS (
             SELECT COUNT(*) AS total FROM leads
             WHERE client_id = $1 AND deleted_at IS NULL
-              AND created_at >= date_trunc('week', CURRENT_DATE)
+              AND created_at >= (SELECT week_start FROM kl)
+              AND created_at < (SELECT week_end FROM kl)
           ),
           sent_this_week AS (
             SELECT COUNT(*) AS total FROM messages
             WHERE client_id = $1 AND status = 'sent'
-              AND sent_at >= date_trunc('week', CURRENT_DATE)
+              AND sent_at IS NOT NULL
+              AND sent_at >= (SELECT week_start FROM kl)
+              AND sent_at < (SELECT week_end FROM kl)
           ),
           replies_this_week AS (
             SELECT COUNT(DISTINCT lead_id) AS total
             FROM messages WHERE client_id = $1 AND reply_detected_at IS NOT NULL
-              AND reply_detected_at >= date_trunc('week', CURRENT_DATE)
+              AND reply_detected_at >= (SELECT week_start FROM kl)
+              AND reply_detected_at < (SELECT week_end FROM kl)
           ),
           reviewed_this_week AS (
             SELECT COUNT(*) AS total FROM logs
             WHERE client_id = $1
               AND agent = 'ranger'
               AND action = 'ranger_review'
-              AND created_at >= date_trunc('week', CURRENT_DATE)
+              AND created_at >= (SELECT week_start FROM kl)
+              AND created_at < (SELECT week_end FROM kl)
           ),
           passed_this_week AS (
             SELECT COUNT(*) AS total FROM logs
             WHERE client_id = $1
               AND ((agent = 'enforcer_beaver' AND action = 'message_auto_approved')
                 OR (agent = 'system'          AND action = 'user_approved_message'))
-              AND created_at >= date_trunc('week', CURRENT_DATE)
+              AND created_at >= (SELECT week_start FROM kl)
+              AND created_at < (SELECT week_end FROM kl)
           )
         SELECT
           (SELECT total FROM msgs_sent_all)       AS sent_all_time,
@@ -162,8 +176,11 @@ router.get('/stats', async (req, res, next) => {
       `, [clientId]),
 
       pool.query(
-        `SELECT * FROM calendar_events WHERE client_id = $1 AND start_time::date = CURRENT_DATE ORDER BY start_time ASC`,
-        [clientId]
+        `SELECT * FROM calendar_events
+         WHERE client_id = $1
+           AND (start_time AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+         ORDER BY start_time ASC`,
+        [clientId, todayInMalaysia()]
       ),
 
       Promise.all([
@@ -418,7 +435,7 @@ router.get('/analytics', async (req, res, next) => {
 router.get('/obsidian-export', async (req, res, next) => {
   try {
     const clientId = req.clientId;
-    const today = new Date().toISOString().split('T')[0];
+    const today = todayInMalaysia();
 
     const [rangerLogsRes, weeklyRes, memoryRes, statsRes] = await Promise.all([
       // Last 30 Ranger rejections

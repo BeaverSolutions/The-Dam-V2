@@ -12,6 +12,7 @@ const logger = require('../utils/logger');
 const { leadSelectionFeedbackExclusionSql } = require('../services/founderFeedbackSignals');
 const { checkBudget, isBudgetExceededError } = require('../services/budget');
 const autonomyStateService = require('../services/autonomyState');
+const { todayInMalaysia } = require('../utils/businessDay');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
@@ -181,19 +182,19 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
 
     // ── Intent 1: KPI / STATUS ───────────────────────────────────────
     if (/\b(kpi|status|progress|sent today|how (many|much)|dashboard|stats|telemetry)\b/i.test(lowerMsg)) {
-      const today = new Date().toISOString().split('T')[0];
+      const today = todayInMalaysia();
       const { rows: [counts] } = await pool.query(
         `SELECT
-           COUNT(*) FILTER (WHERE status = 'sent' AND DATE(sent_at) = $2)                   AS sent_today,
-           COUNT(*) FILTER (WHERE status = 'pending_approval' AND DATE(created_at) = $2)    AS pending,
-           COUNT(*) FILTER (WHERE status = 'approved' AND DATE(created_at) = $2)            AS approved_awaiting_send,
-           COUNT(*) FILTER (WHERE status = 'ranger_rejected' AND DATE(created_at) = $2)     AS rejected,
+           COUNT(*) FILTER (WHERE status = 'sent' AND sent_at IS NOT NULL AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS sent_today,
+           COUNT(*) FILTER (WHERE status = 'pending_approval' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date)          AS pending,
+           COUNT(*) FILTER (WHERE status = 'approved' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date)                  AS approved_awaiting_send,
+           COUNT(*) FILTER (WHERE status = 'ranger_rejected' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date)           AS rejected,
            COUNT(*) FILTER (WHERE status = 'replied')                                       AS total_replied
          FROM messages WHERE client_id = $1`,
         [client_id, today]
       );
       const { rows: [leadCounts] } = await pool.query(
-        `SELECT COUNT(*) FILTER (WHERE DATE(created_at) = $2) AS leads_today
+        `SELECT COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS leads_today
          FROM leads WHERE client_id = $1 AND deleted_at IS NULL`,
         [client_id, today]
       );
@@ -1005,7 +1006,7 @@ router.post('/morning-kickoff', requireInternalKey, async (req, res) => {
   }
 
   const DAILY_BATCH_LIMIT = 16;
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayInMalaysia();
 
   try {
     // 1. Count total available qualified leads (not yet contacted)
@@ -1295,7 +1296,7 @@ async function runAutonomousKickoff(clientId) {
 }
 
 async function _runAutonomousKickoffInner(clientId) {
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayInMalaysia();
   const HARD_CEILING = 15;
   const PENDING_CEILING = 30;
   const CHANNEL_ESCALATION_DAILY_CAP = Number(process.env.CHANNEL_ESCALATION_DAILY_CAP) || 5;
@@ -1335,7 +1336,11 @@ async function _runAutonomousKickoffInner(clientId) {
 
   // Count today's sent
   const { rows: counts } = await pool.query(
-    `SELECT COUNT(*) FILTER (WHERE status = 'sent' AND DATE(sent_at) = $2) AS total_sent
+    `SELECT COUNT(*) FILTER (
+       WHERE status = 'sent'
+         AND sent_at IS NOT NULL
+         AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+     ) AS total_sent
      FROM messages WHERE client_id = $1`,
     [clientId, today]
   );
@@ -1573,11 +1578,11 @@ async function _runAutonomousKickoffInner(clientId) {
       const { escalateChannel } = require('../services/followupSequence');
       const { rows: [channelEscalationQueue] } = await pool.query(
         `SELECT
-           COUNT(*) FILTER (WHERE status = 'pending_approval' AND DATE(created_at) = $2) AS pending,
-           COUNT(*) FILTER (WHERE status = 'approved' AND DATE(created_at) = $2) AS approved_awaiting_send,
+           COUNT(*) FILTER (WHERE status = 'pending_approval' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS pending,
+           COUNT(*) FILTER (WHERE status = 'approved' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS approved_awaiting_send,
            COUNT(*) FILTER (
              WHERE metadata->>'is_channel_escalation' = 'true'
-               AND DATE(created_at) = $2
+               AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
            ) AS drafted_today
          FROM messages
          WHERE client_id = $1`,
@@ -1734,14 +1739,14 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
 
   // Sprint 7D: Ranger rejection pattern detection
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = todayInMalaysia();
     const { rows: patterns } = await pool.query(
       `SELECT metadata->>'reject_reason' AS reason, COUNT(*) AS count
        FROM logs
        WHERE client_id = $1
          AND action IN ('message_rejected', 'ranger_review')
          AND metadata->>'decision' = 'reject'
-         AND DATE(created_at) = $2
+         AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
        GROUP BY reason
        HAVING COUNT(*) >= 3`,
       [clientId, today]
@@ -1791,7 +1796,11 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
 
   // Re-check gap after processing follow-ups
   const { rows: refreshCounts } = await pool.query(
-    `SELECT COUNT(*) FILTER (WHERE status = 'sent' AND DATE(sent_at) = $2) AS total_sent
+    `SELECT COUNT(*) FILTER (
+       WHERE status = 'sent'
+         AND sent_at IS NOT NULL
+         AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+     ) AS total_sent
      FROM messages WHERE client_id = $1`,
     [clientId, today]
   );
@@ -1925,13 +1934,13 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     // Recalculate live counts — now per-channel so we can honour the 30/20 split
     const { rows: liveCount } = await pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE status = 'sent'             AND DATE(COALESCE(sent_at, created_at)) = $2) AS sent,
-         COUNT(*) FILTER (WHERE status = 'pending_approval' AND DATE(created_at) = $2)                     AS pending,
-         COUNT(*) FILTER (WHERE status = 'approved'         AND DATE(created_at) = $2)                     AS approved_awaiting_send,
-         COUNT(*) FILTER (WHERE channel = 'email'    AND status = 'sent' AND DATE(COALESCE(sent_at, created_at)) = $2) AS email_sent_today,
-         COUNT(*) FILTER (WHERE channel = 'linkedin' AND status = 'sent' AND DATE(COALESCE(sent_at, created_at)) = $2) AS linkedin_sent_today,
-         COUNT(*) FILTER (WHERE channel = 'email'    AND DATE(created_at) = $2 AND status NOT IN ('ranger_rejected','blocked_no_email','deleted')) AS email_drafted_today,
-         COUNT(*) FILTER (WHERE channel = 'linkedin' AND DATE(created_at) = $2 AND status NOT IN ('ranger_rejected','blocked_no_email','deleted')) AS linkedin_drafted_today
+         COUNT(*) FILTER (WHERE status = 'sent' AND sent_at IS NOT NULL AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS sent,
+         COUNT(*) FILTER (WHERE status = 'pending_approval' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date)          AS pending,
+         COUNT(*) FILTER (WHERE status = 'approved' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date)                  AS approved_awaiting_send,
+         COUNT(*) FILTER (WHERE channel = 'email' AND status = 'sent' AND sent_at IS NOT NULL AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS email_sent_today,
+         COUNT(*) FILTER (WHERE channel = 'linkedin' AND status = 'sent' AND sent_at IS NOT NULL AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS linkedin_sent_today,
+         COUNT(*) FILTER (WHERE channel = 'email' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date AND status NOT IN ('ranger_rejected','blocked_no_email','deleted')) AS email_drafted_today,
+         COUNT(*) FILTER (WHERE channel = 'linkedin' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date AND status NOT IN ('ranger_rejected','blocked_no_email','deleted')) AS linkedin_drafted_today
        FROM messages WHERE client_id = $1`,
       [clientId, today]
     );
@@ -2271,7 +2280,10 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     // The old buildAutonomousBrief paragraph was fed into Brave's q= and returned 0.
     if (!usedDbPool) {
       const beforeSaved = (await pool.query(
-        `SELECT COUNT(*) AS c FROM leads WHERE client_id=$1 AND DATE(created_at)=$2`,
+        `SELECT COUNT(*) AS c
+         FROM leads
+         WHERE client_id=$1
+           AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date=$2::date`,
         [clientId, today]
       )).rows[0].c;
 
@@ -2301,7 +2313,10 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
       // No-burn stop: the daily top-up is capped and single-attempt. If it
       // produces no new saved leads, do not escalate into generic paid retries.
       const afterSaved = (await pool.query(
-        `SELECT COUNT(*) AS c FROM leads WHERE client_id=$1 AND DATE(created_at)=$2`,
+        `SELECT COUNT(*) AS c
+         FROM leads
+         WHERE client_id=$1
+           AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date=$2::date`,
         [clientId, today]
       )).rows[0].c;
       if (parseInt(afterSaved) === parseInt(beforeSaved)) {
@@ -2335,11 +2350,11 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     const introspection = require('../services/introspection');
     const { rows: finalCounts } = await pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE channel = 'email'    AND DATE(created_at) = $2) AS email_drafted,
-         COUNT(*) FILTER (WHERE channel = 'linkedin' AND DATE(created_at) = $2) AS linkedin_drafted,
-         COUNT(*) FILTER (WHERE channel = 'email'    AND status = 'sent' AND DATE(COALESCE(sent_at, created_at)) = $2) AS email_sent,
-         COUNT(*) FILTER (WHERE channel = 'linkedin' AND status = 'sent' AND DATE(COALESCE(sent_at, created_at)) = $2) AS linkedin_sent,
-         COUNT(*) FILTER (WHERE status = 'blocked_no_email' AND DATE(created_at) = $2) AS blocked_no_email
+         COUNT(*) FILTER (WHERE channel = 'email' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS email_drafted,
+         COUNT(*) FILTER (WHERE channel = 'linkedin' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS linkedin_drafted,
+         COUNT(*) FILTER (WHERE channel = 'email' AND status = 'sent' AND sent_at IS NOT NULL AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS email_sent,
+         COUNT(*) FILTER (WHERE channel = 'linkedin' AND status = 'sent' AND sent_at IS NOT NULL AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS linkedin_sent,
+         COUNT(*) FILTER (WHERE status = 'blocked_no_email' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS blocked_no_email
        FROM messages WHERE client_id = $1`,
       [clientId, today]
     );
@@ -2380,13 +2395,13 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
  */
 async function verifyKickoffOutput(clientId, target) {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = todayInMalaysia();
     const { rows } = await pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE status = 'sent'             AND DATE(COALESCE(sent_at, created_at)) = $2) AS sent,
-         COUNT(*) FILTER (WHERE status = 'pending_approval'  AND DATE(created_at) = $2) AS pending,
-         COUNT(*) FILTER (WHERE status = 'pending_ranger'    AND DATE(created_at) = $2) AS drafting,
-         COUNT(*) FILTER (WHERE status = 'ranger_rejected'   AND DATE(created_at) = $2) AS rejected
+         COUNT(*) FILTER (WHERE status = 'sent' AND sent_at IS NOT NULL AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS sent,
+         COUNT(*) FILTER (WHERE status = 'pending_approval' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS pending,
+         COUNT(*) FILTER (WHERE status = 'pending_ranger' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS drafting,
+         COUNT(*) FILTER (WHERE status = 'ranger_rejected' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS rejected
        FROM messages WHERE client_id = $1`,
       [clientId, today]
     );
@@ -2600,7 +2615,7 @@ async function logAction(clientId, agent, action, targetType, targetId, metadata
 
 router.get('/hourly-stats', requireInternalKey, async (req, res) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = todayInMalaysia();
     const clientId = req.query.client_id || null; // null → all tenants
 
     const [pending, channelStats, aa, ar, failed, leadStats, patternRows] = await Promise.all([
@@ -2612,27 +2627,27 @@ router.get('/hourly-stats', requireInternalKey, async (req, res) => {
       ),
       pool.query(
         `SELECT
-           COUNT(*) FILTER (WHERE channel = 'email' AND status IN ('sent','approved','pending_send') AND created_at::date = CURRENT_DATE)::int AS email_sent,
-           COUNT(*) FILTER (WHERE channel = 'email' AND status IN ('pending_approval') AND created_at::date = CURRENT_DATE)::int AS email_pending,
+           COUNT(*) FILTER (WHERE channel = 'email' AND status = 'sent' AND sent_at IS NOT NULL AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date)::int AS email_sent,
+           COUNT(*) FILTER (WHERE channel = 'email' AND status IN ('pending_approval','approved','pending_send') AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date)::int AS email_pending,
            COUNT(*) FILTER (WHERE channel = 'email' AND status = 'replied')::int AS email_replied,
-           COUNT(*) FILTER (WHERE channel = 'linkedin' AND status IN ('sent','approved','pending_send') AND created_at::date = CURRENT_DATE)::int AS li_sent,
-           COUNT(*) FILTER (WHERE channel = 'linkedin' AND status IN ('pending_approval','linkedin_requested') AND created_at::date = CURRENT_DATE)::int AS li_pending,
+           COUNT(*) FILTER (WHERE channel = 'linkedin' AND status = 'sent' AND sent_at IS NOT NULL AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date)::int AS li_sent,
+           COUNT(*) FILTER (WHERE channel = 'linkedin' AND status IN ('pending_approval','approved','pending_send','linkedin_requested') AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date)::int AS li_pending,
            COUNT(*) FILTER (WHERE channel = 'linkedin' AND status = 'replied')::int AS li_replied
          FROM messages
          WHERE ($1::uuid IS NULL OR client_id = $1::uuid)`,
-        [clientId]
+        [clientId, today]
       ),
       pool.query(
         `SELECT COUNT(*)::int AS c FROM approval_audit
-         WHERE decision='approved' AND created_at::date = CURRENT_DATE
+         WHERE decision='approved' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
            AND ($1::uuid IS NULL OR client_id = $1::uuid)`,
-        [clientId]
+        [clientId, today]
       ).catch(() => ({ rows: [{ c: 0 }] })),
       pool.query(
         `SELECT COUNT(*)::int AS c FROM approval_audit
-         WHERE decision='rejected' AND created_at::date = CURRENT_DATE
+         WHERE decision='rejected' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
            AND ($1::uuid IS NULL OR client_id = $1::uuid)`,
-        [clientId]
+        [clientId, today]
       ).catch(() => ({ rows: [{ c: 0 }] })),
       pool.query(
         `SELECT COUNT(*)::int AS c FROM messages
@@ -2646,9 +2661,10 @@ router.get('/hourly-stats', requireInternalKey, async (req, res) => {
            COUNT(*) FILTER (WHERE metadata->>'outreach_route' = 'email')::int AS email_route,
            COUNT(*) FILTER (WHERE metadata->>'outreach_route' = 'linkedin')::int AS linkedin_route
          FROM leads
-         WHERE created_at::date = CURRENT_DATE AND deleted_at IS NULL
+         WHERE (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+           AND deleted_at IS NULL
            AND ($1::uuid IS NULL OR client_id = $1::uuid)`,
-        [clientId]
+        [clientId, today]
       ),
       pool.query(
         `SELECT content FROM agent_memory
@@ -2869,7 +2885,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
              (SELECT COUNT(*) FILTER (WHERE status = 'pending')::int
                 FROM followup_queue
                WHERE client_id = $1) AS pending,
-             (SELECT COUNT(*) FILTER (WHERE status = 'pending' AND scheduled_for <= CURRENT_DATE)::int
+             (SELECT COUNT(*) FILTER (WHERE status = 'pending' AND scheduled_for <= (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date)::int
                 FROM followup_queue
                WHERE client_id = $1) AS due_today,
              (SELECT COUNT(*) FILTER (WHERE status = 'sent')::int
@@ -3768,6 +3784,7 @@ router.post('/dry-run-followup-drafts', requireInternalKey, async (req, res) => 
     return res.status(400).json({ error: 'client_id required (UUID)' });
   }
   const n = Math.max(1, Math.min(10, parseInt(count, 10) || 3));
+  const today = todayInMalaysia();
 
   try {
     const { draftFollowUp } = require('../services/followupSequence');
@@ -3781,12 +3798,12 @@ router.post('/dry-run-followup-drafts', requireInternalKey, async (req, res) => 
        JOIN leads l ON l.id = fq.lead_id
        WHERE fq.client_id = $1
          AND fq.status IN ('pending','skipped')
-         AND fq.scheduled_for::date <= CURRENT_DATE
+         AND fq.scheduled_for::date <= $3::date
          AND l.sequence_status = 'active'
          AND l.deleted_at IS NULL
        ORDER BY (fq.status = 'pending') DESC, fq.scheduled_for ASC
        LIMIT $2`,
-      [client_id, n]
+      [client_id, n, today]
     );
 
     if (fus.length === 0) {
@@ -3891,6 +3908,7 @@ router.post('/execute-followup-batch', requireInternalKey, async (req, res) => {
     return res.status(400).json({ error: 'client_id required (UUID)' });
   }
   const n = Math.max(1, Math.min(20, parseInt(count, 10) || 5));
+  const today = todayInMalaysia();
 
   try {
     const { executeApprovedFollowUp } = require('../services/followupSequence');
@@ -3903,12 +3921,12 @@ router.post('/execute-followup-batch', requireInternalKey, async (req, res) => {
        JOIN leads l ON l.id = fq.lead_id
        WHERE fq.client_id = $1
          AND fq.status IN ('pending','skipped')
-         AND fq.scheduled_for::date <= CURRENT_DATE
+         AND fq.scheduled_for::date <= $3::date
          AND l.sequence_status = 'active'
          AND l.deleted_at IS NULL
        ORDER BY (fq.status = 'pending') DESC, fq.scheduled_for ASC
        LIMIT $2`,
-      [client_id, n]
+      [client_id, n, today]
     );
 
     if (fus.length === 0) {
