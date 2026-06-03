@@ -37,7 +37,7 @@ function envInt(name, fallback) {
 
 const MAX_SIGNAL_QUERIES_PER_RUN = envInt('SIGNAL_HUNT_MAX_QUERIES', 6);
 const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
-const SIGNAL_HUNT_PARSER_VERSION = 'market_sensor_publication_v1';
+const SIGNAL_HUNT_PARSER_VERSION = 'market_sensor_publication_v2';
 
 function klDateString() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
