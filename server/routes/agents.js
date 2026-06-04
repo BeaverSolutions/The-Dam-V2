@@ -174,7 +174,7 @@ router.post('/director/execute',
            VALUES ($1, 'director', $2, $3::jsonb, 'config')
            ON CONFLICT (client_id, agent, key)
            DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
-          [clientId, execKey, JSON.stringify({ status: 'completed', result, completed_at: new Date().toISOString() })]
+          [clientId, execKey, JSON.stringify({ status: result?.status || 'completed', result, completed_at: new Date().toISOString() })]
         ))
         .catch(err => {
           console.error(`[pipeline] directorExecute FAILED for plan ${plan_id}:`, err.message, err.stack?.split('\n').slice(0, 3).join(' | '));

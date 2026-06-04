@@ -158,6 +158,9 @@ function Message({ msg }) {
   const isUser = msg.role === 'user';
   const isCaptain = msg.source === 'captain' || msg.source === 'myclaw';
   const agentType = isCaptain ? 'captain' : 'director';
+  const plan = msg.plan;
+  const planBlocked = plan && (plan.status === 'blocked' || plan.status === 'needs_input');
+  const planExecutable = msg.plan && !msg.plan.resolved && msg.plan.status === 'pending_approval';
   const bgColor = isCaptain ? 'rgba(168,85,247,0.05)' : 'var(--panel)';
   const borderColor = isCaptain ? 'rgba(168,85,247,0.15)' : 'var(--border)';
   return (
@@ -191,7 +194,13 @@ function Message({ msg }) {
         )}
 
         {/* Plan approval */}
-        {msg.plan && !msg.plan.resolved && (
+        {planBlocked && !plan.resolved && (
+          <div style={{ marginTop: '0.75rem', color: 'var(--orange)', fontSize: '0.8rem', lineHeight: 1.5 }}>
+            {plan.question || plan.message || plan.summary?.reason || 'Campaign blocked before execution.'}
+          </div>
+        )}
+
+        {planExecutable && (
           <div style={{ marginTop: '0.75rem' }}>
             <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600, marginBottom: '0.4rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Proposed plan</div>
             <PlanSteps steps={msg.plan.steps} />
@@ -393,6 +402,18 @@ export default function Chat() {
           return;
         }
 
+        if (plan.status === 'blocked' || plan.status === 'needs_input') {
+          setMessages(prev => [...prev, {
+            id: Date.now() + 1,
+            role: 'assistant',
+            content: plan.question || plan.message || plan.summary?.reason || 'Campaign blocked before execution.',
+            plan: { ...plan, resolved: null },
+            summary: plan.summary,
+            diagnostics: plan.diagnostics,
+          }]);
+          return;
+        }
+
         const planMsgId = Date.now() + 1;
 
         const resolvePlan = (resolution) => {
@@ -420,8 +441,8 @@ export default function Chat() {
                 messages_failed: messages_failed ?? 0,
                 pending_approvals: summary?.pending_approvals ?? summary?.approved ?? 0,
               };
-              const operatorPrompt = status === 'needs_input' && question
-                ? question
+              const operatorPrompt = (status === 'needs_input' || status === 'blocked')
+                ? (question || summary?.reason || summary?.blocker || diagnostics?.reason)
                 : null;
               setMessages(prev => [...prev, {
                 id: Date.now(),
@@ -452,7 +473,9 @@ export default function Chat() {
                     const pollStatus = pollData?.data?.status;
                     // Update beaver status board with live state
                     if (pollData?.data) setExecStatus(pollData.data);
-                    if (pollStatus === 'completed') {
+                    const terminalStatuses = ['completed', 'blocked', 'needs_input'];
+                    const blockedTerminal = pollStatus === 'blocked' || pollStatus === 'needs_input';
+                    if (terminalStatuses.includes(pollStatus) || blockedTerminal) {
                       clearInterval(pollId);
                       activePolls.current.delete(planId);
                       setExecStatus(null);

@@ -23,7 +23,8 @@ describe('requested lead count parser', () => {
     expect(parseRequestedLeadCount('find 12 VP-level leads at Series B SaaS companies', 50)).toBe(12);
   });
 
-  it('bounds requested counts to the campaign max', () => {
-    expect(parseRequestedLeadCount('find 999 leads', 50)).toBe(50);
+  it('bounds requested counts to the single-kickoff max', () => {
+    expect(parseRequestedLeadCount('find 999 leads', 50)).toBe(20);
+    expect(parseRequestedLeadCount('kickoff 47 leads', 20)).toBe(20);
   });
 });

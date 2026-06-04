@@ -1,12 +1,12 @@
 'use strict';
 
+const { MAX_SINGLE_KICKOFF_LEADS, clampSingleKickoffCount } = require('./campaignLimits');
+
 const LEAD_NOUN_RE = /\b(?:approval[-\s]?ready\s+)?(?:new\s+)?(?:leads?|prospects?|companies|founders|contacts|outreach(?:\s+items?)?|messages?)\b/i;
 const CAMPAIGN_ACTION_RE = /\b(find|source|get|research|run|start|kickoff|process|draft|message|send|contact|queue|launch|execute|begin)\b/i;
 
-function clampCount(value, defaultCount = 50) {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return defaultCount;
-  return Math.max(1, Math.min(parsed, 50));
+function clampCount(value, defaultCount = MAX_SINGLE_KICKOFF_LEADS) {
+  return clampSingleKickoffCount(value, defaultCount);
 }
 
 function isSafeNumericToken(text, start, end) {
@@ -36,7 +36,7 @@ function hasAnotherNumber(slice) {
   return /\b\d{1,3}\b/.test(slice);
 }
 
-function parseRequestedLeadCount(command, defaultCount = 50) {
+function parseRequestedLeadCount(command, defaultCount = MAX_SINGLE_KICKOFF_LEADS) {
   const text = String(command || '');
   const tokens = numericTokens(text);
 

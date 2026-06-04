@@ -6,6 +6,7 @@ const validate = require('../middleware/validate');
 const messagesService = require('../services/messages');
 const pool = require('../db/pool');
 const { isLeadSelectionFeedback } = require('../services/founderFeedbackSignals');
+const { enqueueMessage } = require('../services/sendQueueWorker');
 
 router.get('/', async (req, res, next) => {
   try {
@@ -106,6 +107,23 @@ async function writeFounderFeedback(clientId, payload, { required = false } = {}
   }
 }
 
+async function enqueueIfEmailPendingSend(clientId, messageId, nextStatus) {
+  if (nextStatus !== 'pending_send') return null;
+  const enqueueResult = await enqueueMessage(clientId, messageId);
+  if (!enqueueResult?.enqueued && enqueueResult?.reason !== 'already_enqueued') {
+    await pool.query(
+      `UPDATE messages SET status = 'approved', updated_at = NOW()
+       WHERE id = $1 AND client_id = $2 AND status = 'pending_send'`,
+      [messageId, clientId]
+    );
+    const err = new Error(`Email approval could not be queued for send: ${enqueueResult?.reason || 'unknown'}`);
+    err.status = 409;
+    err.code = 'SEND_QUEUE_BLOCKED';
+    throw err;
+  }
+  return enqueueResult;
+}
+
 // Apply-suggestion: MJ clicked Apply on one of the Enforcer's two_thoughts.
 // UI passes the resulting body. Server is agnostic to which suggestion was applied.
 router.post('/:id/apply-suggestion',
@@ -144,6 +162,7 @@ router.post('/:id/apply-suggestion',
         channel: msg.channel,
         lead_context: { name: msg.lead_name, company: msg.lead_company, title: msg.lead_title },
       });
+      await enqueueIfEmailPendingSend(req.clientId, msg.id, nextStatus);
 
       res.json({ data: { id: msg.id, status: nextStatus } });
     } catch (err) { next(err); }
@@ -186,6 +205,7 @@ router.post('/:id/edit-borderline',
         channel: msg.channel,
         lead_context: { name: msg.lead_name, company: msg.lead_company, title: msg.lead_title },
       });
+      await enqueueIfEmailPendingSend(req.clientId, msg.id, nextStatus);
 
       res.json({ data: { id: msg.id, status: nextStatus } });
     } catch (err) { next(err); }

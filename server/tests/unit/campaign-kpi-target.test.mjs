@@ -4,7 +4,7 @@ const require = createRequire(import.meta.url);
 const { resolveCampaignTarget } = require('../../utils/campaignKpiTarget');
 
 describe('campaign KPI target resolver', () => {
-  it('uses the remaining daily KPI gap for bare kickoff commands', () => {
+  it('uses the daily KPI gap but caps one kickoff run at 20 outputs', () => {
     const target = resolveCampaignTarget({
       explicitCount: null,
       dailyTarget: 50,
@@ -12,27 +12,31 @@ describe('campaign KPI target resolver', () => {
     });
 
     expect(target).toEqual({
-      requestedCount: 47,
+      requestedCount: 20,
       source: 'daily_kpi_gap',
       dailyTarget: 50,
       sentToday: 3,
       remainingGap: 47,
+      remainingAfterRun: 27,
+      singleRunCap: 20,
     });
   });
 
-  it('keeps explicit lead counts as bounded manual campaign targets', () => {
+  it('keeps explicit lead counts under the single-run cap', () => {
     const target = resolveCampaignTarget({
-      explicitCount: 5,
+      explicitCount: 47,
       dailyTarget: 50,
       sentToday: 3,
     });
 
     expect(target).toEqual({
-      requestedCount: 5,
+      requestedCount: 20,
       source: 'explicit_request',
       dailyTarget: 50,
       sentToday: 3,
       remainingGap: 47,
+      remainingAfterRun: 27,
+      singleRunCap: 20,
     });
   });
 
@@ -45,5 +49,6 @@ describe('campaign KPI target resolver', () => {
 
     expect(target.requestedCount).toBe(0);
     expect(target.remainingGap).toBe(0);
+    expect(target.remainingAfterRun).toBe(0);
   });
 });

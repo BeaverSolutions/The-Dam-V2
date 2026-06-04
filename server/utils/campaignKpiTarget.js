@@ -1,35 +1,40 @@
 'use strict';
 
-const DEFAULT_DAILY_TARGET = 50;
-const MAX_CAMPAIGN_TARGET = 50;
-
-function boundedCount(value, fallback = DEFAULT_DAILY_TARGET) {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return fallback;
-  return Math.max(1, Math.min(MAX_CAMPAIGN_TARGET, Math.ceil(n)));
-}
+const {
+  DEFAULT_DAILY_TARGET,
+  MAX_SINGLE_KICKOFF_LEADS,
+  clampDailyTarget,
+  clampSingleKickoffCount,
+} = require('./campaignLimits');
 
 function resolveCampaignTarget({ explicitCount = null, dailyTarget = DEFAULT_DAILY_TARGET, sentToday = 0 } = {}) {
-  const boundedDailyTarget = boundedCount(dailyTarget, DEFAULT_DAILY_TARGET);
+  const boundedDailyTarget = clampDailyTarget(dailyTarget, DEFAULT_DAILY_TARGET);
   const sent = Math.max(0, Math.floor(Number(sentToday) || 0));
   const remainingGap = Math.max(0, boundedDailyTarget - sent);
+  const requestedCount = (explicitCount !== null && explicitCount !== undefined && explicitCount !== '')
+    ? Math.min(clampSingleKickoffCount(explicitCount), remainingGap || MAX_SINGLE_KICKOFF_LEADS)
+    : Math.min(remainingGap, MAX_SINGLE_KICKOFF_LEADS);
 
   if (explicitCount !== null && explicitCount !== undefined && explicitCount !== '') {
     return {
-      requestedCount: boundedCount(explicitCount, boundedDailyTarget),
+      requestedCount,
       source: 'explicit_request',
       dailyTarget: boundedDailyTarget,
       sentToday: sent,
       remainingGap,
+      remainingAfterRun: Math.max(0, remainingGap - requestedCount),
+      singleRunCap: MAX_SINGLE_KICKOFF_LEADS,
     };
   }
 
   return {
-    requestedCount: remainingGap,
+    requestedCount,
     source: 'daily_kpi_gap',
     dailyTarget: boundedDailyTarget,
     sentToday: sent,
     remainingGap,
+    remainingAfterRun: Math.max(0, remainingGap - requestedCount),
+    singleRunCap: MAX_SINGLE_KICKOFF_LEADS,
   };
 }
 

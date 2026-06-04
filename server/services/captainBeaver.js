@@ -962,7 +962,7 @@ async function toolQueryLogs(clientId, { agent, action, hours, limit } = {}) {
 }
 
 function campaignTargetFromCommand(command) {
-  return parseRequestedLeadCount(command, 50);
+  return parseRequestedLeadCount(command, 20);
 }
 
 function minPaidQueriesForExternalTarget(target) {
@@ -1074,7 +1074,7 @@ async function getRunCampaignPreflight(clientId, command) {
   const braveRemaining = Math.max(0, CAPS.brave - braveSpent);
   const googleRemaining = Math.max(0, CAPS.google_cse - googleSpent);
   const apolloRemaining = Math.max(0, CAPS.apollo - apolloSpent);
-  const remainingPaidQueries = braveRemaining + googleRemaining + apolloRemaining;
+  const campaignResearchRemaining = braveRemaining + googleRemaining;
   const externalShortfall = Math.max(0, target - Math.min(target, eligibleCount));
   const requiredPaidQueries = externalShortfall > 0
     ? minPaidQueriesForExternalTarget(externalShortfall)
@@ -1083,7 +1083,7 @@ async function getRunCampaignPreflight(clientId, command) {
   const providers = {
     brave: !!process.env.BRAVE_API_KEY && braveRemaining > 0,
     google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX) && googleRemaining > 0,
-    apollo: !!apolloKey && apolloRemaining > 0,
+    apollo_available_not_campaign_capacity: !!apolloKey && apolloRemaining > 0,
   };
   return {
     target,
@@ -1101,11 +1101,11 @@ async function getRunCampaignPreflight(clientId, command) {
       google_cse: { spent: googleSpent, cap: CAPS.google_cse, remaining: googleRemaining },
       apollo: { spent: apolloSpent, cap: CAPS.apollo, remaining: apolloRemaining },
     },
-    has_research_provider: providers.brave || providers.google_cse || providers.apollo,
-    remaining_paid_queries: remainingPaidQueries,
+    has_research_provider: providers.brave || providers.google_cse,
+    remaining_paid_queries: campaignResearchRemaining,
     required_paid_queries: requiredPaidQueries,
     has_sufficient_research_capacity: externalShortfall === 0
-      || ((providers.brave || providers.google_cse || providers.apollo) && remainingPaidQueries >= requiredPaidQueries),
+      || ((providers.brave || providers.google_cse) && campaignResearchRemaining >= requiredPaidQueries),
   };
 }
 
@@ -1785,6 +1785,7 @@ module.exports = {
   loadPersona,
   getClientSlug,
   expireStaleRunningExecutions,
+  getRunCampaignPreflight,
   // Used by LinkedIn auto-sweep in index.js
   toolDraftEmailForLeads,
 };

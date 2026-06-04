@@ -198,14 +198,16 @@ describe('onboarding readiness contracts', () => {
     expect(importPage).toContain('Apollo CSV');
   });
 
-  it('Captain Apollo preflight checks tenant-saved BYOK keys plus cap remaining', () => {
+  it('Captain Apollo preflight reports BYOK availability without crediting unsupported campaign capacity', () => {
     const captainSource = service('captainBeaver.js');
     const agentsSource = service('agents.js');
 
     expect(captainSource).toContain("require('./apollo').getApiKey(clientId)");
     expect(captainSource).toContain("providerUsageToday('apollo', clientId)");
     expect(captainSource).toContain('apolloRemaining');
-    expect(captainSource).toContain('providers.brave || providers.google_cse || providers.apollo');
+    expect(captainSource).toContain('apollo_available_not_campaign_capacity');
+    expect(captainSource).toContain('const campaignResearchRemaining = braveRemaining + googleRemaining;');
+    expect(captainSource).not.toContain('braveRemaining + googleRemaining + apolloRemaining');
     expect(agentsSource).toContain('apolloService.getApiKey(clientId)');
     expect(agentsSource).toContain('!!apolloKey && Number(process.env.APOLLO_DAILY_QUERY_CAP || 0) > 0');
   });

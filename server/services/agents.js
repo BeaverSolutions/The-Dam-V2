@@ -2636,6 +2636,104 @@ async function directorPlan(clientId, { command, source }) {
   const explicitRequestedCount = parseRequestedLeadCount(command, null);
   const targetContext = await resolveDirectorCampaignTarget(clientId, explicitRequestedCount);
   const requestedCount = targetContext.requestedCount;
+  const planId = uuidv4();
+
+  if (requestedCount <= 0) {
+    const blockedMessage = 'Campaign blocked: the daily KPI is already met, so Captain will not start another kickoff without an explicit new target.';
+    return {
+      plan_id: planId,
+      command,
+      status: 'blocked',
+      message: blockedMessage,
+      question: blockedMessage,
+      estimated_leads: 0,
+      target_context: targetContext,
+      summary: {
+        requested: 0,
+        delivered: targetContext.sentToday,
+        shortfall: 0,
+        target_fulfilled: true,
+        blocker: 'daily_kpi_met',
+        reason: blockedMessage,
+      },
+      diagnostics: { campaign_target_context: targetContext },
+    };
+  }
+
+  try {
+    const { getRunCampaignPreflight } = require('./captainBeaver');
+    const preflightCommand = `Find ${requestedCount} approval-ready leads. Original user request: "${String(command || '').replace(/\s+/g, ' ').trim().slice(0, 240)}".`;
+    const preflight = await getRunCampaignPreflight(clientId, preflightCommand);
+    let blockedReason = null;
+    if (preflight.eligible_count === 0 && !preflight.has_research_provider) {
+      blockedReason = 'no_eligible_db_leads_and_no_research_provider';
+    } else if (!preflight.has_sufficient_research_capacity) {
+      blockedReason = 'insufficient_paid_search_capacity';
+    }
+    if (blockedReason) {
+      const blockedMessage = blockedReason === 'insufficient_paid_search_capacity'
+        ? `Campaign blocked before approval: this ${requestedCount}-lead run needs about ${preflight.required_paid_queries} paid search queries for ${preflight.external_shortfall} external leads, but only ${preflight.remaining_paid_queries} remain today.`
+        : 'Campaign blocked before approval: no eligible fresh DB leads and no capped research provider is enabled.';
+      await logsService.createLog(clientId, {
+        agent: 'director',
+        action: 'campaign_plan_blocked',
+        metadata: { command, requested_count: requestedCount, target_context: targetContext, preflight, reason: blockedReason },
+      }).catch(() => {});
+      return {
+        plan_id: planId,
+        command,
+        status: 'blocked',
+        message: blockedMessage,
+        question: blockedMessage,
+        estimated_leads: requestedCount,
+        target_context: targetContext,
+        preflight,
+        summary: {
+          requested: requestedCount,
+          delivered: 0,
+          shortfall: requestedCount,
+          target_fulfilled: false,
+          blocker: blockedReason,
+          reason: blockedMessage,
+        },
+        diagnostics: {
+          campaign_target_context: targetContext,
+          preflight,
+          reason: blockedReason,
+        },
+      };
+    }
+  } catch (err) {
+    console.warn('[directorPlan] campaign preflight failed:', err.message);
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'campaign_plan_preflight_failed',
+      metadata: { command, requested_count: requestedCount, target_context: targetContext, error: err.message },
+    }).catch(() => {});
+    const blockedMessage = `Campaign blocked before approval: Captain could not verify run capacity safely (${err.message}).`;
+    return {
+      plan_id: planId,
+      command,
+      status: 'blocked',
+      message: blockedMessage,
+      question: blockedMessage,
+      estimated_leads: requestedCount,
+      target_context: targetContext,
+      summary: {
+        requested: requestedCount,
+        delivered: 0,
+        shortfall: requestedCount,
+        target_fulfilled: false,
+        blocker: 'campaign_preflight_failed',
+        reason: blockedMessage,
+      },
+      diagnostics: {
+        campaign_target_context: targetContext,
+        reason: 'campaign_preflight_failed',
+        error: err.message,
+      },
+    };
+  }
 
   // Check how many uncontacted leads already exist in DB (DB-first info for plan)
   let uncontactedCount = 0;
@@ -2657,7 +2755,6 @@ async function directorPlan(clientId, { command, source }) {
     uncontactedCount = count;
   } catch { /* ignore */ }
 
-  const planId = uuidv4();
   const [icp, persona, fileConfig, memoryBrief] = await Promise.all([
     directorGetICP(clientId),
     getClientPersona(clientId),
