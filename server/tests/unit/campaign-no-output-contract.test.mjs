@@ -30,6 +30,18 @@ describe('no-output campaign contract', () => {
     expect(planBody).toContain('question: blockedMessage');
   });
 
+  it('stops and prompts MJ when a full kickoff run yields 5 or fewer outputs', () => {
+    const continueIdx = agents.indexOf('captain_continue_signal_first_shortfall');
+    const lowYieldIdx = agents.indexOf('captain_low_yield_prompt_required');
+
+    expect(agents).toContain('shouldStopForLowOutput');
+    expect(agents).toContain("blocker: 'low_yield_outputs'");
+    expect(agents).toContain('Captain stopped this campaign because a full kickoff run produced only');
+    expect(lowYieldIdx).toBeGreaterThan(-1);
+    expect(continueIdx).toBeGreaterThan(-1);
+    expect(lowYieldIdx).toBeLessThan(continueIdx);
+  });
+
   it('preserves blocked and needs_input as terminal execution statuses', () => {
     expect(agentsRoute).toContain("status: result?.status || 'completed'");
     expect(agentsRoute).not.toContain("JSON.stringify({ status: 'completed', result");

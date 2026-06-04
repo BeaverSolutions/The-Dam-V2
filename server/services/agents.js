@@ -21,6 +21,7 @@ const repairPolicy = require('./repairPolicy');
 const { todayInMalaysia } = require('../utils/businessDay');
 const { parseRequestedLeadCount } = require('../utils/requestedLeadCount');
 const { resolveCampaignTarget } = require('../utils/campaignKpiTarget');
+const { shouldStopForLowOutput } = require('../utils/campaignLimits');
 
 // Channel-specific drafting instructions injected into the Sales Beaver prompt.
 // Module scope (2026-05-16, Jules F-03): was a local const inside
@@ -4612,6 +4613,74 @@ async function directorExecute(clientId, {
     if (shortfall > 0) {
       const attemptApproved = dbApprovedCount + signalApprovedCount;
       const attemptLeadsFound = dbLeadsCount + signalLeadsCount;
+
+      if (shouldStopForLowOutput({ requested: campaignRequested, delivered })) {
+        const captainPrompt = `Captain stopped this campaign because a full kickoff run produced only ${delivered}/${campaignRequested} approval-ready outputs. That is at or below the 5/20 low-yield fallback, so no more paid searches will run until MJ decides whether to widen the signal, adjust ICP, or stop.`;
+        const result = {
+          plan_id,
+          status: 'needs_input',
+          leads_found: leadsFound,
+          messages_drafted: drafted,
+          messages_failed: 0,
+          summary: {
+            requested: campaignRequested,
+            delivered,
+            shortfall,
+            target_fulfilled: false,
+            blocker: 'low_yield_outputs',
+            leads_found: leadsFound,
+            messages_drafted: drafted,
+            approved: delivered,
+            rejected,
+            db_leads_processed: dbLeadsCount,
+            signal_leads_processed: signalPipelineLeadCount,
+            signal_leads_saved: signalLeadsCount,
+            signal_approved: signalApprovedCount,
+            reason: captainPrompt,
+          },
+          diagnostics,
+          question: captainPrompt,
+          results: [
+            ...(dbLeadsCount > 0 ? [{ step: 0, agent: 'research_beaver', status: 'completed', result: `${dbLeadsCount} existing DB lead${dbLeadsCount !== 1 ? 's' : ''} processed` }] : []),
+            { step: 1, agent: 'signal_hunt', status: 'blocked', result: `${signalPipelineLeadCount} signal lead${signalPipelineLeadCount !== 1 ? 's' : ''} processed; ${signalLeadsCount} saved; ${signalApprovedCount} approved` },
+            { step: 2, agent: 'captain_beaver', status: 'needs_input', result: captainPrompt },
+          ],
+        };
+        await logsService.createLog(clientId, {
+          agent: 'captain_beaver',
+          action: 'captain_low_yield_prompt_required',
+          metadata: {
+            plan_id,
+            requested: campaignRequested,
+            delivered,
+            shortfall,
+            blocker: 'low_yield_outputs',
+            attempt_approved: attemptApproved,
+            attempt_leads_found: attemptLeadsFound,
+            signal_first_raw: diagnostics.signal_first_raw || 0,
+            signal_first_saved: signalLeadsCount,
+            signal_first_approved: signalApprovedCount,
+            question: captainPrompt,
+          },
+        }).catch(() => {});
+        await updateExecStatus(clientId, plan_id, {
+          status: 'needs_input',
+          phase: 'captain',
+          question: captainPrompt,
+          beavers: {
+            research: { status: 'blocked', task: 'Full kickoff run hit low-yield fallback', found: leadsFound, passed: signalPipelineLeadCount + dbLeadsCount },
+            sales:    { status: drafted > 0 ? 'done' : 'idle', task: `${drafted} messages drafted`, drafted, approved: delivered },
+            enforcer: { status: drafted > 0 ? 'done' : 'idle', task: `${delivered} approved, ${rejected} rejected`, reviewed: drafted, rejected },
+            captain:  { status: 'needs_input', task: `${delivered}/${campaignRequested} delivered; waiting for MJ decision`, approved: delivered },
+          },
+          progress: { total: campaignRequested, complete: Math.min(campaignRequested, delivered) },
+          started_at: new Date().toISOString(),
+          blocker: 'low_yield_outputs',
+          result,
+          completed_at: new Date().toISOString(),
+        });
+        return result;
+      }
 
       if (attemptApproved > 0 && completionAttempt < maxCompletionAttempts) {
         await logsService.createLog(clientId, {

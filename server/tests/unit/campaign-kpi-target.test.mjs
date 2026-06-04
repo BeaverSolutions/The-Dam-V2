@@ -2,6 +2,7 @@ import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
 const { resolveCampaignTarget } = require('../../utils/campaignKpiTarget');
+const { shouldStopForLowOutput } = require('../../utils/campaignLimits');
 
 describe('campaign KPI target resolver', () => {
   it('uses the daily KPI gap but caps one kickoff run at 20 outputs', () => {
@@ -50,5 +51,11 @@ describe('campaign KPI target resolver', () => {
     expect(target.requestedCount).toBe(0);
     expect(target.remainingGap).toBe(0);
     expect(target.remainingAfterRun).toBe(0);
+  });
+
+  it('stops full-size kickoff runs that produce 5 or fewer outputs', () => {
+    expect(shouldStopForLowOutput({ requested: 20, delivered: 5 })).toBe(true);
+    expect(shouldStopForLowOutput({ requested: 20, delivered: 6 })).toBe(false);
+    expect(shouldStopForLowOutput({ requested: 5, delivered: 5 })).toBe(false);
   });
 });
