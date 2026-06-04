@@ -34,6 +34,11 @@ function jobStatus(health, name) {
   return health.jobs?.[name] || null;
 }
 
+function scheduledWorkerState(health, name) {
+  const workers = health.autonomy_state?.scheduled_spend_workers || {};
+  return Object.prototype.hasOwnProperty.call(workers, name) ? workers[name] : null;
+}
+
 function pass(checks, name, detail = '') {
   checks.push({ name, ok: true, detail });
 }
@@ -115,8 +120,13 @@ function validateHealth(checks, health) {
   }
 
   const daily = jobStatus(health, 'daily_kickoff');
+  const dailyWorker = scheduledWorkerState(health, 'daily_kickoff');
   if (!daily) {
-    if (!EXPECT_DAILY_KICKOFF_ENABLED && isGlobalScheduledPauseVisible(health)) {
+    if (EXPECT_DAILY_KICKOFF_ENABLED && dailyWorker === true) {
+      pass(checks, 'daily kickoff enabled', 'scheduled worker enabled');
+    } else if (!EXPECT_DAILY_KICKOFF_ENABLED && dailyWorker === false) {
+      pass(checks, 'daily kickoff safely disabled', 'scheduled worker disabled');
+    } else if (!EXPECT_DAILY_KICKOFF_ENABLED && isGlobalScheduledPauseVisible(health)) {
       pass(checks, 'daily kickoff safely disabled', 'global scheduled pause visible before job marker');
     } else {
       fail(checks, 'daily kickoff job visible', 'job missing from /health');
@@ -131,8 +141,13 @@ function validateHealth(checks, health) {
   }
 
   const kpiGap = jobStatus(health, 'kpi_gap_kickoff');
+  const kpiGapWorker = scheduledWorkerState(health, 'kpi_gap_kickoff');
   if (!kpiGap) {
-    if (!EXPECT_KPI_GAP_KICKOFF_ENABLED && isGlobalScheduledPauseVisible(health)) {
+    if (EXPECT_KPI_GAP_KICKOFF_ENABLED && kpiGapWorker === true) {
+      pass(checks, 'KPI-gap kickoff enabled', 'scheduled worker enabled');
+    } else if (!EXPECT_KPI_GAP_KICKOFF_ENABLED && kpiGapWorker === false) {
+      pass(checks, 'KPI-gap kickoff safely disabled', 'scheduled worker disabled');
+    } else if (!EXPECT_KPI_GAP_KICKOFF_ENABLED && isGlobalScheduledPauseVisible(health)) {
       pass(checks, 'KPI-gap kickoff safely disabled', 'global scheduled pause visible before job marker');
     } else {
       fail(checks, 'KPI-gap kickoff job visible', 'job missing from /health');
@@ -147,8 +162,13 @@ function validateHealth(checks, health) {
   }
 
   const market = jobStatus(health, 'market_sensing');
+  const marketWorker = scheduledWorkerState(health, 'market_sensing');
   if (!market) {
-    if (!EXPECT_MARKET_SENSING_ENABLED && isGlobalScheduledPauseVisible(health)) {
+    if (EXPECT_MARKET_SENSING_ENABLED && marketWorker === true) {
+      pass(checks, 'market sensing enabled', 'scheduled worker enabled');
+    } else if (!EXPECT_MARKET_SENSING_ENABLED && marketWorker === false) {
+      pass(checks, 'market sensing safely disabled', 'scheduled worker disabled');
+    } else if (!EXPECT_MARKET_SENSING_ENABLED && isGlobalScheduledPauseVisible(health)) {
       pass(checks, 'market sensing safely disabled', 'global scheduled pause visible before job marker');
     } else {
       fail(checks, 'market sensing job visible', 'job missing from /health');
