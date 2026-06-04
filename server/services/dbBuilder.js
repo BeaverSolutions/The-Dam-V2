@@ -730,7 +730,7 @@ async function runDbBuilder() {
 
             for (const directive of signalPlaybookDirectives) {
               const payload = directive.payload || {};
-              if (!payload.signal_id) {
+              if (!payload.signal_id && payload.replacement_for_rejection !== true) {
                 consumedDirectiveIds.push(directive.id);
                 await logsService.createLog(client.id, {
                   agent: 'research_beaver',

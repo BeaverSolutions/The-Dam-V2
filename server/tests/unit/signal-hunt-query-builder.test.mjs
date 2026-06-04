@@ -279,6 +279,14 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).not.toContain('consumePaidQuery(2)');
   });
 
+  it('uses the manual paid budget to widen the query window without removing caps', () => {
+    expect(src).toContain('const MAX_SIGNAL_QUERY_WINDOW = Math.max(MAX_SIGNAL_QUERIES_PER_RUN, envInt(\'SIGNAL_HUNT_MAX_QUERY_WINDOW\', 20))');
+    expect(src).toContain('function signalQueryWindow(maxPaidQueries = null)');
+    expect(src).toContain('Math.min(MAX_SIGNAL_QUERY_WINDOW, Math.max(MAX_SIGNAL_QUERIES_PER_RUN, paidQueryBudget))');
+    expect(src).toContain('loadSignalConfig(clientId, icp, { maxPaidQueries })');
+    expect(signalHunt._test.signalQueryWindow(17)).toBe(17);
+  });
+
   it('logs raw-zero blockers and blocks repeated zero-output query sets per day', () => {
     expect(src).toContain('function signalQuerySetHash');
     expect(src).toContain('SIGNAL_HUNT_PARSER_VERSION');

@@ -36,6 +36,7 @@ function envInt(name, fallback) {
 }
 
 const MAX_SIGNAL_QUERIES_PER_RUN = envInt('SIGNAL_HUNT_MAX_QUERIES', 6);
+const MAX_SIGNAL_QUERY_WINDOW = Math.max(MAX_SIGNAL_QUERIES_PER_RUN, envInt('SIGNAL_HUNT_MAX_QUERY_WINDOW', 20));
 const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
 const SIGNAL_HUNT_PARSER_VERSION = 'market_sensor_publication_v4';
 
@@ -49,6 +50,14 @@ function signalQuerySetHash(queries = []) {
     .sort()
     .join('\n');
   return crypto.createHash('sha256').update(`${SIGNAL_HUNT_PARSER_VERSION}\n${canonical}`).digest('hex').slice(0, 16);
+}
+
+function signalQueryWindow(maxPaidQueries = null) {
+  const n = Number(maxPaidQueries);
+  const paidQueryBudget = Number.isFinite(n) && n > 0
+    ? Math.floor(n)
+    : MAX_SIGNAL_QUERIES_PER_RUN;
+  return Math.max(1, Math.min(MAX_SIGNAL_QUERY_WINDOW, Math.max(MAX_SIGNAL_QUERIES_PER_RUN, paidQueryBudget)));
 }
 
 async function blockedByRepeatedZeroQuerySet(clientId, queries = []) {
@@ -517,7 +526,7 @@ function queriesFromConfigContent(content) {
 /**
  * Load the client's signal hunt config, or return defaults.
  */
-async function loadSignalConfig(clientId, icp = {}) {
+async function loadSignalConfig(clientId, icp = {}, { maxPaidQueries = null } = {}) {
   let content = null;
   try {
     const { rows } = await pool.query(
@@ -542,6 +551,7 @@ async function loadSignalConfig(clientId, icp = {}) {
     : (configuredQueries.length > 0 ? 'stored_config' : 'default');
   const seenQueries = new Set();
   const fallbackCountry = countriesFromIcp(icp)[0]?.code || 'MY';
+  const queryWindow = signalQueryWindow(maxPaidQueries);
   const queries = fallbackQueries
     .map(q => normalizeSignalQuery(q, fallbackCountry))
     .filter(Boolean)
@@ -551,13 +561,14 @@ async function loadSignalConfig(clientId, icp = {}) {
       seenQueries.add(key);
       return true;
     })
-    .slice(0, MAX_SIGNAL_QUERIES_PER_RUN);
+    .slice(0, queryWindow);
   const requestedResults = Number(content?.max_results_per_query || MAX_SIGNAL_RESULTS_PER_QUERY);
 
   return {
     ...(content || {}),
     queries,
     query_source: querySource,
+    query_window: queryWindow,
     max_results_per_query: Number.isFinite(requestedResults) && requestedResults > 0
       ? Math.min(requestedResults, MAX_SIGNAL_RESULTS_PER_QUERY)
       : MAX_SIGNAL_RESULTS_PER_QUERY,
@@ -565,7 +576,7 @@ async function loadSignalConfig(clientId, icp = {}) {
 }
 
 async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null, signalPlaybook = null } = {}) {
-  let config = await loadSignalConfig(clientId, icp);
+  let config = await loadSignalConfig(clientId, icp, { maxPaidQueries });
   config = applySignalPlaybookToConfig(config, signalPlaybook);
   const hash = signalQuerySetHash(config.queries);
   const key = `signal_hunt_zero_query_set_${klDateString()}_${hash}`;
@@ -914,7 +925,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   console.log(`[signalHunt] Starting signal hunt for client ${clientId} (target: ${maxLeads})`);
   await assertLlmBudgetOpen(clientId);
 
-  let config = await loadSignalConfig(clientId, icp);
+  let config = await loadSignalConfig(clientId, icp, { maxPaidQueries });
   config = applySignalPlaybookToConfig(config, signalPlaybook);
   const zeroSet = await blockedByRepeatedZeroQuerySet(clientId, config.queries);
   if (zeroSet.blocked) {
@@ -1303,5 +1314,6 @@ module.exports = {
     deterministicPublicationSignals,
     mergeExtractedSignalSets,
     signalQuerySetHash,
+    signalQueryWindow,
   },
 };

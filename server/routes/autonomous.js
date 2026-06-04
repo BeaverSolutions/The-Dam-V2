@@ -84,7 +84,7 @@ function parseRequestedLeadLimit(message, defaultLimit = 20) {
 function boundedChatSignalQueryCap(requestedLimit) {
   const n = Number(requestedLimit);
   if (!Number.isFinite(n) || n <= 0) return null;
-  return Math.max(3, Math.min(12, (Math.ceil(n) * 2) + 2));
+  return Math.max(3, Math.min(20, (Math.ceil(n) * 3) + 2));
 }
 
 function isChatCampaignIntent(message) {

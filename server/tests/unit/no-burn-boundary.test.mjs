@@ -124,7 +124,7 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
     expect(chatBody).toContain("sourceMode: 'chat_db_pool'");
     expect(chatBody).toContain('maxPaidSignalQueries,');
     expect(autonomousSource).toContain('function boundedChatSignalQueryCap(requestedLimit)');
-    expect(autonomousSource).toContain('return Math.max(3, Math.min(12, (Math.ceil(n) * 2) + 2))');
+    expect(autonomousSource).toContain('return Math.max(3, Math.min(20, (Math.ceil(n) * 3) + 2))');
   });
 
   it('pipeline traces use valid stages for repair and channel blocks', () => {

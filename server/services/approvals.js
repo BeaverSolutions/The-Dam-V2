@@ -6,6 +6,7 @@ const logsService = require('./logs');
 const { enqueueMessage } = require('./sendQueueWorker');
 const { trackEvent, upsertDealSummary } = require('./conversionTracker');
 const { isLeadSelectionFeedback, leadStatusForFeedback } = require('./founderFeedbackSignals');
+const { writeDirective } = require('./directives');
 
 function recountKpiAsync(clientId, context) {
   require('./kpi').recountKpi(clientId).catch(err =>
@@ -35,6 +36,91 @@ async function notifyMyClaw(approvalId, messageId, clientId) {
     // Non-fatal — MyClaw will pick it up on next poll
     console.warn('[approvals] MyClaw notify failed (non-fatal):', err.message);
   }
+}
+
+function listFrom(value) {
+  if (Array.isArray(value)) return value.map(v => String(v).trim()).filter(Boolean);
+  if (typeof value === 'string') return value.split(/[,;\n]/).map(v => v.trim()).filter(Boolean);
+  return [];
+}
+
+function geoFromRejectionContext(msg = {}) {
+  const metadata = msg.metadata && typeof msg.metadata === 'object' ? msg.metadata : {};
+  const leadMetadata = msg.lead_metadata && typeof msg.lead_metadata === 'object' ? msg.lead_metadata : {};
+  const signalPackage = metadata.signal_package || leadMetadata.signal_package || {};
+  const geoFit = signalPackage.company_icp_fit || {};
+  return [
+    ...listFrom(metadata.country),
+    ...listFrom(leadMetadata.country),
+    ...listFrom(msg.country),
+    ...listFrom(geoFit.geo_match),
+  ].slice(0, 3);
+}
+
+async function writeCaptainReplacementDirective(clientId, approvalId, messageId, notes = null) {
+  const { rows: [msg] } = await pool.query(
+    `SELECT m.id, m.lead_id, m.channel, m.metadata,
+            l.country, l.metadata AS lead_metadata
+       FROM messages m
+       LEFT JOIN leads l ON l.id = m.lead_id AND l.client_id = m.client_id
+      WHERE m.id = $1 AND m.client_id = $2`,
+    [messageId, clientId]
+  );
+  if (!msg) return null;
+
+  const metadata = msg.metadata && typeof msg.metadata === 'object' ? msg.metadata : {};
+  const leadMetadata = msg.lead_metadata && typeof msg.lead_metadata === 'object' ? msg.lead_metadata : {};
+  const signalPackage = metadata.signal_package || leadMetadata.signal_package || {};
+  const kickoffId = msg.metadata?.kickoff_id || null;
+  if (!kickoffId) return null;
+
+  const signalId = signalPackage.signal_id
+    || metadata.signal_id
+    || metadata.signal
+    || leadMetadata.signal_id
+    || leadMetadata.signal_type
+    || null;
+  const sourceChannel = signalPackage.source_channel
+    || metadata.source_channel
+    || leadMetadata.source_channel
+    || null;
+  const payload = {
+    replacement_for_rejection: true,
+    kickoff_id: msg.metadata?.kickoff_id || null,
+    approval_id: approvalId,
+    message_id: messageId,
+    rejected_lead_id: msg.lead_id || null,
+    rejected_channel: msg.channel || null,
+    rejection_reason: notes || null,
+    signal_id: signalId,
+    source_channel: sourceChannel,
+    geo: geoFromRejectionContext(msg),
+    cap: 1,
+  };
+
+  const directive = await writeDirective(clientId, 'research_beaver', 'run_signal_playbook', payload, {
+    reason: 'MJ rejected a campaign output; Captain requested one replacement lead.',
+    severity: 'high',
+    expiresInHours: 12,
+  });
+
+  await logsService.createLog(clientId, {
+    agent: 'captain_beaver',
+    action: 'captain_replacement_directive_created',
+    target_type: 'approval',
+    target_id: approvalId,
+    metadata: {
+      approval_id: approvalId,
+      message_id: messageId,
+      kickoff_id: kickoffId,
+      directive_id: directive?.id || null,
+      signal_id: signalId,
+      source_channel: sourceChannel,
+      reason: notes || null,
+    },
+  }).catch(() => {});
+
+  return directive;
 }
 
 async function getApprovals(clientId, filters = {}, pagination = {}) {
@@ -237,6 +323,9 @@ async function resolveApproval(clientId, approvalId, { status, notes, userId, ed
     } catch (eventErr) {
       console.warn('[approvals] feedback_events capture failed:', eventErr.message);
     }
+
+    await writeCaptainReplacementDirective(clientId, approvalId, existing.rows[0].message_id, notes)
+      .catch(err => console.warn('[approvals] Captain replacement directive failed:', err.message));
   }
 
   // Phase 4 (2026-05-11): record MJ's decision to followup_learnings for
