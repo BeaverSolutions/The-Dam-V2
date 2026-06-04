@@ -22,7 +22,7 @@ const adminOnly = require('./middleware/adminOnly');
 const superAdminOnly = require('./middleware/superAdminOnly');
 const config = require('./config');
 const autonomyState = require('./services/autonomyState');
-const { todayInMalaysia } = require('./utils/businessDay');
+const { minutesSinceMalaysiaMidnight, todayInMalaysia } = require('./utils/businessDay');
 
 const app = express();
 
@@ -949,18 +949,16 @@ none from this broken report; check app truth before approving batches.`;
       const { checkBudget } = require('./services/budget');
 
       const now = new Date();
-      const utcHour = now.getUTCHours();
-      const utcMin  = now.getUTCMinutes();
-      const utcMinutes = utcHour * 60 + utcMin;
-      const windowStart = 1 * 60 + 30;
-      const windowEnd = 1 * 60 + 40;
+      const klMinutes = minutesSinceMalaysiaMidnight(now);
+      const windowStart = 9 * 60 + 30;
+      const windowEnd = 9 * 60 + 40;
 
       const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
       if (enabledSlugs.length === 0) {
         return { disabled: true, reason: 'AUTONOMOUS_ENABLED_CLIENTS empty' };
       }
 
-      const dedupeKey = `daily_kickoff_${now.toISOString().slice(0, 10)}`;
+      const dedupeKey = `daily_kickoff_${todayInMalaysia(now)}`;
 
       // Defensive: only kickoff active+onboarded tenants. Inactive ones (no ICP
       // / no API keys configured) get explicitly disabled via clients.is_active.
@@ -972,11 +970,11 @@ none from this broken report; check app truth before approving batches.`;
         return { skipped: true, reason: 'no active onboarded clients matched AUTONOMOUS_ENABLED_CLIENTS', enabledSlugs };
       }
 
-      if (utcMinutes < windowStart) {
+      if (klMinutes < windowStart) {
         return { waiting: true, reason: 'before 09:30 MYT daily kickoff window', clients: clients.map(client => client.slug) };
       }
 
-      if (utcMinutes > windowEnd) {
+      if (klMinutes > windowEnd) {
         const { rows: firedRows } = await pool.query(
           `SELECT client_id FROM agent_memory WHERE agent = 'captain' AND key = $1 AND client_id = ANY($2)`,
           [dedupeKey, clients.map(client => client.id)]

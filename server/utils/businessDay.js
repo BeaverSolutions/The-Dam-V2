@@ -13,6 +13,17 @@ function todayInMalaysia(now = new Date()) {
   return `${byType.year}-${byType.month}-${byType.day}`;
 }
 
+function minutesSinceMalaysiaMidnight(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: MALAYSIA_TIME_ZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(now);
+  const byType = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return (Number(byType.hour) * 60) + Number(byType.minute);
+}
+
 function addDaysToDateKey(dateKey, days) {
   const [year, month, day] = String(dateKey).split('-').map(Number);
   const date = new Date(Date.UTC(year, month - 1, day + days));
@@ -44,6 +55,7 @@ function nextBusinessDate(dateKey, holidays = new Set()) {
 module.exports = {
   MALAYSIA_TIME_ZONE,
   addDaysToDateKey,
+  minutesSinceMalaysiaMidnight,
   nextBusinessDate,
   todayInMalaysia,
 };

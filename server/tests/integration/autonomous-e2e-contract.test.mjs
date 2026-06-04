@@ -178,6 +178,7 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(autonomousSource).toContain('external_tenant_activation_gate');
     expect(autonomousSource).toContain('source_truth');
     expect(autonomousSource).toContain('daily_kpi_row_present');
+    expect(autonomousSource).toContain("daily_kickoff_' || b.today_kl::text");
     expect(autonomousSource).toContain('approval_queue');
     expect(autonomousSource).toContain('followup_queue');
     expect(autonomousSource).toContain('orphaned_sent_leads');

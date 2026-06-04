@@ -269,10 +269,13 @@ describe('P0 stabilization contracts', () => {
     expect(index).toContain("jobHealth.markSkipped('kpi_gap_kickoff'");
     expect(index).toContain("jobHealth.markSkipped('market_sensing'");
     expect(index).toContain('daily kickoff window passed without all tenant dedupe rows');
+    expect(index).toContain('minutesSinceMalaysiaMidnight(now)');
+    expect(index).toContain('`daily_kickoff_${todayInMalaysia(now)}`');
     expect(jobHealth).toContain('function markSkipped');
     expect(jobHealth).toContain("status: skippedStatus");
     expect(captain).toContain("CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'");
     expect(captain).toContain('AUTONOMOUS_ENABLED_CLIENTS empty');
+    expect(captain).toContain("am.key = 'daily_kickoff_' || b.today_kl::text");
     expect(captain).toContain("k.business_day.kickoff.state === 'disabled'");
     expect(captain).toContain("MARKET_SENSING_ENABLED !== 'true'");
   });

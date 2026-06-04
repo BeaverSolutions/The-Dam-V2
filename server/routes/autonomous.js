@@ -2908,8 +2908,8 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
           `WITH bounds AS (
              SELECT
                (date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') AS start_at,
-               ((date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') + INTERVAL '1 day') AS end_at,
-               (NOW() AT TIME ZONE 'UTC')::date AS utc_today
+                ((date_trunc('day', NOW() AT TIME ZONE 'Asia/Kuala_Lumpur') AT TIME ZONE 'Asia/Kuala_Lumpur') + INTERVAL '1 day') AS end_at,
+                (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date AS today_kl
            )
            SELECT
              (SELECT MAX(created_at)
@@ -2928,7 +2928,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
                  FROM agent_memory am, bounds b
                 WHERE am.client_id = $1
                   AND am.agent = 'captain'
-                  AND am.key = 'daily_kickoff_' || b.utc_today::text
+                   AND am.key = 'daily_kickoff_' || b.today_kl::text
              ) AS memory_written`,
           [c.id]
         ),

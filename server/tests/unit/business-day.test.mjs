@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { addDaysToDateKey, nextBusinessDate } = require('../../utils/businessDay');
+const { addDaysToDateKey, minutesSinceMalaysiaMidnight, nextBusinessDate, todayInMalaysia } = require('../../utils/businessDay');
 
 const MY_HOLIDAYS_2026 = [
   '2026-01-01', '2026-01-29', '2026-02-17', '2026-02-18',
@@ -38,6 +38,22 @@ function scheduleAllTouches(firstContactDate) {
     return { touch, raw, adjusted };
   });
 }
+
+describe('Malaysia business clock', () => {
+  it('uses MYT date and minutes before the UTC day rolls over', () => {
+    const now = new Date('2026-06-04T18:08:00.000Z'); // 2026-06-05 02:08 MYT
+
+    expect(todayInMalaysia(now)).toBe('2026-06-05');
+    expect(minutesSinceMalaysiaMidnight(now)).toBe((2 * 60) + 8);
+  });
+
+  it('places 09:30 MYT inside the daily kickoff window', () => {
+    const now = new Date('2026-06-05T01:30:00.000Z'); // 2026-06-05 09:30 MYT
+
+    expect(todayInMalaysia(now)).toBe('2026-06-05');
+    expect(minutesSinceMalaysiaMidnight(now)).toBe((9 * 60) + 30);
+  });
+});
 
 describe('nextBusinessDay', () => {
   describe('weekday passthrough', () => {

@@ -333,8 +333,7 @@ async function collectTeamKPIs(clientId) {
          (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date AS today_kl,
          ((EXTRACT(HOUR FROM NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::int * 60)
            + EXTRACT(MINUTE FROM NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::int) AS kl_minutes_now,
-         ((NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date - INTERVAL '1 day')::date AS yesterday_kl,
-         (NOW() AT TIME ZONE 'UTC')::date AS utc_today
+          ((NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date - INTERVAL '1 day')::date AS yesterday_kl
      )
      SELECT
        (SELECT today_kl FROM bounds) AS today_kl,
@@ -364,7 +363,7 @@ async function collectTeamKPIs(clientId) {
          SELECT 1 FROM agent_memory am, bounds b
          WHERE am.client_id = $1
            AND am.agent = 'captain'
-           AND am.key = 'daily_kickoff_' || b.utc_today::text
+            AND am.key = 'daily_kickoff_' || b.today_kl::text
        ) AS daily_kickoff_memory_written`,
     [clientId]
   );
