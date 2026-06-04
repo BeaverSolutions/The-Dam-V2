@@ -36,12 +36,25 @@ describe('chat campaign control', () => {
 });
 
 describe('Captain campaign orchestration contracts', () => {
+  const planStart = agentsSource.indexOf('async function directorPlan');
+  const planEnd = agentsSource.indexOf('/**\n * =========================\n * EMAIL ENRICHMENT', planStart);
+  const planBody = agentsSource.slice(planStart, planEnd);
   const directorStart = agentsSource.indexOf('async function directorExecute');
   const directorEnd = agentsSource.indexOf('module.exports', directorStart);
   const directorBody = agentsSource.slice(directorStart, directorEnd);
   const terminalBlock = directorBody.indexOf('signal_first_terminal_block');
   const continuationBlock = directorBody.indexOf('captain_continue_signal_first_shortfall');
   const zeroStopBlock = directorBody.indexOf('captain_user_prompt_required');
+
+  it('ties bare Director Chat kickoff to the remaining daily KPI gap', () => {
+    expect(agentsSource).toContain("require('../utils/campaignKpiTarget')");
+    expect(planBody).toContain('resolveDirectorCampaignTarget(clientId, explicitRequestedCount)');
+    expect(planBody).toContain('estimated_leads: requestedCount,');
+    expect(planBody).not.toContain('estimated_leads: result.estimated_leads || requestedCount');
+    expect(directorBody).toContain('resolveDirectorCampaignTarget(clientId, explicitCommandTarget)');
+    expect(directorBody).toContain('explicitCommandTarget === null && !requestedTarget');
+    expect(directorBody).toContain('diagnostics.campaign_target_context = targetContext');
+  });
 
   it('lets Captain continue partial signal-first campaigns before the terminal block', () => {
     expect(directorBody).toContain('captain_continue_signal_first_shortfall');

@@ -20,6 +20,7 @@ const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./b
 const repairPolicy = require('./repairPolicy');
 const { todayInMalaysia } = require('../utils/businessDay');
 const { parseRequestedLeadCount } = require('../utils/requestedLeadCount');
+const { resolveCampaignTarget } = require('../utils/campaignKpiTarget');
 
 // Channel-specific drafting instructions injected into the Sales Beaver prompt.
 // Module scope (2026-05-16, Jules F-03): was a local const inside
@@ -2563,6 +2564,55 @@ function allowsPaidPersonalisation(allowPaidSignal, maxPaidSignalQueries) {
   return normalisePaidSignalCap(maxPaidSignalQueries) !== 0;
 }
 
+async function resolveDirectorCampaignTarget(clientId, explicitCount = null) {
+  const today = todayInMalaysia();
+  try {
+    const { rows: [row] } = await pool.query(
+      `WITH bounds AS (
+         SELECT
+           $2::date AS kpi_date,
+           ($2::date::timestamp AT TIME ZONE 'Asia/Kuala_Lumpur') AS start_at,
+           (($2::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Kuala_Lumpur') AS end_at
+       ),
+       kpi AS (
+         SELECT COALESCE((SELECT target FROM daily_kpi WHERE client_id = $1 AND date = $2 LIMIT 1), 50)::int AS daily_target
+       ),
+       sent AS (
+         SELECT COUNT(*)::int AS sent_today
+           FROM messages, bounds
+          WHERE client_id = $1
+            AND status = 'sent'
+            AND sent_at IS NOT NULL
+            AND sent_at >= bounds.start_at
+            AND sent_at < bounds.end_at
+       )
+       SELECT kpi.daily_target, sent.sent_today
+         FROM kpi CROSS JOIN sent`,
+      [clientId, today]
+    );
+
+    return {
+      ...resolveCampaignTarget({
+        explicitCount,
+        dailyTarget: row?.daily_target,
+        sentToday: row?.sent_today,
+      }),
+      date: today,
+    };
+  } catch (err) {
+    return {
+      ...resolveCampaignTarget({
+        explicitCount,
+        dailyTarget: 50,
+        sentToday: 0,
+      }),
+      date: today,
+      fallback: true,
+      error: String(err?.message || err).slice(0, 200),
+    };
+  }
+}
+
 async function directorPlan(clientId, { command, source }) {
   // Pre-screen before calling AI or building a plan
   const rejection = screenCommand(command);
@@ -2580,21 +2630,12 @@ async function directorPlan(clientId, { command, source }) {
     };
   }
 
-  // Extract requested lead count from command — e.g. "Find 3 leads" → 3.
+  // Extract requested lead count from command - e.g. "Find 3 leads" -> 3.
   // Ignore version/date/time fragments such as V2.1 before looking for counts.
-  // Default: pull daily target from DB, fallback to 50 if not set.
-  let requestedCount = parseRequestedLeadCount(command, null);
-  if (requestedCount === null) {
-    // Use daily KPI target as default lead count for bare "kickoff"
-    try {
-      const today = todayInMalaysia();
-      const { rows } = await pool.query(
-        `SELECT target FROM daily_kpi WHERE client_id = $1 AND date = $2 LIMIT 1`,
-        [clientId, today]
-      );
-      requestedCount = rows[0]?.target || 50;
-    } catch { requestedCount = 50; }
-  }
+  // Bare "kickoff" is Captain's daily KPI command: use today's remaining KPI gap.
+  const explicitRequestedCount = parseRequestedLeadCount(command, null);
+  const targetContext = await resolveDirectorCampaignTarget(clientId, explicitRequestedCount);
+  const requestedCount = targetContext.requestedCount;
 
   // Check how many uncontacted leads already exist in DB (DB-first info for plan)
   let uncontactedCount = 0;
@@ -2653,8 +2694,9 @@ async function directorPlan(clientId, { command, source }) {
           interpretation: result.interpretation || command,
           steps: result.steps,
           status: 'pending_approval',
-          estimated_leads: result.estimated_leads || requestedCount,
+          estimated_leads: requestedCount,
           estimated_time: result.estimated_time || '~5 min',
+          target_context: targetContext,
         };
       }
     } catch (err) {
@@ -2684,6 +2726,7 @@ async function directorPlan(clientId, { command, source }) {
     estimated_leads: requestedCount,
     estimated_time: uncontactedCount > 0 ? `~${Math.ceil(requestedCount / 5)} min (${uncontactedCount} from DB)` : `~${Math.ceil(requestedCount / 5)} min`,
     db_leads_available: uncontactedCount,
+    target_context: targetContext,
   };
 }
 
@@ -3958,9 +4001,57 @@ async function directorExecute(clientId, {
   // Check for existing leads that haven't had messages drafted yet.
   // Process fresh DB leads first, then source only the approval-ready output
   // shortfall. This keeps "find 5" tied to delivered approvals, not attempts.
-  const commandTarget = parseRequestedLeadCount(command, null);
-  const targetLimit = limit || commandTarget || 50;
+  const explicitCommandTarget = parseRequestedLeadCount(command, null);
+  const targetContext = await resolveDirectorCampaignTarget(clientId, explicitCommandTarget);
+  const requestedLimit = Number(limit);
+  const boundedLimit = Number.isFinite(requestedLimit) && requestedLimit > 0
+    ? Math.max(1, Math.min(50, Math.ceil(requestedLimit)))
+    : null;
+  const targetLimit = explicitCommandTarget === null && !requestedTarget
+    ? targetContext.requestedCount
+    : (boundedLimit || targetContext.requestedCount);
+  diagnostics.campaign_target_context = targetContext;
   const campaignRequested = Number(requestedTarget) || targetLimit;
+
+  if (campaignRequested <= 0) {
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'campaign_target_already_met',
+      metadata: {
+        plan_id,
+        target_context: targetContext,
+      },
+    }).catch(() => {});
+    await updateExecStatus(clientId, plan_id, {
+      status: 'completed',
+      phase: 'captain',
+      beavers: {
+        research: { status: 'idle', task: 'Daily KPI already met', found: 0, passed: 0 },
+        sales:    { status: 'idle', task: 'No new outreach needed', drafted: 0, approved: 0 },
+        enforcer: { status: 'idle', task: 'No review needed', reviewed: 0, rejected: 0 },
+        captain:  { status: 'done', task: 'Daily KPI already met', approved: 0 },
+      },
+      progress: { total: 0, complete: 0 },
+      started_at: new Date().toISOString(),
+      target_context: targetContext,
+    });
+    return {
+      plan_id,
+      status: 'completed',
+      leads_found: 0,
+      messages_drafted: 0,
+      messages_failed: 0,
+      summary: {
+        requested: 0,
+        delivered: 0,
+        shortfall: 0,
+        target_fulfilled: true,
+        source_mode: sourceMode,
+        reason: 'Daily KPI already met; no new campaign work requested.',
+      },
+      diagnostics,
+    };
+  }
 
   let dbLeadsCount = 0;
   let dbPipelineResult = null;
