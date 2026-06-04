@@ -42,6 +42,20 @@ describe('no-output campaign contract', () => {
     expect(lowYieldIdx).toBeLessThan(continueIdx);
   });
 
+  it('scheduled kickoff writes a Captain blocker before KPI-gap can spend again', () => {
+    const verifyIdx = autonomousRoute.indexOf('verifyKickoffOutput(clientId, target, { runStartedAt: kickoffRunStartedAt })');
+    const recountIdx = autonomousRoute.indexOf("require('../services/kpi').recountKpi(clientId)");
+
+    expect(autonomousRoute).toContain('verifyKickoffOutput(clientId, target, { runStartedAt: kickoffRunStartedAt })');
+    expect(autonomousRoute).toContain('shouldStopForLowOutput({ requested, delivered })');
+    expect(autonomousRoute).toContain('captain_kickoff_blocker_');
+    expect(autonomousRoute).toContain("blocker: 'zero_outputs'");
+    expect(autonomousRoute).toContain("blocker: 'low_yield_outputs'");
+    expect(verifyIdx).toBeGreaterThan(-1);
+    expect(recountIdx).toBeGreaterThan(-1);
+    expect(verifyIdx).toBeLessThan(recountIdx);
+  });
+
   it('preserves blocked and needs_input as terminal execution statuses', () => {
     expect(agentsRoute).toContain("status: result?.status || 'completed'");
     expect(agentsRoute).not.toContain("JSON.stringify({ status: 'completed', result");

@@ -14,6 +14,7 @@ const { checkBudget, isBudgetExceededError } = require('../services/budget');
 const autonomyStateService = require('../services/autonomyState');
 const { todayInMalaysia } = require('../utils/businessDay');
 const { parseRequestedLeadCount } = require('../utils/requestedLeadCount');
+const { shouldStopForLowOutput } = require('../utils/campaignLimits');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
@@ -1354,6 +1355,7 @@ async function runAutonomousKickoff(clientId) {
 }
 
 async function _runAutonomousKickoffInner(clientId) {
+  const kickoffRunStartedAt = new Date();
   const today = todayInMalaysia();
   const HARD_CEILING = 15;
   const PENDING_CEILING = 30;
@@ -2443,8 +2445,8 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     console.warn('[Autonomous] introspection skipped:', err.message);
   }
 
-  // ── Kickoff verification — alert if zero output produced ──
-  await verifyKickoffOutput(clientId, target);
+  // ── Kickoff verification - block follow-on auto-kickoffs on zero/low output ──
+  await verifyKickoffOutput(clientId, target, { runStartedAt: kickoffRunStartedAt });
   await require('../services/kpi').recountKpi(clientId).catch(err =>
     logger.warn({ msg: '[kickoff] final kpi recount failed', clientId, err: err?.message })
   );
@@ -2452,46 +2454,142 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
 
 /**
  * Post-kickoff verification: checks if the kickoff actually produced results.
- * Fires a Telegram alert to MJ if zero outreach was generated today.
+ * Writes a Captain blocker if this run produced zero or <=5/20 usable outputs.
  */
-async function verifyKickoffOutput(clientId, target) {
+async function writeKickoffBlocker(clientId, blocker) {
+  const today = blocker.today || todayInMalaysia();
+  const key = `captain_kickoff_blocker_${today}`;
+  const content = {
+    ...blocker,
+    key,
+    status: 'blocked',
+    next_step: 'MJ must inspect sourcing/ICP/Ranger rejection root cause before another autonomous kickoff',
+    created_at: new Date().toISOString(),
+  };
+
+  await pool.query(
+    `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
+     VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config', NOW())
+     ON CONFLICT (client_id, agent, key)
+     DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()`,
+    [clientId, key, JSON.stringify(content)]
+  );
+
+  await pool.query(
+    `INSERT INTO logs (client_id, agent, action, target_type, metadata, created_at)
+     VALUES ($1, 'captain_orchestrator', 'captain_kickoff_blocker_required', 'system', $2::jsonb, NOW())`,
+    [clientId, JSON.stringify(content)]
+  );
+
+  const message = `<b>Captain kickoff blocker</b>\n\n${blocker.reason}\n\nDelivered: ${blocker.delivered}/${blocker.requested} usable outputs. Autonomous KPI-gap kickoffs are stopped for today until MJ reviews the root cause.`;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (chatId) {
+    try {
+      const telegramService = require('../services/telegram');
+      telegramService.sendMessage(chatId, message).catch(err =>
+        logger.warn({ msg: '[kickoff-blocker] Telegram notify error', err: err.message })
+      );
+    } catch (err) {
+      logger.warn({ msg: '[kickoff-blocker] Telegram notify skipped', err: err.message });
+    }
+  }
+}
+
+async function verifyKickoffOutput(clientId, target, options = {}) {
   try {
     const today = todayInMalaysia();
+    const runStartedAt = options.runStartedAt ? new Date(options.runStartedAt) : null;
+    const requested = Math.min(Number(target) || 20, 20);
     const { rows } = await pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE status = 'sent' AND sent_at IS NOT NULL AND (sent_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS sent,
-         COUNT(*) FILTER (WHERE status = 'pending_approval' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS pending,
-         COUNT(*) FILTER (WHERE status = 'pending_ranger' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS drafting,
-         COUNT(*) FILTER (WHERE status = 'ranger_rejected' AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS rejected
+         COUNT(*) FILTER (
+           WHERE status = 'sent'
+             AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+             AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz)
+         ) AS sent,
+         COUNT(*) FILTER (
+           WHERE status IN ('pending_approval', 'approved', 'pending_send', 'linkedin_requested')
+             AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+             AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz)
+         ) AS approval_ready,
+         COUNT(*) FILTER (
+           WHERE status = 'pending_ranger'
+             AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+             AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz)
+         ) AS drafting,
+         COUNT(*) FILTER (
+           WHERE status = 'ranger_rejected'
+             AND (created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+             AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz)
+         ) AS rejected
        FROM messages WHERE client_id = $1`,
-      [clientId, today]
+      [clientId, today, runStartedAt]
     );
 
-    const { sent, pending, drafting, rejected } = rows[0];
-    const totalOutput = parseInt(sent) + parseInt(pending) + parseInt(drafting);
+    const counts = rows[0] || {};
+    const sent = parseInt(counts.sent, 10) || 0;
+    const approvalReady = parseInt(counts.approval_ready, 10) || 0;
+    const drafting = parseInt(counts.drafting, 10) || 0;
+    const rejected = parseInt(counts.rejected, 10) || 0;
+    const delivered = sent + approvalReady;
+    const totalOutput = delivered + drafting;
 
     if (totalOutput === 0) {
-      console.warn(`[Autonomous] ZERO OUTPUT for client ${clientId} — kickoff produced nothing`);
-
-      // Telegram alert REMOVED 2026-05-13 per project_next_session_priority.md
-      // point 3a (locked 2026-05-03). Hardcoded sentinel duplicates Captain's
-      // own stuck-state detection (email_behind_drafted with per-day dedupe).
-      // Captain owns notification policy per 2026-05-03 lock: morning brief /
-      // EOD brief / impromptu only. No per-kickoff pings. Log only — analytics
-      // record preserved for retrospective.
+      console.warn(`[Autonomous] ZERO OUTPUT for client ${clientId} - kickoff produced nothing`);
       await pool.query(
         `INSERT INTO logs (client_id, agent, action, target_type, metadata, created_at)
          VALUES ($1, 'system', 'kickoff_zero_output', 'system', $2, NOW())`,
-        [clientId, JSON.stringify({ target, sent, pending, rejected })]
+        [clientId, JSON.stringify({ target, sent, approval_ready: approvalReady, drafting, rejected, run_started_at: runStartedAt })]
       );
+      await writeKickoffBlocker(clientId, {
+        today,
+        blocker: 'zero_outputs',
+        reason: 'Scheduled kickoff produced zero usable outputs.',
+        target,
+        requested,
+        delivered,
+        total_output: totalOutput,
+        sent,
+        approval_ready: approvalReady,
+        drafting,
+        rejected,
+        run_started_at: runStartedAt,
+      });
+      return { blocked: true, blocker: 'zero_outputs', delivered, total_output: totalOutput };
+    }
+
+    if (shouldStopForLowOutput({ requested, delivered })) {
+      console.warn(`[Autonomous] LOW OUTPUT for client ${clientId} - kickoff produced ${delivered}/${requested} usable outputs`);
+      await writeKickoffBlocker(clientId, {
+        today,
+        blocker: 'low_yield_outputs',
+        reason: `Scheduled kickoff produced only ${delivered}/${requested} usable outputs, at or below the 5/20 low-yield fallback.`,
+        target,
+        requested,
+        delivered,
+        total_output: totalOutput,
+        sent,
+        approval_ready: approvalReady,
+        drafting,
+        rejected,
+        run_started_at: runStartedAt,
+      });
+      await pool.query(
+        `INSERT INTO logs (client_id, agent, action, target_type, metadata, created_at)
+         VALUES ($1, 'system', 'daily_kickoff_low_yield_blocker', 'system', $2::jsonb, NOW())`,
+        [clientId, JSON.stringify({ target, requested, delivered, total_output: totalOutput, sent, approval_ready: approvalReady, drafting, rejected, run_started_at: runStartedAt })]
+      );
+      return { blocked: true, blocker: 'low_yield_outputs', delivered, total_output: totalOutput };
     } else {
       // Success path: log only, no Telegram. Per MJ notification policy
       // (2026-05-03): morning brief / EOD brief / impromptu only. The morning
       // brief reports yesterday's kickoff numbers — no need to ping per-day too.
-      console.log(`[Autonomous] Kickoff verified for ${clientId}: ${totalOutput} messages produced (${sent} sent, ${pending} pending, ${drafting} drafting)`);
+      console.log(`[Autonomous] Kickoff verified for ${clientId}: ${totalOutput} messages produced (${sent} sent, ${approvalReady} approval-ready, ${drafting} drafting)`);
+      return { blocked: false, delivered, total_output: totalOutput, sent, approval_ready: approvalReady, drafting, rejected };
     }
   } catch (err) {
     console.warn('[Autonomous] Kickoff verification failed:', err.message);
+    return { blocked: false, error: err.message };
   }
 }
 

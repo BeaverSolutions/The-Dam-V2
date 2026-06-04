@@ -76,10 +76,27 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(kickoffBody).toContain('maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP');
     expect(kickoffBody).toContain("'daily_web_linkedin_topup_deduped'");
     expect(kickoffBody).toContain("'daily_web_linkedin_topup_empty'");
-    expect(kickoffBody).toContain('verifyKickoffOutput(clientId, target)');
+    expect(kickoffBody).toContain('const kickoffRunStartedAt = new Date()');
+    expect(kickoffBody).toContain('verifyKickoffOutput(clientId, target, { runStartedAt: kickoffRunStartedAt })');
     expect(kickoffBody).toContain("require('../services/kpi').recountKpi(clientId)");
     expect(kickoffBody).not.toContain('zeroStreak');
     expect(kickoffBody).not.toContain('vp_rescue');
+  });
+
+  it('Captain blocks KPI-gap auto-kickoffs after scheduled zero or low-yield kickoff output', () => {
+    const kickoffBody = functionBody(autonomousSource, 'async function writeKickoffBlocker', 'function buildAutonomousBrief');
+    const kpiGapBody = functionBody(indexSource, 'async function runKpiGapKickoff', 'async function runCaptainDirectiveSweep');
+
+    expect(autonomousSource).toContain("require('../utils/campaignLimits')");
+    expect(kickoffBody).toContain('shouldStopForLowOutput({ requested, delivered })');
+    expect(kickoffBody).toContain('captain_kickoff_blocker_');
+    expect(kickoffBody).toContain("'captain_kickoff_blocker_required'");
+    expect(kickoffBody).toContain("'daily_kickoff_low_yield_blocker'");
+    expect(kickoffBody).toContain("blocker: 'zero_outputs'");
+    expect(kickoffBody).toContain("blocker: 'low_yield_outputs'");
+    expect(kpiGapBody).toContain('captain_kickoff_blocker_');
+    expect(kpiGapBody).toContain("'kpi_gap_blocked_by_kickoff_blocker'");
+    expect(kpiGapBody).toContain('refusing follow-on autonomous kickoff');
   });
 
   it('Director enforces source mode, paid cap, same-day top-up dedupe, and no generic fallback by default', () => {

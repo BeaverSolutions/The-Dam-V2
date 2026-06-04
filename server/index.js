@@ -1417,6 +1417,41 @@ none from this broken report; check app truth before approving batches.`;
         try {
           const today = todayInMalaysia(now);
 
+          const kickoffBlockerKey = `captain_kickoff_blocker_${today}`;
+          const { rows: kickoffBlockerRows } = await pool.query(
+            `SELECT content FROM agent_memory
+             WHERE client_id = $1
+               AND agent = 'captain_orchestrator'
+               AND key = $2
+             LIMIT 1`,
+            [client.id, kickoffBlockerKey]
+          );
+          if (kickoffBlockerRows.length > 0) {
+            const blocker = kickoffBlockerRows[0].content || {};
+            const blockerLogKey = `kpi_gap_blocked_by_kickoff_blocker_${today}_${now.toISOString().slice(11, 13)}`;
+            await pool.query(
+              `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+               VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
+               ON CONFLICT (client_id, agent, key) DO NOTHING`,
+              [client.id, blockerLogKey, JSON.stringify({
+                blocked_at: now.toISOString(),
+                blocker_key: kickoffBlockerKey,
+                blocker,
+              })]
+            ).catch(() => {});
+            await pool.query(
+              `INSERT INTO logs (client_id, agent, action, target_type, metadata)
+               VALUES ($1, 'captain_orchestrator', 'kpi_gap_blocked_by_kickoff_blocker', 'system', $2::jsonb)`,
+              [client.id, JSON.stringify({
+                blocker_key: kickoffBlockerKey,
+                blocker,
+                reason: 'daily kickoff zero/low-yield blocker is active; refusing follow-on autonomous kickoff',
+              })]
+            ).catch(() => {});
+            logger.warn({ msg: `[kpi-gap] ${client.slug}: kickoff blocker active (${blocker.blocker || 'unknown'}), refusing follow-on kickoff` });
+            continue;
+          }
+
           // Email-only KPI gate (2026-05-20): Captain stops when email target is hit.
           // LinkedIn is acceptance-gated and variable — excluded from Captain's stop
           // condition. Captain can only control what it auto-sends (email). LinkedIn
