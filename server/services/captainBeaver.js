@@ -1784,6 +1784,7 @@ module.exports = {
   buildToolHandler,
   loadPersona,
   getClientSlug,
+  expireStaleRunningExecutions,
   // Used by LinkedIn auto-sweep in index.js
   toolDraftEmailForLeads,
 };

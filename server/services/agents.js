@@ -2531,6 +2531,25 @@ function minPaidQueriesForExternalTarget(target) {
   return Math.max(4, n * 4);
 }
 
+function buildSignalFirstSourcingPlan(remainingTarget, campaignSearchBudgetRemaining) {
+  const target = Math.max(0, Math.ceil(Number(remainingTarget) || 0));
+  const availableBudget = Math.max(0, Math.floor(Number(campaignSearchBudgetRemaining) || 0));
+  if (target === 0 || availableBudget === 0) {
+    return { paidQueryBudget: 0, maxSignalLeads: 0, bufferLeads: 0 };
+  }
+
+  const desiredBuffer = Math.min(2, target);
+  const idealBudget = Math.max(3, (target * 2) + desiredBuffer);
+  const paidQueryBudget = Math.min(availableBudget, idealBudget);
+  const maxSignalLeads = Math.max(1, Math.min(target + desiredBuffer, Math.floor(paidQueryBudget / 2)));
+
+  return {
+    paidQueryBudget,
+    maxSignalLeads,
+    bufferLeads: Math.max(0, maxSignalLeads - target),
+  };
+}
+
 function normalisePaidSignalCap(maxPaidSignalQueries) {
   if (maxPaidSignalQueries === null || maxPaidSignalQueries === undefined || maxPaidSignalQueries === '') {
     return null;
@@ -3950,6 +3969,7 @@ async function directorExecute(clientId, {
   let dbRejectedCount = 0;
   let dbSkippedCount = 0;
   let signalLeadsCount = 0;
+  let signalPipelineLeadCount = 0;
   let signalApprovedCount = 0;
   let signalDraftedCount = 0;
   let signalRejectedCount = 0;
@@ -4272,19 +4292,29 @@ async function directorExecute(clientId, {
         diagnostics,
       };
     }
-    const signalBudget = Math.min(campaignSearchBudgetRemaining, Math.max(3, remainingTarget * 2));
+    const signalPlan = buildSignalFirstSourcingPlan(remainingTarget, campaignSearchBudgetRemaining);
+    const signalBudget = signalPlan.paidQueryBudget;
     campaignSearchBudgetRemaining = Math.max(0, campaignSearchBudgetRemaining - signalBudget);
     diagnostics.signal_first_budget_reserved = signalBudget;
+    diagnostics.signal_first_requested = signalPlan.maxSignalLeads;
+    diagnostics.signal_first_buffer_leads = signalPlan.bufferLeads;
     try {
       const { runSignalHunt, saveSignalLeads } = require('./signalHunt');
       await logsService.createLog(clientId, {
         agent: 'director',
         action: 'signal_first_started',
-        metadata: { plan_id, remaining_target: remainingTarget, paid_query_budget: signalBudget, source_mode: sourceMode },
+        metadata: {
+          plan_id,
+          remaining_target: remainingTarget,
+          paid_query_budget: signalBudget,
+          max_signal_leads: signalPlan.maxSignalLeads,
+          buffer_leads: signalPlan.bufferLeads,
+          source_mode: sourceMode,
+        },
       }).catch(() => {});
 
       const signalLeads = await runSignalHunt(clientId, {
-        maxLeads: remainingTarget,
+        maxLeads: signalPlan.maxSignalLeads,
         icp: icpMemory,
         maxPaidQueries: signalBudget,
         plan_id,
@@ -4295,9 +4325,14 @@ async function directorExecute(clientId, {
         const savedSignalLeads = await saveSignalLeads(clientId, signalLeads);
         signalLeadsCount = savedSignalLeads.length;
         diagnostics.signal_first_saved = signalLeadsCount;
+        diagnostics.signal_first_save_stats = savedSignalLeads.saveStats || null;
 
         if (savedSignalLeads.length > 0) {
-          const signalPipelineResult = await processExistingLeadsPipeline(clientId, plan_id, savedSignalLeads, {
+          const signalLeadsForPipeline = savedSignalLeads.slice(0, remainingTarget);
+          signalPipelineLeadCount = signalLeadsForPipeline.length;
+          diagnostics.signal_first_processed = signalPipelineLeadCount;
+
+          const signalPipelineResult = await processExistingLeadsPipeline(clientId, plan_id, signalLeadsForPipeline, {
             allowPersonalisationSearch: allowsPaidPersonalisation(allowPaidSignal, maxPaidSignalQueries),
           })
             .catch(err => {
@@ -4337,7 +4372,8 @@ async function directorExecute(clientId, {
       approved: delivered,
       rejected,
       db_leads_processed: dbLeadsCount,
-      signal_leads_processed: signalLeadsCount,
+      signal_leads_processed: signalPipelineLeadCount,
+      signal_leads_saved: signalLeadsCount,
       db_approved: dbApprovedCount,
       signal_approved: signalApprovedCount,
     };
@@ -4345,7 +4381,7 @@ async function directorExecute(clientId, {
       status: 'completed',
       phase: 'captain',
       beavers: {
-        research: { status: 'done', task: `${leadsFound} leads processed signal-first`, found: leadsFound, passed: signalLeadsCount + dbLeadsCount },
+        research: { status: 'done', task: `${leadsFound} leads saved signal-first`, found: leadsFound, passed: signalPipelineLeadCount + dbLeadsCount },
         sales:    { status: 'done', task: `${drafted} messages drafted`, drafted, approved: delivered },
         enforcer: { status: 'done', task: `${delivered} approved, ${rejected} rejected`, reviewed: drafted, rejected },
         captain:  { status: 'done', task: `${delivered}/${campaignRequested} requested outputs delivered`, approved: delivered },
@@ -4368,7 +4404,7 @@ async function directorExecute(clientId, {
       diagnostics,
       results: [
         ...(dbLeadsCount > 0 ? [{ step: 0, agent: 'research_beaver', status: 'completed', result: `${dbLeadsCount} existing DB lead${dbLeadsCount !== 1 ? 's' : ''} processed` }] : []),
-        { step: 1, agent: 'signal_hunt', status: 'completed', result: `${signalLeadsCount} signal lead${signalLeadsCount !== 1 ? 's' : ''} processed` },
+        { step: 1, agent: 'signal_hunt', status: 'completed', result: `${signalPipelineLeadCount} signal lead${signalPipelineLeadCount !== 1 ? 's' : ''} processed; ${signalLeadsCount} saved` },
         { step: 2, agent: 'sales_beaver', status: 'completed', result: `${drafted} message${drafted !== 1 ? 's' : ''} drafted` },
         { step: 3, agent: 'ranger', status: 'completed', result: `${delivered} approved` },
       ],
@@ -4436,7 +4472,8 @@ async function directorExecute(clientId, {
         approved: delivered,
         rejected,
         db_leads_processed: dbLeadsCount,
-        signal_leads_processed: signalLeadsCount,
+        signal_leads_processed: signalPipelineLeadCount,
+        signal_leads_saved: signalLeadsCount,
         signal_approved: signalApprovedCount,
         generic_research_saved: 0,
         reason: `Signal-first sourcing did not fulfill the request (${delivered}/${campaignRequested} approval-ready). Generic paid fallback was blocked to prevent spend without output.`,
@@ -4444,7 +4481,7 @@ async function directorExecute(clientId, {
       diagnostics,
       results: [
         ...(dbLeadsCount > 0 ? [{ step: 0, agent: 'research_beaver', status: 'completed', result: `${dbLeadsCount} existing DB lead${dbLeadsCount !== 1 ? 's' : ''} processed` }] : []),
-        { step: 1, agent: 'signal_hunt', status: shortfall > 0 ? 'blocked' : 'completed', result: `${signalLeadsCount} signal lead${signalLeadsCount !== 1 ? 's' : ''} processed; ${signalApprovedCount} approved` },
+        { step: 1, agent: 'signal_hunt', status: shortfall > 0 ? 'blocked' : 'completed', result: `${signalPipelineLeadCount} signal lead${signalPipelineLeadCount !== 1 ? 's' : ''} processed; ${signalLeadsCount} saved; ${signalApprovedCount} approved` },
         { step: 2, agent: 'director', status: shortfall > 0 ? 'blocked' : 'completed', result: 'Generic paid research fallback blocked by no-burn rule' },
       ],
     };
@@ -4453,7 +4490,7 @@ async function directorExecute(clientId, {
       status: result.status,
       phase: 'captain',
       beavers: {
-        research: { status: shortfall > 0 ? 'blocked' : 'done', task: `Signal-first produced ${signalApprovedCount}/${campaignRequested} approval-ready`, found: leadsFound, passed: signalLeadsCount },
+        research: { status: shortfall > 0 ? 'blocked' : 'done', task: `Signal-first produced ${signalApprovedCount}/${campaignRequested} approval-ready`, found: leadsFound, passed: signalPipelineLeadCount },
         sales:    { status: drafted > 0 ? 'done' : 'idle', task: `${drafted} messages drafted`, drafted, approved: delivered },
         enforcer: { status: drafted > 0 ? 'done' : 'idle', task: `${delivered} approved, ${rejected} rejected`, reviewed: drafted, rejected },
         captain:  { status: shortfall > 0 ? 'blocked' : 'done', task: `${delivered}/${campaignRequested} requested outputs delivered`, approved: delivered },
@@ -5838,7 +5875,8 @@ async function directorExecute(clientId, {
     pending_your_approval: totalApproved + followupsPending,
     db_leads_processed: dbLeadsCount,
     db_approved: dbApprovedCount,
-    signal_leads_processed: signalLeadsCount,
+    signal_leads_processed: signalPipelineLeadCount,
+    signal_leads_saved: signalLeadsCount,
     signal_approved: signalApprovedCount,
     research_approved: approvedCount,
   };
@@ -5914,7 +5952,7 @@ async function directorExecute(clientId, {
     diagnostics,
     results: [
       ...(dbLeadsCount > 0 ? [{ step: 0, agent: 'research_beaver', status: 'completed', result: `${dbLeadsCount} existing lead${dbLeadsCount !== 1 ? 's' : ''} processed from DB` }] : []),
-      ...(signalLeadsCount > 0 ? [{ step: 1, agent: 'signal_hunt', status: 'completed', result: `${signalLeadsCount} signal lead${signalLeadsCount !== 1 ? 's' : ''} processed first` }] : []),
+      ...(signalLeadsCount > 0 ? [{ step: 1, agent: 'signal_hunt', status: 'completed', result: `${signalPipelineLeadCount} signal lead${signalPipelineLeadCount !== 1 ? 's' : ''} processed first; ${signalLeadsCount} saved` }] : []),
       { step: 1, agent: 'research_beaver', status: 'completed', result: `${savedLeads.length} new lead${savedLeads.length !== 1 ? 's' : ''} found via research` },
       { step: 2, agent: 'sales_beaver', status: 'completed', result: `${totalMessagesDrafted} message${totalMessagesDrafted !== 1 ? 's' : ''} drafted (1 message per lead, best channel)` },
       { step: 3, agent: 'ranger', status: 'completed', result: `${totalApproved} approved${totalRejected > 0 ? `, ${totalRejected} rejected by server gates` : ''}` },
@@ -6243,5 +6281,6 @@ module.exports = {
     captainFallbackDraft,
     getSignalPackage,
     signalPackageMissingFields,
+    buildSignalFirstSourcingPlan,
   },
 };

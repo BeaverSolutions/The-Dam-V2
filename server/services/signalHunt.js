@@ -1167,11 +1167,21 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
  */
 async function saveSignalLeads(clientId, leads) {
   const saved = [];
+  const saveStats = {
+    attempted: 0,
+    saved: 0,
+    duplicate_linkedin: 0,
+    missing_signal_package: 0,
+    contact_gate_blocked: 0,
+    insert_failed: 0,
+  };
   const contactGate = require('./contactGate');
 
   for (const lead of leads) {
+    saveStats.attempted++;
     const missingPackageFields = signalPackageMissingFields(lead.metadata?.signal_package);
     if (missingPackageFields.length > 0) {
+      saveStats.missing_signal_package++;
       await logsService.createLog(clientId, {
         agent: 'research_beaver',
         action: 'research_blocker',
@@ -1196,6 +1206,18 @@ async function saveSignalLeads(clientId, leads) {
         [clientId, lead.linkedin_url]
       );
       if (dup.rows.length > 0) {
+        saveStats.duplicate_linkedin++;
+        await logsService.createLog(clientId, {
+          agent: 'research_beaver',
+          action: 'signal_lead_duplicate_skipped',
+          target_type: 'lead',
+          target_id: dup.rows[0].id,
+          metadata: {
+            source: 'signal_hunt',
+            lead_company: lead.company || null,
+            signal_id: lead.metadata?.signal_package?.signal_id || null,
+          },
+        }).catch(() => {});
         console.log(`[signalHunt] Skipping duplicate: ${lead.linkedin_url}`);
         continue;
       }
@@ -1209,6 +1231,7 @@ async function saveSignalLeads(clientId, leads) {
       allowLinkedinOnly: !!lead.linkedin_only_override,
     });
     if (!gateResult.passed) {
+      saveStats.contact_gate_blocked++;
       console.log(`[signalHunt] Tier C ${lead.name} — reason: ${gateResult.missReason}`);
       continue;
     }
@@ -1244,12 +1267,20 @@ async function saveSignalLeads(clientId, leads) {
           buyingSignalStrength, signalDatedAt,
         ]
       );
-      if (res.rows.length > 0) saved.push(res.rows[0]);
+      if (res.rows.length > 0) {
+        saved.push(res.rows[0]);
+        saveStats.saved++;
+      }
     } catch (err) {
+      saveStats.insert_failed++;
       console.error('[signalHunt] Failed to save signal lead:', err.message);
     }
   }
 
+  Object.defineProperty(saved, 'saveStats', {
+    value: saveStats,
+    enumerable: false,
+  });
   return saved;
 }
 

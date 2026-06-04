@@ -84,7 +84,14 @@ function parseRequestedLeadLimit(message, defaultLimit = 20) {
 function boundedChatSignalQueryCap(requestedLimit) {
   const n = Number(requestedLimit);
   if (!Number.isFinite(n) || n <= 0) return null;
-  return Math.max(3, Math.min(10, Math.ceil(n) * 2));
+  return Math.max(3, Math.min(12, (Math.ceil(n) * 2) + 2));
+}
+
+function isChatCampaignIntent(message) {
+  const msg = String(message || '').toLowerCase();
+  return /\b(kickoff|kick off|start|execute|fire|begin|launch)\b/i.test(msg)
+    || /\brun\b[\s\S]{0,80}\b(campaign|outreach|batch)\b/i.test(msg)
+    || /\bfind\b[\s\S]{0,120}\b(leads?|prospects?|founders?|ceos?|directors?|agenc(?:y|ies))\b/i.test(msg);
 }
 
 function basicOperatingSurfaceForTenant(snapshot = {}) {
@@ -222,7 +229,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
     }
 
     // ── Intent 2: KICKOFF / EXECUTE ──────────────────────────────────
-    else if (/\b(kickoff|kick off|start|execute|fire|begin|find.*(lead|founder|ceo|director|agency|agencies))\b/i.test(lowerMsg)) {
+    else if (isChatCampaignIntent(lowerMsg)) {
       // Calendar gate — must have Google Calendar OR Calendly connected
       const calendarService = require('../services/googleCalendar');
       const hasCalendar = await calendarService.hasAnyCalendar(client_id);
@@ -232,6 +239,11 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
           code: 'CALENDAR_REQUIRED',
         });
       }
+      const { expireStaleRunningExecutions } = require('../services/captainBeaver');
+      await expireStaleRunningExecutions(client_id).catch(err => {
+        logger.warn({ msg: '[chat] stale execution cleanup failed', client_id, err: err.message });
+        return 0;
+      });
       const planId = uuidv4();
 
       // Keep chat-triggered runs bounded. "Find 5" must not fall through to the
@@ -4492,4 +4504,4 @@ router.post('/enrich-cold-signals', async (req, res) => {
 
 module.exports = router;
 module.exports.runAutonomousKickoff = runAutonomousKickoff;
-module.exports._test = { parseRequestedLeadLimit, boundedChatSignalQueryCap };
+module.exports._test = { parseRequestedLeadLimit, boundedChatSignalQueryCap, isChatCampaignIntent };
