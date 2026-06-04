@@ -401,8 +401,18 @@ export default function Chat() {
           ));
 
           if (resolution === 'approved') {
-            const showResult = (data) => {
-              const { results, leads, summary, diagnostics, leads_found, messages_drafted, messages_failed } = data;
+            const showResult = (data = {}) => {
+              const {
+                results,
+                leads,
+                summary,
+                diagnostics,
+                leads_found,
+                messages_drafted,
+                messages_failed,
+                question,
+                status,
+              } = data;
               const mergedSummary = {
                 ...summary,
                 leads_found: leads_found ?? summary?.leads_found ?? leads?.length ?? 0,
@@ -410,12 +420,15 @@ export default function Chat() {
                 messages_failed: messages_failed ?? 0,
                 pending_approvals: summary?.pending_approvals ?? summary?.approved ?? 0,
               };
+              const operatorPrompt = status === 'needs_input' && question
+                ? question
+                : null;
               setMessages(prev => [...prev, {
                 id: Date.now(),
                 role: 'assistant',
                 content: (mergedSummary.leads_found > 0)
                   ? 'The crew executed the plan. Here\'s the status:'
-                  : diagnostics?.reason || 'The crew executed the plan but found no leads matching your criteria.',
+                  : operatorPrompt || diagnostics?.reason || 'The crew executed the plan but found no leads matching your criteria.',
                 results,
                 leads,
                 summary: mergedSummary,
