@@ -942,6 +942,83 @@ none from this broken report; check app truth before approving batches.`;
     const { runAutonomousKickoff } = require('./routes/autonomous');
     // runWithClientContext already imported above for follow-up scheduler
 
+    function dailyKickoffHasWorkProof(proof) {
+      return !!proof?.daily_kickoff_work_log || Number(proof?.trace_count || 0) > 0;
+    }
+
+    async function getDailyKickoffProof(clientId, today) {
+      const { rows: [proof] } = await pool.query(
+        `SELECT
+           EXISTS (
+             SELECT 1 FROM agent_memory am
+              WHERE am.client_id = $1
+                AND am.agent = 'captain'
+                AND am.key = 'daily_kickoff_' || $2::text
+           )
+           OR EXISTS (
+             SELECT 1 FROM logs l
+              WHERE l.client_id = $1
+                AND l.action = 'autonomous_kickoff'
+                AND (l.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+           ) AS daily_kickoff_started,
+           EXISTS (
+             SELECT 1 FROM logs l
+              WHERE l.client_id = $1
+                AND (l.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+                AND l.action IN (
+                  'db_pool_draw',
+                  'db_pool_zero_output_stop',
+                  'pool_audit_rejected',
+                  'pool_dry_for_channel_target',
+                  'generic_sourcing_disabled_skip',
+                  'daily_web_linkedin_topup_failed',
+                  'daily_web_linkedin_topup_empty',
+                  'daily_web_linkedin_topup_deduped',
+                  'research_pool_exhausted',
+                  'kickoff_zero_output',
+                  'daily_kickoff_low_yield_blocker',
+                  'captain_kickoff_blocker_required',
+                  'signal_pipeline_executing',
+                  'signal_first_started',
+                  'signal_first_failed',
+                  'campaign_target_unfulfilled',
+                  'paid_signal_disabled_stop',
+                  'campaign_target_fulfilled'
+                )
+           ) AS daily_kickoff_work_log,
+           (SELECT COUNT(*)::int
+              FROM pipeline_traces pt
+             WHERE pt.client_id = $1
+               AND pt.pipeline_path IN ('kickoff_pipeline', 'signal_pipeline')
+               AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS trace_count`,
+        [clientId, today]
+      );
+      return proof || { daily_kickoff_started: false, daily_kickoff_work_log: false, trace_count: 0 };
+    }
+
+    async function recordUnverifiedDailyKickoff(clientId, today, now, source, proof = {}) {
+      const key = `daily_kickoff_unverified_output_${today}_${source}`;
+      const content = {
+        blocked_at: now.toISOString(),
+        source,
+        reason: 'daily kickoff start marker has no output proof',
+        trace_count: Number(proof.trace_count) || 0,
+      };
+      const inserted = await pool.query(
+        `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+         VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
+         ON CONFLICT (client_id, agent, key) DO NOTHING
+         RETURNING id`,
+        [clientId, key, JSON.stringify(content)]
+      ).catch(() => ({ rows: [] }));
+      if (!inserted.rows?.length) return;
+      await pool.query(
+        `INSERT INTO logs (client_id, agent, action, target_type, metadata)
+         VALUES ($1, 'captain_orchestrator', 'daily_kickoff_unverified_output_blocker', 'system', $2::jsonb)`,
+        [clientId, JSON.stringify(content)]
+      ).catch(() => {});
+    }
+
     async function runDailyKickoff() {
       if (process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true') {
         return { disabled: true, reason: 'CAPTAIN_DAILY_KICKOFF_ENABLED disabled' };
@@ -980,6 +1057,24 @@ none from this broken report; check app truth before approving batches.`;
           [dedupeKey, clients.map(client => client.id)]
         );
         if (firedRows.length >= clients.length) {
+          const unverified = [];
+          for (const client of clients) {
+            const proof = await getDailyKickoffProof(client.id, todayInMalaysia(now));
+            if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof)) {
+              unverified.push({ client_id: client.id, slug: client.slug, trace_count: Number(proof.trace_count) || 0 });
+              await recordUnverifiedDailyKickoff(client.id, todayInMalaysia(now), now, 'daily_scheduler_after_window', proof);
+            }
+          }
+          if (unverified.length > 0) {
+            return {
+              blocked: true,
+              reason: 'daily kickoff dedupe rows present but no output proof',
+              fired: 0,
+              deduped: firedRows.length,
+              unverified,
+              clients: clients.map(client => client.slug),
+            };
+          }
           return { alreadyDone: true, reason: 'daily kickoff dedupe rows present', fired: 0, deduped: firedRows.length, clients: clients.map(client => client.slug) };
         }
         return {
@@ -1002,14 +1097,20 @@ none from this broken report; check app truth before approving batches.`;
       // before tenant B fired left B's row present, and B silently missed its
       // kickoff for the day. Each tenant now checks + marks its own row, and the
       // mark happens BEFORE the kickoff so a crash can't cause a double-fire.
-      const result = { fired: 0, deduped: 0, budgetBlocked: 0, clients: clients.map(client => client.slug) };
+      const result = { fired: 0, deduped: 0, budgetBlocked: 0, unverified: 0, clients: clients.map(client => client.slug) };
       for (const client of clients) {
         const { rows: already } = await pool.query(
           `SELECT 1 FROM agent_memory WHERE client_id = $1 AND agent = 'captain' AND key = $2 LIMIT 1`,
           [client.id, dedupeKey]
         );
         if (already.length > 0) {
-          result.deduped++;
+          const proof = await getDailyKickoffProof(client.id, todayInMalaysia(now));
+          if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof)) {
+            result.unverified++;
+            await recordUnverifiedDailyKickoff(client.id, todayInMalaysia(now), now, 'daily_scheduler_window', proof);
+          } else {
+            result.deduped++;
+          }
           continue;
         }
 
@@ -1051,10 +1152,18 @@ none from this broken report; check app truth before approving batches.`;
             throw err;
           })
         );
-        result.fired++;
+        const proof = await getDailyKickoffProof(client.id, todayInMalaysia(now));
+        if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof)) {
+          result.unverified++;
+          await recordUnverifiedDailyKickoff(client.id, todayInMalaysia(now), now, 'daily_scheduler_after_run', proof);
+        } else {
+          result.fired++;
+        }
       }
       return result.fired > 0
         ? { fired: true, ...result }
+        : result.unverified > 0
+          ? { blocked: true, reason: 'daily kickoff start marker has no output proof', ...result }
         : result.budgetBlocked > 0
           ? { blocked: true, reason: 'daily kickoff blocked by budget guard', ...result }
         : { alreadyDone: true, reason: 'all clients already had daily kickoff dedupe rows', ...result };

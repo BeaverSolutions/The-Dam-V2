@@ -269,6 +269,12 @@ describe('P0 stabilization contracts', () => {
     expect(index).toContain("jobHealth.markSkipped('kpi_gap_kickoff'");
     expect(index).toContain("jobHealth.markSkipped('market_sensing'");
     expect(index).toContain('daily kickoff window passed without all tenant dedupe rows');
+    expect(index).toContain('daily kickoff dedupe rows present but no output proof');
+    expect(index).toContain('function dailyKickoffHasWorkProof(proof)');
+    expect(index).toContain('daily_kickoff_unverified_output_blocker');
+    expect(index).toContain("blocked: true, reason: 'daily kickoff start marker has no output proof'");
+    expect(service('routes/autonomous.js')).toContain("'autonomous_kickoff_failed'");
+    expect(service('routes/autonomous.js')).toContain('verify_after_uncaught_kickoff_error');
     expect(index).toContain('minutesSinceMalaysiaMidnight(now)');
     expect(index).toContain('`daily_kickoff_${todayInMalaysia(now)}`');
     expect(jobHealth).toContain('function markSkipped');

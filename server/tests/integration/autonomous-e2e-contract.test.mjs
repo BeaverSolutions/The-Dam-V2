@@ -76,7 +76,7 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(kickoffBody).toContain('maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP');
     expect(kickoffBody).toContain("'daily_web_linkedin_topup_deduped'");
     expect(kickoffBody).toContain("'daily_web_linkedin_topup_empty'");
-    expect(kickoffBody).toContain('const kickoffRunStartedAt = new Date()');
+    expect(kickoffBody).toContain('const kickoffRunStartedAt = options.kickoffRunStartedAt || new Date()');
     expect(kickoffBody).toContain('verifyKickoffOutput(clientId, target, { runStartedAt: kickoffRunStartedAt })');
     expect(kickoffBody).toContain("require('../services/kpi').recountKpi(clientId)");
     expect(kickoffBody).not.toContain('zeroStreak');
@@ -144,6 +144,8 @@ describe('BeavrDam autonomous end-to-end contract', () => {
   it('start markers are not kickoff work proof and KPI-gap blocks unverified daily kickoff runs', () => {
     const healthBody = functionBody(autonomousSource, "router.get('/system-health'", '/* ─── POST /api/autonomous/mark-linkedin-sent');
     const kpiGapBody = functionBody(indexSource, 'async function runKpiGapKickoff', 'async function runCaptainDirectiveSweep');
+    const dailyKickoffBody = functionBody(indexSource, 'async function runDailyKickoff', 'async function runMarketSensingCron');
+    const kickoffWrapperBody = functionBody(autonomousSource, 'async function runAutonomousKickoff', 'async function _runAutonomousKickoffInner');
 
     expect(healthBody).toContain('last_start_log_at');
     expect(healthBody).toContain('last_work_log_at');
@@ -152,6 +154,13 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(kpiGapBody).toContain('kpi_gap_blocked_by_unverified_daily_kickoff');
     expect(kpiGapBody).toContain('daily kickoff start marker has no output proof');
     expect(kpiGapBody).toContain('dailyKickoffWorkProof');
+    expect(indexSource).toContain('function dailyKickoffHasWorkProof(proof)');
+    expect(indexSource).toContain('async function getDailyKickoffProof(clientId, today)');
+    expect(indexSource).toContain('daily_kickoff_unverified_output_blocker');
+    expect(dailyKickoffBody).toContain('daily kickoff dedupe rows present but no output proof');
+    expect(dailyKickoffBody).toContain("blocked: true, reason: 'daily kickoff start marker has no output proof'");
+    expect(kickoffWrapperBody).toContain("'autonomous_kickoff_failed'");
+    expect(kickoffWrapperBody).toContain('verifyKickoffOutput(clientId, 20, { runStartedAt: kickoffRunStartedAt })');
   });
 
   it('drafting and Enforcer approval converge through the shared approval/enqueue path', () => {

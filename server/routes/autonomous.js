@@ -1346,16 +1346,26 @@ async function runAutonomousKickoff(clientId) {
     console.log(`[Autonomous] Client ${clientId} kickoff already running — skipping concurrent trigger`);
     return;
   }
+  const kickoffRunStartedAt = new Date();
   _runningKickoffs.add(clientId);
   try {
-    return await _runAutonomousKickoffInner(clientId);
+    return await _runAutonomousKickoffInner(clientId, { kickoffRunStartedAt });
+  } catch (err) {
+    logger.error({ msg: '[kickoff] uncaught kickoff failure before normal verification', clientId, err: err?.message });
+    await logAction(clientId, 'director', 'autonomous_kickoff_failed', 'system', null, {
+      error: err?.message || 'unknown_error',
+      run_started_at: kickoffRunStartedAt,
+      boundary: 'verify_after_uncaught_kickoff_error',
+    }).catch(() => {});
+    await verifyKickoffOutput(clientId, 20, { runStartedAt: kickoffRunStartedAt });
+    throw err;
   } finally {
     _runningKickoffs.delete(clientId);
   }
 }
 
-async function _runAutonomousKickoffInner(clientId) {
-  const kickoffRunStartedAt = new Date();
+async function _runAutonomousKickoffInner(clientId, options = {}) {
+  const kickoffRunStartedAt = options.kickoffRunStartedAt || new Date();
   const today = todayInMalaysia();
   const HARD_CEILING = 15;
   const PENDING_CEILING = 30;
