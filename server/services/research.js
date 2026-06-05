@@ -344,6 +344,15 @@ function countryListFromIcp(icp) {
   return parseCsvField(icp.geo || icp.geographies || icp.countries || icp.locations || icp.target_markets);
 }
 
+function countryForQuery(query) {
+  const q = String(query || '').toLowerCase();
+  if (/pte\s*\.?\s*ltd|singapore|\bsg\b/.test(q)) return 'SG';
+  if (/pty\s*\.?\s*ltd|australia|\bau\b/.test(q)) return 'AU';
+  if (/united states|\bu\.?s\.?a?\b|america|\bus\b/.test(q)) return 'US';
+  if (/united kingdom|\buk\b|britain|england|\bgb\b/.test(q)) return 'GB';
+  return 'MY';
+}
+
 function strategyForSignalFamily(family) {
   if (family === 'hiring_capability_build') return 'signal_jobs';
   if (family === 'expansion_growth' || family === 'capital_budget_event') return 'signal_news';
@@ -382,12 +391,13 @@ function buildQueryPoolFromSignalPlanner(icpMemory) {
       query: query.query,
       strategy: strategyForSignalFamily(plan.signalFamily),
       title: '',
-      industry: plan.signalFamily,
+      industry: query.industry || plan.signalFamily,
       location: geo.join(', '),
       country: query.query.includes('Singapore') ? 'SG' : query.query.includes('United States') ? 'US' : 'MY',
       signal_id: plan.signalId,
       signal_family: plan.signalFamily,
       source_channel: query.sourceChannel,
+      source_term: query.term || null,
       expected_evidence: query.expectedEvidence,
       stop_rules: plan.stopRules,
       reject_rules: plan.rejectRules,
@@ -544,14 +554,6 @@ function buildQueryPool(icpMemory) {
   const includesUK = /united kingdom|\buk\b|britain|england|\bgb\b/i.test(geoLower);
 
   const queryPool = [];
-  const countryForQuery = (query) => {
-    const q = String(query || '').toLowerCase();
-    if (/pte\s*\.?\s*ltd|singapore|\bsg\b/.test(q)) return 'SG';
-    if (/pty\s*\.?\s*ltd|australia|\bau\b/.test(q)) return 'AU';
-    if (/united states|\bu\.?s\.?a?\b|america|\bus\b/.test(q)) return 'US';
-    if (/united kingdom|\buk\b|britain|england|\bgb\b/.test(q)) return 'GB';
-    return 'MY';
-  };
 
   // Generate compound industry search phrases
   const industryPhrases = [];
@@ -1255,6 +1257,52 @@ function companyDiscoveryTokens(value) {
     .filter(t => t.length >= 3 && !COMPANY_DISCOVERY_STOPWORDS.has(t) && !/^\d+$/.test(t));
 }
 
+function countryDisplayName(country = 'MY') {
+  const code = String(country || 'MY').toUpperCase();
+  if (code === 'SG') return 'Singapore';
+  if (code === 'US') return 'United States';
+  if (code === 'AU') return 'Australia';
+  if (code === 'GB' || code === 'UK') return 'United Kingdom';
+  return 'Malaysia';
+}
+
+function quotedSearchTerm(value) {
+  const clean = String(value || '').replace(/"/g, '').trim();
+  return clean ? `"${clean}"` : '';
+}
+
+function companyDiscoverySearchPhrase(item = {}) {
+  const rawQuery = String(item.query || '').trim();
+  const strategy = String(item.strategy || '');
+  const sourceChannel = String(item.source_channel || item.sourceChannel || '');
+  const country = item.country || countryForQuery(rawQuery) || 'MY';
+  const industry = item.industry && item.industry !== item.signal_family
+    ? item.industry
+    : '';
+  const sourceTerm = item.source_term || '';
+
+  if (/^signal_/.test(strategy) || sourceChannel) {
+    const parts = [
+      quotedSearchTerm(industry),
+      quotedSearchTerm(countryDisplayName(country)),
+      quotedSearchTerm(sourceTerm),
+    ].filter(Boolean);
+    if (strategy === 'signal_jobs' || /jobs|careers|job_boards/i.test(sourceChannel)) {
+      parts.push('(hiring OR vacancy OR careers)');
+    }
+    if (strategy === 'signal_news' || strategy === 'signal_growth') {
+      parts.push('(expanding OR launched OR growth OR appointed)');
+    }
+    if (parts.length > 0) return parts.join(' ');
+  }
+
+  return rawQuery
+    .replace(/^site:linkedin\.com\/company\s+/i, '')
+    .replace(/^site:linkedin\.com\/jobs\s+/i, '')
+    .replace(/\(\s*site:\*\/careers\s+OR\s+site:\*\/jobs\s*\)/ig, '("careers" OR "jobs")')
+    .trim();
+}
+
 function companyDiscoveryMatchesQuery(item, company) {
   const strategy = String(item?.strategy || '');
   if (strategy === 'signal_growth') return true;
@@ -1303,9 +1351,7 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
         // Step 1: find company LinkedIn pages via Brave search.
         // Pass item.industry (just the phrase) — searchLinkedInCompanies prepends
         // "site:linkedin.com/company" itself. Passing item.query would double it.
-        const searchPhrase = String(item.query || `${item.industry} "Sdn Bhd"`)
-          .replace(/^site:linkedin\.com\/company\s+/i, '')
-          .trim();
+        const searchPhrase = companyDiscoverySearchPhrase(item);
         const companyResults = await searchService.searchLinkedInCompanies
           ? searchService.searchLinkedInCompanies(searchPhrase, 3, { country: item.country || 'MY' })
           : Promise.resolve([]);
@@ -2102,6 +2148,7 @@ module.exports = {
     ORDERED_RESEARCH_ENRICHMENT_STAGES,
     initResearchStageStats,
     buildResearchBlockerResult,
+    companyDiscoverySearchPhrase,
     buildSignalPackage,
     attachSignalPackageToLead,
     signalPackageMissingFields,

@@ -28,9 +28,15 @@ function firstSourceChannel(signal, preferred) {
   return channels[0] || 'web_search';
 }
 
+function sourceChannelsForPlan(signal, preferred) {
+  const channels = list(signal.source_channels);
+  if (preferred && channels.includes(preferred)) return [preferred];
+  return channels.length > 0 ? channels : ['web_search'];
+}
+
 function queryPrefixForSource(sourceChannel) {
   if (sourceChannel === 'linkedin_jobs') return 'site:linkedin.com/jobs';
-  if (sourceChannel === 'company_careers') return '(site:*/careers OR site:*/jobs)';
+  if (sourceChannel === 'company_careers') return '("careers" OR "jobs" OR "join our team")';
   if (sourceChannel === 'meta_ad_library') return 'site:facebook.com/ads/library';
   if (sourceChannel === 'google_ads_transparency') return 'site:adstransparency.google.com';
   return '';
@@ -86,32 +92,39 @@ function buildSignalPlan({
   const finalIndustries = industries.length > 0 ? industries : [null];
   const terms = list(signal.query_terms).length > 0 ? list(signal.query_terms) : [signal.family];
   const selectedSource = firstSourceChannel(signal, sourceChannel);
+  const sourceChannels = sourceChannelsForPlan(signal, sourceChannel);
   const stopRules = signal.stop_rules || {};
   const cap = Math.max(1, Number(maxQueries || stopRules.max_paid_searches_per_day || 6));
   const competitorOffers = list(signal.reject_rules?.competitor_offers || icp.competitor_offers);
   const queries = [];
+  const seenQueries = new Set();
 
-  for (const industry of finalIndustries) {
-    for (const geoValue of finalGeos) {
-      for (const term of terms) {
-        if (queries.length >= cap) break;
-        const rawQuery = buildQueryForSignal({
-          signal,
-          term,
-          geo: geoValue,
-          industry,
-          sourceChannel: selectedSource,
-        });
-        queries.push({
-          sourceChannel: selectedSource,
-          query: stripCompetitorTerms(rawQuery, competitorOffers),
-          costClass: 'paid_search',
-          expectedEvidence: list(signal.evidence_required),
-        });
-      }
-      if (queries.length >= cap) break;
-    }
-    if (queries.length >= cap) break;
+  const totalCombinations = finalIndustries.length * finalGeos.length * terms.length * sourceChannels.length;
+  for (let i = 0; queries.length < cap && i < totalCombinations; i++) {
+    const industry = finalIndustries[i % finalIndustries.length];
+    const geoValue = finalGeos[Math.floor(i / finalIndustries.length) % finalGeos.length];
+    const term = terms[i % terms.length];
+    const querySourceChannel = sourceChannels[i % sourceChannels.length] || selectedSource;
+    const rawQuery = buildQueryForSignal({
+      signal,
+      term,
+      geo: geoValue,
+      industry,
+      sourceChannel: querySourceChannel,
+    });
+    const query = stripCompetitorTerms(rawQuery, competitorOffers);
+    const key = query.toLowerCase();
+    if (seenQueries.has(key)) continue;
+    seenQueries.add(key);
+    queries.push({
+      sourceChannel: querySourceChannel,
+      query,
+      costClass: 'paid_search',
+      expectedEvidence: list(signal.evidence_required),
+      industry,
+      geo: geoValue,
+      term,
+    });
   }
 
   return {

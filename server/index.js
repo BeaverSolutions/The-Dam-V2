@@ -1450,6 +1450,78 @@ none from this broken report; check app truth before approving batches.`;
             continue;
           }
 
+          const { rows: [dailyKickoffProof] } = await pool.query(
+            `SELECT
+               EXISTS (
+                 SELECT 1 FROM agent_memory am
+                  WHERE am.client_id = $1
+                    AND am.agent = 'captain'
+                    AND am.key = 'daily_kickoff_' || $2::text
+               )
+               OR EXISTS (
+                 SELECT 1 FROM logs l
+                  WHERE l.client_id = $1
+                    AND l.action = 'autonomous_kickoff'
+                    AND (l.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+               ) AS daily_kickoff_started,
+               EXISTS (
+                 SELECT 1 FROM logs l
+                  WHERE l.client_id = $1
+                    AND (l.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+                    AND l.action IN (
+                      'db_pool_draw',
+                      'db_pool_zero_output_stop',
+                      'pool_audit_rejected',
+                      'pool_dry_for_channel_target',
+                      'generic_sourcing_disabled_skip',
+                      'daily_web_linkedin_topup_failed',
+                      'daily_web_linkedin_topup_empty',
+                      'daily_web_linkedin_topup_deduped',
+                      'research_pool_exhausted',
+                      'kickoff_zero_output',
+                      'daily_kickoff_low_yield_blocker',
+                      'captain_kickoff_blocker_required',
+                      'signal_pipeline_executing',
+                      'signal_first_started',
+                      'signal_first_failed',
+                      'campaign_target_unfulfilled',
+                      'paid_signal_disabled_stop',
+                      'campaign_target_fulfilled'
+                    )
+               ) AS daily_kickoff_work_log,
+               (SELECT COUNT(*)::int
+                  FROM pipeline_traces pt
+                 WHERE pt.client_id = $1
+                   AND pt.pipeline_path IN ('kickoff_pipeline', 'signal_pipeline')
+                   AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS trace_count`,
+            [client.id, today]
+          );
+          const dailyKickoffWorkProof = !!dailyKickoffProof?.daily_kickoff_work_log || Number(dailyKickoffProof?.trace_count) > 0;
+          if (dailyKickoffProof?.daily_kickoff_started && !dailyKickoffWorkProof) {
+            const blockerLogKey = `kpi_gap_blocked_by_unverified_daily_kickoff_${today}_${now.toISOString().slice(11, 13)}`;
+            const blocker = {
+              blocked_at: now.toISOString(),
+              reason: 'daily kickoff start marker has no output proof',
+              trace_count: Number(dailyKickoffProof.trace_count) || 0,
+            };
+            await pool.query(
+              `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+               VALUES ($1, 'captain_orchestrator', $2, $3::jsonb, 'config')
+               ON CONFLICT (client_id, agent, key) DO NOTHING`,
+              [client.id, blockerLogKey, JSON.stringify(blocker)]
+            ).catch(() => {});
+            await pool.query(
+              `INSERT INTO logs (client_id, agent, action, target_type, metadata)
+               VALUES ($1, 'captain_orchestrator', 'kpi_gap_blocked_by_unverified_daily_kickoff', 'system', $2::jsonb)`,
+              [client.id, JSON.stringify({
+                ...blocker,
+                reason: 'daily kickoff start marker has no output proof; refusing follow-on autonomous kickoff',
+              })]
+            ).catch(() => {});
+            logger.warn({ msg: `[kpi-gap] ${client.slug}: daily kickoff start marker has no output proof, refusing follow-on kickoff` });
+            continue;
+          }
+
           // Email-only KPI gate (2026-05-20): Captain stops when email target is hit.
           // LinkedIn is acceptance-gated and variable — excluded from Captain's stop
           // condition. Captain can only control what it auto-sends (email). LinkedIn

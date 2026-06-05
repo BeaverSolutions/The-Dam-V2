@@ -2129,20 +2129,32 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
             cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
             context: 'pool_dry_channel_target',
           });
-          const topupResult = await directorExecute(clientId, {
-            plan_id: uuidv4(),
-            command: '',
-            batchIndex: batch - 1,
-            limit: Math.min(Math.max(emailGap, linkedinGap), BATCH_SIZE),
-            allowPaidSignal: true,
-            sourceMode: 'daily_web_linkedin_topup',
-            maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
-          });
+          let topupResult = null;
+          try {
+            topupResult = await directorExecute(clientId, {
+              plan_id: uuidv4(),
+              command: '',
+              batchIndex: batch - 1,
+              limit: Math.min(Math.max(emailGap, linkedinGap), BATCH_SIZE),
+              allowPaidSignal: true,
+              sourceMode: 'daily_web_linkedin_topup',
+              maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+            });
+          } catch (err) {
+            console.warn('[Autonomous] Daily web/LinkedIn top-up failed before output verification:', err.message);
+            await logAction(clientId, 'director', 'daily_web_linkedin_topup_failed', 'system', null, {
+              batch,
+              cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+              context: 'pool_dry_channel_target',
+              error: err.message,
+              boundary: 'verify_even_after_topup_failure',
+            });
+          }
           if (Number(topupResult?.leads_found || topupResult?.summary?.leads_found || 0) === 0) {
             await logAction(clientId, 'director', 'daily_web_linkedin_topup_empty', 'system', null, {
               batch,
               cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
-              reason: topupResult?.summary?.blocker || topupResult?.summary?.reason || topupResult?.status || 'no_results',
+              reason: topupResult?.summary?.blocker || topupResult?.summary?.reason || topupResult?.status || 'topup_failed_or_no_results',
               boundary: 'no_burn_zero_raw_stop',
             });
           }
@@ -2363,15 +2375,28 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
         context: 'cold_research_fallback',
       });
-      await directorExecute(clientId, {
-        plan_id: uuidv4(),
-        command: '',
-        batchIndex: batch - 1,
-        limit: draftSize,
-        allowPaidSignal: true,
-        sourceMode: 'daily_web_linkedin_topup',
-        maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
-      });
+      let topupError = null;
+      try {
+        await directorExecute(clientId, {
+          plan_id: uuidv4(),
+          command: '',
+          batchIndex: batch - 1,
+          limit: draftSize,
+          allowPaidSignal: true,
+          sourceMode: 'daily_web_linkedin_topup',
+          maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+        });
+      } catch (err) {
+        topupError = err;
+        console.warn('[Autonomous] Daily web/LinkedIn top-up failed before output verification:', err.message);
+        await logAction(clientId, 'director', 'daily_web_linkedin_topup_failed', 'system', null, {
+          batch,
+          cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+          context: 'cold_research_fallback',
+          error: err.message,
+          boundary: 'verify_even_after_topup_failure',
+        });
+      }
 
       // No-burn stop: the daily top-up is capped and single-attempt. If it
       // produces no new saved leads, do not escalate into generic paid retries.
@@ -2387,6 +2412,7 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         await logAction(clientId, 'director', 'daily_web_linkedin_topup_empty', 'system', null, {
           batch,
           cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+          reason: topupError?.message || 'no_new_saved_leads',
           boundary: 'no_burn_zero_raw_stop',
         });
         await logAction(clientId, 'director', 'research_pool_exhausted', 'system', null, { batch, liveSent, target });
@@ -2912,12 +2938,36 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
                 (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date AS today_kl
            )
            SELECT
-             (SELECT MAX(created_at)
-                FROM logs l, bounds b
-               WHERE l.client_id = $1
-                 AND l.agent = 'director'
-                 AND l.action = 'autonomous_kickoff'
-                 AND l.created_at >= b.start_at AND l.created_at < b.end_at) AS last_log_at,
+              (SELECT MAX(created_at)
+                 FROM logs l, bounds b
+                WHERE l.client_id = $1
+                  AND l.agent = 'director'
+                  AND l.action = 'autonomous_kickoff'
+                  AND l.created_at >= b.start_at AND l.created_at < b.end_at) AS last_start_log_at,
+              (SELECT MAX(created_at)
+                 FROM logs l, bounds b
+                WHERE l.client_id = $1
+                  AND l.created_at >= b.start_at AND l.created_at < b.end_at
+                  AND l.action IN (
+                    'db_pool_draw',
+                    'db_pool_zero_output_stop',
+                    'pool_audit_rejected',
+                    'pool_dry_for_channel_target',
+                    'generic_sourcing_disabled_skip',
+                    'daily_web_linkedin_topup_failed',
+                    'daily_web_linkedin_topup_empty',
+                    'daily_web_linkedin_topup_deduped',
+                    'research_pool_exhausted',
+                    'kickoff_zero_output',
+                    'daily_kickoff_low_yield_blocker',
+                    'captain_kickoff_blocker_required',
+                    'signal_pipeline_executing',
+                    'signal_first_started',
+                    'signal_first_failed',
+                    'campaign_target_unfulfilled',
+                    'paid_signal_disabled_stop',
+                    'campaign_target_fulfilled'
+                  )) AS last_work_log_at,
              (SELECT COUNT(*)::int
                 FROM pipeline_traces pt, bounds b
                WHERE pt.client_id = $1
@@ -3016,10 +3066,82 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
           [c.id]
         ),
         pool.query(
-          `SELECT COUNT(*)::int AS n FROM leads
-           WHERE client_id = $1 AND deleted_at IS NULL
-             AND (pipeline_stage IS NULL OR pipeline_stage NOT IN ('rejected','contacted','outreach','qualifying'))
-             AND (status IS NULL OR status NOT LIKE 'rejected_%')`,
+          `SELECT
+             COUNT(*) FILTER (
+               WHERE l.deleted_at IS NULL
+                 AND (l.pipeline_stage IS NULL OR l.pipeline_stage NOT IN ('rejected','contacted','outreach','qualifying'))
+                 AND (l.status IS NULL OR l.status NOT LIKE 'rejected_%')
+             )::int AS raw_available,
+             COUNT(*) FILTER (
+               WHERE l.deleted_at IS NULL
+                 AND l.pipeline_stage = 'prospecting'
+                 AND l.status = 'new'
+             )::int AS raw_new_prospecting,
+             COUNT(*) FILTER (
+               WHERE l.deleted_at IS NULL
+                 AND l.pipeline_stage = 'prospecting'
+                 AND l.status = 'new'
+                 AND l.lead_tier = 'A'
+                 AND l.email IS NOT NULL
+                 AND l.email <> ''
+                 ${leadSelectionFeedbackExclusionSql('l')}
+                 AND NOT EXISTS (
+                   SELECT 1 FROM messages m
+                    WHERE m.lead_id = l.id
+                      AND m.client_id = l.client_id
+                      AND m.status <> 'deleted'
+                 )
+             )::int AS kickoff_selectable_email,
+             COUNT(*) FILTER (
+               WHERE l.deleted_at IS NULL
+                 AND l.pipeline_stage = 'prospecting'
+                 AND l.status = 'new'
+                 AND l.lead_tier = 'B'
+                 AND l.linkedin_url IS NOT NULL
+                 AND l.linkedin_url <> ''
+                 ${leadSelectionFeedbackExclusionSql('l')}
+                 AND NOT EXISTS (
+                   SELECT 1 FROM messages m
+                    WHERE m.lead_id = l.id
+                      AND m.client_id = l.client_id
+                      AND m.status <> 'deleted'
+                 )
+             )::int AS kickoff_selectable_linkedin,
+             (
+               COUNT(*) FILTER (
+                 WHERE l.deleted_at IS NULL
+                   AND l.pipeline_stage = 'prospecting'
+                   AND l.status = 'new'
+                   AND l.lead_tier = 'A'
+                   AND l.email IS NOT NULL
+                   AND l.email <> ''
+                   ${leadSelectionFeedbackExclusionSql('l')}
+                   AND NOT EXISTS (
+                     SELECT 1 FROM messages m
+                      WHERE m.lead_id = l.id
+                        AND m.client_id = l.client_id
+                        AND m.status <> 'deleted'
+                   )
+               )
+               +
+               COUNT(*) FILTER (
+                 WHERE l.deleted_at IS NULL
+                   AND l.pipeline_stage = 'prospecting'
+                   AND l.status = 'new'
+                   AND l.lead_tier = 'B'
+                   AND l.linkedin_url IS NOT NULL
+                   AND l.linkedin_url <> ''
+                   ${leadSelectionFeedbackExclusionSql('l')}
+                   AND NOT EXISTS (
+                     SELECT 1 FROM messages m
+                      WHERE m.lead_id = l.id
+                        AND m.client_id = l.client_id
+                        AND m.status <> 'deleted'
+                   )
+               )
+             )::int AS kickoff_selectable_total
+           FROM leads l
+           WHERE l.client_id = $1`,
           [c.id]
         ),
         pool.query(
@@ -3069,8 +3191,9 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
 
       const i = integrations.rows[0];
       const evidence = kickoffEvidence.rows[0] || {};
-      const kickoffWorkProof = !!(evidence.last_log_at || Number(evidence.trace_count) > 0);
-      const kickoffMemoryOnlyStarted = !!evidence.memory_written && !kickoffWorkProof;
+      const kickoffWorkProof = !!(evidence.last_work_log_at || Number(evidence.trace_count) > 0);
+      const kickoffStarted = !!(evidence.memory_written || evidence.last_start_log_at);
+      const kickoffMemoryOnlyStarted = kickoffStarted && !kickoffWorkProof;
       const kickoffState = scheduledAutonomyPaused
         ? 'disabled'
         : process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true'
@@ -3091,7 +3214,9 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
         kickoff_today: {
           fired: kickoffWorkProof,
           state: kickoffState,
-          at: evidence.last_log_at || null,
+          at: evidence.last_work_log_at || evidence.last_start_log_at || null,
+          start_at: evidence.last_start_log_at || null,
+          work_at: evidence.last_work_log_at || null,
           memory_written: !!evidence.memory_written,
           memory_only_started: kickoffMemoryOnlyStarted,
           trace_count: Number(evidence.trace_count) || 0,
@@ -3109,7 +3234,14 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
           reply_tracking: { replies_today: kpi.rows[0]?.replies_received || 0 },
           followup_visibility: followupHealth.rows[0],
         }),
-        lead_pool_remaining: leadPool.rows[0].n,
+        lead_pool_remaining: Number(leadPool.rows[0].kickoff_selectable_total) || 0,
+        lead_pool: {
+          raw_available: Number(leadPool.rows[0].raw_available) || 0,
+          raw_new_prospecting: Number(leadPool.rows[0].raw_new_prospecting) || 0,
+          kickoff_selectable_total: Number(leadPool.rows[0].kickoff_selectable_total) || 0,
+          kickoff_selectable_email: Number(leadPool.rows[0].kickoff_selectable_email) || 0,
+          kickoff_selectable_linkedin: Number(leadPool.rows[0].kickoff_selectable_linkedin) || 0,
+        },
         research_beaver: researchLog.rows[0],
         integrations: {
           gmail_connected: !!i.gmail_connected,

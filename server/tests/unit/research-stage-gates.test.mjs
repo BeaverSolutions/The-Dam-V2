@@ -61,6 +61,23 @@ describe('Research Beaver raw candidate stage gates', () => {
     expect(initialVerifyIdx).toBeGreaterThan(rawBlockerIdx);
   });
 
+  it('derives clean company-discovery phrases from source-aware signal queries', () => {
+    const phrase = research._test.companyDiscoverySearchPhrase({
+      query: 'site:linkedin.com/jobs "sales" "Malaysia" "B2B corporate training" (hiring OR vacancy OR careers)',
+      strategy: 'signal_jobs',
+      source_channel: 'linkedin_jobs',
+      source_term: 'sales',
+      industry: 'B2B corporate training',
+      country: 'MY',
+    });
+
+    expect(phrase).toContain('"B2B corporate training"');
+    expect(phrase).toContain('"Malaysia"');
+    expect(phrase).toContain('"sales"');
+    expect(phrase).not.toContain('site:linkedin.com/jobs');
+    expect(phrase).not.toContain('site:linkedin.com/company');
+  });
+
   it('attaches a complete signal package before leads are returned for saving', () => {
     const packaged = research._test.attachSignalPackageToLead({
       name: 'Jane Tan',

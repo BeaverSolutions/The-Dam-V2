@@ -123,7 +123,7 @@ async function appendLearning(clientId, agent, observation) {
   // Use Postgres jsonb concat to atomically append
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
-     VALUES ($1, $2, $3, $4::jsonb, 'learning')
+     VALUES ($1, $2, $3, $4::jsonb, 'journal')
      ON CONFLICT (client_id, agent, key) DO UPDATE
        SET content = agent_memory.content || EXCLUDED.content,
            updated_at = NOW()`,

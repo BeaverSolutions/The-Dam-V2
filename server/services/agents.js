@@ -3801,7 +3801,7 @@ async function claimDailyPaidSignalAttempt(clientId, { sourceMode, plan_id, maxP
   const key = `${sourceMode}_${klDateString()}`;
   const { rows } = await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
-     VALUES ($1, 'director', $2, $3::jsonb, 'state', NOW())
+     VALUES ($1, 'director', $2, $3::jsonb, 'config', NOW())
      ON CONFLICT (client_id, agent, key) DO NOTHING
      RETURNING id`,
     [
@@ -6592,7 +6592,7 @@ async function captureWinLoss(clientId, { lead_id, outcome, notes }) {
 
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, memory_type, key, content)
-     VALUES ($1, 'director', 'learnings', 'weekly_learnings', $2)
+     VALUES ($1, 'director', 'journal', 'weekly_learnings', $2)
      ON CONFLICT (client_id, agent, key) DO UPDATE SET content = $2, updated_at = NOW()`,
     [clientId, JSON.stringify(learnings)]
   );

@@ -7,10 +7,13 @@ const require = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 let signalPlanner = null;
+let research = null;
 try {
   signalPlanner = require('../../services/signalPlanner.js');
+  research = require('../../services/research.js');
 } catch (err) {
   signalPlanner = null;
+  research = null;
 }
 
 const tenantContext = {
@@ -103,6 +106,66 @@ describe('signal planner', () => {
     expect(plan.queries.every(q => /Malaysia|MY/i.test(q.query))).toBe(true);
     expect(plan.queries.some(q => /B2B agency/i.test(q.query))).toBe(true);
     expect(plan.queries[0].expectedEvidence).toEqual(['company', 'role', 'source_url']);
+  });
+
+  it('diversifies small paid query windows across ICP verticals and source channels', () => {
+    const verticals = [
+      'B2B corporate training',
+      'professional training',
+      'L&D providers',
+      'digital agencies',
+      'PR firms',
+      'creative studios',
+    ];
+    const plan = signalPlanner.buildSignalPlan({
+      tenant: {
+        ...tenantContext,
+        icp: {
+          ...tenantContext.icp,
+          verticals,
+          geo: ['MY'],
+        },
+      },
+      signalId: 'hiring_sales_roles',
+      geo: ['MY'],
+      maxQueries: 5,
+    });
+
+    const queryText = plan.queries.map(q => q.query).join('\n');
+    const coveredVerticals = verticals.filter(vertical => queryText.includes(`"${vertical}"`));
+    const coveredChannels = new Set(plan.queries.map(q => q.sourceChannel));
+
+    expect(plan.queries).toHaveLength(5);
+    expect(plan.queries[0]).toMatchObject({ industry: 'B2B corporate training', geo: 'MY', term: 'sales' });
+    expect(coveredVerticals.length).toBeGreaterThanOrEqual(3);
+    expect(coveredChannels.size).toBeGreaterThanOrEqual(2);
+    expect(plan.queries.every(q => /Malaysia|MY/i.test(q.query))).toBe(true);
+    expect(queryText).not.toContain('site:*');
+  });
+
+  it('preserves planner vertical metadata when Research builds the signal query pool', () => {
+    expect(research).toBeTruthy();
+    const verticals = [
+      'B2B corporate training',
+      'professional training',
+      'L&D providers',
+      'digital agencies',
+      'PR firms',
+    ];
+    const pool = research.buildQueryPool({
+      industries: verticals.join(', '),
+      job_titles: 'Founder, CEO, Managing Director',
+      geographies: 'MY',
+      buying_signals: [{
+        ...tenantContext.buying_signals[0],
+        stop_rules: { ...tenantContext.buying_signals[0].stop_rules, max_paid_searches_per_day: 5 },
+      }],
+    });
+    const firstFive = pool.slice(0, 5);
+
+    expect(firstFive.map(q => q.industry)).toEqual(verticals);
+    expect(firstFive.some(q => q.industry === 'hiring_capability_build')).toBe(false);
+    expect(new Set(firstFive.map(q => q.source_channel)).size).toBeGreaterThanOrEqual(2);
   });
 
   it('keeps hiring viable with role plus geo when industry is missing', () => {

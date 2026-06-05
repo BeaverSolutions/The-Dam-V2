@@ -1536,7 +1536,7 @@ async function fireCoachingLoop(clientId, reason) {
   await beaverState.logCaptainAction(clientId, 'fire_coaching_loop', { reason });
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
-     VALUES ($1, 'sales_beaver', $2, $3::jsonb, 'coaching')
+     VALUES ($1, 'sales_beaver', $2, $3::jsonb, 'config')
      ON CONFLICT (client_id, agent, key) DO UPDATE
        SET content = EXCLUDED.content, updated_at = NOW()`,
     [clientId, 'coaching_directive_active', JSON.stringify({ reason, fired_at: new Date().toISOString() })]
@@ -1552,7 +1552,7 @@ async function switchResearchStrategy(clientId, reason, suggested_strategy = nul
   await beaverState.logCaptainAction(clientId, 'switch_research_strategy', { reason, suggested_strategy });
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
-     VALUES ($1, 'research_beaver', $2, $3::jsonb, 'directive')
+     VALUES ($1, 'research_beaver', $2, $3::jsonb, 'config')
      ON CONFLICT (client_id, agent, key) DO UPDATE
        SET content = EXCLUDED.content, updated_at = NOW()`,
     [clientId, 'strategy_directive_active', JSON.stringify({ reason, suggested_strategy, fired_at: new Date().toISOString() })]
@@ -1642,7 +1642,7 @@ async function throttleSend(clientId, throttle_pct = 30) {
   await beaverState.logCaptainAction(clientId, 'throttle_send', { throttle_pct });
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
-     VALUES ($1, 'sales_beaver', $2, $3::jsonb, 'directive')
+     VALUES ($1, 'sales_beaver', $2, $3::jsonb, 'config')
      ON CONFLICT (client_id, agent, key) DO UPDATE
        SET content = EXCLUDED.content, updated_at = NOW()`,
     [clientId, 'send_throttle_directive', JSON.stringify({ throttle_pct, applied_at: new Date().toISOString() })]

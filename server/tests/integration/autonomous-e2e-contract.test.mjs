@@ -113,6 +113,47 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(autonomousSource).toContain("GENERIC_SOURCING_ENABLED !== 'true'");
   });
 
+  it('scheduled daily web top-up failures are logged before post-run verification', () => {
+    const kickoffBody = functionBody(autonomousSource, 'async function _runAutonomousKickoffInner', '/**\n * Post-kickoff verification');
+    const failureLogs = kickoffBody.match(/'daily_web_linkedin_topup_failed'/g) || [];
+    const firstTopupIdx = kickoffBody.indexOf("context: 'pool_dry_channel_target'");
+    const secondTopupIdx = kickoffBody.indexOf("context: 'cold_research_fallback'");
+    const verifyIdx = kickoffBody.indexOf('verifyKickoffOutput(clientId, target, { runStartedAt: kickoffRunStartedAt })');
+
+    expect(firstTopupIdx).toBeGreaterThan(-1);
+    expect(secondTopupIdx).toBeGreaterThan(-1);
+    expect(verifyIdx).toBeGreaterThan(secondTopupIdx);
+    expect(failureLogs.length).toBeGreaterThanOrEqual(2);
+    expect(kickoffBody.slice(firstTopupIdx, verifyIdx)).toContain("context: 'pool_dry_channel_target'");
+    expect(kickoffBody.slice(firstTopupIdx, verifyIdx)).toContain('catch (err)');
+    expect(kickoffBody.slice(secondTopupIdx, verifyIdx)).toContain("context: 'cold_research_fallback'");
+    expect(kickoffBody.slice(secondTopupIdx, verifyIdx)).toContain('catch (err)');
+  });
+
+  it('system-health reports exact kickoff-selectable pool capacity, not raw lead stock', () => {
+    const healthBody = functionBody(autonomousSource, "router.get('/system-health'", '/* ─── POST /api/autonomous/mark-linkedin-sent');
+
+    expect(healthBody).toContain('kickoff_selectable_email');
+    expect(healthBody).toContain('kickoff_selectable_linkedin');
+    expect(healthBody).toContain('kickoff_selectable_total');
+    expect(healthBody).toContain("m.status <> 'deleted'");
+    expect(healthBody).toContain("lead_pool_remaining: Number(leadPool.rows[0].kickoff_selectable_total)");
+    expect(healthBody).toContain('lead_pool: {');
+  });
+
+  it('start markers are not kickoff work proof and KPI-gap blocks unverified daily kickoff runs', () => {
+    const healthBody = functionBody(autonomousSource, "router.get('/system-health'", '/* ─── POST /api/autonomous/mark-linkedin-sent');
+    const kpiGapBody = functionBody(indexSource, 'async function runKpiGapKickoff', 'async function runCaptainDirectiveSweep');
+
+    expect(healthBody).toContain('last_start_log_at');
+    expect(healthBody).toContain('last_work_log_at');
+    expect(healthBody).toContain('const kickoffWorkProof = !!(evidence.last_work_log_at || Number(evidence.trace_count) > 0)');
+    expect(healthBody).not.toContain('const kickoffWorkProof = !!(evidence.last_log_at || Number(evidence.trace_count) > 0)');
+    expect(kpiGapBody).toContain('kpi_gap_blocked_by_unverified_daily_kickoff');
+    expect(kpiGapBody).toContain('daily kickoff start marker has no output proof');
+    expect(kpiGapBody).toContain('dailyKickoffWorkProof');
+  });
+
   it('drafting and Enforcer approval converge through the shared approval/enqueue path', () => {
     expect(agentsSource).toContain('pipeline.applyEnforcerDecision(clientId');
     expect(pipelineSource).toContain('function isVerifiedEmailReadyLead');
