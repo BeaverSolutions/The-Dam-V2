@@ -234,12 +234,13 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     });
     const firstSix = queries.slice(0, 6).map(q => q.query.toLowerCase()).join('\n');
     const firstSixChannels = queries.slice(0, 6).map(q => q.source_channel);
+    const firstTwelveChannels = queries.slice(0, 12).map(q => q.source_channel);
 
     expect(firstSix).toMatch(/training|l&d|coaching|skills development/);
     expect(firstSix).toMatch(/agenc|content studio|pr firm|creative studio/);
     expect(firstSixChannels).toEqual(expect.arrayContaining(['linkedin_jobs', 'review_sites', 'job_descriptions']));
     expect(new Set(firstSixChannels).size).toBeGreaterThan(3);
-    expect(firstSix).not.toMatch(/marketingmagazine|marketing-interactive|campaignasia|digitalnewsasia/);
+    expect(firstTwelveChannels).toContain('industry_publication');
   });
 
   it('puts universal planner source-channel queries before stored publication fallbacks for MY/SG', () => {
@@ -257,6 +258,7 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(firstSix).toMatch(/expanding|new office|funding|investment|review|CRM/);
     expect(firstSix).toMatch(/Malaysia|Singapore/);
     expect(queries.slice(0, 3).some(q => q.source_channel === 'industry_publication')).toBe(false);
+    expect(queries.slice(0, 12).some(q => q.source_channel === 'industry_publication')).toBe(true);
   });
 
   it('teaches Signal Hunt extraction that appointed agencies are the target lead company', () => {
@@ -734,6 +736,39 @@ describe('signal extraction helpers', () => {
     expect(signals.every(s => s.confidence >= 0.5 && s.source_url)).toBe(true);
   });
 
+  it('deterministically extracts local hiring companies from LinkedIn job result titles', () => {
+    const results = [
+      {
+        title: 'Full Cycle Sales Executive - Malaysia Market at Fact Base | LinkedIn',
+        link: 'https://www.linkedin.com/jobs/view/4418286599',
+        snippet: 'Greater Kuala Lumpur. Fact Base is hiring for a sales role in Malaysia.',
+        date: '1 month ago',
+      },
+      {
+        title: 'Account Executive, GTS - Gartner | LinkedIn',
+        link: 'https://www.linkedin.com/jobs/view/4412110000',
+        snippet: 'Kuala Lumpur, Malaysia. Gartner is looking for an Account Executive.',
+        date: '1 week ago',
+      },
+      {
+        title: '(ASM) Area Sales Manager Pharma job vacancy at Delhi NCR and Jaipur in Tablets India',
+        link: 'https://www.linkedin.com/jobs/view/4422053099',
+        snippet: 'Indian Pharma Jobs - Pharma Jobs in India',
+        date: '1 week ago',
+      },
+    ];
+
+    const signals = signalHunt._test.deterministicHiringSignals(results, {
+      signal_type: 'hiring_sales_roles',
+      source_channel: 'linkedin_jobs',
+      country: 'MY',
+    });
+
+    expect(signals.map(s => s.company)).toEqual(['Fact Base', 'Gartner']);
+    expect(signals.every(s => s.signal_type === 'hiring_sales_roles')).toBe(true);
+    expect(signals.every(s => s.confidence >= 0.65 && s.source_url)).toBe(true);
+  });
+
   it('merges deterministic publication fallback without duplicating parser output', () => {
     expect(signalHunt._test.mergeExtractedSignalSets([{
       company: 'Kingdom Digital',
@@ -858,8 +893,10 @@ describe('buildSignalQueriesFromIcp', () => {
       source_channel: 'linkedin_jobs',
       country: 'MY',
     });
-    expect(r.slice(0, 4).some(q => q.source_channel === 'industry_publication')).toBe(false);
-    expect(r.map(q => q.query).join('\n')).not.toMatch(/marketing-interactive|marketingmagazine|campaignasia|digitalnewsasia/);
+    expect(r[0].query).toMatch(/Kuala Lumpur|Greater Kuala Lumpur|Malaysia/i);
+    expect(r[0].query).not.toMatch(/B2B corporate training|digital agencies/i);
+    expect(r.slice(0, 12).some(q => q.source_channel === 'industry_publication')).toBe(true);
+    expect(r.map(q => q.query).join('\n')).toMatch(/marketing-interactive|marketingmagazine|campaignasia|digitalnewsasia/);
   });
 });
 

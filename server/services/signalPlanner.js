@@ -50,11 +50,30 @@ function queryPrefixForSource(sourceChannel) {
   return '';
 }
 
+function hiringLocationQuery(geoName) {
+  if (/malaysia/i.test(geoName)) return '("Kuala Lumpur" OR "Greater Kuala Lumpur" OR "Malaysia")';
+  if (/singapore/i.test(geoName)) return '("Singapore")';
+  return `"${geoName}"`;
+}
+
+function hiringRoleQuery(term) {
+  const cleanTerm = String(term || '').trim() || 'sales';
+  return `("${cleanTerm}" OR "Sales Executive" OR "Account Executive" OR "Business Development Manager" OR "Sales Manager")`;
+}
+
 function buildQueryForSignal({ signal, term, geo, industry, sourceChannel }) {
   const geoName = countryName(geo);
   const sourcePrefix = queryPrefixForSource(sourceChannel);
   const family = signal.family;
 
+  if (family === 'hiring_capability_build' && sourceChannel === 'linkedin_jobs') {
+    return compact([
+      sourcePrefix,
+      hiringLocationQuery(geoName),
+      hiringRoleQuery(term),
+      '-India -Delhi -NCR -Jaipur -Siliguri',
+    ]);
+  }
   if (family === 'active_gtm_spend') {
     return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '']);
   }

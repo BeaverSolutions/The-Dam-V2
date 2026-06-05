@@ -104,7 +104,11 @@ describe('signal planner', () => {
     expect(plan.queries.length).toBeLessThanOrEqual(3);
     expect(plan.queries.some(q => /sales|business development|SDR/i.test(q.query))).toBe(true);
     expect(plan.queries.every(q => /Malaysia|MY/i.test(q.query))).toBe(true);
-    expect(plan.queries.some(q => /B2B agency/i.test(q.query))).toBe(true);
+    const linkedInJobsQuery = plan.queries.find(q => q.sourceChannel === 'linkedin_jobs')?.query || '';
+    expect(linkedInJobsQuery).toMatch(/Kuala Lumpur|Greater Kuala Lumpur|Malaysia/i);
+    expect(linkedInJobsQuery).toMatch(/Sales Executive|Account Executive|Business Development Manager|Sales Manager/i);
+    expect(linkedInJobsQuery).not.toMatch(/B2B agency/i);
+    expect(linkedInJobsQuery).toMatch(/-India -Delhi -NCR -Jaipur -Siliguri/i);
     expect(plan.queries[0].expectedEvidence).toEqual(['company', 'role', 'source_url']);
   });
 

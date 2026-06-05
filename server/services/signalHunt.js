@@ -40,7 +40,7 @@ function envInt(name, fallback) {
 const MAX_SIGNAL_QUERIES_PER_RUN = envInt('SIGNAL_HUNT_MAX_QUERIES', 6);
 const MAX_SIGNAL_QUERY_WINDOW = Math.max(MAX_SIGNAL_QUERIES_PER_RUN, envInt('SIGNAL_HUNT_MAX_QUERY_WINDOW', 20));
 const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
-const SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v1';
+const SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v2';
 
 function klDateString() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -358,6 +358,38 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
   return queries;
 }
 
+function fastProofQueriesForCountry(country = {}, industries = []) {
+  const name = country.name || countryNameFromCode(country.code);
+  const code = country.code || countryCodeFromText(name) || 'MY';
+  const location = code === 'MY'
+    ? '("Kuala Lumpur" OR "Greater Kuala Lumpur" OR "Malaysia")'
+    : `"${name}"`;
+  const negativeGeo = code === 'MY' ? ' -India -Delhi -NCR -Jaipur -Siliguri' : '';
+  const queries = [
+    {
+      query: `site:linkedin.com/jobs ${location} ("Sales Executive" OR "Account Executive" OR "Business Development Manager" OR "Sales Manager")${negativeGeo}`,
+      signal_type: 'hiring_sales_roles',
+      signal_id: 'hiring_sales_roles',
+      signal_family: 'hiring_capability_build',
+      source_channel: 'linkedin_jobs',
+      tier: 'P1',
+      country: code,
+    },
+    {
+      query: `site:linkedin.com/jobs "${name}" ("business development" OR "account executive" OR "sales") ("Easy Apply" OR hiring OR vacancy)${negativeGeo}`,
+      signal_type: 'hiring_sales_roles',
+      signal_id: 'hiring_sales_roles',
+      signal_family: 'hiring_capability_build',
+      source_channel: 'linkedin_jobs',
+      tier: 'P1',
+      country: code,
+    },
+  ];
+
+  queries.push(...sourceAwareQueriesForCountry({ code, name }, industries));
+  return queries;
+}
+
 function hasIcpSearchScope(icp = {}) {
   return [
     ...listFrom(icp.industries),
@@ -417,7 +449,9 @@ function rotateQueryWindow(queries = [], offset = 0) {
 function buildSignalQueriesFromIcp(icp = {}) {
   const tenant = signalPlannerTenantFromIcp(icp);
   const signals = normalizeBuyingSignalsForTenant(tenant).filter(signal => signal.enabled !== false);
-  const countries = countriesFromIcp(icp).map(country => country.code);
+  const countryObjects = countriesFromIcp(icp);
+  const countries = countryObjects.map(country => country.code);
+  const industries = tenant.icp?.verticals?.length > 0 ? tenant.icp.verticals : industriesFromIcp(icp);
   const perSignalQueries = [];
 
   for (const [idx, signal] of signals.entries()) {
@@ -442,7 +476,15 @@ function buildSignalQueriesFromIcp(icp = {}) {
       if (items[i]) queries.push(items[i]);
     }
   }
-  return queries;
+  const highYieldQueries = countryObjects.flatMap(country => fastProofQueriesForCountry(country, industries));
+  const combined = [...queries.slice(0, 6), ...highYieldQueries, ...queries.slice(6)];
+  const seen = new Set();
+  return combined.filter(q => {
+    const key = String(q.query || '').toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function normalizeSignalQuery(item, fallbackCountry = 'MY') {
@@ -770,6 +812,14 @@ async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null
 function signalExtractionGuidance(query = {}) {
   const signalType = String(query.signal_type || '').toLowerCase();
   const sourceChannel = String(query.source_channel || '').toLowerCase();
+  if (isHiringSignalQuery(query)) {
+    return `
+Hiring-source extraction guidance:
+- Extract the hiring company from LinkedIn/job-board titles and snippets, not LinkedIn or the job board itself.
+- Titles often look like "Role at Company", "Role - Company", or "Company hiring Role"; use that company as the signal company.
+- Skip location-mismatched results, generic job-board pages, and results where no specific hiring company is named.
+- A sales, account executive, business development, SDR, BDR, growth, or RevOps job in the target geography is a real buying signal.`;
+  }
   if (sourceChannel === 'industry_publication' || /agency|publication/.test(signalType)) {
     return `
 Agency-publication extraction guidance:
@@ -944,6 +994,93 @@ function deterministicPublicationSignals(results = [], query = {}) {
     .filter(Boolean);
 }
 
+function isHiringSignalQuery(query = {}) {
+  const signalType = String(query.signal_type || query.signal_id || '').toLowerCase();
+  const sourceChannel = String(query.source_channel || '').toLowerCase();
+  return /hiring|sales_roles|vacancy|job/.test(signalType)
+    || ['linkedin_jobs', 'company_careers', 'job_boards'].includes(sourceChannel);
+}
+
+function resultOutsideTargetCountry(result = {}, country = 'MY') {
+  const code = String(country || '').toUpperCase();
+  const text = `${result.title || ''} ${result.snippet || ''} ${result.link || result.url || ''}`.toLowerCase();
+  if (code === 'MY') {
+    const hasMalaysia = /\b(malaysia|kuala lumpur|greater kuala lumpur|selangor|petaling jaya|klang valley)\b/.test(text);
+    const hasIndia = /\b(india|delhi|ncr|jaipur|siliguri|gurugram|mumbai|bangalore|bengaluru)\b/.test(text);
+    return hasIndia && !hasMalaysia;
+  }
+  return false;
+}
+
+function cleanHiringCompanyName(value = '') {
+  let company = String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+\|\s*LinkedIn.*$/i, '')
+    .replace(/\s+-\s*LinkedIn.*$/i, '')
+    .replace(/\s+\|\s*(JobStreet|Hiredly|Indeed|Glassdoor).*$/i, '')
+    .replace(/^[,\s-]+|[,\s-]+$/g, '')
+    .trim();
+
+  company = company
+    .replace(/\s+(?:is\s+)?(?:hiring|looking|seeking)\b.*$/i, '')
+    .replace(/\s+(?:job vacancy|jobs?|careers?)\b.*$/i, '')
+    .replace(/\s+(?:in|at)\s+(?:Malaysia|Kuala Lumpur|Greater Kuala Lumpur|Singapore)\b.*$/i, '')
+    .trim();
+
+  if (!company || company.length < 2 || company.length > 80) return '';
+  if (/\b(linkedin|jobstreet|hiredly|indeed|glassdoor|jobs in india|indian pharma jobs|pharma jobs)\b/i.test(company)) return '';
+  if (/^(easy apply|top applicants|full[- ]time|on[- ]site|remote|hybrid)$/i.test(company)) return '';
+  return company;
+}
+
+function hiringCompanyFromResult(result = {}) {
+  const title = String(result.title || result.name || '')
+    .replace(/\s+\|\s*LinkedIn.*$/i, '')
+    .trim();
+  const text = `${title}. ${result.snippet || ''}`.replace(/\s+/g, ' ');
+  const patterns = [
+    /\bat\s+([A-Z][A-Za-z0-9&.'() ,-]{2,80}?)(?:\s*(?:\||-|,|\.|$))/i,
+    /[-–]\s*([A-Z][A-Za-z0-9&.'() ,-]{2,80}?)(?:\s*(?:\||[-–]|\.|$))/i,
+    /^([A-Z][A-Za-z0-9&.'() ,-]{2,80}?)\s+(?:is\s+)?(?:hiring|seeking|looking for)\b/i,
+    /\|\s*([A-Z][A-Za-z0-9&.'() ,-]{2,80}?)$/i,
+  ];
+
+  for (const sourceText of [title, text]) {
+    for (const pattern of patterns) {
+      const match = sourceText.match(pattern);
+      const company = cleanHiringCompanyName(match?.[1]);
+      if (company) return company;
+    }
+  }
+  return '';
+}
+
+function deterministicHiringSignals(results = [], query = {}) {
+  if (!isHiringSignalQuery(query)) return [];
+  const country = query.country || countryCodeFromText(query.query) || 'MY';
+
+  return (Array.isArray(results) ? results : [])
+    .filter(result => result && !resultOutsideTargetCountry(result, country))
+    .map(result => {
+      const company = hiringCompanyFromResult(result);
+      if (!company) return null;
+      const title = String(result.title || '').replace(/\s+\|\s*LinkedIn.*$/i, '').trim();
+      const sourceUrl = result.link || result.url || '';
+      return {
+        company,
+        signal_type: query.signal_type || query.signal_id || 'hiring_sales_roles',
+        source_url: sourceUrl,
+        signal_summary: `${company} is hiring a sales or business development role in the target market: ${title}.`,
+        why_now: `${company} is adding sales capacity now, which creates an outbound scaling conversation.`,
+        angle: `Open with the hiring signal and ask how ${company} is covering pipeline while building the sales team.`,
+        signal_date: result.date || '',
+        raw_snippet: result.snippet || title,
+        confidence: 0.68,
+      };
+    })
+    .filter(Boolean);
+}
+
 function mergeExtractedSignalSets(primary = [], fallback = []) {
   const merged = [];
   const seen = new Set();
@@ -967,7 +1104,10 @@ async function extractSignalsFromResults(clientId, results, queryContext = {}, g
   const signal_type = query.signal_type || 'buying_signal';
   const extractionGuidance = signalExtractionGuidance(query);
   const agentKey = signalExtractionAgent(query);
-  const deterministicSignals = deterministicPublicationSignals(results, query);
+  const deterministicSignals = mergeExtractedSignalSets(
+    deterministicPublicationSignals(results, query),
+    deterministicHiringSignals(results, query)
+  );
 
   const snippetsForBudgetedAgent = results.map((r, i) =>
     `[${i + 1}] ${r.title}\n${r.snippet}\nURL: ${r.link}${r.date ? `\nDate: ${r.date}` : ''}`
@@ -1472,6 +1612,7 @@ module.exports = {
     normaliseExtractedSignals,
     extractedSignalItems,
     deterministicPublicationSignals,
+    deterministicHiringSignals,
     mergeExtractedSignalSets,
     signalQuerySetHash,
     signalQueryWindow,
