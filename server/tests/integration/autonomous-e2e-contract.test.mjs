@@ -78,6 +78,10 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(kickoffBody).toContain('sourceLeadsOnDemand(clientId');
     expect(kickoffBody).not.toContain("sourceMode: 'daily_web_linkedin_topup'");
     expect(kickoffBody).toContain('maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP');
+    expect(kickoffBody).toContain('if (poolLeads.length > 0)');
+    expect(kickoffBody).toContain('if (passingIds.length > 0)');
+    expect(kickoffBody).toContain('limit: passingIds.length');
+    expect(kickoffBody).not.toContain('Math.min(draftSize, 5)');
     expect(kickoffBody).toContain("'daily_web_linkedin_topup_deduped'");
     expect(kickoffBody).toContain("'daily_web_linkedin_topup_empty'");
     expect(kickoffBody).toContain('const kickoffRunStartedAt = options.kickoffRunStartedAt || new Date()');

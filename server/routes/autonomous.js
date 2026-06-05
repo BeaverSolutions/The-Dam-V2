@@ -320,7 +320,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
           [client_id, poolLimit]
         );
 
-        if (poolLeads.length >= 5) {
+        if (poolLeads.length > 0) {
           usedDbPool = true;
           console.log(`[chat] DB pool has ${poolLeads.length} leads — using pool instead of fresh research`);
           response.reply = `Found ${poolLeads.length} leads in the database. Processing through Sales → Enforcer now. No fresh research needed.`;
@@ -2260,7 +2260,7 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         [clientId, draftSize]
       );
 
-      if (poolLeads.length >= Math.min(draftSize, 5)) {
+      if (poolLeads.length > 0) {
         // 2026-05-06: Re-validate legacy pool leads against current applyIcpV2Filter.
         // Migration 061's permissive backfill grandfathered every linkedin_url lead to
         // Tier B without re-running the gate, so legacy MNC junk (dentsu, IPG Mediabrands,
@@ -2309,7 +2309,7 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
           }
         }
 
-        if (passingIds.length >= Math.min(draftSize, 5)) {
+        if (passingIds.length > 0) {
           console.log(`[Autonomous] DB pool has ${passingIds.length} ICP-passing leads (after audit) — using pool instead of cold research`);
           await logAction(clientId, 'director', 'db_pool_draw', 'system', null, {
             batch, pool_size: passingIds.length, draft_size: draftSize, audited_out: auditRejects.length,
@@ -2319,7 +2319,7 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
             plan_id: uuidv4(),
             command: `DB-POOL BATCH: Process ${passingIds.length} pre-researched leads from the lead pool. These are already verified and saved. Draft outreach using any signal/angle data in their metadata. Do NOT re-run research.`,
             batchIndex: batch - 1,
-            limit: draftSize,
+            limit: passingIds.length,
             use_existing_leads: passingIds,
             allowPaidSignal: false,
             sourceMode: 'daily_db_pool',

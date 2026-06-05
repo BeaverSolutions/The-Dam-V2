@@ -120,6 +120,8 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
     expect(chatBody).toContain('pipeline_traces pt');
     expect(chatBody).toContain("leadSelectionFeedbackExclusionSql('leads')");
     expect(chatBody).toContain("'linkedin_requested', 'awaiting_accept'");
+    expect(chatBody).toContain('if (poolLeads.length > 0)');
+    expect(chatBody).not.toContain('poolLeads.length >= 5');
     expect(chatBody).toContain('limit: poolLeads.length');
     expect(chatBody).toContain('allowPaidSignal: false');
     expect(chatBody).toContain("sourceMode: 'chat_db_pool'");
