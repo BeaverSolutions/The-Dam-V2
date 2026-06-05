@@ -52,9 +52,12 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     const onDemandBody = functionBody(dbBuilderSource, 'async function sourceLeadsOnDemand', 'module.exports');
 
     expect(onDemandBody).not.toContain('sourceLeadsViaVP');
-    expect(onDemandBody).toContain('researchModule.researchLeads');
+    expect(onDemandBody).toContain('runSignalHunt');
+    expect(onDemandBody).toContain('saveSignalLeads');
+    expect(onDemandBody).toContain("'on_demand_signal_first_complete'");
+    expect(onDemandBody.indexOf('runSignalHunt')).toBeLessThan(onDemandBody.indexOf('researchModule.researchLeads'));
     expect(onDemandBody).toContain('maxPaidQueries');
-    expect(onDemandBody).toContain('web_linkedin_hunter_millionverifier');
+    expect(onDemandBody).toContain('signal_hunt_contact_gate');
     expect(signalHuntSource).toContain('MAX_SIGNAL_QUERIES_PER_RUN');
     expect(signalHuntSource).toContain('maxPaidQueries');
     expect(signalHuntSource).toContain('blockedByRepeatedZeroQuerySet');
@@ -72,8 +75,9 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(kickoffBody).toContain('const DAILY_WEB_LINKEDIN_SIGNAL_CAP');
     expect(kickoffBody).toContain("sourceMode: 'daily_db_pool'");
     expect(kickoffBody).toContain('allowPaidSignal: false');
-    expect(kickoffBody).toContain("sourceMode: 'daily_web_linkedin_topup'");
-    expect(kickoffBody).toContain('maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP');
+    expect(kickoffBody).toContain('sourceLeadsOnDemand(clientId');
+    expect(kickoffBody).not.toContain("sourceMode: 'daily_web_linkedin_topup'");
+    expect(kickoffBody).toContain('maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP');
     expect(kickoffBody).toContain("'daily_web_linkedin_topup_deduped'");
     expect(kickoffBody).toContain("'daily_web_linkedin_topup_empty'");
     expect(kickoffBody).toContain('const kickoffRunStartedAt = options.kickoffRunStartedAt || new Date()');

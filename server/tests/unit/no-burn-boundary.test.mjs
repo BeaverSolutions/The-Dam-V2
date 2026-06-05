@@ -75,14 +75,15 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
   it('daily web/LinkedIn top-up is explicit, capped, and one-attempt', () => {
     expect(autonomousSource).toContain('DAILY_WEB_LINKEDIN_SIGNAL_CAP');
     expect(autonomousSource).toContain('Number(process.env.DAILY_WEB_LINKEDIN_SIGNAL_CAP || 6)');
-    expect(autonomousSource).toContain("sourceMode: 'daily_web_linkedin_topup'");
-    expect(autonomousSource).toContain('maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP');
+    expect(autonomousSource).toContain('sourceLeadsOnDemand(clientId');
+    expect(autonomousSource).not.toContain("sourceMode: 'daily_web_linkedin_topup'");
+    expect(autonomousSource).toContain('maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP');
     expect(autonomousSource).toContain("'daily_web_linkedin_topup_empty'");
     expect(autonomousSource).toContain("'web_linkedin_topup_attempted'");
     expect(autonomousSource).toContain("'daily_web_linkedin_topup_deduped'");
     expect(autonomousSource).toContain("'one_topup_attempt_per_kickoff'");
-    expect(agentsSource).toContain("'daily_web_linkedin_topup_already_attempted'");
-    expect(agentsSource).toContain("'one_topup_attempt_per_myt_day'");
+    expect(dbBuilderSource).toContain("'on_demand_signal_first_complete'");
+    expect(dbBuilderSource).toContain("'signal_hunt_topup'");
   });
 
   it('controlled existing-lead runs do not run pre-draft open-web personalization when paid signal is disabled', () => {

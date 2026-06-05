@@ -74,7 +74,10 @@ describe('Research Beaver decision-maker and contact enrichment order', () => {
     const saveLeadBody = dbBuilderSource.slice(saveLeadStart, dbBuilderSource.indexOf('// ── Source Leads', saveLeadStart));
 
     expect(onDemandBody).not.toContain('sourceLeadsViaVP');
-    expect(onDemandBody).toContain('source_order: \'web_linkedin_hunter_millionverifier\'');
+    expect(onDemandBody).toContain('runSignalHunt');
+    expect(onDemandBody).toContain('saveSignalLeads');
+    expect(onDemandBody).toContain('source_order: \'signal_hunt_contact_gate\'');
+    expect(onDemandBody.indexOf('runSignalHunt')).toBeLessThan(onDemandBody.indexOf('researchModule.researchLeads'));
     expect(saveLeadBody).toContain('contactGate.tryPersistSourcedLead');
     expect(saveLeadBody).toContain('signal_package');
     expect(pipelineSource).not.toContain('vpService');

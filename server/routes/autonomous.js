@@ -2141,14 +2141,11 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
           });
           let topupResult = null;
           try {
-            topupResult = await directorExecute(clientId, {
-              plan_id: uuidv4(),
-              command: '',
-              batchIndex: batch - 1,
-              limit: Math.min(Math.max(emailGap, linkedinGap), BATCH_SIZE),
-              allowPaidSignal: true,
-              sourceMode: 'daily_web_linkedin_topup',
-              maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+            const { sourceLeadsOnDemand } = require('../services/dbBuilder');
+            topupResult = await sourceLeadsOnDemand(clientId, {
+              neededChannel: emailGap > 0 ? 'email' : 'linkedin',
+              batchSize: Math.min(Math.max(emailGap, linkedinGap), BATCH_SIZE),
+              maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
             });
           } catch (err) {
             console.warn('[Autonomous] Daily web/LinkedIn top-up failed before output verification:', err.message);
@@ -2160,11 +2157,11 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
               boundary: 'verify_even_after_topup_failure',
             });
           }
-          if (Number(topupResult?.leads_found || topupResult?.summary?.leads_found || 0) === 0) {
+          if (Number(topupResult?.saved || topupResult?.leads_found || topupResult?.summary?.leads_found || 0) === 0) {
             await logAction(clientId, 'director', 'daily_web_linkedin_topup_empty', 'system', null, {
               batch,
               cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
-              reason: topupResult?.summary?.blocker || topupResult?.summary?.reason || topupResult?.status || 'topup_failed_or_no_results',
+              reason: topupResult?.reason || topupResult?.summary?.blocker || topupResult?.summary?.reason || topupResult?.status || 'topup_failed_or_no_results',
               boundary: 'no_burn_zero_raw_stop',
             });
           }
@@ -2386,15 +2383,13 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         context: 'cold_research_fallback',
       });
       let topupError = null;
+      let topupResult = null;
       try {
-        await directorExecute(clientId, {
-          plan_id: uuidv4(),
-          command: '',
-          batchIndex: batch - 1,
-          limit: draftSize,
-          allowPaidSignal: true,
-          sourceMode: 'daily_web_linkedin_topup',
-          maxPaidSignalQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+        const { sourceLeadsOnDemand } = require('../services/dbBuilder');
+        topupResult = await sourceLeadsOnDemand(clientId, {
+          neededChannel: emailGap > 0 ? 'email' : 'linkedin',
+          batchSize: draftSize,
+          maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
         });
       } catch (err) {
         topupError = err;
@@ -2422,7 +2417,7 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         await logAction(clientId, 'director', 'daily_web_linkedin_topup_empty', 'system', null, {
           batch,
           cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
-          reason: topupError?.message || 'no_new_saved_leads',
+          reason: topupError?.message || topupResult?.reason || 'no_new_saved_leads',
           boundary: 'no_burn_zero_raw_stop',
         });
         await logAction(clientId, 'director', 'research_pool_exhausted', 'system', null, { batch, liveSent, target });

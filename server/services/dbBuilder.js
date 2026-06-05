@@ -1238,7 +1238,7 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
   // Autonomous policy (2026-06-02): VP is manual CSV/subscribed-client only.
   // Beaver autonomous sourcing is web/LinkedIn discovery first, then downstream
   // email enrichment uses Hunter before MillionVerifier pattern verification.
-  const researchModule = require('./research');
+  const { runSignalHunt, saveSignalLeads } = require('./signalHunt');
 
   const icpMemory = await loadCanonicalIcp(clientId);
   if (!icpMemory) {
@@ -1246,19 +1246,92 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
     return { saved: 0, reason: 'no_icp_memory' };
   }
 
-  const patterns = await loadEmailPatterns(clientId);
+  const legacyResearchFallbackEnabled = process.env.DB_BUILDER_LEGACY_RESEARCH_FALLBACK_ENABLED === 'true';
+  const paidQueryCap = Math.max(0, Math.floor(Number(maxPaidQueries) || 0));
 
+  try {
+    const signalLeads = await runSignalHunt(clientId, {
+      maxLeads: batchSize,
+      icpMemory,
+      icp: icpMemory,
+      maxPaidQueries: paidQueryCap,
+      plan_id: 'kickoff_on_demand_topup',
+    });
+    const savedSignalLeads = await saveSignalLeads(clientId, signalLeads);
+    const saved = Array.isArray(savedSignalLeads) ? savedSignalLeads.length : 0;
+
+    await logsService.createLog(clientId, {
+      agent: 'research_beaver',
+      action: 'on_demand_signal_first_complete',
+      target_type: 'system',
+      metadata: {
+        trigger: 'pool_dry_kickoff',
+        mode: 'web_linkedin_topup',
+        source: 'signal_hunt',
+        neededChannel,
+        found: signalLeads.length,
+        saved,
+        save_stats: savedSignalLeads?.saveStats || null,
+        maxPaidQueries: paidQueryCap,
+        legacy_research_fallback_enabled: legacyResearchFallbackEnabled,
+      },
+    });
+
+    await logsService.createLog(clientId, {
+      agent: 'research_beaver',
+      action: 'on_demand_sourcing_complete',
+      target_type: 'system',
+      metadata: {
+        trigger: 'pool_dry_kickoff',
+        mode: 'web_linkedin_topup',
+        source: 'signal_hunt',
+        source_order: 'signal_hunt_contact_gate',
+        neededChannel,
+        found: signalLeads.length,
+        saved,
+        save_stats: savedSignalLeads?.saveStats || null,
+        maxPaidQueries: paidQueryCap,
+        fallback_skipped_reason: saved > 0 ? 'signal_first_saved' : (legacyResearchFallbackEnabled ? null : 'legacy_research_disabled'),
+      },
+    });
+
+    if (saved > 0 || !legacyResearchFallbackEnabled) {
+      const health = await checkDbHealth(clientId);
+      logger.info({ msg: '[db-builder] on-demand signal-first complete', found: signalLeads.length, saved, pool_email: health.withEmail });
+      return { saved, health, reason: saved > 0 ? 'signal_hunt_topup' : 'signal_hunt_no_results' };
+    }
+  } catch (err) {
+    logger.warn({ msg: '[db-builder] on-demand signal hunt failed', err: err.message });
+    await logsService.createLog(clientId, {
+      agent: 'research_beaver',
+      action: 'on_demand_signal_first_error',
+      target_type: 'system',
+      metadata: {
+        trigger: 'pool_dry_kickoff',
+        mode: 'web_linkedin_topup',
+        neededChannel,
+        error: err.message,
+        maxPaidQueries: paidQueryCap,
+      },
+    }).catch(() => {});
+    if (!legacyResearchFallbackEnabled) {
+      return { saved: 0, reason: 'signal_hunt_error' };
+    }
+  }
+
+  const researchModule = require('./research');
+  const patterns = await loadEmailPatterns(clientId);
   let result;
   try {
     result = await researchModule.researchLeads(clientId, {
       icpMemory,
       targetCount: batchSize,
       batchIndex: Date.now(),
-      maxPaidQueries,
+      maxPaidQueries: paidQueryCap,
     });
   } catch (err) {
-    logger.warn({ msg: '[db-builder] on-demand research failed', err: err.message });
-    return { saved: 0, reason: 'research_error' };
+    logger.warn({ msg: '[db-builder] on-demand legacy research failed', err: err.message });
+    return { saved: 0, reason: 'legacy_research_error' };
   }
 
   const leads = result.leads || [];
@@ -1290,13 +1363,14 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
     metadata: {
       trigger: 'pool_dry_kickoff',
       mode: 'web_linkedin_topup',
+      source: 'legacy_research',
       source_order: 'web_linkedin_hunter_millionverifier',
       neededChannel,
       found: leads.length,
       saved,
       stage_stats: stageStats,
       blocker: result.diagnostics?.reason || null,
-      maxPaidQueries,
+      maxPaidQueries: paidQueryCap,
     },
   });
 
