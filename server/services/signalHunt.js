@@ -1012,6 +1012,16 @@ function resultOutsideTargetCountry(result = {}, country = 'MY') {
   return false;
 }
 
+function validSignalCompanyName(value = '') {
+  const company = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!company || company.length < 2 || company.length > 80) return false;
+  if (/^(?:MYR|RM|USD|\$)?\s*\d[\d,.]*(?:\+)?(?:\s|$)/i.test(company)) return false;
+  if (/\b(?:MYR|RM|USD)\s*\d[\d,.]*/i.test(company)) return false;
+  if (/^\d[\d,.]*(?:\+)?\s+.*\bjobs?\s+in\b/i.test(company)) return false;
+  if (/^(?:easy apply|top applicants|full[- ]time|on[- ]site|remote|hybrid)$/i.test(company)) return false;
+  return true;
+}
+
 function cleanHiringCompanyName(value = '') {
   let company = String(value || '')
     .replace(/\s+/g, ' ')
@@ -1027,9 +1037,8 @@ function cleanHiringCompanyName(value = '') {
     .replace(/\s+(?:in|at)\s+(?:Malaysia|Kuala Lumpur|Greater Kuala Lumpur|Singapore)\b.*$/i, '')
     .trim();
 
-  if (!company || company.length < 2 || company.length > 80) return '';
+  if (!validSignalCompanyName(company)) return '';
   if (/\b(linkedin|jobstreet|hiredly|indeed|glassdoor|jobs in india|indian pharma jobs|pharma jobs)\b/i.test(company)) return '';
-  if (/^(easy apply|top applicants|full[- ]time|on[- ]site|remote|hybrid)$/i.test(company)) return '';
   return company;
 }
 
@@ -1276,7 +1285,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       if (safeResults.length === 0) continue;
 
       const extracted = await extractSignalsFromResults(clientId, safeResults, q, geoText);
-      const validSignals = extracted.filter(s => s.company && s.confidence >= 0.5);
+      const validSignals = extracted.filter(s => s.company && validSignalCompanyName(s.company) && s.confidence >= 0.5);
 
       // Assign tier from the query config
       validSignals.forEach(s => {
@@ -1613,6 +1622,7 @@ module.exports = {
     extractedSignalItems,
     deterministicPublicationSignals,
     deterministicHiringSignals,
+    validSignalCompanyName,
     mergeExtractedSignalSets,
     signalQuerySetHash,
     signalQueryWindow,

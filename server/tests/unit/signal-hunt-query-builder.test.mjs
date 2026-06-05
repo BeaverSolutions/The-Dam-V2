@@ -751,6 +751,11 @@ describe('signal extraction helpers', () => {
         date: '1 week ago',
       },
       {
+        title: '15,000+ Sales jobs in Malaysia | LinkedIn',
+        link: 'https://www.linkedin.com/jobs/sales-jobs-malaysia',
+        snippet: 'Sales roles from MYR3,500 per month across Malaysia.',
+      },
+      {
         title: '(ASM) Area Sales Manager Pharma job vacancy at Delhi NCR and Jaipur in Tablets India',
         link: 'https://www.linkedin.com/jobs/view/4422053099',
         snippet: 'Indian Pharma Jobs - Pharma Jobs in India',
@@ -791,6 +796,12 @@ describe('signal extraction helpers', () => {
       source_url: 'https://example.com/go',
       confidence: 0.62,
     }]);
+  });
+
+  it('rejects salary and aggregate text as signal company names before lead lookup', () => {
+    expect(signalHunt._test.validSignalCompanyName('MYR3,500')).toBe(false);
+    expect(signalHunt._test.validSignalCompanyName('15,000+ Sales jobs in Malaysia')).toBe(false);
+    expect(signalHunt._test.validSignalCompanyName('Allura Asia')).toBe(true);
   });
 });
 
