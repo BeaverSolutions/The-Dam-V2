@@ -60,6 +60,26 @@ function signalQueryWindow(maxPaidQueries = null) {
   return Math.max(1, Math.min(MAX_SIGNAL_QUERY_WINDOW, Math.max(MAX_SIGNAL_QUERIES_PER_RUN, paidQueryBudget)));
 }
 
+function signalPaidBudgetSplit(maxPaidQueries = null, maxLeads = 1) {
+  if (maxPaidQueries === null || maxPaidQueries === undefined || maxPaidQueries === '') {
+    return { total: null, discovery: null, lookup: null };
+  }
+
+  const n = Number(maxPaidQueries);
+  if (!Number.isFinite(n) || n <= 0) {
+    return { total: 0, discovery: 0, lookup: 0 };
+  }
+
+  const total = Math.max(0, Math.floor(n));
+  const target = Math.max(1, Math.ceil(Number(maxLeads) || 1));
+  const lookup = Math.max(1, Math.min(target, Math.floor(total / 2)));
+  return {
+    total,
+    discovery: Math.max(0, total - lookup),
+    lookup,
+  };
+}
+
 async function blockedByRepeatedZeroQuerySet(clientId, queries = []) {
   const hash = signalQuerySetHash(queries);
   const key = `signal_hunt_zero_query_set_${klDateString()}_${hash}`;
@@ -575,17 +595,15 @@ async function loadSignalConfig(clientId, icp = {}, { maxPaidQueries = null } = 
   };
 }
 
-async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null, signalPlaybook = null } = {}) {
+async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null, maxLeads = 20, signalPlaybook = null } = {}) {
   let config = await loadSignalConfig(clientId, icp, { maxPaidQueries });
   config = applySignalPlaybookToConfig(config, signalPlaybook);
   const hash = signalQuerySetHash(config.queries);
   const key = `signal_hunt_zero_query_set_${klDateString()}_${hash}`;
-  const paidQueryBudget = Number.isFinite(Number(maxPaidQueries))
-    ? Math.max(0, Number(maxPaidQueries))
-    : null;
-  const executableQueryCount = paidQueryBudget === null
+  const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
+  const executableQueryCount = paidQueryBudget.discovery === null
     ? config.queries.length
-    : Math.min(config.queries.length, paidQueryBudget);
+    : Math.min(config.queries.length, paidQueryBudget.discovery);
   const { rows } = await pool.query(
     `SELECT content FROM agent_memory
      WHERE client_id = $1 AND agent = 'research_beaver' AND key = $2
@@ -609,7 +627,9 @@ async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null
     repeated_zero_blocked: rows.length > 0,
     previous_zero_output: rows[0]?.content || null,
     parser_version: SIGNAL_HUNT_PARSER_VERSION,
-    paid_query_budget: paidQueryBudget,
+    paid_query_budget: paidQueryBudget.total,
+    discovery_query_budget: paidQueryBudget.discovery,
+    lookup_query_budget: paidQueryBudget.lookup,
     total_queries: config.queries.length,
     executable_query_count: executableQueryCount,
     queries: config.queries.map(shapeQuery),
@@ -938,9 +958,9 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   const rawSample = [];
   let queriesRun = 0;
   let rawResultsTotal = 0;
-  let paidQueriesRemaining = Number.isFinite(Number(maxPaidQueries))
-    ? Math.max(0, Number(maxPaidQueries))
-    : null;
+  const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
+  let paidQueriesRemaining = paidQueryBudget.total;
+  let discoveryQueriesRun = 0;
   const consumePaidQuery = (units = 1) => {
     if (paidQueriesRemaining === null) return true;
     const needed = Math.max(1, Number(units) || 1);
@@ -952,6 +972,10 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   // Step 1: Run all signal queries in sequence (cost control)
   for (const q of config.queries) {
     if (allSignals.length >= maxLeads * 2) break; // 2x buffer — some will fail contact lookup
+    if (paidQueryBudget.discovery !== null && discoveryQueriesRun >= paidQueryBudget.discovery) {
+      console.log('[signalHunt] Discovery-query budget reached; reserving paid budget for decision-maker lookup');
+      break;
+    }
 
     await assertLlmBudgetOpen(clientId);
     if (!consumePaidQuery(1)) {
@@ -961,6 +985,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
 
     console.log(`[signalHunt] Running query: ${q.query}`);
     queriesRun++;
+    discoveryQueriesRun++;
     try {
       const country = q.country || 'MY';
       const geoText = countryNameFromCode(country);
@@ -1017,6 +1042,8 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         plan_id,
         query_source: config.query_source,
         queries_run: queriesRun,
+        discovery_query_budget: paidQueryBudget.discovery,
+        lookup_query_budget: paidQueryBudget.lookup,
         queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
         paid_query_budget_remaining: paidQueriesRemaining,
         raw_results_total: rawResultsTotal,
@@ -1142,6 +1169,8 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       plan_id,
       query_source: config.query_source,
       queries_run: queriesRun,
+      discovery_query_budget: paidQueryBudget.discovery,
+      lookup_query_budget: paidQueryBudget.lookup,
       queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
       paid_query_budget_remaining: paidQueriesRemaining,
       raw_results_total: rawResultsTotal,
@@ -1315,5 +1344,6 @@ module.exports = {
     mergeExtractedSignalSets,
     signalQuerySetHash,
     signalQueryWindow,
+    signalPaidBudgetSplit,
   },
 };

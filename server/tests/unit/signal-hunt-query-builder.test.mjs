@@ -287,6 +287,29 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(signalHunt._test.signalQueryWindow(17)).toBe(17);
   });
 
+  it('reserves bounded paid Signal Hunt budget for decision-maker lookup', () => {
+    expect(src).toContain('function signalPaidBudgetSplit(maxPaidQueries = null, maxLeads = 1)');
+    expect(src).toContain('discoveryQueriesRun >= paidQueryBudget.discovery');
+    expect(src).toContain('Discovery-query budget reached; reserving paid budget for decision-maker lookup');
+    expect(src).toContain('lookup_query_budget');
+
+    expect(signalHunt._test.signalPaidBudgetSplit(12, 20)).toEqual({
+      total: 12,
+      discovery: 6,
+      lookup: 6,
+    });
+    expect(signalHunt._test.signalPaidBudgetSplit(5, 20)).toEqual({
+      total: 5,
+      discovery: 3,
+      lookup: 2,
+    });
+    expect(signalHunt._test.signalPaidBudgetSplit(0, 20)).toEqual({
+      total: 0,
+      discovery: 0,
+      lookup: 0,
+    });
+  });
+
   it('logs raw-zero blockers and blocks repeated zero-output query sets per day', () => {
     expect(src).toContain('function signalQuerySetHash');
     expect(src).toContain('SIGNAL_HUNT_PARSER_VERSION');

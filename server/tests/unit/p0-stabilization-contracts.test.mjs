@@ -372,6 +372,21 @@ describe('P0 stabilization contracts', () => {
     expect(signalHunt).toContain('query_source: config.query_source');
   });
 
+  it('DB Builder deficit sourcing uses Signal Hunt first and gates legacy Research fallback', () => {
+    const dbBuilder = service('services/dbBuilder.js');
+    const sourceStart = dbBuilder.indexOf('async function sourceLeads');
+    const sourceEnd = dbBuilder.indexOf('// ── Main Loop', sourceStart);
+    const sourceBody = dbBuilder.slice(sourceStart, sourceEnd);
+
+    expect(sourceBody).toContain("require('./signalHunt')");
+    expect(sourceBody).toContain('runSignalHunt(clientId');
+    expect(sourceBody).toContain('saveSignalLeads(clientId');
+    expect(sourceBody).toContain("'db_signal_first_complete'");
+    expect(sourceBody).toContain("envInt('DB_BUILDER_SIGNAL_FIRST_QUERY_CAP', 12)");
+    expect(sourceBody).toContain("process.env.DB_BUILDER_LEGACY_RESEARCH_FALLBACK_ENABLED === 'true'");
+    expect(sourceBody.indexOf('runSignalHunt(clientId')).toBeLessThan(sourceBody.indexOf('researchModule.researchLeads(clientId'));
+  });
+
   it('autonomous routes require the internal key at router level', () => {
     const autonomous = service('routes/autonomous.js');
     expect(autonomous).toContain('router.use(requireInternalKey)');

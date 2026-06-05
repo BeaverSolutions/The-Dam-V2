@@ -463,6 +463,7 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
 
 async function sourceLeads(clientId, deficit, config) {
   // Lazy-load to avoid circular requires at startup
+  const { runSignalHunt, saveSignalLeads } = require('./signalHunt');
   const researchModule = require('./research');
 
   // Load canonical tenant ICP, falling back to director memory when needed.
@@ -487,6 +488,11 @@ async function sourceLeads(clientId, deficit, config) {
   );
 
   let totalSaved = 0;
+  const signalQueryCap = Math.max(
+    1,
+    Math.min(envInt('DB_BUILDER_SIGNAL_FIRST_QUERY_CAP', 12), config.batch_size || 20)
+  );
+  const legacyResearchFallbackEnabled = process.env.DB_BUILDER_LEGACY_RESEARCH_FALLBACK_ENABLED === 'true';
 
   // 2026-05-15: enrichContext was referenced by saveLead() below but never
   // defined in this scope — every cron batch threw ReferenceError, caught
@@ -510,6 +516,76 @@ async function sourceLeads(clientId, deficit, config) {
     }
 
     try {
+      const signalLeads = await runSignalHunt(clientId, {
+        maxLeads: config.batch_size,
+        icp: icpMemory,
+        maxPaidQueries: signalQueryCap,
+        plan_id: 'db_builder_deficit',
+      });
+      const savedSignalLeads = await saveSignalLeads(clientId, signalLeads);
+      const signalSaved = Array.isArray(savedSignalLeads) ? savedSignalLeads.length : 0;
+      totalSaved += signalSaved;
+
+      await logsService.createLog(clientId, {
+        agent: 'research_beaver',
+        action: 'db_signal_first_complete',
+        target_type: 'system',
+        metadata: {
+          batch: i + 1,
+          of: batchCount,
+          source: 'signal_hunt',
+          found: signalLeads.length,
+          saved: signalSaved,
+          save_stats: savedSignalLeads?.saveStats || null,
+          max_paid_queries: signalQueryCap,
+          legacy_research_fallback_enabled: legacyResearchFallbackEnabled,
+        },
+      });
+
+      if (signalSaved > 0 || !legacyResearchFallbackEnabled) {
+        await logsService.createLog(clientId, {
+          agent: 'research_beaver',
+          action: 'db_batch_complete',
+          target_type: 'system',
+          metadata: {
+            batch: i + 1,
+            of: batchCount,
+            source: 'signal_hunt',
+            found: signalLeads.length,
+            saved: signalSaved,
+            queries: signalQueryCap,
+            legacy_research_fallback_enabled: legacyResearchFallbackEnabled,
+            fallback_skipped_reason: signalSaved > 0 ? 'signal_first_saved' : 'legacy_research_disabled',
+          },
+        });
+
+        logger.info({
+          msg: '[db-builder] Signal-first batch complete',
+          batch: i + 1,
+          found: signalLeads.length,
+          saved: signalSaved,
+          legacy_research_fallback_enabled: legacyResearchFallbackEnabled,
+        });
+
+        // Brief pause between batches
+        if (i < batchCount - 1) {
+          await new Promise(r => setTimeout(r, 3000));
+        }
+        continue;
+      }
+
+      await logsService.createLog(clientId, {
+        agent: 'research_beaver',
+        action: 'db_signal_first_legacy_fallback',
+        target_type: 'system',
+        metadata: {
+          batch: i + 1,
+          of: batchCount,
+          reason: 'signal_first_saved_zero',
+          max_paid_queries: signalQueryCap,
+        },
+      });
+
       const result = await researchModule.researchLeads(clientId, {
         icpMemory,
         targetCount: config.batch_size,
@@ -534,6 +610,7 @@ async function sourceLeads(clientId, deficit, config) {
         metadata: {
           batch: i + 1,
           of: batchCount,
+          source: 'legacy_research',
           found: leads.length,
           saved: batchSaved,
           queries: result.queriesUsed?.length || 0,
