@@ -394,6 +394,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
       const signalPaidQueryCap = boundedChatSignalQueryCap(signalLimit);
       const plan = await previewSignalHuntPlan(client_id, {
         icp,
+        maxLeads: signalLimit,
         maxPaidQueries: signalPaidQueryCap,
       });
 

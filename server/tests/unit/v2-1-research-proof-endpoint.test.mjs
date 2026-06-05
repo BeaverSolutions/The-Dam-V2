@@ -44,12 +44,16 @@ describe('V2.1 research proof endpoint', () => {
     const start = chatBody.indexOf('Intent 4: SIGNAL HUNT');
     const end = chatBody.indexOf('Intent 5: RECENT REPLIES', start);
     const signalBranch = chatBody.slice(start, end);
+    const previewStart = signalBranch.indexOf('const plan = await previewSignalHuntPlan');
+    const previewEnd = signalBranch.indexOf('if (req.body?.allow_paid_signal_hunt', previewStart);
+    const previewBlock = signalBranch.slice(previewStart, previewEnd);
 
     expect(signalBranch).toContain('allow_paid_signal_hunt');
     expect(signalBranch).toContain('signal_hunt_paid_gate_required');
     expect(signalBranch).toContain('Math.min(');
     expect(signalBranch).toContain('5');
     expect(signalBranch).toContain('const signalPaidQueryCap = boundedChatSignalQueryCap(signalLimit)');
+    expect(previewBlock).toContain('maxLeads: signalLimit');
     expect(signalBranch).toContain('maxLeads: signalLimit');
     expect(signalBranch).toContain('maxPaidQueries: signalPaidQueryCap');
     expect(signalBranch).toContain('paid_query_cap: signalPaidQueryCap');
