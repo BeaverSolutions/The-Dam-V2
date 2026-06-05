@@ -391,9 +391,10 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
         Number(req.body?.signal_limit || req.body?.limit || parseRequestedLeadLimit(message, 5)) || 5,
         5
       ));
+      const signalPaidQueryCap = boundedChatSignalQueryCap(signalLimit);
       const plan = await previewSignalHuntPlan(client_id, {
         icp,
-        maxPaidQueries: signalLimit,
+        maxPaidQueries: signalPaidQueryCap,
       });
 
       if (req.body?.allow_paid_signal_hunt !== true) {
@@ -413,6 +414,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
       response.data = {
         mode: 'bounded_signal_hunt_research_only',
         requested_limit: signalLimit,
+        paid_query_cap: signalPaidQueryCap,
         query_plan: plan,
       };
 
@@ -422,7 +424,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
             const leads = await runSignalHunt(client_id, {
               maxLeads: signalLimit,
               icp,
-              maxPaidQueries: signalLimit,
+              maxPaidQueries: signalPaidQueryCap,
             });
             if (leads.length > 0) {
               const saved = await saveSignalLeads(client_id, leads);

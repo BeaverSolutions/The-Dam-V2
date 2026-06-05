@@ -39,7 +39,7 @@ describe('V2.1 research proof endpoint', () => {
     );
   });
 
-  it('keeps chat-triggered Signal Hunt behind an explicit paid gate and prevents auto-outreach', () => {
+  it('keeps chat-triggered Signal Hunt behind an explicit paid gate, uses bounded proof cap, and prevents auto-outreach', () => {
     const chatBody = routeBody('/chat');
     const start = chatBody.indexOf('Intent 4: SIGNAL HUNT');
     const end = chatBody.indexOf('Intent 5: RECENT REPLIES', start);
@@ -49,10 +49,13 @@ describe('V2.1 research proof endpoint', () => {
     expect(signalBranch).toContain('signal_hunt_paid_gate_required');
     expect(signalBranch).toContain('Math.min(');
     expect(signalBranch).toContain('5');
+    expect(signalBranch).toContain('const signalPaidQueryCap = boundedChatSignalQueryCap(signalLimit)');
     expect(signalBranch).toContain('maxLeads: signalLimit');
-    expect(signalBranch).toContain('maxPaidQueries: signalLimit');
+    expect(signalBranch).toContain('maxPaidQueries: signalPaidQueryCap');
+    expect(signalBranch).toContain('paid_query_cap: signalPaidQueryCap');
     expect(signalBranch).toContain('Research-only');
     expect(signalBranch).not.toContain('maxLeads: 20');
+    expect(signalBranch).not.toContain('maxPaidQueries: signalLimit');
     expect(signalBranch).not.toContain('directorExecute(client_id');
   });
 });
