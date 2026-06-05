@@ -2157,13 +2157,24 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
               boundary: 'verify_even_after_topup_failure',
             });
           }
-          if (Number(topupResult?.saved || topupResult?.leads_found || topupResult?.summary?.leads_found || 0) === 0) {
+          const topupSaved = Number(topupResult?.saved || topupResult?.leads_found || topupResult?.summary?.leads_found || 0);
+          if (topupSaved === 0) {
             await logAction(clientId, 'director', 'daily_web_linkedin_topup_empty', 'system', null, {
               batch,
               cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
               reason: topupResult?.reason || topupResult?.summary?.blocker || topupResult?.summary?.reason || topupResult?.status || 'topup_failed_or_no_results',
               boundary: 'no_burn_zero_raw_stop',
             });
+          } else {
+            await logAction(clientId, 'director', 'daily_web_linkedin_topup_success', 'system', null, {
+              batch,
+              cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+              saved: topupSaved,
+              health: topupResult?.health || null,
+              reason: topupResult?.reason || topupResult?.status || 'topup_saved',
+              boundary: 'topup_saved_retry_same_kickoff',
+            });
+            continue;
           }
         }
         break;
@@ -2423,6 +2434,14 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         await logAction(clientId, 'director', 'research_pool_exhausted', 'system', null, { batch, liveSent, target });
         break;
       }
+      await logAction(clientId, 'director', 'daily_web_linkedin_topup_success', 'system', null, {
+        batch,
+        cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+        saved: Math.max(0, parseInt(afterSaved) - parseInt(beforeSaved)),
+        reason: topupResult?.reason || topupResult?.status || 'topup_saved',
+        context: 'cold_research_fallback',
+        boundary: 'topup_saved_retry_next_batch',
+      });
     }
 
     if (batch < HARD_CEILING) {
@@ -2961,6 +2980,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
                     'generic_sourcing_disabled_skip',
                     'daily_web_linkedin_topup_failed',
                     'daily_web_linkedin_topup_empty',
+                    'daily_web_linkedin_topup_success',
                     'daily_web_linkedin_topup_deduped',
                     'research_pool_exhausted',
                     'kickoff_zero_output',

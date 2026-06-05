@@ -80,6 +80,14 @@ function signalPaidBudgetSplit(maxPaidQueries = null, maxLeads = 1) {
   };
 }
 
+function executableDiscoveryQueriesForBudget(queries = [], paidQueryBudget = {}) {
+  if (!Array.isArray(queries)) return [];
+  const discovery = paidQueryBudget?.discovery;
+  if (discovery === null || discovery === undefined) return queries;
+  const limit = Math.max(0, Math.floor(Number(discovery) || 0));
+  return queries.slice(0, limit);
+}
+
 async function blockedByRepeatedZeroQuerySet(clientId, queries = []) {
   const hash = signalQuerySetHash(queries);
   const key = `signal_hunt_zero_query_set_${klDateString()}_${hash}`;
@@ -276,10 +284,11 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
   const wantsAgency = /agency|digital|marketing|creative|media|advertising|content studio|pr firm/.test(joinedIndustries);
   const wantsTraining = /training|learning|l&d|coaching|skills|development/.test(joinedIndustries);
   const currentYear = new Date().getUTCFullYear();
-  const queries = [];
+  const agencyQueries = [];
+  const trainingQueries = [];
 
   if (wantsAgency && (code === 'MY' || code === 'SG')) {
-    queries.push({
+    agencyQueries.push({
       query: `site:marketing-interactive.com "${name}" ("social media agency" OR "PR agency" OR "creative agency" OR "media agency") ("appointed" OR "retainer" OR "pitch") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
       signal_id: 'agency_client_win_or_growth',
@@ -288,7 +297,7 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
       tier: 'P1',
       country: code,
     });
-    queries.push({
+    agencyQueries.push({
       query: `site:marketing-interactive.com "${name}" ("agency" OR "communications") ("launches" OR "expands" OR "enters" OR "names new leader") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
       signal_id: 'agency_client_win_or_growth',
@@ -297,7 +306,7 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
       tier: 'P1',
       country: code,
     });
-    queries.push({
+    agencyQueries.push({
       query: `site:marketingmagazine.com.my "${name}" ("agency" OR "communications") ("appoints" OR "promotes" OR "general manager" OR "CEO") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
       signal_id: 'agency_client_win_or_growth',
@@ -306,7 +315,7 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
       tier: 'P1',
       country: code,
     });
-    queries.push({
+    agencyQueries.push({
       query: `site:marketingmagazine.com.my "${name}" ("agency" OR "communications") ("wins" OR "appointed" OR "retainer" OR "launches") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
       signal_id: 'agency_client_win_or_growth',
@@ -315,7 +324,7 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
       tier: 'P1',
       country: code,
     });
-    queries.push({
+    agencyQueries.push({
       query: `site:campaignasia.com "${name}" ("agency" OR "independent agency" OR "growth" OR "40 Under 40") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
       signal_id: 'agency_client_win_or_growth',
@@ -327,7 +336,7 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
   }
 
   if (wantsTraining && code === 'MY') {
-    queries.push({
+    trainingQueries.push({
       query: `site:digitalnewsasia.com "${name}" ("training" OR "upskilling" OR "skills") ("launches" OR "expands" OR "partners") ${currentYear}`,
       signal_type: 'training_growth_signal',
       signal_id: 'training_growth_publication',
@@ -338,6 +347,12 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
     });
   }
 
+  const queries = [];
+  const maxLength = Math.max(agencyQueries.length, trainingQueries.length);
+  for (let i = 0; i < maxLength; i++) {
+    if (agencyQueries[i]) queries.push(agencyQueries[i]);
+    if (trainingQueries[i]) queries.push(trainingQueries[i]);
+  }
   return queries;
 }
 
@@ -550,7 +565,17 @@ async function loadSignalConfig(clientId, icp = {}, { maxPaidQueries = null } = 
   let content = null;
   try {
     const { rows } = await pool.query(
-      `SELECT content FROM agent_memory WHERE client_id = $1 AND key = $2 LIMIT 1`,
+      `SELECT content FROM agent_memory
+       WHERE client_id = $1 AND key = $2
+       ORDER BY
+         CASE agent
+           WHEN 'research_beaver' THEN 0
+           WHEN 'captain_beaver' THEN 1
+           WHEN 'director' THEN 2
+           ELSE 3
+         END,
+         updated_at DESC
+       LIMIT 1`,
       [clientId, SIGNAL_HUNT_CONFIG_KEY]
     );
     content = rows[0]?.content || null;
@@ -598,12 +623,11 @@ async function loadSignalConfig(clientId, icp = {}, { maxPaidQueries = null } = 
 async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null, maxLeads = 20, signalPlaybook = null } = {}) {
   let config = await loadSignalConfig(clientId, icp, { maxPaidQueries });
   config = applySignalPlaybookToConfig(config, signalPlaybook);
-  const hash = signalQuerySetHash(config.queries);
-  const key = `signal_hunt_zero_query_set_${klDateString()}_${hash}`;
   const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
-  const executableQueryCount = paidQueryBudget.discovery === null
-    ? config.queries.length
-    : Math.min(config.queries.length, paidQueryBudget.discovery);
+  const executableDiscoveryQueries = executableDiscoveryQueriesForBudget(config.queries, paidQueryBudget);
+  const hash = signalQuerySetHash(executableDiscoveryQueries);
+  const key = `signal_hunt_zero_query_set_${klDateString()}_${hash}`;
+  const executableQueryCount = executableDiscoveryQueries.length;
   const { rows } = await pool.query(
     `SELECT content FROM agent_memory
      WHERE client_id = $1 AND agent = 'research_beaver' AND key = $2
@@ -633,7 +657,7 @@ async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null
     total_queries: config.queries.length,
     executable_query_count: executableQueryCount,
     queries: config.queries.map(shapeQuery),
-    executable_queries: config.queries.slice(0, executableQueryCount).map(shapeQuery),
+    executable_queries: executableDiscoveryQueries.map(shapeQuery),
   };
 }
 
@@ -947,7 +971,9 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
 
   let config = await loadSignalConfig(clientId, icp, { maxPaidQueries });
   config = applySignalPlaybookToConfig(config, signalPlaybook);
-  const zeroSet = await blockedByRepeatedZeroQuerySet(clientId, config.queries);
+  const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
+  const executableDiscoveryQueries = executableDiscoveryQueriesForBudget(config.queries, paidQueryBudget);
+  const zeroSet = await blockedByRepeatedZeroQuerySet(clientId, executableDiscoveryQueries);
   if (zeroSet.blocked) {
     console.log('[signalHunt] Blocking repeated zero-output query set for today');
     return [];
@@ -958,7 +984,6 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   const rawSample = [];
   let queriesRun = 0;
   let rawResultsTotal = 0;
-  const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
   let paidQueriesRemaining = paidQueryBudget.total;
   let discoveryQueriesRun = 0;
   const consumePaidQuery = (units = 1) => {
@@ -1030,7 +1055,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     await rememberZeroQuerySet(clientId, {
       key: zeroSet.key,
       hash: zeroSet.hash,
-      queries: config.queries,
+      queries: executableDiscoveryQueries,
       queriesRun,
       rawResultsTotal,
       blocker,
@@ -1190,7 +1215,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     await rememberZeroQuerySet(clientId, {
       key: zeroSet.key,
       hash: zeroSet.hash,
-      queries: config.queries,
+      queries: executableDiscoveryQueries,
       queriesRun,
       rawResultsTotal,
       blocker: 'contacts_zero',
@@ -1345,5 +1370,6 @@ module.exports = {
     signalQuerySetHash,
     signalQueryWindow,
     signalPaidBudgetSplit,
+    executableDiscoveryQueriesForBudget,
   },
 };

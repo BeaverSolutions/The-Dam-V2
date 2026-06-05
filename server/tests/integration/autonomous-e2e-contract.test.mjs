@@ -138,6 +138,24 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(kickoffBody.slice(secondTopupIdx, verifyIdx)).toContain('catch (err)');
   });
 
+  it('successful daily web top-up is consumed by the same kickoff run', () => {
+    const kickoffBody = functionBody(autonomousSource, 'async function _runAutonomousKickoffInner', '/**\n * Post-kickoff verification');
+    const poolDryTopupStart = kickoffBody.indexOf("context: 'pool_dry_channel_target'");
+    const genericEnabledBranch = kickoffBody.indexOf('if (poolDryResearchAttempts >= MAX_POOL_DRY_RESEARCH)', poolDryTopupStart);
+    const poolDryTopupBranch = kickoffBody.slice(poolDryTopupStart, genericEnabledBranch);
+    const successIdx = poolDryTopupBranch.indexOf("'daily_web_linkedin_topup_success'");
+    const continueIdx = poolDryTopupBranch.indexOf('continue;', successIdx);
+    const terminalBreakIdx = poolDryTopupBranch.lastIndexOf('break;');
+
+    expect(poolDryTopupStart).toBeGreaterThan(-1);
+    expect(poolDryTopupBranch).toContain('const topupSaved');
+    expect(successIdx).toBeGreaterThan(-1);
+    expect(continueIdx).toBeGreaterThan(successIdx);
+    expect(terminalBreakIdx).toBeGreaterThan(continueIdx);
+    expect(indexSource).toContain("'daily_web_linkedin_topup_success'");
+    expect(autonomousSource).toContain("'daily_web_linkedin_topup_success'");
+  });
+
   it('system-health reports exact kickoff-selectable pool capacity, not raw lead stock', () => {
     const healthBody = functionBody(autonomousSource, "router.get('/system-health'", '/* ─── POST /api/autonomous/mark-linkedin-sent');
 

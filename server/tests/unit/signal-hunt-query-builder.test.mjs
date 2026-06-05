@@ -79,10 +79,11 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
   const wantsAgency = /agency|digital|marketing|creative|media|advertising|content studio|pr firm/.test(joinedIndustries);
   const wantsTraining = /training|learning|l&d|coaching|skills|development/.test(joinedIndustries);
   const currentYear = new Date().getUTCFullYear();
-  const queries = [];
+  const agencyQueries = [];
+  const trainingQueries = [];
 
   if (wantsAgency && (code === 'MY' || code === 'SG')) {
-    queries.push({
+    agencyQueries.push({
       query: `site:marketing-interactive.com "${name}" ("social media agency" OR "PR agency" OR "creative agency" OR "media agency") ("appointed" OR "retainer" OR "pitch") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
       signal_id: 'agency_client_win_or_growth',
@@ -91,7 +92,7 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
       tier: 'P1',
       country: code,
     });
-    queries.push({
+    agencyQueries.push({
       query: `site:marketing-interactive.com "${name}" ("agency" OR "communications") ("launches" OR "expands" OR "enters" OR "names new leader") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
       signal_id: 'agency_client_win_or_growth',
@@ -100,7 +101,7 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
       tier: 'P1',
       country: code,
     });
-    queries.push({
+    agencyQueries.push({
       query: `site:marketingmagazine.com.my "${name}" ("agency" OR "communications") ("appoints" OR "promotes" OR "general manager" OR "CEO") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
       signal_id: 'agency_client_win_or_growth',
@@ -109,7 +110,7 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
       tier: 'P1',
       country: code,
     });
-    queries.push({
+    agencyQueries.push({
       query: `site:marketingmagazine.com.my "${name}" ("agency" OR "communications") ("wins" OR "appointed" OR "retainer" OR "launches") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
       signal_id: 'agency_client_win_or_growth',
@@ -118,7 +119,7 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
       tier: 'P1',
       country: code,
     });
-    queries.push({
+    agencyQueries.push({
       query: `site:campaignasia.com "${name}" ("agency" OR "independent agency" OR "growth" OR "40 Under 40") ${currentYear}`,
       signal_type: 'industry_publication_agency_signal',
       signal_id: 'agency_client_win_or_growth',
@@ -130,7 +131,7 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
   }
 
   if (wantsTraining && code === 'MY') {
-    queries.push({
+    trainingQueries.push({
       query: `site:digitalnewsasia.com "${name}" ("training" OR "upskilling" OR "skills") ("launches" OR "expands" OR "partners") ${currentYear}`,
       signal_type: 'training_growth_signal',
       signal_id: 'training_growth_publication',
@@ -141,6 +142,12 @@ function sourceAwareQueriesForCountry(country = {}, industries = []) {
     });
   }
 
+  const queries = [];
+  const maxLength = Math.max(agencyQueries.length, trainingQueries.length);
+  for (let i = 0; i < maxLength; i++) {
+    if (agencyQueries[i]) queries.push(agencyQueries[i]);
+    if (trainingQueries[i]) queries.push(trainingQueries[i]);
+  }
   return queries;
 }
 function industriesFromIcp(icp = {}) {
@@ -237,14 +244,15 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       industries: ['digital agencies', 'marketing agencies', 'B2B corporate training'],
       geographies: 'Malaysia, Singapore',
     });
-    const firstFive = queries.slice(0, 5).map(q => q.query).join('\n');
+    const firstSix = queries.slice(0, 6).map(q => q.query).join('\n');
     const currentYear = String(new Date().getUTCFullYear());
 
-    expect(firstFive).toContain('site:marketing-interactive.com');
-    expect(firstFive).toContain('site:marketingmagazine.com.my');
-    expect(firstFive).toContain('site:campaignasia.com');
-    expect(firstFive).toContain(currentYear);
-    expect(firstFive).toMatch(/appointed|retainer|pitch|launches|expands|names new leader/);
+    expect(firstSix).toContain('site:marketing-interactive.com');
+    expect(firstSix).toContain('site:marketingmagazine.com.my');
+    expect(firstSix).toContain('site:campaignasia.com');
+    expect(firstSix).toContain('site:digitalnewsasia.com');
+    expect(firstSix).toContain(currentYear);
+    expect(firstSix).toMatch(/appointed|retainer|pitch|launches|expands|names new leader|upskilling/);
     expect(queries.slice(0, 3).every(q => q.source_channel === 'industry_publication')).toBe(true);
   });
 
@@ -310,6 +318,51 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     });
   });
 
+  it('scopes repeated-zero protection to executable discovery queries only', () => {
+    expect(typeof signalHunt._test.executableDiscoveryQueriesForBudget).toBe('function');
+    const plannedQueries = [
+      { query: 'agency query 1', signal_type: 'agency', country: 'MY' },
+      { query: 'agency query 2', signal_type: 'agency', country: 'MY' },
+      { query: 'agency query 3', signal_type: 'agency', country: 'MY' },
+      { query: 'training query 1', signal_type: 'training', country: 'MY' },
+      { query: 'training query 2', signal_type: 'training', country: 'MY' },
+    ];
+    const paidBudget = signalHunt._test.signalPaidBudgetSplit(6, 20);
+    const executable = signalHunt._test.executableDiscoveryQueriesForBudget(plannedQueries, paidBudget);
+
+    expect(executable.map(q => q.query)).toEqual(['agency query 1', 'agency query 2', 'agency query 3']);
+    expect(signalHunt._test.signalQuerySetHash(executable)).not.toBe(
+      signalHunt._test.signalQuerySetHash(plannedQueries)
+    );
+  });
+
+  it('diversifies the first capped discovery window across agency and training ICP surfaces', () => {
+    const activeIcp = {
+      industries: [
+        'B2B corporate training',
+        'professional training',
+        'L&D providers',
+        'executive coaching',
+        'sales coaching',
+        'skills development',
+        'digital agencies',
+        'marketing agencies',
+        'content studios',
+        'PR firms',
+        'creative studios',
+      ],
+      geographies: 'Malaysia, Singapore, United States',
+    };
+    const queries = signalHunt._test.buildSignalQueriesFromIcp(activeIcp);
+    const paidBudget = signalHunt._test.signalPaidBudgetSplit(6, 20);
+    const executable = queries.slice(0, paidBudget.discovery);
+    const combined = executable.map(q => `${q.signal_type} ${q.query}`).join('\n');
+
+    expect(executable).toHaveLength(3);
+    expect(combined).toMatch(/agency|marketing-interactive|marketingmagazine|campaignasia/i);
+    expect(combined).toMatch(/training|upskilling|skills|digitalnewsasia/i);
+  });
+
   it('logs raw-zero blockers and blocks repeated zero-output query sets per day', () => {
     expect(src).toContain('function signalQuerySetHash');
     expect(src).toContain('SIGNAL_HUNT_PARSER_VERSION');
@@ -333,6 +386,12 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).toContain('executable_queries');
     expect(src).toContain('repeated_zero_blocked');
     expect(src).toContain('previewSignalHuntPlan');
+  });
+
+  it('loads stored Signal Hunt config deterministically when multiple agents share the key', () => {
+    expect(src).toContain("WHEN 'research_beaver' THEN 0");
+    expect(src).toContain("WHEN 'captain_beaver' THEN 1");
+    expect(src).toContain('updated_at DESC');
   });
 
   it('saveSignalLeads routes through contactGate.tryPersistSourcedLead', () => {
