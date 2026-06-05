@@ -124,26 +124,100 @@ function defaultStopRules() {
   };
 }
 
+const DEFAULT_BUYING_SIGNAL_CONFIGS = [
+  {
+    id: 'hiring_sales_roles',
+    family: 'hiring_capability_build',
+    priority: 1,
+    source_channels: ['linkedin_jobs', 'company_careers', 'job_boards', 'web_search'],
+    decision_maker_strategy: ['founder', 'ceo', 'managing_director', 'head_of_sales'],
+  },
+  {
+    id: 'expansion_markets',
+    family: 'expansion_growth',
+    priority: 2,
+    source_channels: ['company_news', 'press', 'company_careers', 'web_search'],
+    decision_maker_strategy: ['founder', 'ceo', 'managing_director', 'head_of_sales'],
+  },
+  {
+    id: 'fresh_capital',
+    family: 'capital_budget_event',
+    priority: 3,
+    source_channels: ['news', 'press', 'investor_pages', 'company_blog', 'web_search'],
+    decision_maker_strategy: ['founder', 'ceo', 'cfo', 'head_of_growth'],
+  },
+  {
+    id: 'active_ads',
+    family: 'active_gtm_spend',
+    priority: 4,
+    source_channels: ['meta_ad_library', 'google_ads_transparency', 'landing_pages', 'web_search'],
+    decision_maker_strategy: ['founder', 'ceo', 'head_of_marketing', 'head_of_sales'],
+  },
+  {
+    id: 'vendor_research',
+    family: 'category_vendor_research',
+    priority: 5,
+    source_channels: ['review_sites', 'web_search'],
+    decision_maker_strategy: ['founder', 'ceo', 'head_of_operations', 'head_of_sales'],
+  },
+  {
+    id: 'stack_change',
+    family: 'technology_stack_change',
+    priority: 6,
+    source_channels: ['job_descriptions', 'company_careers', 'website_integrations', 'docs', 'web_search'],
+    decision_maker_strategy: ['founder', 'ceo', 'head_of_operations', 'head_of_sales'],
+  },
+  {
+    id: 'leadership_change',
+    family: 'leadership_org_change',
+    priority: 7,
+    source_channels: ['public_posts', 'company_news', 'press', 'web_search'],
+    decision_maker_strategy: ['new_leader', 'founder', 'ceo', 'head_of_sales'],
+  },
+  {
+    id: 'regulatory_pressure',
+    family: 'regulatory_deadline_pressure',
+    priority: 8,
+    source_channels: ['government_pages', 'industry_bodies', 'public_notices', 'web_search'],
+    decision_maker_strategy: ['founder', 'ceo', 'head_of_operations', 'compliance_lead'],
+  },
+  {
+    id: 'pain_signal',
+    family: 'pain_friction_evidence',
+    priority: 9,
+    source_channels: ['social_posts', 'reviews', 'founder_posts', 'support_pages', 'web_search'],
+    decision_maker_strategy: ['founder', 'ceo', 'head_of_operations', 'head_of_sales'],
+  },
+  {
+    id: 'event_presence',
+    family: 'event_market_presence',
+    priority: 10,
+    source_channels: ['event_pages', 'sponsor_lists', 'webinars', 'conference_sites', 'web_search'],
+    decision_maker_strategy: ['founder', 'ceo', 'head_of_marketing', 'head_of_sales'],
+  },
+];
+
 function getDefaultBuyingSignalsForTenant(tenant = {}) {
   const icp = tenant.icp || {};
-  return [
-    {
-      id: 'hiring_sales_roles',
-      family: 'hiring_capability_build',
+  return DEFAULT_BUYING_SIGNAL_CONFIGS.map(config => {
+    const familyDefaults = SIGNAL_LIBRARY[config.family] || {};
+    return {
+      id: config.id,
+      family: config.family,
       enabled: true,
-      priority: 1,
-      source_channels: [...SIGNAL_LIBRARY.hiring_capability_build.source_channels],
-      query_terms: [...SIGNAL_LIBRARY.hiring_capability_build.query_terms],
+      priority: config.priority,
+      source_channels: [...(config.source_channels || familyDefaults.source_channels || [])],
+      query_terms: [...(familyDefaults.query_terms || [])],
       geo_lock: true,
-      evidence_required: [...SIGNAL_LIBRARY.hiring_capability_build.evidence_required],
-      decision_maker_strategy: ['founder', 'ceo', 'managing_director', 'head_of_sales'],
+      evidence_required: [...(familyDefaults.evidence_required || [])],
+      decision_maker_strategy: [...config.decision_maker_strategy],
       stop_rules: defaultStopRules(),
       reject_rules: {
         exclusions: list(icp.exclusions),
         competitor_offers: list(icp.competitor_offers),
       },
-    },
-  ];
+    };
+  });
 }
 
 function normalizeBuyingSignalsForTenant(tenant = {}) {

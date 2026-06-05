@@ -197,6 +197,89 @@ describe('signal planner', () => {
     expect(ads.queries.some(q => /facebook.com\/ads\/library|adstransparency.google.com/i.test(q.query))).toBe(true);
   });
 
+  it('builds remaining universal signal families with source-specific evidence terms', () => {
+    const tenant = {
+      ...tenantContext,
+      buying_signals: [
+        ...tenantContext.buying_signals,
+        {
+          id: 'vendor_research',
+          family: 'category_vendor_research',
+          enabled: true,
+          priority: 5,
+          source_channels: ['review_sites', 'web_search'],
+          query_terms: ['sales automation'],
+          evidence_required: ['company', 'intent_topic', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 2 },
+        },
+        {
+          id: 'stack_change',
+          family: 'technology_stack_change',
+          enabled: true,
+          priority: 6,
+          source_channels: ['job_descriptions', 'company_careers', 'website_integrations'],
+          query_terms: ['CRM'],
+          evidence_required: ['company', 'tool', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 2 },
+        },
+        {
+          id: 'leadership_change',
+          family: 'leadership_org_change',
+          enabled: true,
+          priority: 7,
+          source_channels: ['public_posts', 'company_news', 'press'],
+          query_terms: ['new CEO'],
+          evidence_required: ['company', 'person', 'role', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 2 },
+        },
+        {
+          id: 'regulatory_pressure',
+          family: 'regulatory_deadline_pressure',
+          enabled: true,
+          priority: 8,
+          source_channels: ['government_pages', 'industry_bodies'],
+          query_terms: ['compliance'],
+          evidence_required: ['deadline', 'industry', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 2 },
+        },
+        {
+          id: 'pain_signal',
+          family: 'pain_friction_evidence',
+          enabled: true,
+          priority: 9,
+          source_channels: ['social_posts', 'reviews', 'founder_posts'],
+          query_terms: ['manual process'],
+          evidence_required: ['company', 'pain', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 2 },
+        },
+        {
+          id: 'event_presence',
+          family: 'event_market_presence',
+          enabled: true,
+          priority: 10,
+          source_channels: ['event_pages', 'sponsor_lists', 'webinars'],
+          query_terms: ['sponsor'],
+          evidence_required: ['company', 'event', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 2 },
+        },
+      ],
+    };
+
+    const vendor = signalPlanner.buildSignalPlan({ tenant, signalId: 'vendor_research', geo: ['MY'] });
+    const stack = signalPlanner.buildSignalPlan({ tenant, signalId: 'stack_change', geo: ['MY'] });
+    const leadership = signalPlanner.buildSignalPlan({ tenant, signalId: 'leadership_change', geo: ['MY'] });
+    const regulatory = signalPlanner.buildSignalPlan({ tenant, signalId: 'regulatory_pressure', geo: ['MY'] });
+    const pain = signalPlanner.buildSignalPlan({ tenant, signalId: 'pain_signal', geo: ['MY'] });
+    const event = signalPlanner.buildSignalPlan({ tenant, signalId: 'event_presence', geo: ['MY'] });
+
+    expect(vendor.queries.some(q => /review|compare|alternative|buyer intent/i.test(q.query))).toBe(true);
+    expect(stack.queries.some(q => /job description|requirements|responsibilities|implementation|migration|integration/i.test(q.query))).toBe(true);
+    expect(leadership.queries.some(q => /linkedin\.com\/posts|appointed|joined|new CEO|head of sales/i.test(q.query))).toBe(true);
+    expect(regulatory.queries.some(q => /gov|deadline|compliance|permit|audit|regulation/i.test(q.query))).toBe(true);
+    expect(pain.queries.some(q => /linkedin\.com\/posts|review|struggling|bottleneck|manual process|hard to scale/i.test(q.query))).toBe(true);
+    expect(event.queries.some(q => /event|sponsor|exhibitor|speaker|webinar|conference/i.test(q.query))).toBe(true);
+  });
+
   it('excludes Beaver competitor-offer terms and enforces query cap before paid search', () => {
     const plan = signalPlanner.buildSignalPlan({
       tenant: tenantContext,

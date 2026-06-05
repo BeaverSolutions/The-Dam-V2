@@ -39,6 +39,14 @@ function queryPrefixForSource(sourceChannel) {
   if (sourceChannel === 'company_careers') return '("careers" OR "jobs" OR "join our team")';
   if (sourceChannel === 'meta_ad_library') return 'site:facebook.com/ads/library';
   if (sourceChannel === 'google_ads_transparency') return 'site:adstransparency.google.com';
+  if (sourceChannel === 'job_descriptions') return '("job description" OR requirements OR responsibilities)';
+  if (sourceChannel === 'website_integrations') return '("integrations" OR "powered by" OR "uses")';
+  if (sourceChannel === 'docs') return '(docs OR documentation)';
+  if (sourceChannel === 'public_posts' || sourceChannel === 'founder_posts' || sourceChannel === 'social_posts') return '(site:linkedin.com/posts OR site:linkedin.com/feed/update)';
+  if (sourceChannel === 'government_pages') return '(site:gov.my OR site:gov.sg OR site:gov)';
+  if (sourceChannel === 'industry_bodies') return '("association" OR "council" OR "industry body")';
+  if (sourceChannel === 'reviews' || sourceChannel === 'review_sites') return '(review OR compare OR alternative)';
+  if (sourceChannel === 'event_pages' || sourceChannel === 'sponsor_lists' || sourceChannel === 'webinars' || sourceChannel === 'conference_sites') return '(event OR sponsor OR exhibitor OR speaker OR webinar OR conference)';
   return '';
 }
 
@@ -58,6 +66,24 @@ function buildQueryForSignal({ signal, term, geo, industry, sourceChannel }) {
   }
   if (family === 'hiring_capability_build') {
     return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(hiring OR vacancy OR careers)']);
+  }
+  if (family === 'category_vendor_research') {
+    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(review OR compare OR alternative OR "buyer intent")']);
+  }
+  if (family === 'technology_stack_change') {
+    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(implementation OR migration OR integration OR RevOps OR CRM)']);
+  }
+  if (family === 'leadership_org_change') {
+    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(appointed OR joined OR "new CEO" OR "new CRO" OR "head of sales")']);
+  }
+  if (family === 'regulatory_deadline_pressure') {
+    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(deadline OR compliance OR permit OR audit OR regulation)']);
+  }
+  if (family === 'pain_friction_evidence') {
+    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '("struggling with" OR bottleneck OR "manual process" OR delayed OR "hard to scale")']);
+  }
+  if (family === 'event_market_presence') {
+    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(sponsor OR exhibitor OR speaker OR webinar OR conference)']);
   }
   return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '']);
 }

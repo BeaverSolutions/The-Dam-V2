@@ -10,7 +10,7 @@
  * Flow:
  *   1. Load signal_hunt_config from agent_memory for the client
  *      (or fall back to sensible defaults based on ICP)
- *   2. Run open-web searches for each signal query (funding, hiring, expansion)
+ *   2. Run planner-built source-channel queries across universal signal families
  *   3. Use Haiku to parse company name + signal summary from each result
  *   4. For each extracted company, run LinkedIn people search to find founder/decision-maker
  *   5. Enrich with Hunter first, then MillionVerifier-backed pattern fallback
@@ -26,6 +26,8 @@ const { searchOpenWeb, searchLinkedInProfiles } = require('./searchService');
 const { callAgent } = require('./claude');
 const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
 const { attachSignalPackageToLead, signalPackageMissingFields } = require('./research');
+const signalPlanner = require('./signalPlanner');
+const { normalizeBuyingSignalsForTenant } = require('../config/buyingSignals');
 const crypto = require('crypto');
 
 function envInt(name, fallback) {
@@ -38,7 +40,7 @@ function envInt(name, fallback) {
 const MAX_SIGNAL_QUERIES_PER_RUN = envInt('SIGNAL_HUNT_MAX_QUERIES', 6);
 const MAX_SIGNAL_QUERY_WINDOW = Math.max(MAX_SIGNAL_QUERIES_PER_RUN, envInt('SIGNAL_HUNT_MAX_QUERY_WINDOW', 20));
 const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
-const SIGNAL_HUNT_PARSER_VERSION = 'market_sensor_publication_v4';
+const SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v1';
 
 function klDateString() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -369,25 +371,75 @@ function hasIcpSearchScope(icp = {}) {
   ].length > 0;
 }
 
+function signalPlannerTenantFromIcp(icp = {}) {
+  const verticals = listFrom(icp.verticals).length > 0
+    ? listFrom(icp.verticals)
+    : [...listFrom(icp.industries), ...listFrom(icp.segments)];
+  return {
+    icp: {
+      ...icp,
+      verticals: diversifyIndustriesForQueryRun(verticals),
+      geo: listFrom(icp.geo).length > 0
+        ? listFrom(icp.geo)
+        : [...listFrom(icp.geographies), ...listFrom(icp.countries), ...listFrom(icp.locations), ...listFrom(icp.target_markets)],
+      competitor_offers: listFrom(icp.competitor_offers),
+      exclusions: listFrom(icp.exclusions),
+    },
+    buying_signals: Array.isArray(icp.buying_signals) ? icp.buying_signals : undefined,
+  };
+}
+
+function signalHuntQueryFromPlannerQuery(query = {}, plan = {}) {
+  const country = String(query.geo || countryCodeFromText(query.query) || 'MY').toUpperCase();
+  return {
+    query: query.query,
+    signal_type: plan.signalId,
+    signal_id: plan.signalId,
+    signal_family: plan.signalFamily,
+    source_channel: query.sourceChannel || 'web_search',
+    tier: 'P1',
+    country,
+    cost_class: query.costClass || 'paid_search',
+    expected_evidence: query.expectedEvidence || [],
+    industry: query.industry || null,
+    term: query.term || null,
+    source_term: query.term || null,
+  };
+}
+
+function rotateQueryWindow(queries = [], offset = 0) {
+  if (!Array.isArray(queries) || queries.length <= 1) return queries;
+  const n = Math.abs(Number(offset) || 0) % queries.length;
+  if (n === 0) return queries;
+  return [...queries.slice(n), ...queries.slice(0, n)];
+}
+
 function buildSignalQueriesFromIcp(icp = {}) {
-  const countries = countriesFromIcp(icp);
-  const industries = diversifyIndustriesForQueryRun(industriesFromIcp(icp));
+  const tenant = signalPlannerTenantFromIcp(icp);
+  const signals = normalizeBuyingSignalsForTenant(tenant).filter(signal => signal.enabled !== false);
+  const countries = countriesFromIcp(icp).map(country => country.code);
+  const perSignalQueries = [];
+
+  for (const [idx, signal] of signals.entries()) {
+    try {
+      const plan = signalPlanner.buildSignalPlan({
+        tenant,
+        signalId: signal.id,
+        geo: countries,
+        maxQueries: signal.stop_rules?.max_paid_searches_per_day || MAX_SIGNAL_QUERY_WINDOW,
+      });
+      const mapped = plan.queries.map(query => signalHuntQueryFromPlannerQuery(query, plan));
+      perSignalQueries.push(rotateQueryWindow(mapped, idx));
+    } catch (err) {
+      console.warn('[signalHunt] Failed to build signal plan:', err.message);
+    }
+  }
+
   const queries = [];
-  for (const country of countries) {
-    queries.push(...sourceAwareQueriesForCountry(country, industries));
-    for (const industry of industries) {
-      queries.push({
-        query: `"${industry}" "${country.name}" "hiring" "sales"`,
-        signal_type: 'hiring_sales',
-        tier: 'P1',
-        country: country.code,
-      });
-      queries.push({
-        query: `"${industry}" "${country.name}" ("expanding" OR "launched" OR "growth") founder OR CEO`,
-        signal_type: 'growth_signal',
-        tier: 'P1',
-        country: country.code,
-      });
+  const maxLength = Math.max(0, ...perSignalQueries.map(items => items.length));
+  for (let i = 0; i < maxLength; i++) {
+    for (const items of perSignalQueries) {
+      if (items[i]) queries.push(items[i]);
     }
   }
   return queries;
@@ -416,6 +468,11 @@ function signalFamilyForType(signalType = '') {
   if (/launch|expansion|expand|growth|new_office/.test(s)) return 'expansion_growth';
   if (/leadership|appointed|new_ceo|new_cro|joined/.test(s)) return 'leadership_org_change';
   if (/ad|gtm|campaign|landing|demo|consultation/.test(s)) return 'active_gtm_spend';
+  if (/vendor|category|review|compare|alternative|intent/.test(s)) return 'category_vendor_research';
+  if (/stack|tech|crm|revops|migration|integration/.test(s)) return 'technology_stack_change';
+  if (/regulatory|regulation|compliance|permit|deadline|audit/.test(s)) return 'regulatory_deadline_pressure';
+  if (/pain|friction|manual_process|bottleneck|hard_to_scale|struggling/.test(s)) return 'pain_friction_evidence';
+  if (/event|sponsor|webinar|conference|exhibitor|speaker/.test(s)) return 'event_market_presence';
   return 'buying_signal';
 }
 
@@ -451,8 +508,57 @@ function queryMatchesGeo(query = {}, geo = []) {
   });
 }
 
+function normalizePlaybookPlannedQuery(raw = {}, signalPlaybook = {}) {
+  const query = String(raw.query || raw.search || raw.text || '').trim();
+  if (!query) return null;
+
+  const playbookGeo = listFrom(signalPlaybook.geo)[0] || '';
+  const rawGeo = raw.geo || raw.country || playbookGeo || 'MY';
+  const country = String(raw.country || countryCodeFromText(rawGeo) || rawGeo || 'MY').toUpperCase();
+  const signalId = signalPlaybook.signal_id || signalPlaybook.signalId || raw.signal_id || raw.signalId || raw.signal;
+  const signalFamily = signalPlaybook.signal_family
+    || signalPlaybook.signalFamily
+    || raw.signal_family
+    || raw.signalFamily
+    || signalFamilyForType(signalId || raw.signal_type || raw.type);
+  const sourceChannel = raw.source_channel
+    || raw.sourceChannel
+    || signalPlaybook.source_channel
+    || signalPlaybook.sourceChannel
+    || 'web_search';
+
+  return {
+    query,
+    signal_id: signalId || raw.signal_type || raw.type || 'signal_playbook',
+    signal_family: signalFamily,
+    source_channel: sourceChannel,
+    signal_type: raw.signal_type || raw.type || signalId || signalFamily || 'buying_signal',
+    tier: raw.tier || 'P1',
+    country,
+    cost_class: raw.cost_class || raw.costClass || 'paid_search',
+    expected_evidence: raw.expected_evidence || raw.expectedEvidence || [],
+    industry: raw.industry || null,
+    term: raw.term || raw.source_term || null,
+    source_term: raw.source_term || raw.term || null,
+  };
+}
+
 function applySignalPlaybookToConfig(config = {}, signalPlaybook = null) {
   if (!signalPlaybook || typeof signalPlaybook !== 'object') return config;
+  const plannedQueries = Array.isArray(signalPlaybook.queries)
+    ? signalPlaybook.queries
+      .map(q => normalizePlaybookPlannedQuery(q, signalPlaybook))
+      .filter(Boolean)
+    : [];
+  if (plannedQueries.length > 0) {
+    return {
+      ...config,
+      queries: plannedQueries,
+      query_source: 'signal_playbook_planned_queries',
+      signal_playbook: signalPlaybook,
+    };
+  }
+
   const signalId = signalPlaybook.signal_id || signalPlaybook.signalId || null;
   const sourceChannel = signalPlaybook.source_channel || signalPlaybook.sourceChannel || null;
   const geo = listFrom(signalPlaybook.geo).map(v => String(v).toUpperCase());
@@ -592,7 +698,7 @@ async function loadSignalConfig(clientId, icp = {}, { maxPaidQueries = null } = 
     ? [...icpQueries, ...configuredQueries]
     : (configuredQueries.length > 0 ? configuredQueries : DEFAULT_SIGNAL_QUERIES);
   const querySource = icpQueries.length > 0
-    ? (configuredQueries.length > 0 ? 'current_icp_then_config' : 'current_icp')
+    ? (configuredQueries.length > 0 ? 'current_icp_signal_planner_then_config' : 'current_icp_signal_planner')
     : (configuredQueries.length > 0 ? 'stored_config' : 'default');
   const seenQueries = new Set();
   const fallbackCountry = countriesFromIcp(icp)[0]?.code || 'MY';

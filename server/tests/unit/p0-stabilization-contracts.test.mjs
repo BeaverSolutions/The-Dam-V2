@@ -360,18 +360,20 @@ describe('P0 stabilization contracts', () => {
     expect(research).toContain('retryCompanyQueries');
   });
 
-  it('Signal Hunt uses current ICP before stale stored config and does not double-reserve query budget', () => {
+  it('Signal Hunt uses current ICP through the universal planner before stale stored config and does not double-reserve query budget', () => {
     const signalHunt = service('services/signalHunt.js');
 
     expect(signalHunt).toContain('function hasIcpSearchScope');
     expect(signalHunt).toContain('const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : []');
     expect(signalHunt).toContain('const fallbackQueries = icpQueries.length > 0');
     expect(signalHunt).toContain('...icpQueries, ...configuredQueries');
-    expect(signalHunt).toContain('for (const industry of industries)');
-    expect(signalHunt).toContain('for (const country of countries)');
-    expect(signalHunt.indexOf('for (const industry of industries)')).toBeLessThan(
-      signalHunt.indexOf('for (const country of countries)')
-    );
+    expect(signalHunt).toContain("require('./signalPlanner')");
+    expect(signalHunt).toContain("require('../config/buyingSignals')");
+    expect(signalHunt).toContain('normalizeBuyingSignalsForTenant(tenant)');
+    expect(signalHunt).toContain('signalPlanner.buildSignalPlan({');
+    expect(signalHunt).toContain('signalHuntQueryFromPlannerQuery(query, plan)');
+    expect(signalHunt).toContain('const maxLength = Math.max(0, ...perSignalQueries.map(items => items.length))');
+    expect(signalHunt).toContain("'current_icp_signal_planner_then_config'");
     expect(signalHunt).toContain('consumePaidQuery(1)');
     expect(signalHunt).not.toContain('consumePaidQuery(2)');
     expect(signalHunt).toContain('signal_hunt_complete');

@@ -215,7 +215,7 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(industriesFn).not.toContain('.slice(0, 3)');
   });
 
-  it('diversifies bounded query windows across training and agency ICP buckets', () => {
+  it('diversifies bounded planner query windows across training and agency ICP buckets', () => {
     const queries = signalHunt._test.buildSignalQueriesFromIcp({
       industries: [
         'B2B corporate training',
@@ -233,27 +233,30 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       geographies: 'Malaysia, Singapore, United States',
     });
     const firstSix = queries.slice(0, 6).map(q => q.query.toLowerCase()).join('\n');
+    const firstSixChannels = queries.slice(0, 6).map(q => q.source_channel);
 
-    expect(firstSix).toMatch(/marketingmagazine|marketing-interactive|campaignasia/);
     expect(firstSix).toMatch(/training|l&d|coaching|skills development/);
     expect(firstSix).toMatch(/agenc|content studio|pr firm|creative studio/);
+    expect(firstSixChannels).toEqual(expect.arrayContaining(['linkedin_jobs', 'review_sites', 'job_descriptions']));
+    expect(new Set(firstSixChannels).size).toBeGreaterThan(3);
+    expect(firstSix).not.toMatch(/marketingmagazine|marketing-interactive|campaignasia|digitalnewsasia/);
   });
 
-  it('puts source-aware publication queries before brittle vertical event strings for MY/SG', () => {
+  it('puts universal planner source-channel queries before stored publication fallbacks for MY/SG', () => {
     const queries = signalHunt._test.buildSignalQueriesFromIcp({
       industries: ['digital agencies', 'marketing agencies', 'B2B corporate training'],
       geographies: 'Malaysia, Singapore',
     });
     const firstSix = queries.slice(0, 6).map(q => q.query).join('\n');
-    const currentYear = String(new Date().getUTCFullYear());
+    const firstSixChannels = queries.slice(0, 6).map(q => q.source_channel);
 
-    expect(firstSix).toContain('site:marketing-interactive.com');
-    expect(firstSix).toContain('site:marketingmagazine.com.my');
-    expect(firstSix).toContain('site:campaignasia.com');
-    expect(firstSix).toContain('site:digitalnewsasia.com');
-    expect(firstSix).toContain(currentYear);
-    expect(firstSix).toMatch(/appointed|retainer|pitch|launches|expands|names new leader|upskilling/);
-    expect(queries.slice(0, 3).every(q => q.source_channel === 'industry_publication')).toBe(true);
+    expect(firstSix).toContain('site:linkedin.com/jobs');
+    expect(firstSixChannels).toEqual(expect.arrayContaining(['linkedin_jobs', 'review_sites', 'job_descriptions']));
+    expect(new Set(firstSixChannels).size).toBeGreaterThan(3);
+    expect(firstSix).toMatch(/sales|business development|SDR|BDR|account executive/);
+    expect(firstSix).toMatch(/expanding|new office|funding|investment|review|CRM/);
+    expect(firstSix).toMatch(/Malaysia|Singapore/);
+    expect(queries.slice(0, 3).some(q => q.source_channel === 'industry_publication')).toBe(false);
   });
 
   it('teaches Signal Hunt extraction that appointed agencies are the target lead company', () => {
@@ -359,8 +362,9 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     const combined = executable.map(q => `${q.signal_type} ${q.query}`).join('\n');
 
     expect(executable).toHaveLength(3);
-    expect(combined).toMatch(/agency|marketing-interactive|marketingmagazine|campaignasia/i);
-    expect(combined).toMatch(/training|upskilling|skills|digitalnewsasia/i);
+    expect(combined).toMatch(/agenc|marketing|content studio|pr firm|creative studio/i);
+    expect(combined).toMatch(/training|professional training|b2b corporate training|l&d|coaching|skills development/i);
+    expect(combined).not.toMatch(/marketing-interactive|marketingmagazine|campaignasia|digitalnewsasia/i);
   });
 
   it('logs raw-zero blockers and blocks repeated zero-output query sets per day', () => {
@@ -484,6 +488,66 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       signal_id: 'hiring_sales_roles',
     });
     expect(planned.query_source).toBe('current_icp_signal_playbook');
+  });
+
+  it('executes Captain-planned signal queries directly instead of relabeling fallback queries', () => {
+    const config = {
+      queries: [
+        { query: 'site:marketing-interactive.com "Malaysia" "agency" "appointed"', signal_type: 'growth_signal', tier: 'P1', country: 'MY', source_channel: 'industry_publication' },
+      ],
+      query_source: 'current_icp_then_config',
+      max_results_per_query: 3,
+    };
+
+    const planned = signalHunt._test.applySignalPlaybookToConfig(config, {
+      signal_id: 'hiring_sales_roles',
+      signal_family: 'hiring_capability_build',
+      source_channel: 'linkedin_jobs',
+      geo: ['MY'],
+      cap: 2,
+      queries: [
+        {
+          sourceChannel: 'linkedin_jobs',
+          query: 'site:linkedin.com/jobs "sales" "Malaysia" "B2B corporate training" (hiring OR vacancy OR careers)',
+          costClass: 'paid_search',
+          expectedEvidence: ['company', 'role', 'source_url'],
+          industry: 'B2B corporate training',
+          geo: 'MY',
+          term: 'sales',
+        },
+        {
+          sourceChannel: 'company_careers',
+          query: '("careers" OR "jobs" OR "join our team") "sales" "Malaysia" "digital agencies" (hiring OR vacancy OR careers)',
+          costClass: 'paid_search',
+          expectedEvidence: ['company', 'role', 'source_url'],
+          industry: 'digital agencies',
+          geo: 'MY',
+          term: 'sales',
+        },
+      ],
+    });
+
+    expect(planned.query_source).toBe('signal_playbook_planned_queries');
+    expect(planned.queries).toHaveLength(2);
+    expect(planned.queries[0]).toMatchObject({
+      query: 'site:linkedin.com/jobs "sales" "Malaysia" "B2B corporate training" (hiring OR vacancy OR careers)',
+      signal_id: 'hiring_sales_roles',
+      signal_family: 'hiring_capability_build',
+      source_channel: 'linkedin_jobs',
+      expected_evidence: ['company', 'role', 'source_url'],
+      industry: 'B2B corporate training',
+      term: 'sales',
+      country: 'MY',
+    });
+    expect(planned.queries.some(q => q.source_channel === 'industry_publication')).toBe(false);
+  });
+
+  it('maps universal signal ids into their canonical families for packages and playbook matching', () => {
+    expect(signalHunt._test.signalFamilyForType('vendor_research')).toBe('category_vendor_research');
+    expect(signalHunt._test.signalFamilyForType('stack_change')).toBe('technology_stack_change');
+    expect(signalHunt._test.signalFamilyForType('regulatory_pressure')).toBe('regulatory_deadline_pressure');
+    expect(signalHunt._test.signalFamilyForType('pain_signal')).toBe('pain_friction_evidence');
+    expect(signalHunt._test.signalFamilyForType('event_presence')).toBe('event_market_presence');
   });
 
   it('DB Builder consumes Research run_signal_playbook directives before pool health', () => {
@@ -725,6 +789,77 @@ describe('buildSignalQueriesFromIcp', () => {
     const firstFour = r.slice(0, 4);
     expect(firstFour.some(q => q.source_channel === 'industry_publication')).toBe(true);
     expect(firstFour.map(q => q.query.toLowerCase()).join('\n')).toMatch(/marketingmagazine|marketing-interactive|campaignasia|digitalnewsasia/);
+  });
+
+  it('builds ICP Signal Hunt queries from the universal signal planner across source channels', () => {
+    const r = signalHunt._test.buildSignalQueriesFromIcp({
+      verticals: ['B2B corporate training', 'digital agencies'],
+      geo: ['MY'],
+      competitor_offers: ['lead generation', 'AI outbound'],
+      buying_signals: [
+        {
+          id: 'hiring_sales_roles',
+          family: 'hiring_capability_build',
+          enabled: true,
+          priority: 1,
+          source_channels: ['linkedin_jobs', 'company_careers'],
+          query_terms: ['sales'],
+          evidence_required: ['company', 'role', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 2 },
+        },
+        {
+          id: 'expansion_markets',
+          family: 'expansion_growth',
+          enabled: true,
+          priority: 2,
+          source_channels: ['company_news', 'press'],
+          query_terms: ['expanding'],
+          evidence_required: ['company', 'expansion_fact', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 2 },
+        },
+        {
+          id: 'fresh_capital',
+          family: 'capital_budget_event',
+          enabled: true,
+          priority: 3,
+          source_channels: ['news', 'investor_pages'],
+          query_terms: ['funding'],
+          evidence_required: ['company', 'event', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 2 },
+        },
+        {
+          id: 'active_ads',
+          family: 'active_gtm_spend',
+          enabled: true,
+          priority: 4,
+          source_channels: ['meta_ad_library', 'google_ads_transparency'],
+          query_terms: ['demo'],
+          evidence_required: ['company', 'ad_url', 'offer'],
+          stop_rules: { max_paid_searches_per_day: 2 },
+        },
+      ],
+    });
+
+    expect(r.map(q => q.signal_id)).toEqual(expect.arrayContaining([
+      'hiring_sales_roles',
+      'expansion_markets',
+      'fresh_capital',
+      'active_ads',
+    ]));
+    expect(r.map(q => q.source_channel)).toEqual(expect.arrayContaining([
+      'linkedin_jobs',
+      'company_news',
+      'news',
+      'meta_ad_library',
+    ]));
+    expect(r[0]).toMatchObject({
+      signal_id: 'hiring_sales_roles',
+      signal_family: 'hiring_capability_build',
+      source_channel: 'linkedin_jobs',
+      country: 'MY',
+    });
+    expect(r.slice(0, 4).some(q => q.source_channel === 'industry_publication')).toBe(false);
+    expect(r.map(q => q.query).join('\n')).not.toMatch(/marketing-interactive|marketingmagazine|campaignasia|digitalnewsasia/);
   });
 });
 

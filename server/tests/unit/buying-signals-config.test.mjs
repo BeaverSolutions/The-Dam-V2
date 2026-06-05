@@ -167,4 +167,32 @@ describe('buying signal config foundation', () => {
     expect(signals[0].reject_rules.competitor_offers).toContain('lead generation');
     expect(signals[0].reject_rules.competitor_offers).toContain('AI outbound');
   });
+
+  it('defaults legacy tenants to every universal signal family instead of hiring-only sourcing', () => {
+    const signals = buyingSignals.getDefaultBuyingSignalsForTenant({
+      icp: baseProfile().icp,
+    });
+
+    expect(signals.map(signal => signal.family)).toEqual(buyingSignals.SIGNAL_FAMILIES);
+    expect(signals.map(signal => signal.id)).toEqual([
+      'hiring_sales_roles',
+      'expansion_markets',
+      'fresh_capital',
+      'active_ads',
+      'vendor_research',
+      'stack_change',
+      'leadership_change',
+      'regulatory_pressure',
+      'pain_signal',
+      'event_presence',
+    ]);
+    for (const signal of signals) {
+      expect(signal.source_channels.length).toBeGreaterThan(0);
+      expect(signal.query_terms.length).toBeGreaterThan(0);
+      expect(signal.evidence_required.length).toBeGreaterThan(0);
+      expect(signal.stop_rules.max_paid_searches_per_day).toBeGreaterThan(0);
+      expect(signal.reject_rules.competitor_offers).toContain('lead generation');
+      expect(signal.reject_rules.competitor_offers).toContain('AI outbound');
+    }
+  });
 });
