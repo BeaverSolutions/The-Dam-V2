@@ -9,7 +9,10 @@ const { directorExecute, rangerReview } = agentsService;
 const { runWithClientContext } = require('../middleware/clientContext');
 const pipelineTrace = require('../services/pipelineTrace');
 const logger = require('../utils/logger');
-const { leadSelectionFeedbackExclusionSql } = require('../services/founderFeedbackSignals');
+const {
+  leadSelectionFeedbackExclusionSql,
+  currentSignalPackageEligibilitySql,
+} = require('../services/founderFeedbackSignals');
 const { checkBudget, isBudgetExceededError } = require('../services/budget');
 const autonomyStateService = require('../services/autonomyState');
 const { todayInMalaysia } = require('../utils/businessDay');
@@ -312,6 +315,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
                       (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date
              )
              ${leadSelectionFeedbackExclusionSql('leads')}
+             ${currentSignalPackageEligibilitySql('leads')}
             ORDER BY
               CASE WHEN signal_tier = 'P1' THEN 1 WHEN signal_tier = 'P2' THEN 2 ELSE 3 END,
               CASE WHEN email IS NOT NULL THEN 0 ELSE 1 END,
@@ -320,7 +324,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
           [client_id, poolLimit]
         );
 
-        if (poolLeads.length > 0) {
+        if (poolLeads.length >= poolLimit) {
           usedDbPool = true;
           console.log(`[chat] DB pool has ${poolLeads.length} leads — using pool instead of fresh research`);
           response.reply = `Found ${poolLeads.length} leads in the database. Processing through Sales → Enforcer now. No fresh research needed.`;
@@ -338,6 +342,17 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
               console.error(`[chat] DB pool directorExecute failed:`, err.message);
             })
           );
+        } else if (poolLeads.length > 0) {
+          await logsService.createLog(client_id, {
+            agent: 'captain',
+            action: 'chat_db_pool_insufficient',
+            metadata: {
+              plan_id: planId,
+              requested: poolLimit,
+              available: poolLeads.length,
+              boundary: 'db_pool_must_satisfy_requested_target_before_short_circuit',
+            },
+          }).catch(() => {});
         }
       } catch (err) {
         console.warn('[chat] DB pool check failed, falling back to research:', err.message);
@@ -2091,7 +2106,8 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
          AND pipeline_stage = 'prospecting'
          AND status = 'new'
          AND deleted_at IS NULL
-         ${leadSelectionFeedbackExclusionSql('leads')}`,
+         ${leadSelectionFeedbackExclusionSql('leads')}
+         ${currentSignalPackageEligibilitySql('leads')}`,
       [clientId]
     );
     const poolEmailReady   = parseInt(poolCounts[0].email_ready) || 0;
@@ -2250,6 +2266,7 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
            AND status = 'new'
            AND deleted_at IS NULL
            ${leadSelectionFeedbackExclusionSql('leads')}
+           ${currentSignalPackageEligibilitySql('leads')}
            -- 2026-05-18: never re-draw a lead that already has a message.
            -- processExistingLeadsPipeline does not advance lead state after a
            -- draft, so a drafted lead stays pipeline_stage='prospecting'/
@@ -3113,6 +3130,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
                  AND l.email IS NOT NULL
                  AND l.email <> ''
                  ${leadSelectionFeedbackExclusionSql('l')}
+                 ${currentSignalPackageEligibilitySql('l')}
                  AND NOT EXISTS (
                    SELECT 1 FROM messages m
                     WHERE m.lead_id = l.id
@@ -3128,6 +3146,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
                  AND l.linkedin_url IS NOT NULL
                  AND l.linkedin_url <> ''
                  ${leadSelectionFeedbackExclusionSql('l')}
+                 ${currentSignalPackageEligibilitySql('l')}
                  AND NOT EXISTS (
                    SELECT 1 FROM messages m
                     WHERE m.lead_id = l.id
@@ -3144,6 +3163,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
                    AND l.email IS NOT NULL
                    AND l.email <> ''
                    ${leadSelectionFeedbackExclusionSql('l')}
+                   ${currentSignalPackageEligibilitySql('l')}
                    AND NOT EXISTS (
                      SELECT 1 FROM messages m
                       WHERE m.lead_id = l.id
@@ -3160,6 +3180,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
                    AND l.linkedin_url IS NOT NULL
                    AND l.linkedin_url <> ''
                    ${leadSelectionFeedbackExclusionSql('l')}
+                   ${currentSignalPackageEligibilitySql('l')}
                    AND NOT EXISTS (
                      SELECT 1 FROM messages m
                       WHERE m.lead_id = l.id

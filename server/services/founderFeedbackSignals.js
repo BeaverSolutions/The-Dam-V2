@@ -32,6 +32,20 @@ function leadSelectionFeedbackExclusionSql(leadAlias = 'l') {
         )`;
 }
 
+function currentSignalPackageEligibilitySql(leadAlias = 'l') {
+  const fit = `COALESCE(${leadAlias}.metadata->'signal_package'->'company_icp_fit', ${leadAlias}.metadata->'company_icp_fit', '{}'::jsonb)`;
+  const checked = `COALESCE((${fit})->'reject_rules_checked', '[]'::jsonb)`;
+  return `AND (
+          COALESCE(${leadAlias}.source, '') <> 'signal_hunt'
+          OR (
+            (${checked}) ? 'tenant_exclusions'
+            AND (${checked}) ? 'competitor_offers'
+            AND (${checked}) ? 'company_icp_evidence'
+            AND NULLIF(BTRIM((${fit})->>'vertical_match'), '') IS NOT NULL
+          )
+        )`;
+}
+
 module.exports = {
   LEAD_SELECTION_REJECTION_REGEX,
   LEAD_SELECTION_REJECTION_SQL,
@@ -39,4 +53,5 @@ module.exports = {
   isGeoSelectionFeedback,
   leadStatusForFeedback,
   leadSelectionFeedbackExclusionSql,
+  currentSignalPackageEligibilitySql,
 };

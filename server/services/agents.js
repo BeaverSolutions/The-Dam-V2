@@ -15,7 +15,11 @@ const researchModule = require('./research');
 const { getClientConfig, buildClientContext } = require('./clientConfig');
 const { evaluateLeadQuality } = require('../utils/leadQuality');
 const { recordOutcome, attributionFromLead } = require('./outcomeTracker');
-const { LEAD_SELECTION_REJECTION_SQL, leadSelectionFeedbackExclusionSql } = require('./founderFeedbackSignals');
+const {
+  LEAD_SELECTION_REJECTION_SQL,
+  leadSelectionFeedbackExclusionSql,
+  currentSignalPackageEligibilitySql,
+} = require('./founderFeedbackSignals');
 const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
 const repairPolicy = require('./repairPolicy');
 const { todayInMalaysia } = require('../utils/businessDay');
@@ -833,6 +837,19 @@ function getSignalPackage(source = {}) {
     || source.signalPackage
     || meta.signalPackage
     || null;
+}
+
+function hasCurrentSignalPackageIcpEvidence(lead = {}) {
+  const meta = safeJsonObject(lead.metadata);
+  if (lead.source !== 'signal_hunt' && !meta.signal_package && !meta.company_icp_fit) return true;
+  const signalPackage = getSignalPackage(lead) || {};
+  const fit = safeJsonObject(signalPackage.company_icp_fit || meta.company_icp_fit);
+  const checked = Array.isArray(fit.reject_rules_checked) ? fit.reject_rules_checked : [];
+  return checked.includes('tenant_exclusions')
+    && checked.includes('competitor_offers')
+    && checked.includes('company_icp_evidence')
+    && typeof fit.vertical_match === 'string'
+    && fit.vertical_match.trim().length > 0;
 }
 
 function isCompetitorOffer(source = {}, signalPackage = null) {
@@ -3001,10 +3018,44 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
   }
   leads = dedupedLeads;
 
+  const currentPackageLeads = [];
+  let staleSignalPackageRejected = 0;
+  for (const lead of leads) {
+    if (hasCurrentSignalPackageIcpEvidence(lead)) {
+      currentPackageLeads.push(lead);
+      continue;
+    }
+    staleSignalPackageRejected++;
+    await logsService.createLog(clientId, {
+      agent: 'director',
+      action: 'lead_rejected_stale_signal_package',
+      target_type: 'lead',
+      target_id: lead.id,
+      metadata: {
+        plan_id,
+        lead_name: lead.name,
+        lead_company: lead.company,
+        source: lead.source,
+        reason: 'signal_hunt_lead_missing_current_company_icp_evidence_gate',
+      },
+    }).catch(() => {});
+    pipelineTrace.traceStage(clientId, {
+      lead_id: lead.id,
+      kickoff_id: plan_id,
+      stage: 'icp_rejected',
+      status: 'stale_signal_package',
+      agent: 'director',
+      reason: 'signal_hunt_lead_missing_current_company_icp_evidence_gate',
+      pipeline_path: 'signal_pipeline',
+      metadata: { lead_name: lead.name, lead_company: lead.company, source: lead.source },
+    }).catch(() => {});
+  }
+  leads = currentPackageLeads;
+
   await logsService.createLog(clientId, {
     agent: 'director',
     action: 'signal_pipeline_executing',
-    metadata: { plan_id, lead_count: leads.length, original_lead_count: originalLeadCount, skipped_same_day: skippedSameDay },
+    metadata: { plan_id, lead_count: leads.length, original_lead_count: originalLeadCount, skipped_same_day: skippedSameDay, stale_signal_package_rejected: staleSignalPackageRejected },
   });
 
   if (leads.length === 0) {
@@ -3013,15 +3064,16 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
       action: 'signal_pipeline_skipped',
       metadata: {
         plan_id,
-        reason: skippedSameDay > 0 ? 'same_day_enrolled_dedupe' : 'no_leads_provided',
+        reason: staleSignalPackageRejected > 0 ? 'stale_signal_package_rejected' : (skippedSameDay > 0 ? 'same_day_enrolled_dedupe' : 'no_leads_provided'),
         original_lead_count: originalLeadCount,
         skipped_same_day: skippedSameDay,
+        stale_signal_package_rejected: staleSignalPackageRejected,
       },
     });
     await logsService.createLog(clientId, {
       agent: 'director',
       action: 'signal_pipeline_completed',
-      metadata: { plan_id, leads: 0, drafted: 0, approved: 0, rejected: 0, skipped_same_day: skippedSameDay },
+      metadata: { plan_id, leads: 0, drafted: 0, approved: 0, rejected: 0, skipped_same_day: skippedSameDay, stale_signal_package_rejected: staleSignalPackageRejected },
     });
     pipelineTrace.traceStage(clientId, {
       kickoff_id: plan_id,
@@ -3033,6 +3085,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         total_leads: 0,
         original_lead_count: originalLeadCount,
         skipped_same_day: skippedSameDay,
+        stale_signal_package_rejected: staleSignalPackageRejected,
         drafted: 0,
         approved: 0,
         rejected: 0,
@@ -3043,7 +3096,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
       plan_id,
       status: 'completed',
       leads: 0,
-      summary: { leads_found: 0, messages_drafted: 0, approved: 0, rejected: 0, skipped_same_day: skippedSameDay },
+      summary: { leads_found: 0, messages_drafted: 0, approved: 0, rejected: 0, skipped_same_day: skippedSameDay, stale_signal_package_rejected: staleSignalPackageRejected },
       source: 'signal_hunt',
     };
   }
@@ -4231,6 +4284,7 @@ async function directorExecute(clientId, {
                   (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date
           )
           ${leadSelectionFeedbackExclusionSql('l')}
+          ${currentSignalPackageEligibilitySql('l')}
         ORDER BY
          CASE
            WHEN l.email IS NOT NULL AND (l.email_verified IS TRUE OR l.email_source = 'hunter') THEN 0

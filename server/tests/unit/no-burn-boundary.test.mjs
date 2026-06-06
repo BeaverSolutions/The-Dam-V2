@@ -119,15 +119,25 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
     expect(chatBody).toContain('const poolLimit = requestedLimit || 20');
     expect(chatBody).toContain('pipeline_traces pt');
     expect(chatBody).toContain("leadSelectionFeedbackExclusionSql('leads')");
+    expect(chatBody).toContain("currentSignalPackageEligibilitySql('leads')");
     expect(chatBody).toContain("'linkedin_requested', 'awaiting_accept'");
-    expect(chatBody).toContain('if (poolLeads.length > 0)');
-    expect(chatBody).not.toContain('poolLeads.length >= 5');
+    expect(chatBody).toContain('if (poolLeads.length >= poolLimit)');
+    expect(chatBody).toContain("'chat_db_pool_insufficient'");
     expect(chatBody).toContain('limit: poolLeads.length');
     expect(chatBody).toContain('allowPaidSignal: false');
     expect(chatBody).toContain("sourceMode: 'chat_db_pool'");
     expect(chatBody).toContain('maxPaidSignalQueries,');
     expect(autonomousSource).toContain('function boundedChatSignalQueryCap(requestedLimit)');
     expect(autonomousSource).toContain('return Math.max(3, Math.min(20, (Math.ceil(n) * 3) + 2))');
+  });
+
+  it('DB pool selectors require current Signal Hunt ICP evidence before drafting cached leads', () => {
+    expect(autonomousSource).toContain("currentSignalPackageEligibilitySql('leads')");
+    expect(autonomousSource).toContain("currentSignalPackageEligibilitySql('l')");
+    expect(agentsSource).toContain("currentSignalPackageEligibilitySql('l')");
+    expect(agentsSource).toContain('function hasCurrentSignalPackageIcpEvidence');
+    expect(agentsSource).toContain("'lead_rejected_stale_signal_package'");
+    expect(agentsSource).toContain("'stale_signal_package'");
   });
 
   it('pipeline traces use valid stages for repair and channel blocks', () => {
