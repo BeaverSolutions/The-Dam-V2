@@ -274,6 +274,88 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).not.toContain('(icp.job_titles || icp.who || "").split');
   });
 
+  it('blocks generic role and geo hiring signals before decision-maker lookup when company ICP evidence is missing', () => {
+    const gate = signalHunt._test.evaluateSignalCompanyIcpGate({
+      company: 'HEPMIL Malaysia',
+      signal_type: 'hiring_sales_roles',
+      source_channel: 'linkedin_jobs',
+      expected_industry: 'B2B corporate training',
+      signal_summary: 'HEPMIL Malaysia is hiring an Account Executive in the target market.',
+      raw_snippet: 'Account Executive | HEPMIL Malaysia | LinkedIn Jobs',
+      country: 'MY',
+    }, {
+      verticals: ['B2B corporate training', 'professional training', 'L&D providers'],
+      exclusions: ['Leo Burnett'],
+      competitor_offers: ['lead generation', 'AI outbound'],
+    });
+
+    expect(gate).toMatchObject({
+      pass: false,
+      blocker: 'icp_zero_after_company_extract',
+      reason: 'missing_company_icp_evidence',
+    });
+  });
+
+  it('passes company ICP gate only when extracted company evidence proves a configured vertical', () => {
+    const gate = signalHunt._test.evaluateSignalCompanyIcpGate({
+      company: 'Acme Training',
+      signal_type: 'hiring_sales_roles',
+      source_channel: 'linkedin_jobs',
+      signal_summary: 'Acme Training is hiring sales roles in Kuala Lumpur.',
+      raw_snippet: 'Corporate training provider hiring Sales Manager in Malaysia',
+      country: 'MY',
+    }, {
+      verticals: ['B2B corporate training', 'professional training', 'L&D providers'],
+    });
+
+    expect(gate).toMatchObject({
+      pass: true,
+      vertical_match: 'B2B corporate training',
+    });
+    expect(gate.reject_rules_checked).toContain('company_icp_evidence');
+  });
+
+  it('blocks tenant exclusions and competitor-offer evidence before enrichment', () => {
+    expect(signalHunt._test.evaluateSignalCompanyIcpGate({
+      company: 'HEPMIL Malaysia',
+      signal_summary: 'HEPMIL Malaysia is hiring. Parent network Leo Burnett appears in the evidence.',
+      raw_snippet: 'HEPMIL Malaysia under Leo Burnett',
+    }, {
+      verticals: ['B2B corporate training'],
+      banned_regex: ['Leo Burnett'],
+    })).toMatchObject({
+      pass: false,
+      blocker: 'icp_zero_after_company_extract',
+      reason: 'tenant_exclusion_matched',
+      matched_terms: ['Leo Burnett'],
+    });
+
+    expect(signalHunt._test.evaluateSignalCompanyIcpGate({
+      company: 'Pipeline Pros',
+      signal_summary: 'Pipeline Pros is a lead generation agency hiring SDRs.',
+      raw_snippet: 'Lead generation agency hiring sales development reps',
+    }, {
+      verticals: ['B2B corporate training'],
+      competitor_offers: ['lead generation'],
+    })).toMatchObject({
+      pass: false,
+      blocker: 'competitor_offer_disqualified',
+      reason: 'competitor_offer_matched',
+      matched_terms: ['lead generation'],
+    });
+  });
+
+  it('runs the company ICP gate before decision-maker lookup and email enrichment', () => {
+    const runStart = src.indexOf('async function runSignalHunt');
+    const gateIdx = src.indexOf('const companyGate = evaluateSignalCompanyIcpGate', runStart);
+    const decisionMakerIdx = src.indexOf('const person = await findDecisionMaker', runStart);
+    const emailIdx = src.indexOf('const enriched = await findEmail', runStart);
+
+    expect(gateIdx).toBeGreaterThan(runStart);
+    expect(gateIdx).toBeLessThan(decisionMakerIdx);
+    expect(gateIdx).toBeLessThan(emailIdx);
+  });
+
   it('uses the market-sensor parser for industry publication snippets', () => {
     expect(src).toContain('function signalExtractionAgent');
     expect(src).toContain("return 'market_sensor'");
@@ -481,6 +563,32 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       },
     });
     expect(signalHunt._test.signalPackageMissingFields(packaged.metadata.signal_package)).toEqual([]);
+  });
+
+  it('records company ICP evidence in Signal Hunt packages after the pre-enrichment gate passes', () => {
+    const packaged = signalHunt._test.attachSignalPackageToSignalLead({
+      name: 'Jane Tan',
+      title: 'Founder',
+      company: 'Acme Training',
+      linkedin_url: 'https://www.linkedin.com/in/janetan',
+      data_source: 'signal_hunt',
+      metadata: {
+        signal: 'Acme Training is hiring sales roles in Kuala Lumpur',
+        why_now: 'They are building sales capacity now',
+        signal_type: 'hiring_sales',
+        signal_source_url: 'https://www.linkedin.com/jobs/view/123',
+        country: 'Malaysia',
+        industry_match: 'B2B corporate training',
+        icp_evidence: ['training'],
+        reject_rules_checked: ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence'],
+      },
+    });
+
+    expect(packaged.metadata.signal_package.company_icp_fit).toMatchObject({
+      vertical_match: 'B2B corporate training',
+      geo_match: 'Malaysia',
+      reject_rules_checked: ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence'],
+    });
   });
 
   it('refuses incomplete Signal Hunt packages before contactGate persistence', () => {

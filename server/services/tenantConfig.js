@@ -77,6 +77,8 @@ function tenantProfileToLegacyConfig(profile) {
     },
     verticals,
     company_size: { min: 2, max: 100 },
+    exclusions: Array.isArray(icp.exclusions) ? icp.exclusions : [],
+    competitor_offers: Array.isArray(icp.competitor_offers) ? icp.competitor_offers : [],
     banned_regex: Array.isArray(icp.exclusions) ? icp.exclusions : [],
     source: 'tenant_profiles',
   };

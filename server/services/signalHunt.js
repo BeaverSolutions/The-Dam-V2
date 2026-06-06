@@ -269,6 +269,158 @@ function titlesFromIcp(icp = {}) {
     .filter(Boolean);
 }
 
+function normalizedEvidenceText(value = '') {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function evidenceTextForSignal(signal = {}) {
+  const metadata = signal.metadata || {};
+  return [
+    signal.company,
+    signal.signal_summary,
+    signal.raw_snippet,
+    signal.why_now,
+    signal.angle,
+    signal.source_url,
+    signal.description,
+    signal.company_description,
+    signal.industry,
+    signal.segment,
+    metadata.signal_summary,
+    metadata.raw_snippet,
+    metadata.why_now,
+    metadata.evidence,
+    metadata.industry,
+    metadata.segment,
+  ].filter(Boolean).join(' ');
+}
+
+function termMatchesText(term = '', text = '', { allowRegex = false, flexible = false } = {}) {
+  const rawTerm = String(term || '').trim();
+  if (!rawTerm) return false;
+  const normalizedTerm = normalizedEvidenceText(rawTerm);
+  const normalizedText = normalizedEvidenceText(text);
+  if (!normalizedTerm || !normalizedText) return false;
+  if (allowRegex) {
+    try {
+      if (new RegExp(rawTerm, 'i').test(text)) return true;
+    } catch { /* fall through to literal matching */ }
+  }
+  if (normalizedText.includes(normalizedTerm)) return true;
+  if (!flexible) return false;
+
+  const generic = new Set([
+    'b2b', 'sales', 'business', 'development', 'provider', 'providers',
+    'service', 'services', 'professional', 'company', 'companies',
+    'digital', 'marketing', 'solutions',
+  ]);
+  const keywords = new Set(
+    normalizedTerm
+      .split(' ')
+      .map(token => token.replace(/ies$/, 'y').replace(/s$/, ''))
+      .filter(token => token.length >= 3 && !generic.has(token))
+  );
+  if (/\btraining\b/.test(normalizedTerm)) keywords.add('training');
+  if (/\bupskill/.test(normalizedTerm)) keywords.add('upskill');
+  if (/\bskills?\b/.test(normalizedTerm)) keywords.add('skill');
+  if (/\b(coach|coaching)\b/.test(normalizedTerm)) keywords.add('coach');
+  if (/\bagenc(y|ies)\b/.test(normalizedTerm)) keywords.add('agency');
+  if (/\bstudios?\b/.test(normalizedTerm)) keywords.add('studio');
+  if (/\brecruit/.test(normalizedTerm)) keywords.add('recruit');
+  if (/\bl\s+and\s+d\b|\blearning\b/.test(normalizedTerm)) keywords.add('learning');
+  if (/\bpr\b|public relations/.test(normalizedTerm)) keywords.add('pr');
+
+  return [...keywords].some(keyword => {
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b${escaped}\\b`, 'i').test(normalizedText);
+  });
+}
+
+function matchedTerms(terms = [], text = '', options = {}) {
+  const seen = new Set();
+  return listFrom(terms).filter(term => {
+    const key = term.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return termMatchesText(term, text, options);
+  });
+}
+
+function icpVerticalTerms(icp = {}) {
+  return [
+    ...listFrom(icp.industries),
+    ...listFrom(icp.verticals),
+    ...listFrom(icp.segments),
+  ];
+}
+
+function evaluateSignalCompanyIcpGate(signal = {}, icp = {}) {
+  const text = evidenceTextForSignal(signal);
+  const exclusionMatches = matchedTerms([
+    ...listFrom(icp.exclusions),
+    ...listFrom(icp.banned_regex),
+    ...listFrom(signal.exclusions),
+    ...listFrom(signal.banned_regex),
+  ], text, { allowRegex: true });
+  if (exclusionMatches.length > 0) {
+    return {
+      pass: false,
+      blocker: 'icp_zero_after_company_extract',
+      reason: 'tenant_exclusion_matched',
+      matched_terms: exclusionMatches,
+      reject_rules_checked: ['tenant_exclusions'],
+    };
+  }
+
+  const competitorMatches = matchedTerms([
+    ...listFrom(icp.competitor_offers),
+    ...listFrom(signal.competitor_offers),
+    ...listFrom(signal.reject_rules?.competitor_offers),
+  ], text);
+  if (competitorMatches.length > 0) {
+    return {
+      pass: false,
+      blocker: 'competitor_offer_disqualified',
+      reason: 'competitor_offer_matched',
+      matched_terms: competitorMatches,
+      reject_rules_checked: ['tenant_exclusions', 'competitor_offers'],
+    };
+  }
+
+  const verticals = icpVerticalTerms(icp);
+  if (verticals.length === 0) {
+    return {
+      pass: true,
+      vertical_match: null,
+      icp_evidence: [],
+      reject_rules_checked: ['tenant_exclusions', 'competitor_offers'],
+    };
+  }
+
+  const verticalMatches = matchedTerms(verticals, text, { flexible: true });
+  if (verticalMatches.length === 0) {
+    return {
+      pass: false,
+      blocker: 'icp_zero_after_company_extract',
+      reason: 'missing_company_icp_evidence',
+      expected_verticals: verticals,
+      reject_rules_checked: ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence'],
+    };
+  }
+
+  return {
+    pass: true,
+    vertical_match: verticalMatches[0],
+    icp_evidence: verticalMatches,
+    reject_rules_checked: ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence'],
+  };
+}
+
 function industryPriority(value) {
   const s = String(value || '').toLowerCase();
   if (/\b(agency|digital|marketing|creative|media|advertising|professional service|consult)/i.test(s)) return 0;
@@ -461,6 +613,7 @@ function signalHuntQueryFromPlannerQuery(query = {}, plan = {}) {
     industry: query.industry || null,
     term: query.term || null,
     source_term: query.term || null,
+    reject_rules: plan.rejectRules || {},
   };
 }
 
@@ -701,10 +854,11 @@ function attachSignalPackageToSignalLead(lead = {}, options = {}) {
       source_url: sourceUrl,
       evidence,
       company_icp_fit: metadata.company_icp_fit || {
-        vertical_match: metadata.industry || metadata.segment || null,
+        vertical_match: metadata.industry_match || metadata.vertical_match || metadata.industry || metadata.segment || null,
         geo_match: metadata.country || lead.country || null,
-        size_signal: null,
-        reject_rules_checked: [],
+        size_signal: metadata.size_signal || null,
+        icp_evidence: metadata.icp_evidence || [],
+        reject_rules_checked: Array.isArray(metadata.reject_rules_checked) ? metadata.reject_rules_checked : [],
       },
       decision_maker: decisionMaker,
       contact,
@@ -1320,6 +1474,10 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         s.signal_id = q.signal_id || q.signal_type;
         s.signal_family = q.signal_family || signalFamilyForType(q.signal_id || q.signal_type);
         s.source_channel = q.source_channel || 'web_search';
+        s.expected_industry = q.industry || s.expected_industry || null;
+        s.expected_evidence = q.expected_evidence || s.expected_evidence || [];
+        s.source_term = q.source_term || q.term || s.source_term || null;
+        s.reject_rules = q.reject_rules || s.reject_rules || {};
       });
       allSignals.push(...validSignals);
 
@@ -1386,14 +1544,20 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   for (const signal of uniqueSignals.slice(0, maxLeads * 2)) {
     if (leads.length >= maxLeads) break;
 
+    const country = signal.country || countryCodeFromText(signal.raw_snippet || signal.signal_summary || '') || 'MY';
+    const countryName = countryNameFromCode(country);
+    const companyGate = evaluateSignalCompanyIcpGate(signal, icp);
+    if (!companyGate.pass) {
+      console.log(`[signalHunt] Company ICP gate blocked ${signal.company}: ${companyGate.reason}`);
+      continue;
+    }
+
     await assertLlmBudgetOpen(clientId);
     if (!consumePaidQuery(1)) {
       console.log('[signalHunt] Paid-query budget exhausted before decision-maker lookup');
       break;
     }
 
-    const country = signal.country || countryCodeFromText(signal.raw_snippet || signal.signal_summary || '') || 'MY';
-    const countryName = countryNameFromCode(country);
     const person = await findDecisionMaker(signal.company, icpTitles, country);
     if (!person || !person.linkedin_url) {
       console.log(`[signalHunt] No decision-maker found for ${signal.company}`);
@@ -1406,8 +1570,18 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       company: signal.company,
       title: person.title || '',
       country: countryName,
+      snippet: evidenceTextForSignal(signal),
       score: signal.tier === 'P1' ? 90 : 70,
-      metadata: { country: countryName },
+      metadata: {
+        country: countryName,
+        company_icp_fit: {
+          vertical_match: companyGate.vertical_match || null,
+          geo_match: countryName,
+          size_signal: null,
+          icp_evidence: companyGate.icp_evidence || [],
+          reject_rules_checked: companyGate.reject_rules_checked || [],
+        },
+      },
     });
     if (!gate.pass) {
       console.log(`[signalHunt] ICP gate blocked ${person.name} / ${signal.company}: ${gate.reason}`);
@@ -1463,6 +1637,12 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         signal_source_url: signal.source_url,
         signal_confidence: signal.confidence,
         country: countryName,
+        industry_match: companyGate.vertical_match || null,
+        icp_evidence: companyGate.icp_evidence || [],
+        reject_rules_checked: companyGate.reject_rules_checked || [],
+        expected_industry: signal.expected_industry || null,
+        expected_evidence: signal.expected_evidence || [],
+        source_term: signal.source_term || null,
         tier: signal.tier,
         source: 'signal_hunt',
       },
@@ -1648,6 +1828,7 @@ module.exports = {
     buildSignalQueriesFromIcp,
     sourceAwareQueriesForCountry,
     titlesFromIcp,
+    evaluateSignalCompanyIcpGate,
     signalExtractionAgent,
     normaliseExtractedSignals,
     extractedSignalItems,

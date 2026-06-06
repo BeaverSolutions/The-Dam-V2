@@ -241,6 +241,7 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(captainSource).toContain('snapshot_error');
     expect(captainSource).toContain('signal_scorecard: buildSignalScorecard');
     expect(tenantConfigSource).toContain('buying_signals');
+    expect(tenantConfigSource).toContain('competitor_offers: Array.isArray(icp.competitor_offers)');
     expect(captainSource).toContain('buying_signals: cfg.buying_signals');
     expect(captainSource).toContain('buildCaptainSignalOrchestration');
     expect(captainSource).toContain('writeSignalOrchestrationDirectives');
