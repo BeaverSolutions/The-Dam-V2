@@ -78,6 +78,35 @@ const tenantContext = {
 };
 
 describe('signal planner', () => {
+  it('does not reintroduce agency as a Beaver fallback/default target', () => {
+    const tenantConfigSource = readFileSync(resolve(__dirname, '../../services/tenantConfig.js'), 'utf-8');
+    const signalHuntSource = readFileSync(resolve(__dirname, '../../services/signalHunt.js'), 'utf-8');
+    const agentsConfigSource = readFileSync(resolve(__dirname, '../../config/agents.js'), 'utf-8');
+    const researchSource = readFileSync(resolve(__dirname, '../../services/research.js'), 'utf-8');
+    const marketSensingSource = readFileSync(resolve(__dirname, '../../services/marketSensing.js'), 'utf-8');
+    const researchEnrichmentSource = readFileSync(resolve(__dirname, '../../services/researchEnrichment.js'), 'utf-8');
+
+    expect(tenantConfigSource).not.toContain("verticals: ['digital_marketing', 'digital_agency', 'marketing_services', 'advertising']");
+    expect(signalHuntSource).not.toContain("['B2B corporate training', 'digital agency']");
+    expect(agentsConfigSource).not.toContain('B2B agencies, consultancies');
+    expect(agentsConfigSource).not.toContain('Boutique / independent / specialist marketing or digital agencies');
+    expect(agentsConfigSource).not.toContain('Lead generation agencies');
+    expect(agentsConfigSource).not.toContain('Recruitment agencies / talent acquisition firms');
+    expect(agentsConfigSource).not.toContain('agency_expansion');
+    expect(agentsConfigSource).not.toContain('boutique_agency');
+    expect(agentsConfigSource).toContain('Agencies are not a default priority');
+    expect(marketSensingSource).not.toContain('agency_expansion');
+    expect(marketSensingSource).not.toContain('boutique_agency');
+    expect(marketSensingSource).not.toContain('Agency-vertical');
+    expect(marketSensingSource).not.toContain('"new agency"');
+    expect(researchEnrichmentSource).not.toContain('agency_expansion');
+    expect(researchSource).not.toContain("'consulting', 'agency', 'SaaS', 'training'");
+    expect(researchSource).not.toContain("widened.industries = 'consulting, agency");
+    expect(researchSource).not.toContain('Malaysia CEO agency "scaling"');
+    expect(researchSource).not.toContain('Singapore CEO agency "scaling"');
+    expect(researchSource).toContain("'corporate training', 'professional services'");
+  });
+
   it('is consumed by Research query planning when buying signals exist', () => {
     const research = readFileSync(resolve(__dirname, '../../services/research.js'), 'utf-8');
     const tenantContext = readFileSync(resolve(__dirname, '../../services/tenantContext.js'), 'utf-8');

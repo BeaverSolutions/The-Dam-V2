@@ -55,9 +55,9 @@ const DEFAULT_TITLES = [
 ];
 
 const DEFAULT_INDUSTRIES = [
-  'consulting', 'agency', 'SaaS', 'training',
-  'professional services', 'recruitment', 'marketing',
-  'digital marketing', 'media', 'advertising',
+  'corporate training', 'professional services', 'business consulting',
+  'managed IT services', 'software development', 'BPO',
+  'sales training', 'executive coaching',
 ];
 
 const KL_LOCATIONS = [
@@ -458,7 +458,8 @@ function expandIndustry(industry) {
  *
  * Level 0 = original ICP (strict)
  * Level 1 = add synonym titles (Founder → Founder/Owner/Proprietor/Principal)
- * Level 2 = add sibling industries (agency → also consulting/services/media)
+ * Level 2 = add sibling industries (explicit agency/marketing ICP widens toward
+ * service businesses, not more agency-news surfaces)
  * Level 3 = widen geography (Klang Valley → all Malaysia)
  * Level 4 = broaden to generic B2B founder/CEO across any industry
  */
@@ -491,7 +492,7 @@ function widenIcp(originalIcp, level) {
     for (const ind of origIndustries) {
       const lower = ind.toLowerCase();
       if (/agency|marketing|digital/i.test(lower)) {
-        ['consulting', 'professional services', 'media', 'advertising'].forEach(x => expandedIndustries.add(x));
+        ['consulting', 'professional services', 'business services'].forEach(x => expandedIndustries.add(x));
       }
       if (/property|proptech|real estate/i.test(lower)) {
         ['construction', 'architecture', 'interior design'].forEach(x => expandedIndustries.add(x));
@@ -513,7 +514,7 @@ function widenIcp(originalIcp, level) {
 
   if (level >= 4) {
     // Last resort: generic B2B founders — still restricted to owner/C-level
-    widened.industries = 'consulting, agency, saas, professional services, b2b';
+    widened.industries = 'corporate training, professional services, business consulting, managed IT services, software development, bpo';
     widened.job_titles = 'Founder, CEO, Managing Director, Owner, Co-Founder';
   }
 
@@ -753,7 +754,7 @@ function buildQueryPool(icpMemory) {
     '"head of sales" hiring Malaysia "Sdn Bhd"',
     'Malaysia B2B SaaS founder "growing team"',
     'Malaysia founder "first enterprise client"',
-    'Malaysia CEO agency "scaling"',
+    'Malaysia CEO consulting "scaling"',
   ];
   // SG growth signals — parallel structure to MY set
   const GROWTH_SIGNALS_SG = includesSG ? [
@@ -766,7 +767,7 @@ function buildQueryPool(icpMemory) {
     '"head of sales" hiring Singapore "Pte Ltd"',
     'Singapore B2B SaaS founder "growing team"',
     'Singapore founder "first enterprise client"',
-    'Singapore CEO agency "scaling"',
+    'Singapore CEO professional services "scaling"',
   ] : [];
   for (const sig of [...GROWTH_SIGNALS, ...GROWTH_SIGNALS_SG]) {
     queryPool.push({

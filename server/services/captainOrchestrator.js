@@ -374,6 +374,10 @@ async function collectTeamKPIs(clientId) {
        signal_id, signal_family, source_channel, stage, blocker_reason,
        SUM(cnt)::int AS cnt,
        SUM(raw_candidates)::int AS raw_candidates,
+       SUM(icp_passed)::int AS icp_passed,
+       SUM(decision_makers_found)::int AS decision_makers_found,
+       SUM(contacts_found)::int AS contacts_found,
+       SUM(saved)::int AS saved,
        SUM(attempted)::int AS attempted
      FROM (
        SELECT
@@ -394,10 +398,14 @@ async function collectTeamKPIs(clientId) {
          ) AS source_channel,
          stage,
          COALESCE(reason, metadata->>'blocker', metadata->>'reason', metadata->>'reject_reason') AS blocker_reason,
-         COUNT(*)::int AS cnt,
-         0::int AS raw_candidates,
-         0::int AS attempted
-       FROM pipeline_traces
+        COUNT(*)::int AS cnt,
+        0::int AS raw_candidates,
+        0::int AS icp_passed,
+        0::int AS decision_makers_found,
+        0::int AS contacts_found,
+        0::int AS saved,
+        0::int AS attempted
+      FROM pipeline_traces
        WHERE client_id = $1
          AND created_at >= ${klTodayStart}
        GROUP BY signal_id, signal_family, source_channel, stage, blocker_reason
@@ -411,19 +419,23 @@ async function collectTeamKPIs(clientId) {
          NULL::text AS stage,
          COALESCE(metadata->>'blocker', metadata->>'reason') AS blocker_reason,
          COUNT(*)::int AS cnt,
-         SUM(
-           CASE
-             WHEN (metadata->>'raw_candidates_total') ~ '^[0-9]+$' THEN (metadata->>'raw_candidates_total')::int
-             WHEN (metadata->>'raw_results_total') ~ '^[0-9]+$' THEN (metadata->>'raw_results_total')::int
-             ELSE 0
-           END
-         )::int AS raw_candidates,
-         COUNT(*)::int AS attempted
-       FROM logs
-       WHERE client_id = $1
-         AND created_at >= ${klTodayStart}
-         AND action IN ('research_blocker', 'research_no_results', 'signal_hunt_zero_query_set_blocked', 'daily_web_linkedin_topup_empty')
-       GROUP BY signal_id, signal_family, source_channel, blocker_reason
+        SUM(
+          CASE
+            WHEN (metadata->>'raw_candidates_total') ~ '^[0-9]+$' THEN (metadata->>'raw_candidates_total')::int
+            WHEN (metadata->>'raw_results_total') ~ '^[0-9]+$' THEN (metadata->>'raw_results_total')::int
+            ELSE 0
+          END
+        )::int AS raw_candidates,
+        SUM(CASE WHEN (metadata->>'icp_passed') ~ '^[0-9]+$' THEN (metadata->>'icp_passed')::int ELSE 0 END)::int AS icp_passed,
+        SUM(CASE WHEN (metadata->>'decision_makers_found') ~ '^[0-9]+$' THEN (metadata->>'decision_makers_found')::int ELSE 0 END)::int AS decision_makers_found,
+        SUM(CASE WHEN (metadata->>'contacts_found') ~ '^[0-9]+$' THEN (metadata->>'contacts_found')::int ELSE 0 END)::int AS contacts_found,
+        SUM(CASE WHEN (metadata->>'saved') ~ '^[0-9]+$' THEN (metadata->>'saved')::int ELSE 0 END)::int AS saved,
+        COUNT(*)::int AS attempted
+      FROM logs
+      WHERE client_id = $1
+        AND created_at >= ${klTodayStart}
+        AND action IN ('research_blocker', 'research_no_results', 'signal_hunt_complete', 'signal_hunt_save_complete', 'signal_hunt_zero_query_set_blocked', 'daily_web_linkedin_topup_empty')
+      GROUP BY signal_id, signal_family, source_channel, blocker_reason
      ) signal_rows
      GROUP BY signal_id, signal_family, source_channel, stage, blocker_reason`,
     [clientId]
@@ -2193,7 +2205,11 @@ async function runDirectiveSweep(clientId) {
       linkedin: true,
     },
   });
-  if (signalIds.length > 0 && (signalOrchestration.stop_current_signal.stop_for_today || signalOrchestration.sales_repair)) {
+  const shouldWriteSignalOrchestration =
+    signalIds.length === 0
+    || signalOrchestration.stop_current_signal.stop_for_today
+    || signalOrchestration.sales_repair;
+  if (shouldWriteSignalOrchestration) {
     try {
       written.push(...await writeSignalOrchestrationDirectives(clientId, signalOrchestration));
     } catch (err) {

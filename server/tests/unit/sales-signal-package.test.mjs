@@ -147,6 +147,21 @@ describe('Sales Beaver signal package preflight', () => {
     expect(callAgentIdx).toBeGreaterThan(preflightIdx);
   });
 
+  it('consumes Captain fix_signal_copy directives before drafting', () => {
+    const salesStart = agentsSource.indexOf('async function salesGenerate');
+    const directivesRead = agentsSource.indexOf("readPendingDirectives(clientId, 'sales_beaver')", salesStart);
+    const fixDirective = agentsSource.indexOf("directive_type === 'fix_signal_copy'", directivesRead);
+    const promptContext = agentsSource.indexOf("CAPTAIN'S DIRECTIVE - signal copy repair", fixDirective);
+    const consumed = agentsSource.indexOf('consumedDirectiveIds.push(fixSignalCopyDirective.id)', fixDirective);
+    const callAgentIdx = agentsSource.indexOf('await callAgent(', salesStart);
+
+    expect(directivesRead).toBeGreaterThan(salesStart);
+    expect(fixDirective).toBeGreaterThan(directivesRead);
+    expect(promptContext).toBeGreaterThan(fixDirective);
+    expect(consumed).toBeGreaterThan(promptContext);
+    expect(callAgentIdx).toBeGreaterThan(consumed);
+  });
+
   it('updates the Sales Beaver system prompt contract for signal packages', () => {
     expect(configSource).toContain('signal_package');
     expect(configSource).toContain('needs_more_research');

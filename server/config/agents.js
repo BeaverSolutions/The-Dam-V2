@@ -238,7 +238,7 @@ Always pick the highest available angle on this list.
 
 TARGET GEOGRAPHY:
 Geography: use the tenant ICP geography. Beaver Solutions currently targets **Malaysia (MY), Singapore (SG), and United States (US)**. Do not reject US leads because older prompts said MY/SG only.
-Current tenant override: prioritize B2B corporate/professional training, L&D, sales training/coaching, B2B agencies, consultancies, MSPs, and software/IT service firms. Do not prioritize lead-generation or appointment-setting vendors when their own offer overlaps with AI sales, outbound automation, SDR, GTM, lead-gen, cold-email, or appointment-setting services; those are competitor-offer leads and must be parked, not drafted.
+Current tenant override: prioritize B2B corporate/professional training, L&D, sales training/coaching, consultancies, MSPs, custom software/IT service firms, BPO/call centers, and other active-outbound B2B SMB service firms. Agencies are not a default priority; source them only when the tenant profile explicitly includes them and the company is independent, SMB-sized, and not a competitor-offer or global network. Do not prioritize lead-generation or appointment-setting vendors when their own offer overlaps with AI sales, outbound automation, SDR, GTM, lead-gen, cold-email, or appointment-setting services; those are competitor-offer leads and must be parked, not drafted.
 Apollo data is not trusted as a verified-email source. Use guarded search and enrichment paths.
 
 PRIORITY SEGMENTS (Beaver Solutions ICP — rank top to bottom):
@@ -246,9 +246,9 @@ Search queries must combine **decision-maker title × segment × target geograph
 
 1. **B2B corporate / professional training companies** — founder-led providers selling training, L&D, sales enablement, leadership, and workforce upskilling into companies. Query examples: \`"corporate training" "founder" "malaysia" "hiring sales"\`, \`"sales training" "CEO" "United States" "expanding"\`.
 
-2. **B2B agencies and consultancies** — digital, growth, content, CRM, transformation, RevOps, and professional-services firms where outbound is still founder/sales-led. Query: \`"B2B agency" "founder" "singapore" "hiring sales"\`.
+2. **B2B consultancies and professional-services firms** — growth, CRM, transformation, RevOps, managed services, and professional-services firms where outbound is still founder/sales-led. Query: \`"business consultancy" "founder" "singapore" "hiring sales"\`.
 
-3. **Recruitment / executive search firms** — cold-call B2B clients + candidates. Two outbound funnels. Query: \`"recruitment agency" "founder" "kuala lumpur"\`, \`"executive search" "managing director" "singapore"\`.
+3. **Recruitment / executive search firms** — use only when explicitly configured for the tenant; cold-call B2B clients + candidates. Two outbound funnels. Query: \`"executive search" "founder" "kuala lumpur"\`, \`"executive search" "managing director" "singapore"\`.
 
 4. **MSPs and custom software / IT service firms** — sell to SMB or mid-market buyers by outbound. Query: \`"managed services" "founder" "malaysia" "sales team"\`, \`"software development" "CEO" "United States" "growth"\`.
 
@@ -836,7 +836,7 @@ If meetings are not converting, that's an outcome signal. Surface what you're be
 Two sub-blocks:
 
   TASKS — what each beaver is working on today. 1-2 lines.
-  "research beaver pulling 100 quality leads, MY funding focus + agency hires.
+  "research beaver pulling 100 quality leads, MY sales-hiring and training-signal focus.
    sales beaver drafting 50, vp enrichment auto-fires above 75.
    enforcer monday teaching note ready."
 
@@ -891,7 +891,7 @@ RETURN JSON ONLY (one outer object, no markdown fences):
 
     // ═══════════════════════════════════════════════════════════
     // MARKET SENSOR — Phase E daily MY-news scanner (Haiku)
-    // Reads raw Brave Search results from MY business/tech/marketing
+    // Reads raw Brave Search results from MY business/tech/service
     // sources and extracts named buying signals for the tenant's ICP.
     // Cheap (Haiku), fast (one call/day), high-leverage (feeds Research
     // Beaver's morning loop and Captain's brief).
@@ -903,21 +903,20 @@ RETURN JSON ONLY (one outer object, no markdown fences):
       systemPrompt: `You are a buying-signal triager for B2B sales outreach. You scan news from Malaysia business and tech publications, extract specific company-level buying signals that match the tenant's ICP, and write a 1-line outreach angle per signal.
 
 WHAT COUNTS AS A SIGNAL:
-- A real, named company (not "an agency", not "a startup" — the company's actual name)
+- A real, named company (not "an agency", not "a startup", not an unnamed provider — the company's actual name)
 - RECENT — published within the last 90 days. HARD REJECT anything dated 2023, 2022, 2021 or earlier even if the title looks attractive. If the URL or snippet shows a year before 2025, skip it. If a date isn't visible at all and the article uses past tense about the event, treat as stale and skip unless the company itself is small enough that even a 6-month-old expansion still implies current pain.
 - A specific event from one of: funding raise, exec hire, expansion, product launch, hiring spree, award shortlist, new launch, founder visibility
 - The company is plausibly inside the tenant's ICP
 
 ICP DEFINITION (for tenants whose offering is B2B sales/outreach automation):
 POSITIVE — companies whose CORE BUSINESS is selling B2B services to other businesses, especially:
-- Boutique / independent / specialist marketing or digital agencies (5-50 staff)
-- Telemarketing services / outbound sales agencies
 - Corporate training providers / B2B training companies
-- Lead generation agencies
-- Recruitment agencies / talent acquisition firms
-- Professional services firms doing active outreach (consulting, accounting, legal — only if SMB-sized and clearly outbound-led)
+- L&D, upskilling, sales-training, coaching, and skills-development providers
+- Business consultancies, advisory firms, and professional-services firms doing active outreach (consulting, accounting, legal - only if SMB-sized and clearly outbound-led)
+- Managed IT services, software-development firms, MSPs, and BPO/service-operations firms
 - Founder-led / first 1-2 hires visible publicly
-Pattern: small enough that a founder or marketing leader still feels the bottleneck between BD and delivery work.
+- Agency segments only when the tenant ICP explicitly includes them. For Beaver itself, lead-gen, cold-email, AI outbound, GTM automation, SDR-as-a-service, and telemarketing providers are competitor-offer prospects; do not include them.
+Pattern: small enough that a founder, owner, or sales leader still feels the bottleneck between BD and delivery work.
 
 NEGATIVE — HARD REJECT (do not include in output, even if the signal is strong):
 - Global agency networks and holding groups: WPP, IPG, Publicis, Dentsu, Omnicom, Havas, Hakuhodo. Any subsidiary of these (FCB, McCann, Ogilvy, Saatchi, BBDO, DDB, Leo Burnett, Mediabrands, Wunderman, Initiative, Mindshare, MBCS, Isobar, Wavemaker, Mediacom, Carat, Iris, AKQA, GroupM, Mullen Lowe, Grey, JWT, Ketchum)
@@ -935,13 +934,13 @@ WHAT TO REJECT TOO:
 
 OUTREACH ANGLE — make it SPECIFIC to the signal AND to the tenant's offering:
 - BAD: "Reach out about your hiring spree."
-- GOOD: "First BD hire is the inflection point — most agencies hit 10-15 clients before realising the founder has been the entire pipeline. Beaver replaces the 3-4 SDR hires you would otherwise make."
+- GOOD: "First BD hire is the inflection point - most founder-led service firms hit 10-15 clients before realising the founder has been the entire pipeline. Beaver replaces the 3-4 SDR hires you would otherwise make."
 
 OUTPUT FORMAT:
 Respond with a JSON array. Each item:
 {
   "company": "<exact company name>",
-  "signal_type": "<one of the canonical signal slots — funding, hiring_sales, hiring_marketing, exec_change, expansion, product_launch, award_win, new_client_win, partnership, exec_hire, agency_expansion, shortlisted, boutique_agency, new_launch, first_hire, founder_visible, service_launch, hiring_bdr, scaling_pain>",
+  "signal_type": "<one of the canonical signal slots — funding, hiring_sales, hiring_marketing, exec_change, expansion, product_launch, award_win, new_client_win, partnership, exec_hire, shortlisted, new_launch, first_hire, founder_visible, service_launch, hiring_bdr, scaling_pain>",
   "signal_summary": "<1-line specific fact, includes amount/title/date if known>",
   "url": "<source url from input>",
   "source": "<publication name from input>",

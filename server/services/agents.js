@@ -1121,6 +1121,17 @@ async function salesGenerate(clientId, { lead_id, channel, context = '' }) {
         consumedDirectiveIds.push(winningHooksDirective.id);
       }
 
+      const fixSignalCopyDirective = salesDirectives.find(d => d.directive_type === 'fix_signal_copy');
+      if (fixSignalCopyDirective?.payload) {
+        const payload = fixSignalCopyDirective.payload;
+        captainDirectiveContext += `\n\nCAPTAIN'S DIRECTIVE - signal copy repair:
+- Signal family: ${payload.signal_family || 'unknown_signal_family'}
+- Reject reason: ${payload.reject_reason || 'unknown_reject_reason'}
+- Instruction: ${payload.instruction || 'Lead with the observed buying signal and commercial implication, not a generic company observation'}
+Apply this instruction to the SIGNAL PACKAGE block before drafting.`;
+        consumedDirectiveIds.push(fixSignalCopyDirective.id);
+      }
+
       // Sender identity — resolved at template layer, NOT in prompt (ICP+channel patches per MJ direction 2026-04-29).
       // The LLM must not produce its own signature; we strip and re-append below.
       const senderName = resolveSenderName(clientId, persona);
@@ -4006,8 +4017,8 @@ async function directorExecute(clientId, {
   // this gate ("malaysia agency founder" in the text would bypass the check even
   // when icpMemory was empty). This was exactly how off-ICP leads slipped through:
   // command-level keyword matches don't feed Research Beaver's query builder —
-  // Research reads icpMemory directly and falls back to DEFAULT_INDUSTRIES (SaaS,
-  // training, fintech, global) when memory is empty. Result: US/UK leads in a
+  // Research reads icpMemory directly and falls back to DEFAULT_INDUSTRIES
+  // when memory is empty. Result: US/UK leads in a
   // Malaysia-only ICP.
   //
   // Now we require actual icpMemory to have the three fields populated. If the

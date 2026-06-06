@@ -107,6 +107,82 @@ function providerFanoutCapsLog(caps) {
   };
 }
 
+function initSignalHuntStageStats() {
+  return {
+    raw_results_total: 0,
+    raw_candidates_total: 0,
+    companies_extracted: 0,
+    icp_passed: 0,
+    decision_makers_found: 0,
+    contacts_found: 0,
+    saved: 0,
+  };
+}
+
+function signalIdentity(signal = {}) {
+  const signalId = signal.signal_id || signal.signal_type || signal.signal || 'unknown_signal';
+  return {
+    signal_id: signalId,
+    signal_family: signal.signal_family || signalFamilyForType(signalId),
+    source_channel: signal.source_channel || 'web_search',
+  };
+}
+
+function signalHuntCompleteMetadata({
+  planId = null,
+  config = {},
+  queriesRun = 0,
+  paidQueryBudget = {},
+  providerFanoutCaps = {},
+  paidQueriesRemaining = null,
+  rawSample = [],
+  blocker = null,
+  stageStats = initSignalHuntStageStats(),
+  tiers = {},
+} = {}) {
+  return {
+    plan_id: planId,
+    query_source: config.query_source,
+    queries_run: queriesRun,
+    discovery_query_budget: paidQueryBudget.discovery,
+    lookup_query_budget: paidQueryBudget.lookup,
+    provider_fanout_caps: providerFanoutCapsLog(providerFanoutCaps),
+    queries_preview: Array.isArray(config.queries) ? config.queries.slice(0, queriesRun).map(q => q.query) : [],
+    paid_query_budget_remaining: paidQueriesRemaining,
+    raw_sample: rawSample,
+    blocker,
+    ...stageStats,
+    total_signals: stageStats.raw_candidates_total,
+    unique_companies: stageStats.companies_extracted,
+    leads_with_contacts: stageStats.contacts_found,
+    tiers,
+  };
+}
+
+async function logSignalHuntMiss(clientId, {
+  signal = {},
+  blocker,
+  reason = null,
+  metadata = {},
+} = {}) {
+  if (!clientId || !blocker) return;
+  const identity = signalIdentity(signal);
+  await logsService.createLog(clientId, {
+    agent: 'research_beaver',
+    action: 'research_blocker',
+    target_type: 'research',
+    metadata: {
+      source: 'signal_hunt',
+      ...identity,
+      blocker,
+      reason,
+      lead_company: signal.company || metadata.lead_company || null,
+      source_url: signal.source_url || metadata.source_url || null,
+      ...metadata,
+    },
+  }).catch(() => {});
+}
+
 function executableDiscoveryQueriesForBudget(queries = [], paidQueryBudget = {}) {
   if (!Array.isArray(queries)) return [];
   const discovery = paidQueryBudget?.discovery;
@@ -246,7 +322,7 @@ function industriesFromIcp(icp = {}) {
     ...listFrom(icp.verticals),
     ...listFrom(icp.segments),
   ];
-  const base = industries.length > 0 ? industries : ['B2B corporate training', 'digital agency'];
+  const base = industries.length > 0 ? industries : ['B2B corporate training', 'professional services', 'managed IT services'];
   const seen = new Set();
   return base
     .filter(value => {
@@ -457,82 +533,9 @@ function diversifyIndustriesForQueryRun(industries = []) {
 }
 
 function sourceAwareQueriesForCountry(country = {}, industries = []) {
-  const name = country.name || countryNameFromCode(country.code);
-  const code = country.code || countryCodeFromText(name) || 'MY';
-  const joinedIndustries = industries.join(' ').toLowerCase();
-  const wantsAgency = /agency|digital|marketing|creative|media|advertising|content studio|pr firm/.test(joinedIndustries);
-  const wantsTraining = /training|learning|l&d|coaching|skills|development/.test(joinedIndustries);
-  const currentYear = new Date().getUTCFullYear();
-  const agencyQueries = [];
-  const trainingQueries = [];
-
-  if (wantsAgency && (code === 'MY' || code === 'SG')) {
-    agencyQueries.push({
-      query: `site:marketing-interactive.com "${name}" ("social media agency" OR "PR agency" OR "creative agency" OR "media agency") ("appointed" OR "retainer" OR "pitch") ${currentYear}`,
-      signal_type: 'industry_publication_agency_signal',
-      signal_id: 'agency_client_win_or_growth',
-      signal_family: 'expansion_growth',
-      source_channel: 'industry_publication',
-      tier: 'P1',
-      country: code,
-    });
-    agencyQueries.push({
-      query: `site:marketing-interactive.com "${name}" ("agency" OR "communications") ("launches" OR "expands" OR "enters" OR "names new leader") ${currentYear}`,
-      signal_type: 'industry_publication_agency_signal',
-      signal_id: 'agency_client_win_or_growth',
-      signal_family: 'expansion_growth',
-      source_channel: 'industry_publication',
-      tier: 'P1',
-      country: code,
-    });
-    agencyQueries.push({
-      query: `site:marketingmagazine.com.my "${name}" ("agency" OR "communications") ("appoints" OR "promotes" OR "general manager" OR "CEO") ${currentYear}`,
-      signal_type: 'industry_publication_agency_signal',
-      signal_id: 'agency_client_win_or_growth',
-      signal_family: 'leadership_org_change',
-      source_channel: 'industry_publication',
-      tier: 'P1',
-      country: code,
-    });
-    agencyQueries.push({
-      query: `site:marketingmagazine.com.my "${name}" ("agency" OR "communications") ("wins" OR "appointed" OR "retainer" OR "launches") ${currentYear}`,
-      signal_type: 'industry_publication_agency_signal',
-      signal_id: 'agency_client_win_or_growth',
-      signal_family: 'expansion_growth',
-      source_channel: 'industry_publication',
-      tier: 'P1',
-      country: code,
-    });
-    agencyQueries.push({
-      query: `site:campaignasia.com "${name}" ("agency" OR "independent agency" OR "growth" OR "40 Under 40") ${currentYear}`,
-      signal_type: 'industry_publication_agency_signal',
-      signal_id: 'agency_client_win_or_growth',
-      signal_family: 'expansion_growth',
-      source_channel: 'industry_publication',
-      tier: 'P1',
-      country: code,
-    });
-  }
-
-  if (wantsTraining && code === 'MY') {
-    trainingQueries.push({
-      query: `site:digitalnewsasia.com "${name}" ("training" OR "upskilling" OR "skills") ("launches" OR "expands" OR "partners") ${currentYear}`,
-      signal_type: 'training_growth_signal',
-      signal_id: 'training_growth_publication',
-      signal_family: 'expansion_growth',
-      source_channel: 'industry_publication',
-      tier: 'P1',
-      country: code,
-    });
-  }
-
-  const queries = [];
-  const maxLength = Math.max(agencyQueries.length, trainingQueries.length);
-  for (let i = 0; i < maxLength; i++) {
-    if (agencyQueries[i]) queries.push(agencyQueries[i]);
-    if (trainingQueries[i]) queries.push(trainingQueries[i]);
-  }
-  return queries;
+  void country;
+  void industries;
+  return [];
 }
 
 function fastProofQueriesForCountry(country = {}, industries = []) {
@@ -563,7 +566,6 @@ function fastProofQueriesForCountry(country = {}, industries = []) {
     },
   ];
 
-  queries.push(...sourceAwareQueriesForCountry({ code, name }, industries));
   return queries;
 }
 
@@ -654,10 +656,8 @@ function buildSignalQueriesFromIcp(icp = {}) {
       if (items[i]) queries.push(items[i]);
     }
   }
-  const highYieldQueries = countryObjects.flatMap(country => fastProofQueriesForCountry(country, industries));
-  const combined = [...queries.slice(0, 6), ...highYieldQueries, ...queries.slice(6)];
   const seen = new Set();
-  return combined.filter(q => {
+  return queries.filter(q => {
     const key = String(q.query || '').toLowerCase();
     if (!key || seen.has(key)) return false;
     seen.add(key);
@@ -999,12 +999,12 @@ Hiring-source extraction guidance:
 - Skip location-mismatched results, generic job-board pages, and results where no specific hiring company is named.
 - A sales, account executive, business development, SDR, BDR, growth, or RevOps job in the target geography is a real buying signal.`;
   }
-  if (sourceChannel === 'industry_publication' || /agency|publication/.test(signalType)) {
+  if (sourceChannel === 'industry_publication' || /publication/.test(signalType)) {
     return `
-Agency-publication extraction guidance:
-- If a result says a brand appointed, retained, reappointed, or picked an agency/PR/social/creative/media partner, extract the appointed agency as the company, not the brand client.
-- Treat agency client wins, retainer appointments, market entry, new office/team launch, senior leadership appointments, and named growth/capability expansion as real buying signals.
-- Do not reject a signal merely because the source is an industry publication instead of the company's own site.
+Industry-publication extraction guidance:
+- Extract the company that has the configured signal evidence, not a surrounding brand, publisher, event organizer, or unrelated partner.
+- Treat current, named company events as candidate buying signals only when they match the requested signal family and tenant ICP.
+- Do not treat the source publication itself as the lead company.
 - Prefer current-year and dated results. If the result date is stale and there is no ongoing appointment/retainer/expansion, skip it.
 - For multi-company roundups, include only companies with a named event and source URL.`;
   }
@@ -1020,7 +1020,7 @@ Training-publication extraction guidance:
 function signalExtractionAgent(query = {}) {
   const signalType = String(query.signal_type || '').toLowerCase();
   const sourceChannel = String(query.source_channel || '').toLowerCase();
-  if (sourceChannel === 'industry_publication' || /agency|publication|training_growth/.test(signalType)) {
+  if (sourceChannel === 'industry_publication' || /publication|training_growth/.test(signalType)) {
     return 'market_sensor';
   }
   return 'research_beaver';
@@ -1086,7 +1086,7 @@ function extractedSignalItems(parsed) {
 function isIndustryPublicationQuery(query = {}) {
   const signalType = String(query.signal_type || '').toLowerCase();
   const sourceChannel = String(query.source_channel || '').toLowerCase();
-  return sourceChannel === 'industry_publication' || /agency|publication|training_growth/.test(signalType);
+  return sourceChannel === 'industry_publication' || /publication|training_growth/.test(signalType);
 }
 
 function publicationTitle(result = {}) {
@@ -1160,7 +1160,7 @@ function deterministicPublicationSignals(results = [], query = {}) {
       const sourceUrl = result.link || result.url || '';
       return {
         company,
-        signal_type: query.signal_type || 'industry_publication_agency_signal',
+        signal_type: query.signal_type || query.signal_id || 'industry_publication_signal',
         source_url: sourceUrl,
         signal_summary: `${company} has a current industry-publication signal: ${title}.`,
         why_now: `A current industry publication gives Sales Beaver a timely opening to contact ${company}.`,
@@ -1327,7 +1327,7 @@ For each result containing a REAL buying signal from a company in ${geoText}, re
 Rules:
 - Only include REAL signals from companies in ${geoText}
 - Ignore generic articles, listicles, job boards with no specific company
-- For agency/client-win articles, the lead company is the agency/provider being appointed or expanding, not the brand that hired them
+- Extract the company with the configured signal evidence; do not infer a lead company from unrelated brand or partner mentions
 - Confidence 0.9 = very clear specific company + event, 0.5 = weak
 - Use the result date as signal_date when available; use empty string if no date is visible
 - If no real signals found, return []
@@ -1354,15 +1354,80 @@ Rules:
 
 }
 
+function regexEscape(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function decisionMakerTitleAlternatives(icpTitles = []) {
+  const titles = icpTitles.length > 0 ? icpTitles.slice(0, 4) : ['founder', 'CEO', 'managing director', 'head of sales', 'director'];
+  return titles
+    .map(title => String(title || '').trim())
+    .filter(Boolean)
+    .map(regexEscape)
+    .join('|');
+}
+
+function decisionMakerFromPublicEvidence(results = [], icpTitles = [], sourceLabel = 'decision_maker_public_evidence') {
+  const titleAlternatives = decisionMakerTitleAlternatives(icpTitles);
+  const titleRegex = new RegExp(`\\b(${titleAlternatives})\\b`, 'i');
+  const namePattern = '([A-Z][A-Za-z.\'-]+(?:\\s+[A-Z][A-Za-z.\'-]+){1,3})';
+  const patterns = [
+    new RegExp(`${namePattern}\\s*(?:-|\\u2013|\\u2014|,|\\|)\\s*(${titleAlternatives})\\b`, 'i'),
+    new RegExp(`\\b(${titleAlternatives})\\s*(?:-|\\u2013|\\u2014|,|:)?\\s*${namePattern}`, 'i'),
+    new RegExp(`${namePattern}\\s+(?:is|as|serves as|named|appointed)\\s+(?:the\\s+)?(${titleAlternatives})\\b`, 'i'),
+  ];
+
+  for (const result of Array.isArray(results) ? results : []) {
+    const sourceUrl = result.link || result.url || '';
+    const text = `${result.title || ''}. ${result.snippet || ''}`.replace(/\s+/g, ' ').trim();
+    if (!text || !titleRegex.test(text)) continue;
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (!match) continue;
+      const first = match[1] || '';
+      const second = match[2] || '';
+      const titleFirst = titleRegex.test(first);
+      const name = titleFirst ? second : first;
+      const title = titleFirst ? first : second;
+      if (!name || !title || titleRegex.test(name)) continue;
+      return {
+        name: name.trim(),
+        title: title.trim(),
+        source_url: sourceUrl,
+        linkedin_url: /linkedin\.com\/in\//i.test(sourceUrl) ? sourceUrl : null,
+        source: sourceLabel,
+      };
+    }
+  }
+  return null;
+}
+
 /**
- * For a company with a signal, find the best decision-maker via LinkedIn.
- * Returns { name, title, linkedin_url } or null.
+ * For a company with a signal, find the best decision-maker from public
+ * website/search evidence first, then LinkedIn-style profile evidence.
+ * Returns { name, title, source_url, linkedin_url } or null.
  */
-async function findDecisionMaker(companyName, icpTitles = [], country = 'MY') {
+async function findDecisionMaker(companyName, icpTitles = [], country = 'MY', options = {}) {
   if (!companyName) return null;
 
   const titleHints = icpTitles.length > 0 ? icpTitles.slice(0, 3).join(' OR ') : 'founder OR CEO OR director';
   const query = `"${companyName}" (${titleHints})`;
+  const clientId = options.clientId || null;
+  const publicEvidenceSource = 'decision_maker_public_evidence';
+  const consumeFallbackSearch = typeof options.consumeFallbackSearch === 'function'
+    ? options.consumeFallbackSearch
+    : () => true;
+
+  try {
+    const publicQuery = `"${companyName}" (${titleHints}) ("team" OR "about" OR "leadership" OR "founder")`;
+    const publicResults = await searchOpenWeb(publicQuery, 3, { country, clientId });
+    const publicPerson = decisionMakerFromPublicEvidence(publicResults, icpTitles, publicEvidenceSource);
+    if (publicPerson) return publicPerson;
+  } catch (err) {
+    console.warn(`[signalHunt] public decision-maker lookup failed for ${companyName}:`, err.message);
+  }
+
+  if (!consumeFallbackSearch()) return null;
 
   try {
     const profiles = await searchLinkedInProfiles(query, 3, { country });
@@ -1382,7 +1447,12 @@ async function findDecisionMaker(companyName, icpTitles = [], country = 'MY') {
       .filter(p => p.name && p.linkedin_url)
       .sort((a, b) => seniorityRank(b.title) - seniorityRank(a.title));
 
-    return sorted[0] || null;
+    const top = sorted[0] || null;
+    return top ? {
+      ...top,
+      source_url: top.linkedin_url || null,
+      source: 'decision_maker_linkedin_evidence',
+    } : null;
   } catch (err) {
     console.warn(`[signalHunt] findDecisionMaker failed for ${companyName}:`, err.message);
     return null;
@@ -1419,6 +1489,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   const rawSample = [];
   let queriesRun = 0;
   let rawResultsTotal = 0;
+  const stageStats = initSignalHuntStageStats();
   let paidQueriesRemaining = paidQueryBudget.total;
   let discoveryQueriesRun = 0;
   const consumePaidQuery = (units = 1) => {
@@ -1452,6 +1523,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       const results = await searchOpenWeb(q.query, config.max_results_per_query || 5, { country, clientId });
       const safeResults = Array.isArray(results) ? results : [];
       rawResultsTotal += safeResults.length;
+      stageStats.raw_results_total = rawResultsTotal;
       for (const result of safeResults.slice(0, 2)) {
         if (rawSample.length >= 12) break;
         rawSample.push({
@@ -1488,6 +1560,8 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   }
 
   console.log(`[signalHunt] Total signals extracted: ${allSignals.length}`);
+  stageStats.raw_results_total = rawResultsTotal;
+  stageStats.raw_candidates_total = allSignals.length;
 
   if (allSignals.length === 0) {
     const blocker = rawResultsTotal === 0 ? 'raw_candidates_zero' : 'signals_zero_after_llm_parse';
@@ -1502,23 +1576,17 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     await logsService.createLog(clientId, {
       agent: 'research_beaver',
       action: 'signal_hunt_complete',
-      metadata: {
-        plan_id,
-        query_source: config.query_source,
-        queries_run: queriesRun,
-        discovery_query_budget: paidQueryBudget.discovery,
-        lookup_query_budget: paidQueryBudget.lookup,
-        provider_fanout_caps: providerFanoutCapsLog(providerFanoutCaps),
-        queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
-        paid_query_budget_remaining: paidQueriesRemaining,
-        raw_results_total: rawResultsTotal,
-        raw_sample: rawSample,
+      metadata: signalHuntCompleteMetadata({
+        planId: plan_id,
+        config,
+        queriesRun,
+        paidQueryBudget,
+        providerFanoutCaps,
+        paidQueriesRemaining,
+        rawSample,
         blocker,
-        total_signals: 0,
-        unique_companies: 0,
-        leads_with_contacts: 0,
-        tiers: {},
-      },
+        stageStats,
+      }),
     }).catch(() => {});
     return [];
   }
@@ -1531,6 +1599,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     seenCompanies.add(key);
     return true;
   });
+  stageStats.companies_extracted = uniqueSignals.length;
 
   // Step 3: Sort P1 first
   uniqueSignals.sort((a, b) => {
@@ -1548,21 +1617,51 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     const countryName = countryNameFromCode(country);
     const companyGate = evaluateSignalCompanyIcpGate(signal, icp);
     if (!companyGate.pass) {
+      await logSignalHuntMiss(clientId, {
+        signal,
+        blocker: companyGate.blocker || 'icp_zero_after_company_extract',
+        reason: companyGate.reason || 'company_icp_gate_failed',
+        metadata: {
+          matched_terms: companyGate.matched_terms || [],
+          expected_verticals: companyGate.expected_verticals || [],
+          reject_rules_checked: companyGate.reject_rules_checked || [],
+        },
+      });
       console.log(`[signalHunt] Company ICP gate blocked ${signal.company}: ${companyGate.reason}`);
       continue;
     }
+    stageStats.icp_passed++;
 
     await assertLlmBudgetOpen(clientId);
     if (!consumePaidQuery(1)) {
+      await logSignalHuntMiss(clientId, {
+        signal,
+        blocker: 'provider_cap_closed',
+        reason: 'paid_query_budget_exhausted_before_decision_maker_lookup',
+      });
       console.log('[signalHunt] Paid-query budget exhausted before decision-maker lookup');
       break;
     }
 
-    const person = await findDecisionMaker(signal.company, icpTitles, country);
-    if (!person || !person.linkedin_url) {
+    let decisionMakerFallbackBlocked = false;
+    const person = await findDecisionMaker(signal.company, icpTitles, country, {
+      clientId,
+      consumeFallbackSearch: () => {
+        const allowed = consumePaidQuery(1);
+        if (!allowed) decisionMakerFallbackBlocked = true;
+        return allowed;
+      },
+    });
+    if (!person || !person.name) {
+      await logSignalHuntMiss(clientId, {
+        signal,
+        blocker: decisionMakerFallbackBlocked ? 'provider_cap_closed' : 'decision_maker_zero',
+        reason: decisionMakerFallbackBlocked ? 'paid_query_budget_exhausted_before_linkedin_decision_maker_lookup' : 'decision_maker_not_found',
+      });
       console.log(`[signalHunt] No decision-maker found for ${signal.company}`);
       continue;
     }
+    stageStats.decision_makers_found++;
 
     const { applyIcpV2Filter } = require('./agents');
     const gate = applyIcpV2Filter({
@@ -1584,6 +1683,15 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       },
     });
     if (!gate.pass) {
+      await logSignalHuntMiss(clientId, {
+        signal,
+        blocker: gate.reason === 'competitor_offer_disqualified' ? 'competitor_offer_disqualified' : 'icp_zero_after_company_extract',
+        reason: gate.reason || 'person_icp_gate_failed',
+        metadata: {
+          person_name: person.name,
+          person_title: person.title || null,
+        },
+      });
       console.log(`[signalHunt] ICP gate blocked ${person.name} / ${signal.company}: ${gate.reason}`);
       continue;
     }
@@ -1616,7 +1724,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       name: person.name,
       title: person.title || '',
       company: signal.company,
-      linkedin_url: person.linkedin_url,
+      linkedin_url: person.linkedin_url || null,
       email,
       email_source,
       email_verified,
@@ -1636,6 +1744,13 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         signal_type: signal.signal_type,
         signal_source_url: signal.source_url,
         signal_confidence: signal.confidence,
+        decision_maker_source_url: person.source_url || person.linkedin_url || null,
+        decision_maker: {
+          name: person.name,
+          title: person.title || '',
+          source_url: person.source_url || person.linkedin_url || null,
+          source: person.source || null,
+        },
         country: countryName,
         industry_match: companyGate.vertical_match || null,
         icp_evidence: companyGate.icp_evidence || [],
@@ -1650,31 +1765,27 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       evidenceDate: signal.signal_date || undefined,
       source_channel: signal.source_channel || 'web_search',
     }));
+    stageStats.contacts_found++;
   }
 
   await logsService.createLog(clientId, {
     agent: 'research_beaver',
     action: 'signal_hunt_complete',
-    metadata: {
-      plan_id,
-      query_source: config.query_source,
-      queries_run: queriesRun,
-      discovery_query_budget: paidQueryBudget.discovery,
-      lookup_query_budget: paidQueryBudget.lookup,
-      provider_fanout_caps: providerFanoutCapsLog(providerFanoutCaps),
-      queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
-      paid_query_budget_remaining: paidQueriesRemaining,
-      raw_results_total: rawResultsTotal,
-      raw_sample: rawSample,
-      blocker: leads.length === 0 ? 'contacts_zero' : null,
-      total_signals: allSignals.length,
-      unique_companies: uniqueSignals.length,
-      leads_with_contacts: leads.length,
+    metadata: signalHuntCompleteMetadata({
+      planId: plan_id,
+      config,
+      queriesRun,
+      paidQueryBudget,
+      providerFanoutCaps,
+      paidQueriesRemaining,
+      rawSample,
+      blocker: leads.length === 0 ? 'contact_zero' : null,
+      stageStats,
       tiers: leads.reduce((acc, l) => {
         acc[l.signal_tier] = (acc[l.signal_tier] || 0) + 1;
         return acc;
       }, {}),
-    },
+    }),
   }).catch(() => {});
 
   if (leads.length === 0) {
@@ -1684,7 +1795,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       queries: executableDiscoveryQueries,
       queriesRun,
       rawResultsTotal,
-      blocker: 'contacts_zero',
+      blocker: 'contact_zero',
     }).catch(() => {});
   }
 
@@ -1763,6 +1874,16 @@ async function saveSignalLeads(clientId, leads) {
     });
     if (!gateResult.passed) {
       saveStats.contact_gate_blocked++;
+      await logSignalHuntMiss(clientId, {
+        signal: lead.metadata?.signal_package || lead.metadata || lead,
+        blocker: 'contact_zero',
+        reason: gateResult.missReason || 'contact_gate_blocked',
+        metadata: {
+          lead_name: lead.name || null,
+          lead_company: lead.company || null,
+          contact_gate: gateResult,
+        },
+      });
       console.log(`[signalHunt] Tier C ${lead.name} — reason: ${gateResult.missReason}`);
       continue;
     }
@@ -1801,6 +1922,22 @@ async function saveSignalLeads(clientId, leads) {
       if (res.rows.length > 0) {
         saved.push(res.rows[0]);
         saveStats.saved++;
+        const pkg = lead.metadata?.signal_package || {};
+        await logsService.createLog(clientId, {
+          agent: 'research_beaver',
+          action: 'signal_hunt_save_complete',
+          target_type: 'lead',
+          target_id: res.rows[0].id,
+          metadata: {
+            source: 'signal_hunt',
+            ...signalIdentity(pkg),
+            lead_name: lead.name || null,
+            lead_company: lead.company || null,
+            saved: 1,
+            contacts_found: 1,
+            lead_tier: leadTier,
+          },
+        }).catch(() => {});
       }
     } catch (err) {
       saveStats.insert_failed++;

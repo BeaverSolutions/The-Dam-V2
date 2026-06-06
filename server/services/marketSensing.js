@@ -3,7 +3,7 @@
 /**
  * Phase E — Market Sensing Layer (MY-only v1).
  *
- * Pulls Malaysia business/tech/marketing news from a fixed source set,
+ * Pulls Malaysia business/tech/service news from a fixed source set,
  * uses Brave Search (already authenticated) to query each source for
  * signals matching the tenant's signal_preferences weights and ICP
  * verticals, then asks Haiku to extract named opportunities with a
@@ -27,22 +27,15 @@ const spendGuard = require('./spendGuard');
 const { todayInMalaysia } = require('../utils/businessDay');
 const { checkBudget, BudgetExceededError } = require('./budget');
 
-// MY + SEA-agency news sources for v1. Mix of MY-general business/tech
-// publications and SEA agency-vertical publications (which heavily cover
-// MY agencies). Each carries a domain (for site: queries) and a friendly
-// name (for surfacing to MJ + the LLM).
+// MY general business/tech/service publications for v1. Each carries a
+// domain (for site: queries) and a friendly name (for surfacing to MJ + the LLM).
 const MY_SOURCES = [
-  // MY-general business/tech
   { name: 'Edge Markets MY',      domain: 'theedgemalaysia.com' },
   { name: 'Vulcan Post MY',       domain: 'vulcanpost.com' },
   { name: 'Digital News Asia',    domain: 'digitalnewsasia.com' },
   { name: 'SoyaCincau',           domain: 'soyacincau.com' },
   { name: 'Free Malaysia Today',  domain: 'freemalaysiatoday.com' },
   { name: 'The Star',             domain: 'thestar.com.my' },
-  // Agency-vertical (regional, heavy MY coverage)
-  { name: 'Marketing Magazine MY', domain: 'marketingmagazine.com.my' },
-  { name: 'Marketing Interactive', domain: 'marketing-interactive.com' },
-  { name: 'Campaign Asia',         domain: 'campaignasia.com' },
 ];
 
 // Signal triggers, keyed by signal_preferences slot. Brave composes per
@@ -50,11 +43,7 @@ const MY_SOURCES = [
 // the Haiku extraction step (which has full ICP context) — keeping the
 // search layer broad maximizes recall, then we filter for precision.
 //
-// AGENCY-SPECIFIC slots (new — for tenants whose ICP is marketing/PR/
-// digital agencies, where funding signals are rare but award/client/
-// hire signals are abundant):
 const SIGNAL_KEYWORDS = {
-  // Generic B2B signals (good for SaaS/tech/SMB ICPs)
   funding:           '("Series A" OR "Series B" OR "seed round" OR "funding round" OR raised)',
   hiring_sales:      '("head of sales" OR "VP sales" OR "sales director" OR "hiring sales")',
   hiring_marketing:  '(CMO OR "head of marketing" OR "marketing director" OR "appoints marketing")',
@@ -63,22 +52,17 @@ const SIGNAL_KEYWORDS = {
   product_launch:    '("launches" OR unveils OR "rolls out")',
   scaling_pain:      '("hiring spree" OR "doubled headcount" OR "scaling team")',
   competitor_switch: '("switches from" OR "replaces" OR "migrated from")',
-
-  // Agency-vertical signals (high yield on Marketing Interactive / Campaign Asia / Marketing Magazine)
-  award_win:         '(MARKies OR "AMY Awards" OR "Effie" OR "Spark Awards" OR winner OR "wins award")',
-  new_client_win:    '("appointed by" OR "wins account" OR "new client" OR "campaign for" OR "media account")',
+  award_win:         '("wins award" OR winner OR finalist OR "industry award" OR "business award")',
+  new_client_win:    '("new client" OR "customer win" OR "wins contract" OR "contract awarded" OR "case study")',
   partnership:       '("partners with" OR "partnership with" OR "joint venture" OR collaboration)',
-  exec_hire:         '("appoints" OR "names" OR "new MD" OR "managing director" OR "ECD" OR "creative director" OR "growth director" OR "general manager")',
-  agency_expansion:  '("opens" OR "expands" OR "new practice" OR "launches division" OR "opens office")',
+  exec_hire:         '("appoints" OR "names" OR "new MD" OR "managing director" OR "head of sales" OR "general manager")',
 
-  // SMB-specific signals (5-50 staff agencies + B2B-services orgs).
+  // SMB-specific signals (5-50 staff B2B-services orgs).
   // These surface SMALL/EMERGING players not covered by the establishment
-  // signals above. Especially valuable for telemarketing services, B2B
-  // training, lead-gen agencies, recruitment, professional services —
-  // anyone whose core business is selling B2B services via outbound.
+  // signals above. Especially valuable for corporate training, consultancies,
+  // professional services, MSP/software/IT services, and BPO/service operators.
   shortlisted:       '(shortlist OR shortlisted OR finalist OR nominee OR "in the running")',
-  boutique_agency:   '("boutique agency" OR "independent agency" OR "specialist agency" OR "homegrown agency")',
-  new_launch:        '("founded in 2024" OR "founded in 2025" OR "founded in 2026" OR "opens its doors" OR "launches in Malaysia" OR "new agency" OR "launches a new")',
+  new_launch:        '("founded in 2024" OR "founded in 2025" OR "founded in 2026" OR "opens its doors" OR "launches in Malaysia" OR "launches a new")',
   first_hire:        '("first BD hire" OR "first sales hire" OR "first growth" OR "founding sales" OR "founding BD")',
   founder_visible:   '("founder of" OR "co-founder of" OR "started by" OR "co-founded by" OR "MD and founder")',
   service_launch:    '("launches new service" OR "launches new programme" OR "rolls out training" OR "new training programme" OR "launches B2B")',
@@ -242,7 +226,7 @@ ICP company size: ${client.icp_config?.company_size?.min ?? '?'}-${client.icp_co
 
   const userMessage = `${tenantContext}
 
-You are scanning Malaysia news for HIGH-INTENT buying signals for THIS tenant. Below are ${trimmed.length} raw search snippets from MY business/tech/marketing publications. Extract ONLY items where:
+You are scanning Malaysia news for HIGH-INTENT buying signals for THIS tenant. Below are ${trimmed.length} raw search snippets from MY business/tech/service publications. Extract ONLY items where:
 - A real named company is identifiable (not "an agency" — name it)
 - The company is plausibly in the tenant's ICP (or close enough to be worth outreach)
 - A specific recent signal is present (funding, exec hire, expansion, product launch, hiring spree)

@@ -11,6 +11,7 @@ const researchSource = readFileSync(resolve(__dirname, '../../services/research.
 const dbBuilderSource = readFileSync(resolve(__dirname, '../../services/dbBuilder.js'), 'utf-8');
 const pipelineSource = readFileSync(resolve(__dirname, '../../services/pipeline.js'), 'utf-8');
 const emailEnrichmentSource = readFileSync(resolve(__dirname, '../../services/emailEnrichment.js'), 'utf-8');
+const signalHuntSource = readFileSync(resolve(__dirname, '../../services/signalHunt.js'), 'utf-8');
 
 describe('Research Beaver decision-maker and contact enrichment order', () => {
   it('documents the canonical Phase 3 enrichment sequence as code', () => {
@@ -54,6 +55,28 @@ describe('Research Beaver decision-maker and contact enrichment order', () => {
     expect(decisionLookup).toBeGreaterThan(-1);
     expect(hunterLookup).toBeGreaterThan(-1);
     expect(decisionLookup).toBeLessThan(hunterLookup);
+  });
+
+  it('runs Signal Hunt public evidence lookup before LinkedIn-style decision-maker lookup', () => {
+    const fnStart = signalHuntSource.indexOf('async function findDecisionMaker');
+    const fnEnd = signalHuntSource.indexOf('async function runSignalHunt', fnStart);
+    const body = signalHuntSource.slice(fnStart, fnEnd);
+    const publicLookup = body.indexOf('searchOpenWeb');
+    const linkedinLookup = body.indexOf('searchLinkedInProfiles');
+
+    expect(fnStart).toBeGreaterThan(-1);
+    expect(publicLookup).toBeGreaterThan(-1);
+    expect(linkedinLookup).toBeGreaterThan(publicLookup);
+    expect(body).toContain('decision_maker_public_evidence');
+  });
+
+  it('does not require a LinkedIn URL before Signal Hunt can attempt contact enrichment', () => {
+    const loopStart = signalHuntSource.indexOf('for (const signal of uniqueSignals');
+    const loopEnd = signalHuntSource.indexOf('leads.push(attachSignalPackageToSignalLead', loopStart);
+    const loopBody = signalHuntSource.slice(loopStart, loopEnd);
+
+    expect(loopBody).not.toContain('!person.linkedin_url');
+    expect(loopBody).toContain('!person || !person.name');
   });
 
   it('runs Hunter before MillionVerifier and only verifies generated candidates', () => {

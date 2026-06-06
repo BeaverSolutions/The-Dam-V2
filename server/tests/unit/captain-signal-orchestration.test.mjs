@@ -1,11 +1,16 @@
 import { createRequire } from 'module';
+import { readFileSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 
 const require = createRequire(import.meta.url);
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const { buildSignalScorecard } = require('../../services/beaverScorecard');
 const captain = require('../../services/captainOrchestrator');
 const directiveBus = require('../../services/directives');
 const jobHealth = require('../../services/jobHealth');
+const captainSource = readFileSync(resolve(__dirname, '../../services/captainOrchestrator.js'), 'utf-8');
 
 const tenant = {
   icp: {
@@ -81,6 +86,43 @@ describe('Captain signal orchestration (V2.1 Phase 5)', () => {
     expect(scorecard.hiring_sales_roles.blocker_reasons.generic_message).toBe(1);
   });
 
+  it('builds scorecard rows from Signal Hunt completion and save-stage metrics', () => {
+    const scorecard = buildSignalScorecard([
+      {
+        signal_id: 'hiring_sales_roles',
+        signal_family: 'hiring_capability_build',
+        source_channel: 'linkedin_jobs',
+        attempted: 1,
+        raw_candidates_total: 9,
+        companies_extracted: 7,
+        icp_passed: 5,
+        decision_makers_found: 4,
+        contacts_found: 3,
+        saved: 2,
+        blocker: 'contact_zero',
+      },
+    ]);
+
+    expect(scorecard.hiring_sales_roles).toMatchObject({
+      attempted: 1,
+      raw_candidates: 9,
+      icp_pass: 5,
+      decision_maker_found: 4,
+      contact_found: 3,
+      saved_leads: 2,
+    });
+    expect(scorecard.hiring_sales_roles.blocker_reasons.contact_zero).toBe(1);
+  });
+
+  it('collects Signal Hunt complete/save logs for Captain per-signal yield', () => {
+    expect(captainSource).toContain('signal_hunt_complete');
+    expect(captainSource).toContain('signal_hunt_save_complete');
+    expect(captainSource).toContain("metadata->>'icp_passed'");
+    expect(captainSource).toContain("metadata->>'decision_makers_found'");
+    expect(captainSource).toContain("metadata->>'contacts_found'");
+    expect(captainSource).toContain("metadata->>'saved'");
+  });
+
   it('stops a zero-yield signal for the day and selects another enabled signal', () => {
     const signalScorecard = buildSignalScorecard([
       {
@@ -113,6 +155,28 @@ describe('Captain signal orchestration (V2.1 Phase 5)', () => {
       source_channel: 'company_news',
       cap: 2,
     });
+  });
+
+  it('can issue the first Research playbook before signal scorecard rows exist', () => {
+    const decision = captain._test.buildCaptainSignalOrchestration({
+      tenant,
+      currentSignalId: null,
+      signalScorecard: {},
+      spend: { provider_cap_closed: false, daily_budget_remaining_usd: 5 },
+      queue: { pending_approvals: 0, capacity: 20 },
+      channelReadiness: { email: true, linkedin: true },
+    });
+    const sweepStart = captainSource.indexOf('async function runDirectiveSweep');
+    const emptyScorecardGuard = captainSource.indexOf('signalIds.length === 0', sweepStart);
+    const writeDirectives = captainSource.indexOf('writeSignalOrchestrationDirectives(clientId, signalOrchestration)', sweepStart);
+
+    expect(decision.next_playbook).toMatchObject({
+      signal_id: 'hiring_sales_roles',
+      signal_family: 'hiring_capability_build',
+      source_channel: 'linkedin_jobs',
+    });
+    expect(emptyScorecardGuard).toBeGreaterThan(sweepStart);
+    expect(writeDirectives).toBeGreaterThan(emptyScorecardGuard);
   });
 
   it('treats provider caps, repeated zero query sets, full queues, and channel readiness as dry-spend stops', () => {

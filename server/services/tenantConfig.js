@@ -31,7 +31,7 @@ const LEGACY_DEFAULT_ICP = Object.freeze({
     senior_leader: ['VP Marketing', 'VP Sales', 'Head of Marketing', 'Head of Sales', 'Marketing Director', 'Sales Director'],
     junior_ic_regex: '(specialist|coordinator|associate|intern|junior|assistant|executive)',
   },
-  verticals: ['digital_marketing', 'digital_agency', 'marketing_services', 'advertising'],
+  verticals: ['corporate_training', 'professional_services', 'business_consulting', 'managed_it_services', 'software_it_services'],
   company_size: { min: 5, max: 50 },
   banned_regex: ['freelance', 'freelancer', 'self-employed', 'looking for opportunities'],
 });

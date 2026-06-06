@@ -348,7 +348,7 @@ async function runDailyEnrichmentPass(clientId) {
 // signal_type values the quality scorer + Beaver ICP recognise.
 const COLD_SIGNAL_TYPES = [
   'hiring_sales', 'hiring_bdr', 'expansion', 'funding',
-  'product_launch', 'scaling_pain', 'agency_expansion',
+  'product_launch', 'scaling_pain',
 ];
 
 /**
