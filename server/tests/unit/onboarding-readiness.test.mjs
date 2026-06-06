@@ -199,15 +199,15 @@ describe('onboarding readiness contracts', () => {
   });
 
   it('Captain Apollo preflight reports BYOK availability without crediting unsupported campaign capacity', () => {
-    const captainSource = service('captainBeaver.js');
+    const captainPreflightSource = service('captainOrchestrator.js');
     const agentsSource = service('agents.js');
 
-    expect(captainSource).toContain("require('./apollo').getApiKey(clientId)");
-    expect(captainSource).toContain("providerUsageToday('apollo', clientId)");
-    expect(captainSource).toContain('apolloRemaining');
-    expect(captainSource).toContain('apollo_available_not_campaign_capacity');
-    expect(captainSource).toContain('const campaignResearchRemaining = braveRemaining + googleRemaining;');
-    expect(captainSource).not.toContain('braveRemaining + googleRemaining + apolloRemaining');
+    expect(captainPreflightSource).toContain("require('./apollo').getApiKey(clientId)");
+    expect(captainPreflightSource).toContain("providerUsageToday('apollo', clientId)");
+    expect(captainPreflightSource).toContain('apolloRemaining');
+    expect(captainPreflightSource).toContain('apollo_available_not_campaign_capacity');
+    expect(captainPreflightSource).toContain('const campaignResearchRemaining = braveRemaining + googleRemaining;');
+    expect(captainPreflightSource).not.toContain('braveRemaining + googleRemaining + apolloRemaining');
     expect(agentsSource).toContain('apolloService.getApiKey(clientId)');
     expect(agentsSource).toContain('!!apolloKey && Number(process.env.APOLLO_DAILY_QUERY_CAP || 0) > 0');
   });

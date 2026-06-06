@@ -52,9 +52,9 @@ router.post('/ranger/review',
 );
 
 // ── Captain Beaver routing ──────────────────────────────────────────────
-// Captain Beaver is the unified brain. All Director Chat goes through Captain.
-// Pipeline trigger words activate the full agent pipeline (Research → Sales → Enforcer).
-// Everything else is handled by Captain Beaver directly (queries, outreach, memory, etc.)
+// Director Chat has two safe paths:
+// - Explicit pipeline verbs use the structured approval flow with Captain preflight.
+// - Everything else is handled by Captain Beaver directly (queries, outreach, memory, etc.)
 const CAPTAIN_PREFIX_RE = /^(?:@?(?:my)?claw|(?:hey|hi|yo)\s+(?:claw|captain)|@?captain|@?lodge(?:\s*master)?)[,:\s]*/i;
 const PIPELINE_TRIGGER_RE = /\b(kickoff|kick off|start campaign|launch campaign|execute|run campaign|start outreach|begin campaign|activate campaign)\b/i;
 

@@ -49,7 +49,11 @@ const {
   injectMemoryContext,
   postSessionLearning,
 } = require('./learningEngine');
-const { leadSelectionFeedbackExclusionSql } = require('./founderFeedbackSignals');
+const {
+  leadSelectionFeedbackExclusionSql,
+  currentSignalPackageEligibilitySql,
+} = require('./founderFeedbackSignals');
+const { getRunCampaignPreflight: orchestratorPreflight } = require('./captainOrchestrator');
 
 // ─── Persona loader ────────────────────────────────────────────────────────
 // Loads the same files Jarvis loads: IDENTITY, SOUL, USER, AGENTS, MEMORY, TOOLS.
@@ -472,6 +476,7 @@ async function toolSearchInternalLeads(clientId, { industry, location, signal_ti
         )
     )`);
     conditions.push(leadSelectionFeedbackExclusionSql('leads').replace(/^AND\s+/, ''));
+    conditions.push(currentSignalPackageEligibilitySql('leads').replace(/^AND\s+/, ''));
   }
 
   if (industry) {
@@ -965,11 +970,6 @@ function campaignTargetFromCommand(command) {
   return parseRequestedLeadCount(command, 20);
 }
 
-function minPaidQueriesForExternalTarget(target) {
-  const n = Math.max(1, Number(target) || 1);
-  return Math.max(4, n * 4);
-}
-
 function listFromIcp(value) {
   if (Array.isArray(value)) return value.map(v => String(v || '').trim()).filter(Boolean);
   if (typeof value !== 'string') return [];
@@ -1006,107 +1006,6 @@ function isLeadCampaignRequest(command) {
   if (REFERENTIAL_WORDS.test(cmd)) return false;
   return /\b(find|source|get|research|run|start|kickoff)\b/i.test(cmd)
     && /\b(leads?|companies|prospects?|outreach|campaign|kickoff)\b/i.test(cmd);
-}
-
-async function getRunCampaignPreflight(clientId, command) {
-  const target = campaignTargetFromCommand(command);
-  const { rows: [capacity] } = await pool.query(
-    `WITH selectable AS (
-       SELECT l.*,
-              (
-                SELECT COUNT(*)::int
-                  FROM messages mr
-                 WHERE mr.client_id = $1
-                   AND mr.lead_id = l.id
-                   AND mr.status IN ('rejected', 'ranger_rejected')
-              ) AS prior_reject_count,
-              (l.email IS NOT NULL AND (l.email_verified IS TRUE OR l.email_source = 'hunter')) AS has_verified_email,
-              (l.linkedin_url IS NOT NULL AND NOT EXISTS (
-                SELECT 1 FROM messages ml
-                 WHERE ml.client_id = $1
-                   AND ml.lead_id = l.id
-                   AND ml.channel = 'linkedin'
-                   AND ml.status NOT IN ('deleted')
-              )) AS has_usable_linkedin
-         FROM leads l
-        WHERE l.client_id = $1
-          AND l.deleted_at IS NULL
-          AND l.status = 'new'
-          AND l.pipeline_stage = 'prospecting'
-          AND NULLIF(BTRIM(l.name), '') IS NOT NULL
-          AND NULLIF(BTRIM(l.company), '') IS NOT NULL
-          AND LOWER(BTRIM(l.company)) NOT IN ('unknown', 'unknown company', 'independent', 'self-employed', 'self employed', 'stealth', 'confidential')
-          AND (l.email IS NOT NULL OR l.linkedin_url IS NOT NULL)
-          AND NOT EXISTS (
-            SELECT 1 FROM messages m
-             WHERE m.lead_id = l.id AND m.client_id = $1
-               AND m.status IN (
-                 'pending_ranger', 'pending_approval', 'approved',
-                 'pending_send', 'sending', 'sent', 'delivered',
-                 'linkedin_requested', 'awaiting_accept'
-               )
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM pipeline_traces pt
-             WHERE pt.client_id = $1 AND pt.lead_id = l.id
-               AND pt.stage = 'enrolled'
-               AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date =
-                   (NOW() AT TIME ZONE 'Asia/Kuala_Lumpur')::date
-          )
-          ${leadSelectionFeedbackExclusionSql('l')}
-     )
-     SELECT COUNT(*)::int AS raw_eligible_count,
-            COUNT(*) FILTER (WHERE prior_reject_count < 2 AND (has_verified_email OR has_usable_linkedin))::int AS channel_ready_count,
-            COUNT(*) FILTER (WHERE has_verified_email)::int AS verified_email_count,
-            COUNT(*) FILTER (WHERE has_usable_linkedin AND NOT has_verified_email)::int AS usable_linkedin_count,
-            COUNT(*) FILTER (WHERE NOT has_verified_email AND linkedin_url IS NOT NULL AND NOT has_usable_linkedin)::int AS channel_exhausted_count,
-            COUNT(*) FILTER (WHERE prior_reject_count >= 2)::int AS repeat_reject_count
-       FROM selectable`,
-    [clientId]
-  );
-  const rawEligibleCount = Number(capacity?.raw_eligible_count) || 0;
-  const eligibleCount = Number(capacity?.channel_ready_count) || 0;
-  const { CAPS } = require('./spendGuard');
-  const { providerUsageToday } = require('./spendGuard');
-  const braveSpent = await providerUsageToday('brave', clientId).catch(() => CAPS.brave);
-  const googleSpent = await providerUsageToday('google_cse', clientId).catch(() => CAPS.google_cse);
-  const apolloSpent = await providerUsageToday('apollo', clientId).catch(() => CAPS.apollo);
-  const braveRemaining = Math.max(0, CAPS.brave - braveSpent);
-  const googleRemaining = Math.max(0, CAPS.google_cse - googleSpent);
-  const apolloRemaining = Math.max(0, CAPS.apollo - apolloSpent);
-  const campaignResearchRemaining = braveRemaining + googleRemaining;
-  const externalShortfall = Math.max(0, target - Math.min(target, eligibleCount));
-  const requiredPaidQueries = externalShortfall > 0
-    ? minPaidQueriesForExternalTarget(externalShortfall)
-    : 0;
-  const apolloKey = await require('./apollo').getApiKey(clientId).catch(() => null);
-  const providers = {
-    brave: !!process.env.BRAVE_API_KEY && braveRemaining > 0,
-    google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX) && googleRemaining > 0,
-    apollo_available_not_campaign_capacity: !!apolloKey && apolloRemaining > 0,
-  };
-  return {
-    target,
-    eligible_count: eligibleCount,
-    raw_eligible_count: rawEligibleCount,
-    channel_ready_count: eligibleCount,
-    verified_email_count: Number(capacity?.verified_email_count) || 0,
-    usable_linkedin_count: Number(capacity?.usable_linkedin_count) || 0,
-    channel_exhausted_count: Number(capacity?.channel_exhausted_count) || 0,
-    repeat_reject_count: Number(capacity?.repeat_reject_count) || 0,
-    external_shortfall: externalShortfall,
-    providers,
-    provider_usage: {
-      brave: { spent: braveSpent, cap: CAPS.brave, remaining: braveRemaining },
-      google_cse: { spent: googleSpent, cap: CAPS.google_cse, remaining: googleRemaining },
-      apollo: { spent: apolloSpent, cap: CAPS.apollo, remaining: apolloRemaining },
-    },
-    has_research_provider: providers.brave || providers.google_cse,
-    remaining_paid_queries: campaignResearchRemaining,
-    required_paid_queries: requiredPaidQueries,
-    has_sufficient_research_capacity: externalShortfall === 0
-      || ((providers.brave || providers.google_cse) && campaignResearchRemaining >= requiredPaidQueries),
-  };
 }
 
 async function findRecentRunningExecution(clientId) {
@@ -1168,7 +1067,7 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
   const planId = plan_id || uuidV4();
   const originalCommand = command || '';
   const campaignCommand = await buildCampaignCommandFromClientConfig(clientId, originalCommand);
-  const preflight = await getRunCampaignPreflight(clientId, campaignCommand);
+  const preflight = await orchestratorPreflight(clientId, campaignCommand);
   await expireStaleRunningExecutions(clientId).catch(() => 0);
   const running = await findRecentRunningExecution(clientId).catch(() => null);
   if (running) {
@@ -1785,7 +1684,7 @@ module.exports = {
   loadPersona,
   getClientSlug,
   expireStaleRunningExecutions,
-  getRunCampaignPreflight,
+  getRunCampaignPreflight: orchestratorPreflight,
   // Used by LinkedIn auto-sweep in index.js
   toolDraftEmailForLeads,
 };

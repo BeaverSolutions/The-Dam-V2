@@ -71,6 +71,7 @@ describe('P0 stabilization contracts', () => {
 
   it('campaigns cannot silently claim output after zero-useful-lead paths', () => {
     const captain = service('services/captainBeaver.js');
+    const captainPreflight = service('services/captainOrchestrator.js');
     const agents = service('services/agents.js');
     const index = service('index.js');
 
@@ -83,20 +84,20 @@ describe('P0 stabilization contracts', () => {
     expect(captain).toContain('findRecentRunningExecution');
     expect(captain).toContain('expireStaleRunningExecutions');
     expect(captain).toContain('persistExecTerminalStatus');
-    expect(captain).toContain('has_sufficient_research_capacity');
-    expect(captain).toContain('required_paid_queries');
-    expect(captain).toContain('raw_eligible_count');
-    expect(captain).toContain('channel_ready_count');
-    expect(captain).toContain('channel_exhausted_count');
-    expect(captain).toContain('repeat_reject_count');
-    expect(captain).toContain('prior_reject_count < 2');
-    expect(captain).toContain("ml.channel = 'linkedin'");
+    expect(captainPreflight).toContain('has_sufficient_research_capacity');
+    expect(captainPreflight).toContain('required_paid_queries');
+    expect(captainPreflight).toContain('raw_eligible_count');
+    expect(captainPreflight).toContain('channel_ready_count');
+    expect(captainPreflight).toContain('channel_exhausted_count');
+    expect(captainPreflight).toContain('repeat_reject_count');
+    expect(captainPreflight).toContain('prior_reject_count < 2');
+    expect(captainPreflight).toContain("ml.channel = 'linkedin'");
     expect(captain).toContain('insufficient_paid_search_capacity');
     expect(captain).toContain("status: result?.status || 'completed'");
     expect(captain).toContain("response.status = 'captain_response'");
     expect(captain).toContain('campaign_status: campaignResult.status');
     expect(captain).not.toContain('\n      status: campaignResult.status,');
-    expect(captain).toContain("NULLIF(BTRIM(l.company), '') IS NOT NULL");
+    expect(captainPreflight).toContain("NULLIF(BTRIM(l.company), '') IS NOT NULL");
     expect(agents).toContain("NULLIF(BTRIM(l.company), '') IS NOT NULL");
     expect(agents).toContain("ml.channel = 'linkedin'");
     expect(agents).toContain("l.email_verified IS TRUE OR l.email_source = 'hunter'");

@@ -12,6 +12,7 @@ describe('no-output campaign contract', () => {
   const agents = source('services/agents.js');
   const agentsRoute = source('routes/agents.js');
   const captainBeaver = source('services/captainBeaver.js');
+  const captainOrchestrator = source('services/captainOrchestrator.js');
   const chatPage = source('../client/src/pages/Chat.jsx');
   const autonomousRoute = source('routes/autonomous.js');
   const messagesRoute = source('routes/messages.js');
@@ -78,8 +79,9 @@ describe('no-output campaign contract', () => {
   });
 
   it('counts only execution-supported search providers in campaign preflight capacity', () => {
-    expect(captainBeaver).toContain('const campaignResearchRemaining = braveRemaining + googleRemaining;');
-    expect(captainBeaver).not.toContain('braveRemaining + googleRemaining + apolloRemaining');
+    expect(captainOrchestrator).toContain('const campaignResearchRemaining = braveRemaining + googleRemaining;');
+    expect(captainOrchestrator).not.toContain('braveRemaining + googleRemaining + apolloRemaining');
+    expect(captainBeaver).toContain("getRunCampaignPreflight: orchestratorPreflight");
   });
 
   it('enqueues email sends when borderline drafts are approved by message routes', () => {

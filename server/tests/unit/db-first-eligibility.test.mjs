@@ -4,7 +4,8 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const agentsSource = readFileSync(resolve(__dirname, '../../services/agents.js'), 'utf-8');
-const captainSource = readFileSync(resolve(__dirname, '../../services/captainBeaver.js'), 'utf-8');
+const captainBeaverSource = readFileSync(resolve(__dirname, '../../services/captainBeaver.js'), 'utf-8');
+const captainOrchestratorSource = readFileSync(resolve(__dirname, '../../services/captainOrchestrator.js'), 'utf-8');
 
 describe('director DB-first eligibility', () => {
   const dbFirstStart = agentsSource.indexOf('Step 0: DB-first');
@@ -40,9 +41,17 @@ describe('director DB-first eligibility', () => {
 });
 
 describe('Captain campaign preflight eligibility', () => {
-  const preflightStart = captainSource.indexOf('async function getRunCampaignPreflight');
-  const preflightEnd = captainSource.indexOf('const { CAPS }', preflightStart);
-  const preflightSql = captainSource.slice(preflightStart, preflightEnd);
+  const preflightStart = captainOrchestratorSource.indexOf('async function getRunCampaignPreflight');
+  const preflightEnd = captainOrchestratorSource.indexOf('const { CAPS }', preflightStart);
+  const preflightSql = captainOrchestratorSource.slice(preflightStart, preflightEnd);
+
+  it('uses V2.1 signal orchestration as the single campaign preflight owner', () => {
+    expect(captainOrchestratorSource).toContain('async function getRunCampaignPreflight');
+    expect(captainOrchestratorSource).toContain('getRunCampaignPreflight,');
+    expect(agentsSource).toContain("require('./captainOrchestrator')");
+    expect(captainBeaverSource).toContain("require('./captainOrchestrator')");
+    expect(captainBeaverSource).not.toContain('WITH selectable AS (');
+  });
 
   it('uses the same active outreach dedupe as Director DB-first', () => {
     expect(preflightSql).toContain('m.status IN (');
@@ -62,5 +71,6 @@ describe('Captain campaign preflight eligibility', () => {
 
   it('does not count wrong-geo/ICP founder feedback as eligible campaign capacity', () => {
     expect(preflightSql).toContain("leadSelectionFeedbackExclusionSql('l')");
+    expect(preflightSql).toContain("currentSignalPackageEligibilitySql('l')");
   });
 });

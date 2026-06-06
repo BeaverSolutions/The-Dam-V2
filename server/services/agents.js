@@ -2666,6 +2666,7 @@ async function directorPlan(clientId, { command, source }) {
   const targetContext = await resolveDirectorCampaignTarget(clientId, explicitRequestedCount);
   const requestedCount = targetContext.requestedCount;
   const planId = uuidv4();
+  let campaignPreflight = null;
 
   if (requestedCount <= 0) {
     const blockedMessage = 'Campaign blocked: the daily KPI is already met, so Captain will not start another kickoff without an explicit new target.';
@@ -2690,9 +2691,10 @@ async function directorPlan(clientId, { command, source }) {
   }
 
   try {
-    const { getRunCampaignPreflight } = require('./captainBeaver');
+    const { getRunCampaignPreflight } = require('./captainOrchestrator');
     const preflightCommand = `Find ${requestedCount} approval-ready leads. Original user request: "${String(command || '').replace(/\s+/g, ' ').trim().slice(0, 240)}".`;
     const preflight = await getRunCampaignPreflight(clientId, preflightCommand);
+    campaignPreflight = preflight;
     let blockedReason = null;
     if (preflight.eligible_count === 0 && !preflight.has_research_provider) {
       blockedReason = 'no_eligible_db_leads_and_no_research_provider';
@@ -2764,25 +2766,8 @@ async function directorPlan(clientId, { command, source }) {
     };
   }
 
-  // Check how many uncontacted leads already exist in DB (DB-first info for plan)
-  let uncontactedCount = 0;
-  try {
-    const { rows: [{ count }] } = await pool.query(
-      `SELECT COUNT(*)::int AS count FROM leads l
-       WHERE l.client_id = $1 AND l.deleted_at IS NULL AND l.status = 'new'
-         AND NOT EXISTS (
-           SELECT 1 FROM messages m
-            WHERE m.lead_id = l.id AND m.client_id = $1
-              AND m.status IN (
-                'pending_ranger', 'pending_approval', 'approved',
-                'pending_send', 'sending', 'sent', 'delivered',
-                'linkedin_requested', 'awaiting_accept'
-              )
-         )`,
-      [clientId]
-    );
-    uncontactedCount = count;
-  } catch { /* ignore */ }
+  // DB-first capacity shown in the plan must match Captain's preflight boundary.
+  const uncontactedCount = Number(campaignPreflight?.eligible_count) || 0;
 
   const [icp, persona, fileConfig, memoryBrief] = await Promise.all([
     directorGetICP(clientId),
