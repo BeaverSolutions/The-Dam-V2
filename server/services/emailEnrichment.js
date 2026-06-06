@@ -153,6 +153,13 @@ async function enrichEmail(clientId, { name, company }) {
 
 const { searchOpenWeb } = require('./searchService');
 
+function providerCapInt(value, fallback) {
+  if (value === null || value === undefined || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.floor(n));
+}
+
 // ── 1. Domain discovery ─────────────────────────────────────────────────
 /**
  * Find the canonical web domain for a company.
@@ -166,6 +173,7 @@ const { searchOpenWeb } = require('./searchService');
  */
 async function discoverDomain(lead) {
   if (!lead?.company) return null;
+  const maxDomainSearches = providerCapInt(lead.maxDomainSearches, 1);
   const cleaned = String(lead.company)
     .replace(/\b(inc|ltd|llc|corp|corporation|company|holdings|technologies|solutions|services|group)\b/gi, '')
     .replace(/\bsdn\.?\s*bhd\.?\b/gi, '')
@@ -175,27 +183,29 @@ async function discoverDomain(lead) {
 
   // Single open-web query — official site lookup. Spec budget: 1-2 max per
   // call. searchOpenWeb is Brave-primary with Google CSE + DDG fallbacks.
-  try {
-    const items = await searchOpenWeb(`"${cleaned}" official website`, 5, {
-      clientId: lead.clientId || lead.client_id || null,
-    });
-    for (const item of items) {
-      // searchOpenWeb shape: { title, description, url } (Brave) or { link, title, snippet } (DDG).
-      const url = item.url || item.link || '';
-      if (!url) continue;
-      try {
-        const host = new URL(url).hostname.replace(/^www\./, '');
-        if (!host) continue;
-        // Reject obvious aggregator/directory domains; we want the company's own.
-        if (/linkedin\.com|facebook\.com|crunchbase\.com|glassdoor\.com|wikipedia\.org|youtube\.com|twitter\.com|x\.com|instagram\.com|bloomberg\.com/i.test(host)) continue;
-        // Loose match: any token of the cleaned company name appears in host.
-        const tokens = cleaned.toLowerCase().split(/\s+/).filter(t => t.length >= 3);
-        if (tokens.some(t => host.toLowerCase().includes(t))) return host;
-      } catch { /* invalid URL — skip */ }
+  if (maxDomainSearches > 0) {
+    try {
+      const items = await searchOpenWeb(`"${cleaned}" official website`, 5, {
+        clientId: lead.clientId || lead.client_id || null,
+      });
+      for (const item of items) {
+        // searchOpenWeb shape: { title, description, url } (Brave) or { link, title, snippet } (DDG).
+        const url = item.url || item.link || '';
+        if (!url) continue;
+        try {
+          const host = new URL(url).hostname.replace(/^www\./, '');
+          if (!host) continue;
+          // Reject obvious aggregator/directory domains; we want the company's own.
+          if (/linkedin\.com|facebook\.com|crunchbase\.com|glassdoor\.com|wikipedia\.org|youtube\.com|twitter\.com|x\.com|instagram\.com|bloomberg\.com/i.test(host)) continue;
+          // Loose match: any token of the cleaned company name appears in host.
+          const tokens = cleaned.toLowerCase().split(/\s+/).filter(t => t.length >= 3);
+          if (tokens.some(t => host.toLowerCase().includes(t))) return host;
+        } catch { /* invalid URL — skip */ }
+      }
+    } catch (err) {
+      // Search failed — fall through to guesses (no spend).
+      console.warn('[emailEnrichment] discoverDomain searchOpenWeb failed:', err.message);
     }
-  } catch (err) {
-    // Search failed — fall through to guesses (no spend).
-    console.warn('[emailEnrichment] discoverDomain searchOpenWeb failed:', err.message);
   }
 
   // Fallback: pattern-guess from company name. No API spend.
@@ -383,6 +393,8 @@ async function verifyEmail(email, clientIdOverride = null) {
 async function findEmail(lead) {
   if (!lead?.name || !lead?.company) return null;
   const clientId = lead.clientId || lead.client_id || null;
+  const maxHunterCalls = providerCapInt(lead.maxHunterCalls, lead.skipHunter === true ? 0 : 1);
+  const maxVerifierCalls = providerCapInt(lead.maxVerifierCalls, 3);
 
   const domain = lead.domain || await discoverDomain(lead);
   if (!domain) return null;
@@ -445,7 +457,7 @@ async function findEmail(lead) {
   // Step 5: use Hunter while its configured free-credit budget is available.
   // If Hunter is blocked or exhausted, hunter.findEmail returns null and the
   // MillionVerifier pattern fallback below continues.
-  if (lead.skipHunter !== true) {
+  if (maxHunterCalls > 0) {
     const hunterResult = await tryHunter(clientId, firstName, lastName, lead.company);
     if (hunterResult?.email) {
       return {
@@ -463,7 +475,7 @@ async function findEmail(lead) {
   // order. Name-score over-weights "first.last" patterns that match BOTH
   // name tokens vs. simpler "first@" patterns that match one but are more
   // common in real B2B (Hunter/Apollo stats). Worst case: 3 credits/lead.
-  const verifyCandidates = candidates.slice(0, 3);
+  const verifyCandidates = candidates.slice(0, maxVerifierCalls);
   for (const email of verifyCandidates) {
     const nameScore = scoreEmailNameMatch(email, firstName, lastName);
     const v = await verifyEmail(email, clientId);

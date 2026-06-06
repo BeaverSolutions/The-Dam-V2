@@ -58,13 +58,23 @@ describe('Research Beaver decision-maker and contact enrichment order', () => {
 
   it('runs Hunter before MillionVerifier and only verifies generated candidates', () => {
     const hunterIdx = emailEnrichmentSource.indexOf('const hunterResult = await tryHunter');
-    const verifyCandidatesIdx = emailEnrichmentSource.indexOf('const verifyCandidates = candidates.slice(0, 3)');
+    const verifyCandidatesIdx = emailEnrichmentSource.indexOf('const verifyCandidates = candidates.slice(0, maxVerifierCalls)');
     const millionVerifierIdx = emailEnrichmentSource.indexOf('await verifyEmail(email, clientId)');
 
     expect(hunterIdx).toBeGreaterThan(-1);
     expect(verifyCandidatesIdx).toBeGreaterThan(hunterIdx);
     expect(millionVerifierIdx).toBeGreaterThan(verifyCandidatesIdx);
     expect(emailEnrichmentSource).toContain('const candidates = generateEmailCandidates(firstName, lastName, domain)');
+  });
+
+  it('lets Signal Hunt cap domain, Hunter, and verifier fanout per enrichment call', () => {
+    expect(emailEnrichmentSource).toContain('function providerCapInt(value, fallback)');
+    expect(emailEnrichmentSource).toContain('const maxDomainSearches = providerCapInt(lead.maxDomainSearches, 1)');
+    expect(emailEnrichmentSource).toContain('if (maxDomainSearches > 0)');
+    expect(emailEnrichmentSource).toContain('const maxHunterCalls = providerCapInt(lead.maxHunterCalls, lead.skipHunter === true ? 0 : 1)');
+    expect(emailEnrichmentSource).toContain('if (maxHunterCalls > 0)');
+    expect(emailEnrichmentSource).toContain('const maxVerifierCalls = providerCapInt(lead.maxVerifierCalls, 3)');
+    expect(emailEnrichmentSource).toContain('const verifyCandidates = candidates.slice(0, maxVerifierCalls)');
   });
 
   it('keeps autonomous Research sourcing off VP and routes save through contact gate with signal package metadata', () => {

@@ -323,6 +323,34 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     });
   });
 
+  it('bounds Signal Hunt email-enrichment provider fanout', () => {
+    expect(src).toContain('function signalProviderFanoutCaps(maxPaidQueries = null, maxLeads = 1)');
+    expect(src).toContain('const providerFanoutCaps = signalProviderFanoutCaps(maxPaidQueries, maxLeads)');
+    expect(src).toContain('maxDomainSearches: providerFanoutCaps.maxDomainSearchesPerLead');
+    expect(src).toContain('maxHunterCalls: providerFanoutCaps.maxHunterCallsPerLead');
+    expect(src).toContain('maxVerifierCalls: providerFanoutCaps.maxVerifierCallsPerLead');
+    expect(src).toContain('provider_fanout_caps');
+
+    expect(signalHunt._test.signalProviderFanoutCaps(17, 5)).toEqual({
+      maxDomainSearchesPerLead: 0,
+      maxHunterCallsPerLead: 1,
+      maxVerifierCallsPerLead: 1,
+      maxEnrichmentLeads: 5,
+    });
+    expect(signalHunt._test.signalProviderFanoutCaps(0, 5)).toEqual({
+      maxDomainSearchesPerLead: 0,
+      maxHunterCallsPerLead: 0,
+      maxVerifierCallsPerLead: 0,
+      maxEnrichmentLeads: 0,
+    });
+    expect(signalHunt._test.signalProviderFanoutCaps(null, 20)).toEqual({
+      maxDomainSearchesPerLead: 0,
+      maxHunterCallsPerLead: 1,
+      maxVerifierCallsPerLead: 1,
+      maxEnrichmentLeads: 20,
+    });
+  });
+
   it('scopes repeated-zero protection to executable discovery queries only', () => {
     expect(typeof signalHunt._test.executableDiscoveryQueriesForBudget).toBe('function');
     const plannedQueries = [

@@ -82,6 +82,31 @@ function signalPaidBudgetSplit(maxPaidQueries = null, maxLeads = 1) {
   };
 }
 
+function signalProviderFanoutCaps(maxPaidQueries = null, maxLeads = 1) {
+  const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
+  const target = Math.max(1, Math.ceil(Number(maxLeads) || 1));
+  const lookup = paidQueryBudget.lookup === null || paidQueryBudget.lookup === undefined
+    ? target
+    : Math.max(0, Math.min(target, Math.floor(Number(paidQueryBudget.lookup) || 0)));
+  const perLeadPaidEnrichment = lookup > 0 ? 1 : 0;
+
+  return {
+    maxDomainSearchesPerLead: 0,
+    maxHunterCallsPerLead: perLeadPaidEnrichment,
+    maxVerifierCallsPerLead: perLeadPaidEnrichment,
+    maxEnrichmentLeads: lookup,
+  };
+}
+
+function providerFanoutCapsLog(caps) {
+  return {
+    max_domain_searches_per_lead: caps.maxDomainSearchesPerLead,
+    max_hunter_calls_per_lead: caps.maxHunterCallsPerLead,
+    max_verifier_calls_per_lead: caps.maxVerifierCallsPerLead,
+    max_enrichment_leads: caps.maxEnrichmentLeads,
+  };
+}
+
 function executableDiscoveryQueriesForBudget(queries = [], paidQueryBudget = {}) {
   if (!Array.isArray(queries)) return [];
   const discovery = paidQueryBudget?.discovery;
@@ -1227,6 +1252,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   let config = await loadSignalConfig(clientId, icp, { maxPaidQueries });
   config = applySignalPlaybookToConfig(config, signalPlaybook);
   const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
+  const providerFanoutCaps = signalProviderFanoutCaps(maxPaidQueries, maxLeads);
   const executableDiscoveryQueries = executableDiscoveryQueriesForBudget(config.queries, paidQueryBudget);
   const zeroSet = await blockedByRepeatedZeroQuerySet(clientId, executableDiscoveryQueries);
   if (zeroSet.blocked) {
@@ -1324,6 +1350,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         queries_run: queriesRun,
         discovery_query_budget: paidQueryBudget.discovery,
         lookup_query_budget: paidQueryBudget.lookup,
+        provider_fanout_caps: providerFanoutCapsLog(providerFanoutCaps),
         queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
         paid_query_budget_remaining: paidQueriesRemaining,
         raw_results_total: rawResultsTotal,
@@ -1398,6 +1425,9 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         name: person.name,
         company: signal.company,
         clientId,
+        maxDomainSearches: providerFanoutCaps.maxDomainSearchesPerLead,
+        maxHunterCalls: providerFanoutCaps.maxHunterCallsPerLead,
+        maxVerifierCalls: providerFanoutCaps.maxVerifierCallsPerLead,
       });
       if (enriched?.email) {
         email = enriched.email;
@@ -1451,6 +1481,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       queries_run: queriesRun,
       discovery_query_budget: paidQueryBudget.discovery,
       lookup_query_budget: paidQueryBudget.lookup,
+      provider_fanout_caps: providerFanoutCapsLog(providerFanoutCaps),
       queries_preview: config.queries.slice(0, queriesRun).map(q => q.query),
       paid_query_budget_remaining: paidQueriesRemaining,
       raw_results_total: rawResultsTotal,
@@ -1627,6 +1658,7 @@ module.exports = {
     signalQuerySetHash,
     signalQueryWindow,
     signalPaidBudgetSplit,
+    signalProviderFanoutCaps,
     executableDiscoveryQueriesForBudget,
   },
 };
