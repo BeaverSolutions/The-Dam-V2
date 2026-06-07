@@ -418,7 +418,8 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).toContain('function signalProviderFanoutCaps(maxPaidQueries = null, maxLeads = 1)');
     expect(src).toContain('const providerFanoutCaps = signalProviderFanoutCaps(maxPaidQueries, maxLeads)');
     expect(src).toContain('maxDomainSearches: providerFanoutCaps.maxDomainSearchesPerLead');
-    expect(src).toContain('maxLushaCalls: providerFanoutCaps.maxLushaCallsPerLead');
+    expect(src).toContain('maxAnymailCalls: providerFanoutCaps.maxAnymailCallsPerLead');
+    expect(src).toContain('maxIcypeasCalls: providerFanoutCaps.maxIcypeasCallsPerLead');
     expect(src).toContain('maxSnovCalls: providerFanoutCaps.maxSnovCallsPerLead');
     expect(src).toContain('maxHunterCalls: providerFanoutCaps.maxHunterCallsPerLead');
     expect(src).toContain('maxVerifierCalls: providerFanoutCaps.maxVerifierCallsPerLead');
@@ -426,7 +427,8 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
 
     expect(signalHunt._test.signalProviderFanoutCaps(17, 5)).toEqual({
       maxDomainSearchesPerLead: 0,
-      maxLushaCallsPerLead: 1,
+      maxAnymailCallsPerLead: 1,
+      maxIcypeasCallsPerLead: 1,
       maxSnovCallsPerLead: 1,
       maxHunterCallsPerLead: 1,
       maxVerifierCallsPerLead: 3,
@@ -434,7 +436,8 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     });
     expect(signalHunt._test.signalProviderFanoutCaps(0, 5)).toEqual({
       maxDomainSearchesPerLead: 0,
-      maxLushaCallsPerLead: 0,
+      maxAnymailCallsPerLead: 0,
+      maxIcypeasCallsPerLead: 0,
       maxSnovCallsPerLead: 0,
       maxHunterCallsPerLead: 0,
       maxVerifierCallsPerLead: 0,
@@ -442,7 +445,8 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     });
     expect(signalHunt._test.signalProviderFanoutCaps(null, 20)).toEqual({
       maxDomainSearchesPerLead: 0,
-      maxLushaCallsPerLead: 1,
+      maxAnymailCallsPerLead: 1,
+      maxIcypeasCallsPerLead: 1,
       maxSnovCallsPerLead: 1,
       maxHunterCallsPerLead: 1,
       maxVerifierCallsPerLead: 3,

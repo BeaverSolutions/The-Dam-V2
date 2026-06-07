@@ -13,7 +13,7 @@
  *   2. Run planner-built source-channel queries across universal signal families
  *   3. Use Haiku to parse company name + signal summary from each result
  *   4. For each extracted company, run LinkedIn people search to find founder/decision-maker
- *   5. Enrich with Lusha -> Snov -> Hunter sourcing, then MillionVerifier verification
+ *   5. Enrich with Anymail -> Icypeas -> Snov -> Hunter sourcing, then MillionVerifier verification
  *   6. Return leads with P1 tag + signal + why_now + angle
  *
  * These leads become the FIRST batch the outreach pipeline processes
@@ -93,7 +93,8 @@ function signalProviderFanoutCaps(maxPaidQueries = null, maxLeads = 1) {
 
   return {
     maxDomainSearchesPerLead: 0,
-    maxLushaCallsPerLead: perLeadPaidEnrichment,
+    maxAnymailCallsPerLead: perLeadPaidEnrichment,
+    maxIcypeasCallsPerLead: perLeadPaidEnrichment,
     maxSnovCallsPerLead: perLeadPaidEnrichment,
     maxHunterCallsPerLead: perLeadPaidEnrichment,
     maxVerifierCallsPerLead: perLeadVerifierAttempts,
@@ -104,7 +105,8 @@ function signalProviderFanoutCaps(maxPaidQueries = null, maxLeads = 1) {
 function providerFanoutCapsLog(caps) {
   return {
     max_domain_searches_per_lead: caps.maxDomainSearchesPerLead,
-    max_lusha_calls_per_lead: caps.maxLushaCallsPerLead,
+    max_anymail_calls_per_lead: caps.maxAnymailCallsPerLead,
+    max_icypeas_calls_per_lead: caps.maxIcypeasCallsPerLead,
     max_snov_calls_per_lead: caps.maxSnovCallsPerLead,
     max_hunter_calls_per_lead: caps.maxHunterCallsPerLead,
     max_verifier_calls_per_lead: caps.maxVerifierCallsPerLead,
@@ -1841,7 +1843,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       continue;
     }
 
-    // Step 5: email enrichment. Sources via Lusha -> Snov -> Hunter, then
+    // Step 5: email enrichment. Sources via Anymail -> Icypeas -> Snov -> Hunter, then
     // trusts only MillionVerifier for deliverability.
     let email = null;
     let email_source = null;
@@ -1853,7 +1855,8 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         company: signal.company,
         clientId,
         maxDomainSearches: providerFanoutCaps.maxDomainSearchesPerLead,
-        maxLushaCalls: providerFanoutCaps.maxLushaCallsPerLead,
+        maxAnymailCalls: providerFanoutCaps.maxAnymailCallsPerLead,
+        maxIcypeasCalls: providerFanoutCaps.maxIcypeasCallsPerLead,
         maxSnovCalls: providerFanoutCaps.maxSnovCallsPerLead,
         maxHunterCalls: providerFanoutCaps.maxHunterCallsPerLead,
         maxVerifierCalls: providerFanoutCaps.maxVerifierCallsPerLead,

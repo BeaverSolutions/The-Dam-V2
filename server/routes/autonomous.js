@@ -18,6 +18,7 @@ const autonomyStateService = require('../services/autonomyState');
 const { todayInMalaysia } = require('../utils/businessDay');
 const { parseRequestedLeadCount } = require('../utils/requestedLeadCount');
 const { shouldStopForLowOutput } = require('../utils/campaignLimits');
+const spendGuard = require('../services/spendGuard');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
@@ -2542,7 +2543,7 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
 
 /**
  * Post-kickoff verification: checks if the kickoff actually produced results.
- * Writes a Captain blocker if this run produced zero or <=5/20 usable outputs.
+ * Writes a Captain blocker if this run produced zero or less than 20% usable outputs.
  */
 async function writeKickoffBlocker(clientId, blocker) {
   const today = blocker.today || todayInMalaysia();
@@ -2651,7 +2652,7 @@ async function verifyKickoffOutput(clientId, target, options = {}) {
       await writeKickoffBlocker(clientId, {
         today,
         blocker: 'low_yield_outputs',
-        reason: `Scheduled kickoff produced only ${delivered}/${requested} usable outputs, at or below the 5/20 low-yield fallback.`,
+        reason: `Scheduled kickoff produced only ${delivered}/${requested} usable outputs, below the 20% low-yield fallback.`,
         target,
         requested,
         delivered,
@@ -3310,6 +3311,7 @@ router.get('/system-health', requireInternalKey, async (req, res) => {
           kickoff_selectable_linkedin: Number(leadPool.rows[0].kickoff_selectable_linkedin) || 0,
         },
         research_beaver: researchLog.rows[0],
+        provider_usage: await spendGuard.providerCreditSnapshots(c.id),
         integrations: {
           gmail_connected: !!i.gmail_connected,
           agentmail_provisioned: !!i.agentmail_provisioned,
@@ -3888,7 +3890,7 @@ router.post('/linkedin-sync-replies', requireInternalKey, async (req, res) => {
  * accepts a batch from the local Chrome-CDP scraper
  * (scripts/sync-linkedin-connections-to-beavrdam.mjs in MJxClaude) and:
  *   1. Normalizes linkedin slug, dedupes against existing leads.linkedin_url
- *   2. Enriches email via emailEnrichment (Lusha -> Snov -> Hunter, MV-verified)
+ *   2. Enriches email via emailEnrichment (Anymail -> Icypeas -> Snov -> Hunter, MV-verified)
  *   3. Creates lead with source='linkedin_connection_sync', signal_tier='P3',
  *      pipeline_stage='prospecting', buying_signal_strength='lite'
  *
@@ -3955,7 +3957,8 @@ router.post('/linkedin-sync-connections', requireInternalKey, async (req, res) =
     let created = 0;
     let skippedDup = 0;
     let enrichedBrave = 0;
-    let enrichedLusha = 0;
+    let enrichedAnymail = 0;
+    let enrichedIcypeas = 0;
     let enrichedSnov = 0;
     let enrichedHunter = 0;
     let noEmail = 0;
@@ -3975,7 +3978,8 @@ router.post('/linkedin-sync-connections', requireInternalKey, async (req, res) =
         logger.warn({ msg: '[linkedin-sync-connections] enrichEmail failed', slug: c.slug, err: err.message });
       }
       if (enrich?.source === 'brave') enrichedBrave++;
-      else if (enrich?.source === 'lusha') enrichedLusha++;
+      else if (enrich?.source === 'anymail') enrichedAnymail++;
+      else if (enrich?.source === 'icypeas') enrichedIcypeas++;
       else if (enrich?.source === 'snov') enrichedSnov++;
       else if (enrich?.source === 'hunter') enrichedHunter++;
       else noEmail++;
@@ -4025,7 +4029,8 @@ router.post('/linkedin-sync-connections', requireInternalKey, async (req, res) =
         skipped_dup: skippedDup,
         skipped_invalid: skippedInvalid,
         enriched_brave: enrichedBrave,
-        enriched_lusha: enrichedLusha,
+        enriched_anymail: enrichedAnymail,
+        enriched_icypeas: enrichedIcypeas,
         enriched_snov: enrichedSnov,
         enriched_hunter: enrichedHunter,
         no_email: noEmail,

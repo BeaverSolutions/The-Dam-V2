@@ -1294,7 +1294,7 @@ async function toolDraftEmailForLeads(clientId, { lead_ids, note } = {}) {
       continue;
     }
 
-    // Use the shared enrichment orchestrator: Lusha -> Snov -> Hunter sourcing,
+    // Use the shared enrichment orchestrator: Anymail -> Icypeas -> Snov -> Hunter sourcing,
     // then MillionVerifier-backed deliverability.
     if (!lead.email) {
       try {
@@ -1319,7 +1319,7 @@ async function toolDraftEmailForLeads(clientId, { lead_ids, note } = {}) {
           lead.email_verified = emailResult.status === 'deliverable';
           results.push({ lead_id: leadId, lead_name: lead.name, email: emailResult.email, email_source: lead.email_source, email_confidence: emailResult.confidence, status: 'email_found_queuing' });
         } else {
-          results.push({ lead_id: leadId, lead_name: lead.name, ok: false, reason: 'No email found via Lusha/Snov/Hunter/MillionVerifier waterfall' });
+          results.push({ lead_id: leadId, lead_name: lead.name, ok: false, reason: 'No email found via Anymail/Icypeas/Snov/Hunter/MillionVerifier waterfall' });
           continue;
         }
       } catch (err) {

@@ -21,7 +21,8 @@ describe('Research Beaver decision-maker and contact enrichment order', () => {
       'company_evidence',
       'icp_and_exclusion_checks',
       'decision_maker_lookup',
-      'lusha',
+      'anymail',
+      'icypeas',
       'snov',
       'hunter',
       'millionverifier',
@@ -83,33 +84,37 @@ describe('Research Beaver decision-maker and contact enrichment order', () => {
     expect(loopBody).toContain('!person || !person.name');
   });
 
-  it('runs Lusha, then Snov, then Hunter before MillionVerifier verifies sourced emails', () => {
-    const lushaIdx = emailEnrichmentSource.indexOf('const lushaResult = await tryLusha');
+  it('runs Anymail, then Icypeas, then Snov, then Hunter before MillionVerifier verifies sourced emails', () => {
+    const anymailIdx = emailEnrichmentSource.indexOf('const anymailResult = await tryAnymail');
+    const icypeasIdx = emailEnrichmentSource.indexOf('const icypeasResult = await tryIcypeas');
     const snovIdx = emailEnrichmentSource.indexOf('const snovResult = await trySnov');
     const hunterIdx = emailEnrichmentSource.indexOf('const hunterResult = await tryHunter');
     const providerVerifyIdx = emailEnrichmentSource.indexOf('await verifyProviderEmail');
     const verifyCandidatesIdx = emailEnrichmentSource.indexOf('const verifyCandidates = candidates.slice(0, verifierCallsRemaining)');
     const millionVerifierIdx = emailEnrichmentSource.indexOf('await verifyEmail(email, clientId)');
 
-    expect(lushaIdx).toBeGreaterThan(-1);
-    expect(snovIdx).toBeGreaterThan(lushaIdx);
+    expect(anymailIdx).toBeGreaterThan(-1);
+    expect(icypeasIdx).toBeGreaterThan(anymailIdx);
+    expect(snovIdx).toBeGreaterThan(icypeasIdx);
     expect(hunterIdx).toBeGreaterThan(-1);
     expect(hunterIdx).toBeGreaterThan(snovIdx);
-    expect(providerVerifyIdx).toBeGreaterThan(lushaIdx);
+    expect(providerVerifyIdx).toBeGreaterThan(anymailIdx);
     expect(providerVerifyIdx).toBeLessThan(millionVerifierIdx);
     expect(verifyCandidatesIdx).toBeGreaterThan(hunterIdx);
     expect(millionVerifierIdx).toBeGreaterThan(verifyCandidatesIdx);
     expect(emailEnrichmentSource).toContain('const candidates = generateEmailCandidates(firstName, lastName, domain)');
   });
 
-  it('lets Signal Hunt cap domain, Hunter, and verifier fanout per enrichment call', () => {
+  it('lets Signal Hunt cap domain, email sourcing providers, and verifier fanout per enrichment call', () => {
     expect(emailEnrichmentSource).toContain('function providerCapInt(value, fallback)');
     expect(emailEnrichmentSource).toContain('const maxDomainSearches = providerCapInt(lead.maxDomainSearches, 1)');
     expect(emailEnrichmentSource).toContain('if (maxDomainSearches > 0)');
-    expect(emailEnrichmentSource).toContain('const maxLushaCalls = providerCapInt(lead.maxLushaCalls, lead.skipLusha === true ? 0 : 1)');
+    expect(emailEnrichmentSource).toContain('const maxAnymailCalls = providerCapInt(lead.maxAnymailCalls, lead.skipAnymail === true ? 0 : 1)');
+    expect(emailEnrichmentSource).toContain('const maxIcypeasCalls = providerCapInt(lead.maxIcypeasCalls, lead.skipIcypeas === true ? 0 : 1)');
     expect(emailEnrichmentSource).toContain('const maxSnovCalls = providerCapInt(lead.maxSnovCalls, lead.skipSnov === true ? 0 : 1)');
     expect(emailEnrichmentSource).toContain('const maxHunterCalls = providerCapInt(lead.maxHunterCalls, lead.skipHunter === true ? 0 : 1)');
-    expect(emailEnrichmentSource).toContain('if (maxLushaCalls > 0)');
+    expect(emailEnrichmentSource).toContain('if (maxAnymailCalls > 0)');
+    expect(emailEnrichmentSource).toContain('if (maxIcypeasCalls > 0)');
     expect(emailEnrichmentSource).toContain('if (maxSnovCalls > 0)');
     expect(emailEnrichmentSource).toContain('if (maxHunterCalls > 0)');
     expect(emailEnrichmentSource).toContain('const maxVerifierCalls = providerCapInt(lead.maxVerifierCalls, 3)');

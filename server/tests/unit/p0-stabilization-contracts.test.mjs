@@ -56,9 +56,15 @@ describe('P0 stabilization contracts', () => {
     expect(service('services/searchService.js')).toContain('logProviderError');
     expect(service('services/marketSensing.js')).toContain("checkProvider('brave'");
     expect(service('services/hunter.js')).toContain("checkProvider('hunter'");
+    expect(service('services/emailEnrichment.js')).toContain("checkProvider('anymail'");
+    expect(service('services/emailEnrichment.js')).toContain("checkProvider('icypeas'");
     expect(service('services/emailEnrichment.js')).toContain("checkProvider('millionverifier'");
     expect(service('services/apollo.js')).toContain("checkProvider('apollo'");
+    expect(service('services/spendGuard.js')).toContain("anymail: envNumber('ANYMAIL_DAILY_QUERY_CAP', 0)");
+    expect(service('services/spendGuard.js')).toContain("icypeas: envNumber('ICYPEAS_DAILY_QUERY_CAP', 0)");
+    expect(service('services/spendGuard.js')).toContain("anymail: envNumber('ANYMAIL_TRIAL_CREDIT_CAP', 0)");
     expect(service('services/spendGuard.js')).toContain("apollo: envNumber('APOLLO_DAILY_QUERY_CAP', 0)");
+    expect(service('services/spendGuard.js')).toContain('providerCreditSnapshot(provider, clientId = null)');
     expect(service('services/spendGuard.js')).toContain('providerUsageToday(provider, clientId)');
     expect(service('services/vibeProspecting.js')).toContain('ALLOW_VP_PAID_ENRICHMENT');
     expect(service('services/spendGuard.js')).toContain("brave: envNumber('BRAVE_DAILY_QUERY_CAP', 70)");

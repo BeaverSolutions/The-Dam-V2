@@ -2891,10 +2891,10 @@ async function enrichLeadsWithHunter(clientId, leads) {
 
   await logsService.createLog(clientId, {
     agent: 'research_beaver',
-    action: 'hunter_enrichment_complete',
+    action: 'email_enrichment_complete',
     metadata: {
       total: leads.length,
-      enriched: enriched.filter(l => ['hunter', 'pattern+verify', 'pattern+catch_all', 'scrape+pattern', 'scrape'].includes(l.email_source)).length,
+      enriched: enriched.filter(l => ['anymail', 'icypeas', 'snov', 'hunter', 'pattern+verify', 'pattern+catch_all', 'scrape+pattern', 'scrape'].includes(l.email_source)).length,
     },
   });
 
@@ -3221,7 +3221,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
 
       // ── Email-priority rule ─────────────────────────────────────────────
       // If the lead has no email, use the autonomous order: public web/domain
-      // evidence -> Lusha -> Snov -> Hunter -> MillionVerifier verification.
+      // evidence -> Anymail -> Icypeas -> Snov -> Hunter -> MillionVerifier verification.
       // LinkedIn is used only when no usable email is available.
       await pipeline.enrichEmail(clientId, lead, {
         pipeline_path: 'signal-pipeline',
@@ -4663,7 +4663,7 @@ async function directorExecute(clientId, {
       const attemptLeadsFound = dbLeadsCount + signalLeadsCount;
 
       if (shouldStopForLowOutput({ requested: campaignRequested, delivered })) {
-        const captainPrompt = `Captain stopped this campaign because a full kickoff run produced only ${delivered}/${campaignRequested} approval-ready outputs. That is at or below the 5/20 low-yield fallback, so no more paid searches will run until MJ decides whether to widen the signal, adjust ICP, or stop.`;
+        const captainPrompt = `Captain stopped this campaign because a full kickoff run produced only ${delivered}/${campaignRequested} approval-ready outputs, below the 20% low-yield fallback. No more paid searches will run until MJ decides whether to widen the signal, adjust ICP, or stop.`;
         const result = {
           plan_id,
           status: 'needs_input',
@@ -5603,8 +5603,8 @@ async function directorExecute(clientId, {
     // CHANNEL_HINTS moved to module scope (Jules F-03) so the signal pipeline shares it.
 
     // ── Email-priority enrichment via pipeline.enrichEmail ────────────────
-    // Autonomous order: public web/domain evidence -> Lusha -> Snov ->
-    // Hunter -> MillionVerifier verification. VP is not used by Beaver kickoff
+    // Autonomous order: public web/domain evidence -> Anymail -> Icypeas ->
+    // Snov -> Hunter -> MillionVerifier verification. VP is not used by Beaver kickoff
     // sourcing/enrichment.
     let linkedinAlreadyTried = false;
     await pipeline.enrichEmail(clientId, lead, {

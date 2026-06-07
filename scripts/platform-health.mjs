@@ -42,6 +42,13 @@ function severity(anomalies) {
   return '🟢 OK';
 }
 
+function providerUsageSummary(provider_usage = {}) {
+  return Object.values(provider_usage)
+    .filter(row => row && row.configured)
+    .map(row => `${row.provider} ${row.remaining_today ?? 0}/${row.daily_cap ?? 0} today${row.remaining_total !== null && row.remaining_total !== undefined ? `, ${row.remaining_total}/${row.trial_cap ?? 0} total` : ''}`)
+    .join('; ') || 'not reported';
+}
+
 async function main() {
   const anomalies = [];
   const summary = [];
@@ -84,8 +91,9 @@ async function main() {
     const kickoff = t.kickoff_today || {};
     const kickoffState = kickoff.state || 'unknown';
     const targetText = target === null ? sent : `${sent}/${target}`;
+    const provider_usage = t.provider_usage || {};
 
-    summary.push(`${t.name}: kickoff ${kickoffState}, sent ${targetText}, reviewable ${reviewable}, LI-awaiting ${awaitingAccept}, follow-ups due ${followupsDue}, pool ${pool ?? '?'}`);
+    summary.push(`${t.name}: kickoff ${kickoffState}, sent ${targetText}, reviewable ${reviewable}, LI-awaiting ${awaitingAccept}, follow-ups due ${followupsDue}, pool ${pool ?? '?'}, providers ${providerUsageSummary(provider_usage)}`);
 
     if (kickoffState === 'missed') {
       anomalies.push(`🔴 ${t.slug} daily kickoff missed — no memory/log/trace evidence`);
@@ -132,6 +140,14 @@ async function main() {
     }
     if (failedSend > 5) {
       anomalies.push(`🔴 ${t.slug} send queue has ${failedSend} failed rows`);
+    }
+    for (const row of Object.values(provider_usage)) {
+      if (!row || !row.configured) continue;
+      if (Number(row.remaining_today) <= 0) {
+        anomalies.push(`🔴 ${t.slug} provider capacity low: ${row.provider} daily cap exhausted`);
+      } else if (row.remaining_total !== null && row.remaining_total !== undefined && Number(row.remaining_total) <= 10) {
+        anomalies.push(`🟡 ${t.slug} provider capacity low: ${row.provider} remaining_total ${row.remaining_total}/${row.trial_cap ?? 0}`);
+      }
     }
   }
 

@@ -102,7 +102,7 @@ for (const stage of traceStages) {
 
 // 6. VP is not autonomous sourcing. It remains available only through explicit
 // manual/subscribed-client paths; Beaver autonomous source order is
-// web/LinkedIn -> Lusha -> Snov -> Hunter -> MillionVerifier.
+// web/LinkedIn -> Anymail -> Icypeas -> Snov -> Hunter -> MillionVerifier.
 const onDemandStart = dbBuilder.indexOf('async function sourceLeadsOnDemand');
 const onDemandEnd = dbBuilder.indexOf('module.exports', onDemandStart);
 const onDemandBody = dbBuilder.slice(onDemandStart, onDemandEnd);
@@ -113,11 +113,11 @@ const vpNotAutonomous = onDemandStart > -1
 check('VP is blocked from autonomous on-demand sourcing', vpNotAutonomous,
   vpNotAutonomous ? 'sourceLeadsOnDemand uses web/LinkedIn; VP remains a separate explicit function' : 'autonomous on-demand sourcing may still call VP');
 
-// 7. Autonomous email sourcing order is web/LinkedIn -> Lusha -> Snov -> Hunter -> MillionVerifier.
+// 7. Autonomous email sourcing order is web/LinkedIn -> Anymail -> Icypeas -> Snov -> Hunter -> MillionVerifier.
 const autonomousSourceOrder = onDemandBody.includes('source_order')
-  && onDemandBody.includes('web_linkedin_lusha_snov_hunter_millionverifier')
+  && onDemandBody.includes('web_linkedin_anymail_icypeas_snov_hunter_millionverifier')
   && dbBuilder.includes('maxPaidQueries');
-check('Autonomous source order is web/LinkedIn -> Lusha -> Snov -> Hunter -> MillionVerifier', autonomousSourceOrder,
+check('Autonomous source order is web/LinkedIn -> Anymail -> Icypeas -> Snov -> Hunter -> MillionVerifier', autonomousSourceOrder,
   autonomousSourceOrder ? 'source order logged and paid query cap passed to research' : 'autonomous source order or cap is missing');
 
 // 8. Enforcer model is Sonnet (not Haiku)

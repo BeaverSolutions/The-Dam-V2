@@ -6,12 +6,12 @@
  * Primary: Brave Search via searchService.searchEmailDomain — searches the
  *   inferred company domain for email patterns, picks the one most likely
  *   to belong to the named person.
- * Provider sourcing: Lusha -> Snov -> Hunter. Provider emails are candidates
+ * Provider sourcing: Anymail -> Icypeas -> Snov -> Hunter. Provider emails are candidates
  *   only; MillionVerifier is the deliverability authority.
  *
  * Returns: { email, confidence, source } or null.
  *   confidence is 0-100 from the provider/heuristic.
- *   source is 'brave' | 'lusha' | 'snov' | 'hunter' | null.
+ *   source is 'brave' | 'anymail' | 'icypeas' | 'snov' | 'hunter' | null.
  */
 
 const { searchEmailDomain } = require('./searchService');
@@ -146,49 +146,119 @@ async function fetchJson(url, options = {}) {
   }
 }
 
-async function tryLusha(clientId, { firstName, lastName, company, domain }) {
-  const apiKey = envKey('LUSHA_API_KEY');
-  if (!apiKey || !firstName || !company) return null;
+async function tryAnymail(clientId, { firstName, lastName, fullName, company, domain, linkedinUrl }) {
+  const apiKey = envKey('ANYMAIL_API_KEY');
+  const displayName = fullName || [firstName, lastName].filter(Boolean).join(' ');
+  if (!apiKey || !firstName || (!domain && !company)) return null;
 
-  const guard = await spendGuard.checkProvider('lusha', { clientId, estimatedUnits: 1 });
+  const guard = await spendGuard.checkProvider('anymail', { clientId, estimatedUnits: 1 });
   if (!guard.allowed) {
-    console.warn(`[emailEnrichment] Lusha blocked by spend guard: ${guard.reason}`);
+    console.warn(`[emailEnrichment] Anymail blocked by spend guard: ${guard.reason}`);
     return null;
   }
 
   try {
-    const { res, data } = await fetchJson('https://api.lusha.com/v3/contacts/search-and-enrich', {
+    const { res, data } = await fetchJson('https://api.anymailfinder.com/v5.1/find-email/person', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        api_key: apiKey,
+        Authorization: apiKey,
       },
       body: JSON.stringify({
-        contacts: [{
-          firstName,
-          lastName: lastName || undefined,
-          companyName: company,
-          companyDomain: domain || undefined,
-        }],
-        reveal: ['emails'],
-        options: { includePartialProfiles: true },
+        first_name: firstName,
+        last_name: lastName || undefined,
+        full_name: displayName || undefined,
+        company_name: company || undefined,
+        domain: domain || undefined,
+        linkedin_url: linkedinUrl || undefined,
       }),
+      timeoutMs: providerCapInt(process.env.ANYMAIL_TIMEOUT_MS, 45000),
     });
     if (!res.ok) {
       if ([401, 402, 403, 429].includes(res.status)) {
-        console.warn(`[emailEnrichment] Lusha HTTP ${res.status} - unavailable for this call`);
+        console.warn(`[emailEnrichment] Anymail HTTP ${res.status} - unavailable for this call`);
       }
       return null;
     }
-    await spendGuard.logProviderUsage('lusha', {
+    await spendGuard.logProviderUsage('anymail', {
       clientId,
-      units: Math.max(1, Number(data?.billing?.creditsCharged) || 1),
-      metadata: { operation: 'contacts-search-and-enrich', domain: domain || null },
+      units: Math.max(1, Number(data?.credits_charged || data?.creditsCharged) || 1),
+      metadata: { operation: 'find-email/person', domain: domain || null },
     });
-    const email = firstEmailFromValue(data?.results);
-    return email ? { email, confidence: 75, source: 'lusha' } : null;
+    const status = String(data?.status || data?.email_status || data?.result || '').toLowerCase();
+    const email = firstEmailFromValue(data?.valid_email || data?.email || data);
+    if (!email) return null;
+    if (status && /invalid|not_found|unknown|risky|blacklisted/.test(status)) return null;
+    return { email, confidence: 82, source: 'anymail' };
   } catch (err) {
-    logger.warn({ msg: '[enrichment] Lusha lookup failed', err: err.message });
+    logger.warn({ msg: '[enrichment] Anymail lookup failed', err: err.message });
+    return null;
+  }
+}
+
+async function tryIcypeas(clientId, { firstName, lastName, company, domain }) {
+  const apiKey = envKey('ICYPEAS_API_KEY');
+  const domainOrCompany = domain || company;
+  if (!apiKey || !firstName || !domainOrCompany) return null;
+
+  const guard = await spendGuard.checkProvider('icypeas', { clientId, estimatedUnits: 1 });
+  if (!guard.allowed) {
+    console.warn(`[emailEnrichment] Icypeas blocked by spend guard: ${guard.reason}`);
+    return null;
+  }
+
+  try {
+    const start = await fetchJson('https://app.icypeas.com/api/email-search', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: apiKey,
+      },
+      body: JSON.stringify({
+        firstname: firstName,
+        lastname: lastName || '',
+        domainOrCompany,
+      }),
+      timeoutMs: providerCapInt(process.env.ICYPEAS_TIMEOUT_MS, 30000),
+    });
+    if (!start.res.ok) {
+      if ([401, 402, 403, 429].includes(start.res.status)) {
+        console.warn(`[emailEnrichment] Icypeas HTTP ${start.res.status} - unavailable for this call`);
+      }
+      return null;
+    }
+    await spendGuard.logProviderUsage('icypeas', {
+      clientId,
+      units: 1,
+      metadata: { operation: 'email-search', domain: domain || null, company: company || null },
+    });
+    const immediateEmail = firstEmailFromValue(start.data);
+    if (immediateEmail) return { email: immediateEmail, confidence: 76, source: 'icypeas' };
+
+    const itemId = start.data?.item?._id || start.data?._id || start.data?.id || start.data?.itemId;
+    if (!itemId) return null;
+    const maxPolls = providerCapInt(process.env.ICYPEAS_RESULT_POLLS, 2);
+    const pollDelayMs = providerCapInt(process.env.ICYPEAS_RESULT_POLL_MS, 1500);
+    for (let i = 0; i < maxPolls; i++) {
+      if (i > 0 && pollDelayMs > 0) await new Promise(resolve => setTimeout(resolve, pollDelayMs));
+      const result = await fetchJson('https://app.icypeas.com/api/bulk-single-searchs/read', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: apiKey,
+        },
+        body: JSON.stringify({ id: itemId }),
+        timeoutMs: providerCapInt(process.env.ICYPEAS_TIMEOUT_MS, 30000),
+      });
+      if (!result.res.ok) return null;
+      const email = firstEmailFromValue(result.data?.item || result.data?.items || result.data);
+      if (email) return { email, confidence: 76, source: 'icypeas' };
+      const status = String(result.data?.status || result.data?.item?.status || '').toLowerCase();
+      if (status && !/none|progress|pending|process|running|queued/.test(status)) return null;
+    }
+    return null;
+  } catch (err) {
+    logger.warn({ msg: '[enrichment] Icypeas lookup failed', err: err.message });
     return null;
   }
 }
@@ -223,14 +293,19 @@ async function trySnov(clientId, { firstName, lastName, domain }) {
   }
 
   try {
-    const params = new URLSearchParams({
-      firstName,
-      lastName: lastName || '',
-      domain,
-    });
-    const start = await fetchJson(`https://api.snov.io/v2/emails-by-domain-by-name/start?${params.toString()}`, {
+    const start = await fetchJson('https://api.snov.io/v2/emails-by-domain-by-name/start', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        rows: [{
+          first_name: firstName,
+          last_name: lastName || '',
+          domain,
+        }],
+      }),
     });
     if (!start.res.ok) return null;
     await spendGuard.logProviderUsage('snov', {
@@ -239,11 +314,11 @@ async function trySnov(clientId, { firstName, lastName, domain }) {
       metadata: { operation: 'emails-by-domain-by-name', domain },
     });
     const resultUrl = start.data?.links?.result;
-    const taskHash = start.data?.meta?.task_hash || start.data?.task_hash;
-    const url = resultUrl || (taskHash ? `https://api.snov.io/v2/emails-by-domain-by-name/result/${encodeURIComponent(taskHash)}` : null);
+    const taskHash = start.data?.data?.task_hash || start.data?.meta?.task_hash || start.data?.task_hash;
+    const url = resultUrl || (taskHash ? `https://api.snov.io/v2/emails-by-domain-by-name/result?task_hash=${encodeURIComponent(taskHash)}` : null);
     if (!url) return firstEmailFromValue(start.data) ? { email: firstEmailFromValue(start.data), confidence: 70, source: 'snov' } : null;
     const maxPolls = providerCapInt(process.env.SNOV_RESULT_POLLS, 2);
-    const pollDelayMs = providerCapInt(process.env.SNOV_RESULT_POLL_MS, 750);
+    const pollDelayMs = providerCapInt(process.env.SNOV_RESULT_POLL_MS, 1500);
     for (let i = 0; i < maxPolls; i++) {
       if (i > 0 && pollDelayMs > 0) await new Promise(resolve => setTimeout(resolve, pollDelayMs));
       const result = await fetchJson(url, {
@@ -282,7 +357,7 @@ async function tryHunter(clientId, firstName, lastName, company) {
 /**
  * Find an email for a person at a company.
  * Legacy wrapper kept for older routes. It delegates to findEmail() so every
- * caller uses Lusha -> Snov -> Hunter sourcing and MillionVerifier authority.
+ * caller uses Anymail -> Icypeas -> Snov -> Hunter sourcing and MillionVerifier authority.
  */
 async function enrichEmail(clientId, { name, company }) {
   const result = await findEmail({ name, company, clientId });
@@ -297,7 +372,7 @@ async function enrichEmail(clientId, { name, company }) {
  * Replaces direct Hunter/VP in pipeline.enrichEmail. Hunter stays in this file
  * as the final provider fallback inside findEmail().
  *
- * Architecture: discover domain (Brave 1-2 searches) -> Lusha -> Snov ->
+ * Architecture: discover domain (Brave 1-2 searches) -> Anymail -> Icypeas -> Snov ->
  * Hunter candidate sourcing -> scrape/pattern candidates -> verify via
  * provider-agnostic interface (MillionVerifier impl) -> consensus scoring.
  *
@@ -537,7 +612,7 @@ async function verifyEmail(email, clientIdOverride = null) {
  *
  * Order (each step is conditional on prior step's confidence):
  *   1. Discover domain (Brave 1-2 searches, fallback to name-pattern guess)
- *   2. Source via Lusha -> Snov -> Hunter while caps allow
+ *   2. Source via Anymail -> Icypeas -> Snov -> Hunter while caps allow
  *   3. Scrape /contact + /about -> emails published by the company
  *   4. Generate 8 candidate patterns from name + domain
  *   5. Score candidates against scraped emails (name-match heuristic)
@@ -554,7 +629,8 @@ async function verifyEmail(email, clientIdOverride = null) {
 async function findEmail(lead) {
   if (!lead?.name || !lead?.company) return null;
   const clientId = lead.clientId || lead.client_id || null;
-  const maxLushaCalls = providerCapInt(lead.maxLushaCalls, lead.skipLusha === true ? 0 : 1);
+  const maxAnymailCalls = providerCapInt(lead.maxAnymailCalls, lead.skipAnymail === true ? 0 : 1);
+  const maxIcypeasCalls = providerCapInt(lead.maxIcypeasCalls, lead.skipIcypeas === true ? 0 : 1);
   const maxSnovCalls = providerCapInt(lead.maxSnovCalls, lead.skipSnov === true ? 0 : 1);
   const maxHunterCalls = providerCapInt(lead.maxHunterCalls, lead.skipHunter === true ? 0 : 1);
   const maxVerifierCalls = providerCapInt(lead.maxVerifierCalls, 3);
@@ -599,9 +675,22 @@ async function findEmail(lead) {
     return null;
   }
 
-  if (maxLushaCalls > 0) {
-    const lushaResult = await tryLusha(clientId, { firstName, lastName, company: lead.company, domain });
-    const verified = await verifyProviderEmail(lushaResult);
+  if (maxAnymailCalls > 0) {
+    const anymailResult = await tryAnymail(clientId, {
+      firstName,
+      lastName,
+      fullName: lead.name,
+      company: lead.company,
+      domain,
+      linkedinUrl: lead.linkedin_url || lead.linkedinUrl || null,
+    });
+    const verified = await verifyProviderEmail(anymailResult);
+    if (verified) return verified;
+  }
+
+  if (maxIcypeasCalls > 0) {
+    const icypeasResult = await tryIcypeas(clientId, { firstName, lastName, company: lead.company, domain });
+    const verified = await verifyProviderEmail(icypeasResult);
     if (verified) return verified;
   }
 

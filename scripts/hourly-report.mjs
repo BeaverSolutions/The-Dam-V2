@@ -33,6 +33,27 @@ function kickoffLabel(kickoff) {
   return state;
 }
 
+function providerUsageLines(providerUsage = {}) {
+  return Object.values(providerUsage)
+    .filter(row => row && row.configured)
+    .map(row => {
+      const daily = `${row.remaining_today ?? 0}/${row.daily_cap ?? 0} today`;
+      const total = row.remaining_total === null || row.remaining_total === undefined
+        ? 'no total cap'
+        : `${row.remaining_total}/${row.trial_cap ?? 0} total`;
+      return `${row.provider}: ${daily}, ${total}`;
+    });
+}
+
+function lowProviderCapacity(providerUsage = {}) {
+  return Object.values(providerUsage).filter(row => {
+    if (!row || !row.configured) return false;
+    if (Number(row.remaining_today) <= 0) return true;
+    if (row.remaining_total !== null && row.remaining_total !== undefined && Number(row.remaining_total) <= 10) return true;
+    return false;
+  });
+}
+
 async function main() {
   const now = new Date();
   const utcHour = now.getUTCHours();
@@ -65,6 +86,8 @@ async function main() {
   const sendQueue = tenant.send_queue || {};
   const research = tenant.research_beaver || {};
   const integrations = tenant.integrations || {};
+  const providerUsage = tenant.provider_usage || {};
+  const providerLines = providerUsageLines(providerUsage);
   const sent = messages.sent_today ?? 0;
   const target = kpi.target ?? '?';
   const pendingToday = messages.pending_today ?? 0;
@@ -92,6 +115,9 @@ async function main() {
   if (sqStuck > 0) blockers.push(`${sqStuck} send-queue jobs stuck`);
   if (sqFailed > 0) blockers.push(`${sqFailed} send-queue jobs failed`);
   if (!integrations.gmail_connected && !integrations.agentmail_provisioned) blockers.push('no email provider configured');
+  for (const provider of lowProviderCapacity(providerUsage)) {
+    blockers.push(`low provider capacity: ${provider.provider} ${provider.remaining_today ?? 0}/${provider.daily_cap ?? 0} today${provider.remaining_total !== null && provider.remaining_total !== undefined ? `, ${provider.remaining_total}/${provider.trial_cap ?? 0} total` : ''}`);
+  }
 
   const lines = [
     `<b>[${String(mytHour).padStart(2, '0')}:00 MYT] BeavrDam Hourly</b>`,
@@ -104,6 +130,7 @@ async function main() {
     `Approved unsent: ${approvedEmail} email, ${approvedLinkedIn} LinkedIn.`,
     `Send queue: ${sendQueue.sq_pending ?? 0} pending, ${sqStuck} stuck, ${sqFailed} failed.`,
     `Research: ${research.leads_saved_24h ?? 0} saved in 24h, ${research.no_results_24h ?? 0} no-result runs, pool ${tenant.lead_pool_remaining ?? '?'}.`,
+    `Provider caps: ${providerLines.length ? providerLines.join('; ') : 'not reported'}.`,
     `Integrations: Gmail ${integrations.gmail_connected ? 'connected' : 'missing'}, AgentMail ${integrations.agentmail_provisioned ? 'ready' : 'missing'}.`,
     '',
     '<b>Action needed</b>',

@@ -2,7 +2,8 @@
 
 const DEFAULT_DAILY_TARGET = 50;
 const MAX_SINGLE_KICKOFF_LEADS = 20;
-const LOW_OUTPUT_STOP_THRESHOLD = 5;
+const LOW_OUTPUT_STOP_RATIO = 0.2;
+const LOW_OUTPUT_STOP_THRESHOLD = LOW_OUTPUT_STOP_RATIO;
 
 function clampPositiveInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -21,14 +22,14 @@ function clampDailyTarget(value, fallback = DEFAULT_DAILY_TARGET) {
 function shouldStopForLowOutput({ requested, delivered } = {}) {
   const requestedCount = Number(requested) || 0;
   const deliveredCount = Number(delivered) || 0;
-  return requestedCount >= MAX_SINGLE_KICKOFF_LEADS
-    && deliveredCount > 0
-    && deliveredCount <= LOW_OUTPUT_STOP_THRESHOLD;
+  if (requestedCount <= 0) return false;
+  return deliveredCount / requestedCount < LOW_OUTPUT_STOP_RATIO;
 }
 
 module.exports = {
   DEFAULT_DAILY_TARGET,
   MAX_SINGLE_KICKOFF_LEADS,
+  LOW_OUTPUT_STOP_RATIO,
   LOW_OUTPUT_STOP_THRESHOLD,
   clampSingleKickoffCount,
   clampDailyTarget,

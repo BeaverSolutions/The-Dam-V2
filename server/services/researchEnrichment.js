@@ -31,7 +31,7 @@ const { scoreAndPersist } = require('./qualityScorer');
 const { getTenantConfig } = require('./tenantConfig');
 const { todayInMalaysia } = require('../utils/businessDay');
 const { checkBudget, isBudgetExceededError } = require('./budget');
-const { CAPS, providerUsageToday } = require('./spendGuard');
+const { CAPS, providerUsageToday, providerCreditSnapshots } = require('./spendGuard');
 const repairPolicy = require('./repairPolicy');
 
 const ENRICHMENT_STALE_DAYS = 7;
@@ -923,6 +923,7 @@ async function runPoolEmailEnrichment(clientId, opts = {}) {
   const braveRemaining = dryRun ? requestedLimit : Math.max(0, (Number(CAPS.brave) || 0) - braveSpent);
   const mvSpent = dryRun ? requestedLimit * 3 : await providerUsageToday('millionverifier', clientId);
   const mvRemaining = dryRun ? requestedLimit * 3 : Math.max(0, (Number(CAPS.millionverifier) || 0) - mvSpent);
+  const providerUsage = await providerCreditSnapshots(clientId, ['anymail', 'icypeas', 'snov', 'hunter', 'millionverifier']);
   const providerBound = dryRun ? requestedLimit : Math.min(braveRemaining, Math.floor(mvRemaining / 3));
   const cap = Math.min(requestedLimit, Math.floor(providerBound));
   if (cap <= 0) {
@@ -937,6 +938,7 @@ async function runPoolEmailEnrichment(clientId, opts = {}) {
       brave_cap: CAPS.brave,
       millionverifier_spent_today: mvSpent,
       millionverifier_cap: CAPS.millionverifier,
+      provider_usage: providerUsage,
       message: 'Pool email enrichment blocked before provider spend: no reserved Brave/MillionVerifier capacity available.',
     };
   }
@@ -970,12 +972,13 @@ async function runPoolEmailEnrichment(clientId, opts = {}) {
       dry_run: true,
       candidates: leads.length,
       sample: leads.slice(0, 10).map(l => ({ name: l.name, company: l.company })),
+      provider_usage: providerUsage,
       message: `[dry-run] ${leads.length} Tier-B leads would be email-enriched (no findEmail called, no spend).`,
     };
   }
 
   if (leads.length === 0) {
-    return { processed: 0, promoted: 0, no_email: 0, errors: 0, message: 'No Tier-B leads eligible for email enrichment.' };
+    return { processed: 0, promoted: 0, no_email: 0, errors: 0, provider_usage: providerUsage, message: 'No Tier-B leads eligible for email enrichment.' };
   }
 
   const { findEmail } = require('./emailEnrichment');
@@ -1027,13 +1030,13 @@ async function runPoolEmailEnrichment(clientId, opts = {}) {
        VALUES ($1, 'research_beaver', $2, $3::jsonb, 'journal', NOW())
        ON CONFLICT (client_id, agent, key) DO UPDATE SET content = $3::jsonb, updated_at = NOW()`,
       [clientId, `pool_email_enrichment_${dayKey}`, JSON.stringify({
-        ran_at: nowIso, processed: leads.length, promoted, no_email: noEmail, errors,
+        ran_at: nowIso, processed: leads.length, promoted, no_email: noEmail, errors, provider_usage: providerUsage,
       })]
     );
   } catch { /* non-critical */ }
 
   return {
-    processed: leads.length, promoted, no_email: noEmail, errors,
+    processed: leads.length, promoted, no_email: noEmail, errors, provider_usage: providerUsage,
     message: `Promoted ${promoted}/${leads.length} Tier-B leads to Tier-A (verified email). ${noEmail} had no deliverable email, ${errors} errors.`,
   };
 }

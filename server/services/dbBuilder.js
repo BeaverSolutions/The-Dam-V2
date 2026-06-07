@@ -1364,7 +1364,7 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
       trigger: 'pool_dry_kickoff',
       mode: 'web_linkedin_topup',
       source: 'legacy_research',
-      source_order: 'web_linkedin_lusha_snov_hunter_millionverifier',
+      source_order: 'web_linkedin_anymail_icypeas_snov_hunter_millionverifier',
       neededChannel,
       found: leads.length,
       saved,

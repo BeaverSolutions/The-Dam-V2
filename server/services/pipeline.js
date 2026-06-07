@@ -218,7 +218,7 @@ async function processLead(clientId, lead, ctx = {}) {
       console.log(`[pipeline.processLead] Skipping open-web personalization for ${lead.name}: ${allowPersonalisationSearch ? 'missing signal_package' : 'paid signal disabled'}`);
     }
 
-    // ── 4. Email enrichment (Lusha -> Snov -> Hunter -> MillionVerifier) ──
+    // ── 4. Email enrichment (Anymail -> Icypeas -> Snov -> Hunter -> MillionVerifier) ──
     await enrichEmail(clientId, lead, {
       pipeline_path: pipelinePath,
       hunterService,
@@ -678,7 +678,7 @@ async function persistDraft(clientId, params) {
 // Risk-correct path tonight: extract the two helpers with the highest
 // line-for-line duplication and zero behaviour change:
 //
-//   - enrichEmail(clientId, lead, options)         — Lusha -> Snov -> Hunter -> MillionVerifier
+//   - enrichEmail(clientId, lead, options)         — Anymail -> Icypeas -> Snov -> Hunter -> MillionVerifier
 //   - draftWithFallback(clientId, params)          — Sales Beaver + optional Captain fallback
 //
 // Caller wiring stays. Channel selection, dedup, Captain-validate, persistDraft
@@ -696,8 +696,8 @@ async function persistDraft(clientId, params) {
  * Enrich a lead's email if missing. Mutates `lead` in place and writes to DB.
  *
  * Mirrors the email-enrichment blocks in agents.js:
- *   signal_pipeline: Lusha -> Snov -> Hunter -> MillionVerifier
- *   kickoff_pipeline: Lusha -> Snov -> Hunter -> MillionVerifier
+ *   signal_pipeline: Anymail -> Icypeas -> Snov -> Hunter -> MillionVerifier
+ *   kickoff_pipeline: Anymail -> Icypeas -> Snov -> Hunter -> MillionVerifier
  * Phase 3 signal execution contract: Research must provide company evidence
  * and decision-maker context before this email enrichment step runs. This
  * helper remains the shared contact-enrichment layer.
@@ -724,11 +724,11 @@ async function enrichEmail(clientId, lead, options = {}) {
 
   // ── v2 (P0 2026-05-23): findEmail orchestrator ───────────────────────
   // VP is not part of autonomous Beaver sourcing. findEmail discovers
-  // domain via Brave, tries Lusha -> Snov -> Hunter, scrapes/patterns
+  // domain via Brave, tries Anymail -> Icypeas -> Snov -> Hunter, scrapes/patterns
   // candidates, then verifies selected candidates via MillionVerifier.
   //
   // hunterService is legacy DI; the findEmail orchestrator owns the provider
-  // order: public web evidence -> Lusha -> Snov -> Hunter -> MillionVerifier.
+  // order: public web evidence -> Anymail -> Icypeas -> Snov -> Hunter -> MillionVerifier.
   //
   // Spend gate: all provider calls are finite and spendGuard-capped.
   // findEmail spends only within per-lead caps and uses MV as the final
@@ -769,6 +769,9 @@ async function enrichEmail(clientId, lead, options = {}) {
 }
 
 const TRUSTED_EMAIL_SOURCES = new Set([
+  'anymail',
+  'icypeas',
+  'snov',
   'hunter',
   'pattern+verify',
   'scrape+pattern',

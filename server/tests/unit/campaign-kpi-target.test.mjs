@@ -53,9 +53,12 @@ describe('campaign KPI target resolver', () => {
     expect(target.remainingAfterRun).toBe(0);
   });
 
-  it('stops full-size kickoff runs that produce 5 or fewer outputs', () => {
-    expect(shouldStopForLowOutput({ requested: 20, delivered: 5 })).toBe(true);
-    expect(shouldStopForLowOutput({ requested: 20, delivered: 6 })).toBe(false);
-    expect(shouldStopForLowOutput({ requested: 5, delivered: 5 })).toBe(false);
+  it('stops runs that produce less than 20% of requested outputs', () => {
+    expect(shouldStopForLowOutput({ requested: 20, delivered: 3 })).toBe(true);
+    expect(shouldStopForLowOutput({ requested: 20, delivered: 4 })).toBe(false);
+    expect(shouldStopForLowOutput({ requested: 50, delivered: 9 })).toBe(true);
+    expect(shouldStopForLowOutput({ requested: 50, delivered: 10 })).toBe(false);
+    expect(shouldStopForLowOutput({ requested: 5, delivered: 0 })).toBe(true);
+    expect(shouldStopForLowOutput({ requested: 5, delivered: 1 })).toBe(false);
   });
 });
