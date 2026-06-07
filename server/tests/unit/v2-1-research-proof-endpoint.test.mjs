@@ -19,6 +19,8 @@ describe('V2.1 research proof endpoint', () => {
     expect(body).toContain("router.post('/v2-1/research-proof', requireInternalKey");
     expect(body).toContain('const proofLimit = 5;');
     expect(body).toContain('previewSignalHuntPlan');
+    expect(body).toContain('getLegacyIcpForClient(clientId');
+    expect(body).toContain('TENANT_PROFILE_BLOCKED');
     expect(body).toContain('confirm_query_plan_hash');
     expect(body).toContain('QUERY_PLAN_CONFIRMATION_MISMATCH');
     expect(body).toContain('REPEATED_ZERO_QUERY_SET');
@@ -36,6 +38,9 @@ describe('V2.1 research proof endpoint', () => {
 
     expect(body.indexOf('confirm_query_plan_hash')).toBeLessThan(
       body.indexOf('runWithClientContext(clientId, () => runSignalHunt')
+    );
+    expect(body.indexOf('getLegacyIcpForClient(clientId')).toBeLessThan(
+      body.indexOf('previewSignalHuntPlan(clientId')
     );
   });
 

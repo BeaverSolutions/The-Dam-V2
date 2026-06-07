@@ -1262,7 +1262,16 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
         LIMIT 1`,
       [clientId]
     );
-    const icp = icpRows[0]?.content || {};
+    const fallbackIcp = icpRows[0]?.content || null;
+    const { getLegacyIcpForClient } = require('../services/tenantContext');
+    const icp = await getLegacyIcpForClient(clientId, { source: 'http', fallback: fallbackIcp }) || {};
+    if (icp.blocked) {
+      return res.status(409).json({
+        error: 'tenant profile blocked',
+        code: 'TENANT_PROFILE_BLOCKED',
+        data: { blocker: icp.blocker || icp.reason || 'tenant_profile_blocked', icp },
+      });
+    }
     const before = await proofCounts();
     const { runSignalHunt, saveSignalLeads, previewSignalHuntPlan } = require('../services/signalHunt');
     const queryPlan = await previewSignalHuntPlan(clientId, {
