@@ -425,7 +425,7 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(signalHunt._test.signalProviderFanoutCaps(17, 5)).toEqual({
       maxDomainSearchesPerLead: 0,
       maxHunterCallsPerLead: 1,
-      maxVerifierCallsPerLead: 1,
+      maxVerifierCallsPerLead: 3,
       maxEnrichmentLeads: 5,
     });
     expect(signalHunt._test.signalProviderFanoutCaps(0, 5)).toEqual({
@@ -437,7 +437,7 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(signalHunt._test.signalProviderFanoutCaps(null, 20)).toEqual({
       maxDomainSearchesPerLead: 0,
       maxHunterCallsPerLead: 1,
-      maxVerifierCallsPerLead: 1,
+      maxVerifierCallsPerLead: 3,
       maxEnrichmentLeads: 20,
     });
   });

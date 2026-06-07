@@ -89,11 +89,12 @@ function signalProviderFanoutCaps(maxPaidQueries = null, maxLeads = 1) {
     ? target
     : Math.max(0, Math.min(target, Math.floor(Number(paidQueryBudget.lookup) || 0)));
   const perLeadPaidEnrichment = lookup > 0 ? 1 : 0;
+  const perLeadVerifierAttempts = lookup > 0 ? 3 : 0;
 
   return {
     maxDomainSearchesPerLead: 0,
     maxHunterCallsPerLead: perLeadPaidEnrichment,
-    maxVerifierCallsPerLead: perLeadPaidEnrichment,
+    maxVerifierCallsPerLead: perLeadVerifierAttempts,
     maxEnrichmentLeads: lookup,
   };
 }
