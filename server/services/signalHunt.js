@@ -373,6 +373,47 @@ function evidenceTextForSignal(signal = {}) {
   ].filter(Boolean).join(' ');
 }
 
+function isMarketingAgencyVertical(normalizedTerm = '') {
+  return /\b(agenc(y|ies)|studio|studios|firm|firms)\b/.test(normalizedTerm)
+    && /\b(marketing|digital|creative|pr|communications?|advertising|media|content|public relations)\b/.test(normalizedTerm);
+}
+
+function marketingAgencyEvidenceMatches(normalizedText = '') {
+  if (/\b(recruit|recruitment|staffing|headhunt|headhunting|employment agency|talent acquisition)\b/.test(normalizedText)) {
+    return false;
+  }
+  const hasAgencyShape = /\b(agenc(y|ies)|studio|studios|firm|firms)\b/.test(normalizedText);
+  const hasQualifier = /\b(marketing|digital|creative|pr|communications?|advertising|media|content|brand|branding|social media|public relations)\b/.test(normalizedText);
+  return hasAgencyShape && hasQualifier;
+}
+
+function isCorporateTrainingVertical(normalizedTerm = '') {
+  return /\b(training|learning|coaching|skill|skills|upskill|upskilling|l and d|development)\b/.test(normalizedTerm);
+}
+
+function corporateTrainingEvidenceMatches(normalizedText = '') {
+  return /\b(corporate training|professional training|workplace training|employee training|training provider|training company|training firm|training consultancy|learning and development|l and d|executive coaching|leadership coaching|sales coaching|skills development|skill development|upskill|upskilling|workforce development)\b/.test(normalizedText);
+}
+
+function competitorOfferWordingMatches(text = '') {
+  const normalizedText = normalizedEvidenceText(text);
+  if (!normalizedText) return [];
+  const patterns = [
+    ['lead generation', /\b(lead\s*(gen|generation)|leadgen)\b/],
+    ['cold email outreach', /\bcold\s+(email|outreach)\b/],
+    ['outbound agency', /\boutbound\s+(agency|agencies|service|services|consulting|consultancy|firm|firms)\b/],
+    ['SDR-as-a-service', /\b(sdr|bdr)\s+(as\s+a\s+)?service\b/],
+    ['appointment setting', /\bappointment\s+setting\b/],
+    ['demand generation agency', /\bdemand\s*(gen|generation)\b/],
+    ['GTM agency', /\b(gtm|go to market)\s+(agency|agencies|service|services|consulting|consultancy|firm|firms)\b/],
+    ['AI sales outbound', /\bai\s+(sales|outbound|sdr|lead\s*(gen|generation)|gtm)\b/],
+    ['LinkedIn outreach', /\blinkedin\s+(outreach|lead\s*(gen|generation)|appointment|automation)\b/],
+  ];
+  return patterns
+    .filter(([, pattern]) => pattern.test(normalizedText))
+    .map(([label]) => label);
+}
+
 function termMatchesText(term = '', text = '', { allowRegex = false, flexible = false } = {}) {
   const rawTerm = String(term || '').trim();
   if (!rawTerm) return false;
@@ -383,6 +424,12 @@ function termMatchesText(term = '', text = '', { allowRegex = false, flexible = 
     try {
       if (new RegExp(rawTerm, 'i').test(text)) return true;
     } catch { /* fall through to literal matching */ }
+  }
+  if (flexible && isMarketingAgencyVertical(normalizedTerm)) {
+    return marketingAgencyEvidenceMatches(normalizedText);
+  }
+  if (flexible && isCorporateTrainingVertical(normalizedTerm)) {
+    return corporateTrainingEvidenceMatches(normalizedText);
   }
   if (normalizedText.includes(normalizedTerm)) return true;
   if (!flexible) return false;
@@ -448,11 +495,14 @@ function evaluateSignalCompanyIcpGate(signal = {}, icp = {}) {
     };
   }
 
-  const competitorMatches = matchedTerms([
-    ...listFrom(icp.competitor_offers),
-    ...listFrom(signal.competitor_offers),
-    ...listFrom(signal.reject_rules?.competitor_offers),
-  ], text);
+  const competitorMatches = [...new Set([
+    ...matchedTerms([
+      ...listFrom(icp.competitor_offers),
+      ...listFrom(signal.competitor_offers),
+      ...listFrom(signal.reject_rules?.competitor_offers),
+    ], text),
+    ...competitorOfferWordingMatches(text),
+  ])];
   if (competitorMatches.length > 0) {
     return {
       pass: false,
