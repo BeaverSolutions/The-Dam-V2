@@ -123,6 +123,10 @@ function queriesFromConfigContent(content) {
   return [];
 }
 
+function hasThreeStackedRequiredQuotedPhrases(query) {
+  return /"[^"]+"\s+"[^"]+"\s+"[^"]+"/.test(String(query || ''));
+}
+
 // ── Source contracts ──────────────────────────────────────────────────────
 describe('signalHunt source contracts (ICP-first query priority)', () => {
   const src = service('services/signalHunt.js');
@@ -131,19 +135,48 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
   const industriesFnEnd = src.indexOf('function hasIcpSearchScope', industriesFnStart);
   const industriesFn = src.slice(industriesFnStart, industriesFnEnd);
 
-  it('ICP queries take priority over stored config and both over defaults', () => {
+  it('uses one authoritative query source and rejects stale stored config', () => {
     expect(src).toContain('const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : []');
-    expect(src).toContain('const fallbackQueries = icpQueries.length > 0');
-    expect(src).toContain('...icpQueries, ...configuredQueries');
+    expect(src).toContain('function trustedSignalHuntConfigContent');
+    expect(src).toContain('rejected_config_source');
+    expect(src).toContain('current_icp_signal_planner');
+    expect(src).not.toContain('...icpQueries, ...configuredQueries');
+    expect(src).not.toContain('current_icp_signal_planner_then_config');
   });
 
   it('uses the full ICP and does not slice to the first three industries', () => {
     expect(src).toContain('function industriesFromIcp');
     expect(industriesFn).not.toContain('.slice(0, 3)');
+    expect(src).not.toContain('function industryPriority');
+    expect(industriesFn).not.toContain('industryPriority');
+  });
+
+  it('trusts stored signal_hunt_config only when bound to the active tenant profile version', () => {
+    expect(signalHunt._test.trustedSignalHuntConfigContent({
+      tenant_profile_content_version: 5,
+      signal_queries: [{ query: 'trusted query' }],
+    }, { content_version: 5 })).toBe(true);
+
+    expect(signalHunt._test.trustedSignalHuntConfigContent({
+      signal_queries: [{ query: 'stale April query' }],
+    }, { content_version: 5 })).toBe(false);
   });
 
   it('keeps bounded query windows on planner source channels instead of agency publication fallbacks', () => {
     const queries = signalHunt._test.buildSignalQueriesFromIcp({
+      active_industries: [
+        'B2B corporate training',
+        'professional training',
+        'L&D providers',
+        'executive coaching',
+        'sales coaching',
+        'skills development',
+        'digital agencies',
+        'marketing agencies',
+        'content studios',
+        'PR firms',
+        'creative studios',
+      ],
       industries: [
         'B2B corporate training',
         'professional training',
@@ -159,21 +192,26 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       ],
       geographies: 'Malaysia, Singapore, United States',
     });
-    const firstSix = queries.slice(0, 6).map(q => q.query.toLowerCase()).join('\n');
+    const firstSix = queries.slice(0, 6);
+    const firstSixText = firstSix.map(q => q.query.toLowerCase()).join('\n');
+    const firstSixIndustries = firstSix.map(q => q.industry || '').join('\n');
     const firstSixChannels = queries.slice(0, 6).map(q => q.source_channel);
     const firstTwelveChannels = queries.slice(0, 12).map(q => q.source_channel);
     const allQueries = queries.map(q => q.query).join('\n');
 
-    expect(firstSix).toMatch(/training|l&d|coaching|skills development/);
-    expect(firstSix).toMatch(/agenc|content studio|pr firm|creative studio/);
-    expect(firstSixChannels).toEqual(expect.arrayContaining(['linkedin_jobs', 'review_sites', 'job_descriptions']));
+    expect(firstSixIndustries).toMatch(/training|l&d|coaching|skills development/);
+    expect(firstSixIndustries).toMatch(/agenc|content studio|pr firm|creative studio/);
+    expect(firstSixText).not.toMatch(/"[^"]+"\s+"[^"]+"\s+"[^"]+"/);
+    expect(firstSixChannels).toEqual(expect.arrayContaining(['linkedin_jobs', 'press', 'investor_pages']));
     expect(new Set(firstSixChannels).size).toBeGreaterThan(3);
+    expect(queries.map(q => q.source_channel)).toEqual(expect.arrayContaining(['review_sites', 'job_descriptions']));
     expect(firstTwelveChannels).not.toContain('industry_publication');
     expect(allQueries).not.toMatch(/marketing-interactive|marketingmagazine|campaignasia|digitalnewsasia/i);
   });
 
   it('uses universal planner source-channel queries without stored publication fallback injection for MY/SG', () => {
     const queries = signalHunt._test.buildSignalQueriesFromIcp({
+      active_industries: ['digital agencies', 'marketing agencies', 'B2B corporate training'],
       industries: ['digital agencies', 'marketing agencies', 'B2B corporate training'],
       geographies: 'Malaysia, Singapore',
     });
@@ -187,6 +225,7 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(firstSix).toMatch(/sales|business development|SDR|BDR|account executive/);
     expect(firstSix).toMatch(/expanding|new office|funding|investment|review|CRM/);
     expect(firstSix).toMatch(/Malaysia|Singapore/);
+    expect(queries.every(q => !hasThreeStackedRequiredQuotedPhrases(q.query))).toBe(true);
     expect(queries.some(q => q.source_channel === 'industry_publication')).toBe(false);
     expect(allQueries).not.toMatch(/marketing-interactive|marketingmagazine|campaignasia|digitalnewsasia/i);
   });
@@ -216,6 +255,7 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       country: 'MY',
     }, {
       verticals: ['B2B corporate training', 'professional training', 'L&D providers'],
+      active_industries: ['B2B corporate training', 'professional training', 'L&D providers'],
       exclusions: ['Leo Burnett'],
       competitor_offers: ['lead generation', 'AI outbound'],
     });
@@ -237,6 +277,7 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       country: 'MY',
     }, {
       verticals: ['B2B corporate training', 'professional training', 'L&D providers'],
+      active_industries: ['B2B corporate training', 'professional training', 'L&D providers'],
     });
 
     expect(gate).toMatchObject({
@@ -253,6 +294,7 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       raw_snippet: 'HEPMIL Malaysia under Leo Burnett',
     }, {
       verticals: ['B2B corporate training'],
+      active_industries: ['B2B corporate training'],
       banned_regex: ['Leo Burnett'],
     })).toMatchObject({
       pass: false,
@@ -267,6 +309,7 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       raw_snippet: 'Lead generation agency hiring sales development reps',
     }, {
       verticals: ['B2B corporate training'],
+      active_industries: ['B2B corporate training'],
       competitor_offers: ['lead generation'],
     })).toMatchObject({
       pass: false,
@@ -294,10 +337,9 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).toContain('callAgent(agentKey');
   });
 
-  it('keeps explicit industry prioritization helpers for deterministic ordering', () => {
-    expect(src).toContain('function industryPriority');
-    expect(src).toContain('professional service');
-    expect(src).toContain('training');
+  it('does not rank agency and professional services ahead of focus industries', () => {
+    expect(src).not.toContain('function industryPriority');
+    expect(src).not.toContain('industryPriority(a) - industryPriority(b)');
   });
 
   it('paid query budget consumed once per signal query (not doubled)', () => {
@@ -384,6 +426,19 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
 
   it('diversifies the first capped discovery window across agency and training ICP surfaces', () => {
     const activeIcp = {
+      active_industries: [
+        'B2B corporate training',
+        'professional training',
+        'L&D providers',
+        'executive coaching',
+        'sales coaching',
+        'skills development',
+        'digital agencies',
+        'marketing agencies',
+        'content studios',
+        'PR firms',
+        'creative studios',
+      ],
       industries: [
         'B2B corporate training',
         'professional training',
@@ -402,7 +457,7 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     const queries = signalHunt._test.buildSignalQueriesFromIcp(activeIcp);
     const paidBudget = signalHunt._test.signalPaidBudgetSplit(6, 20);
     const executable = queries.slice(0, paidBudget.discovery);
-    const combined = executable.map(q => `${q.signal_type} ${q.query}`).join('\n');
+    const combined = executable.map(q => `${q.signal_type} ${q.industry || ''} ${q.query}`).join('\n');
 
     expect(executable).toHaveLength(3);
     expect(combined).toMatch(/agenc|marketing|content studio|pr firm|creative studio/i);
@@ -894,11 +949,13 @@ describe('buildSignalQueriesFromIcp', () => {
   });
 
   it('does not drop later ICP verticals after the first three', () => {
-    const r = buildSignalQueriesFromIcp({
+    const r = signalHunt._test.buildSignalQueriesFromIcp({
       verticals: ['B2B corporate training', 'professional training', 'L&D providers', 'digital agency'],
+      active_industries: ['B2B corporate training', 'professional training', 'L&D providers', 'digital agency'],
       geographies: ['Malaysia'],
     });
-    expect(r.some(q => q.query.includes('"digital agency"'))).toBe(true);
+    expect(r.some(q => q.industry === 'digital agency')).toBe(true);
+    expect(r.every(q => !q.query.includes('"digital agency"'))).toBe(true);
   });
 
   it('does not allow publication fallbacks to consume the proof window', () => {
@@ -914,6 +971,7 @@ describe('buildSignalQueriesFromIcp', () => {
   it('builds ICP Signal Hunt queries from the universal signal planner across source channels', () => {
     const r = signalHunt._test.buildSignalQueriesFromIcp({
       verticals: ['B2B corporate training', 'digital agencies'],
+      active_industries: ['B2B corporate training', 'digital agencies'],
       geo: ['MY'],
       competitor_offers: ['lead generation', 'AI outbound'],
       buying_signals: [
@@ -980,6 +1038,7 @@ describe('buildSignalQueriesFromIcp', () => {
     });
     expect(r[0].query).toMatch(/Kuala Lumpur|Greater Kuala Lumpur|Malaysia/i);
     expect(r[0].query).not.toMatch(/B2B corporate training|digital agencies/i);
+    expect(r.every(q => !hasThreeStackedRequiredQuotedPhrases(q.query))).toBe(true);
     expect(r.slice(0, 12).some(q => q.source_channel === 'industry_publication')).toBe(false);
     expect(r.map(q => q.query).join('\n')).not.toMatch(/marketing-interactive|marketingmagazine|campaignasia|digitalnewsasia/);
   });

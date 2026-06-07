@@ -220,8 +220,9 @@ function getDefaultBuyingSignalsForTenant(tenant = {}) {
   });
 }
 
-function normalizeBuyingSignalsForTenant(tenant = {}) {
+function normalizeBuyingSignalsForTenant(tenant = {}, { allowDefaults = true } = {}) {
   const configured = list(tenant.buying_signals).filter(signal => signal && signal.enabled !== false);
+  if (configured.length === 0 && !allowDefaults) return [];
   const signals = configured.length > 0 ? configured : getDefaultBuyingSignalsForTenant(tenant);
   const icp = tenant.icp || {};
 

@@ -5,8 +5,15 @@ import { fileURLToPath } from 'url';
 
 const require = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const { buildBeaverScorecard, BEAVER_TARGETS } = require('../../services/beaverScorecard');
+const {
+  buildBeaverScorecard,
+  buildCaptainPeriodReport,
+  formatCaptainPeriodReport,
+  BEAVER_TARGETS,
+} = require('../../services/beaverScorecard');
 const captainSource = readFileSync(resolve(__dirname, '../../services/captainOrchestrator.js'), 'utf-8');
+const kpiSource = readFileSync(resolve(__dirname, '../../services/kpi.js'), 'utf-8');
+const indexSource = readFileSync(resolve(__dirname, '../../index.js'), 'utf-8');
 
 // Fixed inputs → known hit/miss. No DB, no heavy deps.
 describe('buildBeaverScorecard (Phase 3 per-beaver accountability)', () => {
@@ -100,5 +107,62 @@ describe('scorecard wiring in captainOrchestrator (source contract)', () => {
   it('renders the per-beaver scorecard block in the morning brief (additive)', () => {
     expect(captainSource).toContain('BEAVER SCORECARD (today, MYT)');
     expect(captainSource).toContain('...scorecardLines');
+  });
+});
+
+describe('Captain weekly/monthly period reports', () => {
+  it('renders honest zeros for a zero-output period', () => {
+    const report = buildCaptainPeriodReport({
+      period: { type: 'weekly', label: '2026-05-25 to 2026-06-01', start_date: '2026-05-25', end_date: '2026-06-01', days: 7 },
+      active_industries: ['B2B corporate training', 'small marketing agencies'],
+      targets: { outreach_sent: 350 },
+    });
+
+    expect(report.headline.sent).toBe(0);
+    expect(report.headline.target).toBe(350);
+    expect(report.industries.map(row => row.industry)).toEqual(['B2B corporate training', 'small marketing agencies']);
+    expect(report.industries[0]).toMatchObject({ queries_run: 0, raw_candidates: 0, saved: 0, sent: 0, replies: 0, meetings: 0 });
+
+    const text = formatCaptainPeriodReport(report);
+    expect(text).toContain('HEADLINE VS TARGET');
+    expect(text).toContain('0/350 sent');
+    expect(text).toContain('B2B corporate training: queries 0, raw 0, saved 0, sent 0, replies 0, meetings 0');
+  });
+
+  it('surfaces monthly observations for a human decision without auto-reweighting', () => {
+    const report = buildCaptainPeriodReport({
+      period: { type: 'monthly', label: 'May 2026', start_date: '2026-05-01', end_date: '2026-06-01', days: 31 },
+      active_industries: ['B2B corporate training'],
+      targets: { outreach_sent: 1550 },
+      industries: [{ industry: 'B2B corporate training', queries_run: 8, raw_candidates: 120, saved: 10, sent: 15, replies: 0, meetings: 0 }],
+      blockers: [{ reason: 'raw_candidates_zero', count: 3 }],
+    });
+
+    expect(report.observations).toEqual(expect.arrayContaining([
+      'B2B corporate training: 0 replies in period',
+      'Top blocker: raw_candidates_zero (3)',
+    ]));
+    expect(JSON.stringify(report)).not.toMatch(/auto.?reweight|auto.?act|recommended_weight/i);
+    expect(formatCaptainPeriodReport(report)).toContain('MONTHLY OBSERVATIONS');
+  });
+
+  it('wires report collection through kpi.js, scorecard rendering, Telegram, and agent_memory artifacts', () => {
+    expect(kpiSource).toContain('async function collectCaptainPeriodReport');
+    expect(kpiSource).toContain('buildCaptainPeriodReport');
+    expect(kpiSource).toContain('formatCaptainPeriodReport');
+    expect(kpiSource).toContain("l.metadata->'signal_package'->'company_icp_fit'->>'vertical_match'");
+    expect(kpiSource).toContain("logs.action = 'provider_usage'");
+    expect(kpiSource).toContain('FROM llm_usage');
+    expect(kpiSource).toContain("profile->'icp'->'active_industries'");
+    expect(kpiSource).toContain("INSERT INTO agent_memory (client_id, agent, key, content, memory_type)");
+    expect(kpiSource).toContain('captain_weekly_report_');
+    expect(kpiSource).toContain('captain_monthly_report_');
+
+    expect(indexSource).toContain('async function runCaptainPeriodReports()');
+    expect(indexSource).toContain("reportType === 'weekly'");
+    expect(indexSource).toContain("reportType === 'monthly'");
+    expect(indexSource).toContain('dayOfWeekFromDateKey(todayKey) === 1');
+    expect(indexSource).toContain("todayKey.endsWith('-01')");
+    expect(indexSource).toContain("telegramService.sendMessage(chatId, `<b>Captain ${reportType} report</b>");
   });
 });

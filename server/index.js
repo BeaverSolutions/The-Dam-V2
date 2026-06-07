@@ -174,11 +174,12 @@ app.get('/health', async (req, res) => {
   const jobHealth = require('./services/jobHealth');
   const jobs = jobHealth.getStatus();
   const staleJobs = Object.entries(jobs).filter(([, v]) => v.status === 'stale').map(([k]) => k);
+  const degradedJobs = Object.entries(jobs).filter(([, v]) => v.status === 'degraded').map(([k]) => k);
   const currentAutonomyState = autonomyState.getAutonomyState();
 
   const status = dbOk ? 200 : 503;
   res.status(status).json({
-    status: dbOk ? (staleJobs.length > 0 ? 'degraded' : 'ok') : 'degraded',
+    status: dbOk ? ((staleJobs.length > 0 || degradedJobs.length > 0) ? 'degraded' : 'ok') : 'degraded',
     version: '2.0.0',
     tag: 'Autonomous',
     timestamp: new Date().toISOString(),
@@ -193,6 +194,7 @@ app.get('/health', async (req, res) => {
     autonomy_state: currentAutonomyState,
     jobs,
     stale_jobs: staleJobs,
+    degraded_jobs: degradedJobs,
   });
 });
 
@@ -891,6 +893,77 @@ none from this broken report; check app truth before approving batches.`;
       }
     }
 
+    function dayOfWeekFromDateKey(dateKey) {
+      const [year, month, day] = String(dateKey).slice(0, 10).split('-').map(Number);
+      return new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+    }
+
+    async function runCaptainPeriodReports() {
+      const now = new Date();
+      const todayKey = todayInMalaysia(now);
+      const klMinutes = minutesSinceMalaysiaMidnight(now);
+      const windowStart = 8 * 60 + 20;
+      const windowEnd = 8 * 60 + 30;
+      if (klMinutes < windowStart || klMinutes > windowEnd) {
+        return { idle: true, reason: 'outside 08:20-08:30 MYT Captain report window' };
+      }
+
+      const dueReports = [];
+      if (dayOfWeekFromDateKey(todayKey) === 1) dueReports.push('weekly');
+      if (todayKey.endsWith('-01')) dueReports.push('monthly');
+      if (dueReports.length === 0) return { idle: true, reason: 'no Captain period report due today' };
+
+      const { rows: [clientRow] } = await pool.query(
+        `SELECT id FROM clients WHERE slug = $1 LIMIT 1`,
+        [process.env.TELEGRAM_CLIENT_SLUG || 'beaver-solutions']
+      );
+      if (!clientRow) return { skipped: true, reason: 'telegram client not found' };
+
+      const { generateCaptainPeriodReport } = require('./services/kpi');
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      let generated = 0;
+      let sent = 0;
+      let deduped = 0;
+      const artifacts = [];
+
+      for (const reportType of dueReports) {
+        if (reportType === 'weekly') {
+          logger.debug({ msg: 'Captain weekly report due', todayKey });
+        } else if (reportType === 'monthly') {
+          logger.debug({ msg: 'Captain monthly report due', todayKey });
+        }
+        const dedupeKey = `captain_${reportType}_report_sent_${todayKey}`;
+        const { rows } = await pool.query(
+          `SELECT 1 FROM agent_memory WHERE client_id = $1 AND agent = 'captain' AND key = $2 LIMIT 1`,
+          [clientRow.id, dedupeKey]
+        );
+        if (rows.length > 0) {
+          deduped++;
+          continue;
+        }
+
+        await pool.query(
+          `INSERT INTO agent_memory (client_id, agent, key, content, memory_type)
+           VALUES ($1, 'captain', $2, $3::jsonb, 'kpi')
+           ON CONFLICT (client_id, agent, key) DO NOTHING`,
+          [clientRow.id, dedupeKey, JSON.stringify({ report_type: reportType, scheduled_for: todayKey })]
+        ).catch(() => {});
+
+        const generatedReport = await generateCaptainPeriodReport(clientRow.id, { reportType, now });
+        generated++;
+        artifacts.push(generatedReport.artifactKey);
+
+        if (chatId) {
+          await telegramService.sendMessage(chatId, `<b>Captain ${reportType} report</b>\n\n${generatedReport.text}`);
+          sent++;
+        } else {
+          console.warn('[captain] TELEGRAM_CHAT_ID not set — Captain period report artifact saved but Telegram delivery was suppressed');
+        }
+      }
+
+      return { generated, sent, deduped, artifacts, report_types: dueReports };
+    }
+
     // Daily agent self-reflection — 11:00 UTC = 7pm MYT, once per day.
     // Runs 1 hour before Sunday's weekly review so Sunday's daily gets captured first.
     // Each agent reflects on its own logs activity. Activity-gated (see learningEngine).
@@ -1098,7 +1171,15 @@ none from this broken report; check app truth before approving batches.`;
       // before tenant B fired left B's row present, and B silently missed its
       // kickoff for the day. Each tenant now checks + marks its own row, and the
       // mark happens BEFORE the kickoff so a crash can't cause a double-fire.
-      const result = { fired: 0, deduped: 0, budgetBlocked: 0, unverified: 0, clients: clients.map(client => client.slug) };
+      const result = {
+        fired: 0,
+        deduped: 0,
+        budgetBlocked: 0,
+        unverified: 0,
+        blocked: 0,
+        blockers: [],
+        clients: clients.map(client => client.slug),
+      };
       for (const client of clients) {
         const { rows: already } = await pool.query(
           `SELECT 1 FROM agent_memory WHERE client_id = $1 AND agent = 'captain' AND key = $2 LIMIT 1`,
@@ -1108,6 +1189,13 @@ none from this broken report; check app truth before approving batches.`;
           const proof = await getDailyKickoffProof(client.id, todayInMalaysia(now));
           if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof)) {
             result.unverified++;
+            result.blocked++;
+            result.blockers.push({
+              client_id: client.id,
+              slug: client.slug,
+              reason: 'daily kickoff start marker has no output proof',
+              trace_count: Number(proof.trace_count) || 0,
+            });
             await recordUnverifiedDailyKickoff(client.id, todayInMalaysia(now), now, 'daily_scheduler_window', proof);
           } else {
             result.deduped++;
@@ -1147,26 +1235,47 @@ none from this broken report; check app truth before approving batches.`;
         ).catch(() => {});
 
         logger.info({ msg: `[daily-kickoff] Starting for ${client.slug}` });
-        await runWithClientContext(client.id, () =>
+        const kickoffResult = await runWithClientContext(client.id, () =>
           runAutonomousKickoff(client.id).catch(err => {
             logger.error({ msg: `[daily-kickoff] Failed for ${client.slug}`, err: err.message });
             throw err;
           })
         );
+        const kickoffBlocker = jobHealth.degradedReasonFromResult(kickoffResult);
         const proof = await getDailyKickoffProof(client.id, todayInMalaysia(now));
+        if (kickoffBlocker) {
+          result.blocked++;
+          result.blockers.push({
+            client_id: client.id,
+            slug: client.slug,
+            reason: kickoffBlocker,
+            kickoff_result: kickoffResult,
+          });
+        }
         if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof)) {
           result.unverified++;
+          if (!kickoffBlocker) {
+            result.blocked++;
+            result.blockers.push({
+              client_id: client.id,
+              slug: client.slug,
+              reason: 'daily kickoff start marker has no output proof',
+              trace_count: Number(proof.trace_count) || 0,
+            });
+          }
           await recordUnverifiedDailyKickoff(client.id, todayInMalaysia(now), now, 'daily_scheduler_after_run', proof);
-        } else {
+        } else if (!kickoffBlocker) {
           result.fired++;
         }
       }
-      return result.fired > 0
-        ? { fired: true, ...result }
+      return result.blocked > 0
+        ? { ...result, blocked: true, reason: result.blockers[0]?.reason || 'daily kickoff blocked by autonomous output blocker' }
+        : result.fired > 0
+          ? { fired: true, ...result }
         : result.unverified > 0
-          ? { blocked: true, reason: 'daily kickoff start marker has no output proof', ...result }
+          ? { ...result, blocked: true, reason: 'daily kickoff start marker has no output proof' }
         : result.budgetBlocked > 0
-          ? { blocked: true, reason: 'daily kickoff blocked by budget guard', ...result }
+          ? { ...result, blocked: true, reason: 'daily kickoff blocked by budget guard' }
         : { alreadyDone: true, reason: 'all clients already had daily kickoff dedupe rows', ...result };
     }
 
@@ -1520,7 +1629,7 @@ none from this broken report; check app truth before approving batches.`;
         [enabledSlugs]
       );
 
-      let fired = 0;
+      const result = { fired: 0, blocked: 0, blockers: [] };
       for (const client of clients) {
         try {
           const today = todayInMalaysia(now);
@@ -1557,6 +1666,13 @@ none from this broken report; check app truth before approving batches.`;
               })]
             ).catch(() => {});
             logger.warn({ msg: `[kpi-gap] ${client.slug}: kickoff blocker active (${blocker.blocker || 'unknown'}), refusing follow-on kickoff` });
+            result.blocked++;
+            result.blockers.push({
+              client_id: client.id,
+              slug: client.slug,
+              reason: jobHealth.degradedReasonFromResult(blocker) || blocker.blocker || 'daily kickoff zero/low-yield blocker is active',
+              blocker,
+            });
             continue;
           }
 
@@ -1630,6 +1746,13 @@ none from this broken report; check app truth before approving batches.`;
               })]
             ).catch(() => {});
             logger.warn({ msg: `[kpi-gap] ${client.slug}: daily kickoff start marker has no output proof, refusing follow-on kickoff` });
+            result.blocked++;
+            result.blockers.push({
+              client_id: client.id,
+              slug: client.slug,
+              reason: 'daily kickoff start marker has no output proof',
+              trace_count: Number(dailyKickoffProof.trace_count) || 0,
+            });
             continue;
           }
 
@@ -1765,6 +1888,13 @@ none from this broken report; check app truth before approving batches.`;
               }
             }
             logger.warn({ msg: `[kpi-gap] ${client.slug}: CIRCUIT BREAKER tripped — ${zero_count} zero-output kickoffs in last 4h, skipping` });
+            result.blocked++;
+            result.blockers.push({
+              client_id: client.id,
+              slug: client.slug,
+              reason: 'zero_outputs',
+              zero_output_count_4h: zero_count,
+            });
             continue;
           }
 
@@ -1785,17 +1915,32 @@ none from this broken report; check app truth before approving batches.`;
             [client.id, JSON.stringify({ email_sent: email_sent_today, email_target: EMAIL_TARGET, gap, pool_size, kickoff_number: kickoffsToday + 1 })]
           ).catch(() => {});
 
-          runWithClientContext(client.id, () =>
+          const kickoffResult = await runWithClientContext(client.id, () =>
             runAutonomousKickoff(client.id).catch(err => {
               logger.error({ msg: `[kpi-gap] kickoff failed for ${client.slug}`, err: err.message });
+              throw err;
             })
           );
-          fired++;
+          const kickoffBlocker = jobHealth.degradedReasonFromResult(kickoffResult);
+          if (kickoffBlocker) {
+            result.blocked++;
+            result.blockers.push({
+              client_id: client.id,
+              slug: client.slug,
+              reason: kickoffBlocker,
+              kickoff_result: kickoffResult,
+            });
+          } else {
+            result.fired++;
+          }
         } catch (err) {
           logger.warn({ msg: `[kpi-gap] check failed for ${client.slug}`, err: err.message });
         }
       }
-      return fired > 0 ? { fired: true, fired } : { skipped: true, reason: 'no KPI-gap kickoff fired' };
+      if (result.blocked > 0) {
+        return { ...result, blocked: true, reason: result.blockers[0]?.reason || 'KPI-gap kickoff blocked by autonomous output blocker' };
+      }
+      return result.fired > 0 ? { fired: true, ...result } : { skipped: true, reason: 'no KPI-gap kickoff fired' };
     }
 
     // ── Captain directive sweep (Wave 1, 2026-05-03; cadence fix Wave 3) ───
@@ -1859,6 +2004,7 @@ none from this broken report; check app truth before approving batches.`;
           'research_enrichment',
           'morning_brief',
           'weekly_review',
+          'captain_period_report',
           'daily_reflections',
           'daily_kickoff',
           'captain_eod_brief',
@@ -1884,12 +2030,20 @@ none from this broken report; check app truth before approving batches.`;
       runWeeklyReview()
         .then(() => { jobHealth.markRun('weekly_review'); })
         .catch(err => { logger.warn({ msg: 'Weekly review poll error', err: err.message }); jobHealth.markError('weekly_review', err.message); });
+      runCaptainPeriodReports()
+        .then(result => {
+          if (result?.generated > 0 || result?.sent > 0) jobHealth.markRun('captain_period_report', result);
+          else if (result?.skipped) jobHealth.markSkipped('captain_period_report', result.reason || 'Captain period report skipped', result);
+        })
+        .catch(err => { logger.warn({ msg: 'Captain period report error', err: err.message }); jobHealth.markError('captain_period_report', err.message); });
       runDailyAgentReflections()
         .then(() => { jobHealth.markRun('daily_reflections'); })
         .catch(err => { logger.warn({ msg: 'Daily reflection poll error', err: err.message }); jobHealth.markError('daily_reflections', err.message); });
       runDailyKickoff()
         .then(result => {
-          if (result?.fired || result?.alreadyDone) jobHealth.markRun('daily_kickoff', result);
+          const degradedReason = jobHealth.degradedReasonFromResult(result);
+          if (degradedReason) jobHealth.markDegraded('daily_kickoff', degradedReason, result);
+          else if (result?.fired || result?.alreadyDone) jobHealth.markRun('daily_kickoff', result);
           else if (result?.disabled || result?.missed || result?.skipped || result?.blocked) jobHealth.markSkipped('daily_kickoff', result?.reason || 'daily kickoff skipped', result);
         })
         .catch(err => { logger.warn({ msg: 'Daily kickoff poll error', err: err.message }); jobHealth.markError('daily_kickoff', err.message); });
@@ -1925,7 +2079,9 @@ none from this broken report; check app truth before approving batches.`;
         .catch(err => { logger.warn({ msg: 'Captain directive sweep error', err: err.message }); jobHealth.markError('captain_directive_sweep', err.message); });
       runKpiGapKickoff()
         .then(result => {
-          if (result?.fired || result?.alreadyDone) jobHealth.markRun('kpi_gap_kickoff', result);
+          const degradedReason = jobHealth.degradedReasonFromResult(result);
+          if (degradedReason) jobHealth.markDegraded('kpi_gap_kickoff', degradedReason, result);
+          else if (result?.fired || result?.alreadyDone) jobHealth.markRun('kpi_gap_kickoff', result);
           else if (result?.disabled || result?.skipped || result?.waiting) jobHealth.markSkipped('kpi_gap_kickoff', result?.reason || 'KPI-gap kickoff skipped', result);
         })
         .catch(err => { logger.warn({ msg: 'KPI gap kickoff poll error', err: err.message }); jobHealth.markError('kpi_gap_kickoff', err.message); });

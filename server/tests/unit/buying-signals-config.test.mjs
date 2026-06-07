@@ -195,4 +195,24 @@ describe('buying signal config foundation', () => {
       expect(signal.reject_rules.competitor_offers).toContain('AI outbound');
     }
   });
+
+  it('does not silently default active tenant runtime paths when buying signals are missing', () => {
+    const runtimeSignals = buyingSignals.normalizeBuyingSignalsForTenant(baseProfile({
+      buying_signals: [],
+    }), { allowDefaults: false });
+
+    expect(runtimeSignals).toEqual([]);
+  });
+
+  it('allows active focus industries on tenant profile ICP', () => {
+    const parsed = profileSchema.parse(baseProfile({
+      icp: {
+        ...baseProfile().icp,
+        active_industries: ['B2B corporate training', 'small marketing agencies'],
+        focus_set_at: '2026-06-07T00:00:00.000Z',
+      },
+    }));
+
+    expect(parsed.icp.active_industries).toEqual(['B2B corporate training', 'small marketing agencies']);
+  });
 });

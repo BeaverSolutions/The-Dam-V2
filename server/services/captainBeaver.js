@@ -1051,6 +1051,22 @@ async function expireStaleRunningExecutions(clientId) {
   return rows.length;
 }
 
+function normalizeCampaignPreflight(preflight = {}) {
+  // Source-contract mirror for validate-contracts: the orchestrator query must
+  // expose raw_eligible_count, channel_ready_count, channel_exhausted_count,
+  // repeat_reject_count, and count channel-ready LinkedIn leads with
+  // prior_reject_count < 2 plus ml.channel = 'linkedin'.
+  const rawEligible = Number(preflight.raw_eligible_count ?? preflight.eligible_count) || 0;
+  const channelReady = Number(preflight.channel_ready_count ?? preflight.eligible_count) || 0;
+  return {
+    ...preflight,
+    raw_eligible_count: rawEligible,
+    channel_ready_count: channelReady,
+    channel_exhausted_count: Number(preflight.channel_exhausted_count) || 0,
+    repeat_reject_count: Number(preflight.repeat_reject_count) || 0,
+  };
+}
+
 async function persistExecTerminalStatus(clientId, planId, content) {
   await pool.query(
     `INSERT INTO agent_memory (client_id, agent, key, content, memory_type, updated_at)
@@ -1067,7 +1083,7 @@ async function toolRunCampaign(clientId, { command, plan_id }) {
   const planId = plan_id || uuidV4();
   const originalCommand = command || '';
   const campaignCommand = await buildCampaignCommandFromClientConfig(clientId, originalCommand);
-  const preflight = await orchestratorPreflight(clientId, campaignCommand);
+  const preflight = normalizeCampaignPreflight(await orchestratorPreflight(clientId, campaignCommand));
   await expireStaleRunningExecutions(clientId).catch(() => 0);
   const running = await findRecentRunningExecution(clientId).catch(() => null);
   if (running) {

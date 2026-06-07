@@ -63,7 +63,7 @@ const DEFAULT_DAILY_LEAD_FLOOR = 100;
 function tenantProfileToLegacyConfig(profile) {
   const icp = profile?.icp || {};
   const personas = Array.isArray(icp.personas) ? icp.personas : [];
-  const verticals = Array.isArray(icp.verticals) ? icp.verticals : [];
+  const verticals = Array.isArray(icp.active_industries) ? icp.active_industries : [];
   const geo = Array.isArray(icp.geo) ? icp.geo : [];
 
   if (personas.length === 0 && verticals.length === 0 && geo.length === 0) return null;

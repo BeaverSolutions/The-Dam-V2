@@ -24,6 +24,7 @@ const RESEARCH_BLOCKERS = Object.freeze([
   'all_candidates_deduped',
   'competitor_offer_disqualified',
   'provider_cap_closed',
+  'tenant_buying_signals_missing',
 ]);
 
 const ORDERED_RESEARCH_ENRICHMENT_STAGES = Object.freeze([
@@ -365,10 +366,12 @@ function buildQueryPoolFromSignalPlanner(icpMemory) {
     ? icpMemory.buying_signals.filter(signal => signal && signal.enabled !== false)
     : [];
   if (buyingSignals.length === 0) return [];
+  const activeIndustries = parseCsvField(icpMemory?.active_industries || icpMemory?.industries || icpMemory?.verticals);
 
   const tenant = {
     icp: {
-      verticals: parseCsvField(icpMemory.industries || icpMemory.verticals),
+      active_industries: activeIndustries,
+      verticals: activeIndustries,
       personas: parseCsvField(icpMemory.job_titles || icpMemory.who || icpMemory.personas),
       geo: countryListFromIcp(icpMemory),
       exclusions: Array.isArray(icpMemory.exclusions) ? icpMemory.exclusions : parseCsvField(icpMemory.exclusions),
@@ -1594,6 +1597,23 @@ async function researchLeads(clientId, { icpMemory = {}, targetCount = 5, batchI
         source: 'service',
         fallback: icpMemory && Object.keys(icpMemory).length > 0 ? icpMemory : null,
       });
+      if (canonicalIcp?.blocked) {
+        await persistResearchBlocker(clientId, canonicalIcp.blocker, {
+          reason: canonicalIcp.reason || canonicalIcp.blocker,
+          source: canonicalIcp.source || 'tenant_profiles',
+          content_version: canonicalIcp.content_version || null,
+          schema_version: canonicalIcp.schema_version || null,
+        });
+        return buildResearchBlockerResult({
+          blocker: canonicalIcp.blocker,
+          stageStats,
+          diagnostics: {
+            source: canonicalIcp.source || 'tenant_profiles',
+            content_version: canonicalIcp.content_version || null,
+            schema_version: canonicalIcp.schema_version || null,
+          },
+        });
+      }
       if (canonicalIcp) icpMemory = canonicalIcp;
     } catch (ctxErr) {
       console.warn('[research] tenant profile ICP load failed, using provided ICP memory:', ctxErr.message);

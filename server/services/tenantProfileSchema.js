@@ -58,6 +58,8 @@ const offerSchema = z.object({
 // ── icp ──────────────────────────────────────────────────────────────────
 const icpSchema = z.object({
   verticals: z.array(z.string()).default([]),
+  active_industries: z.array(z.string()).default([]),
+  focus_set_at: z.string().optional().nullable(),
   personas: z.array(z.string()).default([]),
   geo: z.array(z.string()).default([]),
   exclusions: z.array(z.string()).default([]),

@@ -77,6 +77,61 @@ function numberedList(arr) {
   return arr.map((s, i) => `${i + 1}. ${s}`).join('\n');
 }
 
+const TENANT_BUYING_SIGNALS_MISSING = 'tenant_buying_signals_missing';
+
+function buyingSignalList(profile = {}) {
+  return Array.isArray(profile.buying_signals)
+    ? profile.buying_signals.filter(signal => signal && signal.enabled !== false)
+    : [];
+}
+
+function runtimeBuyingSignals(profile = {}) {
+  return normalizeBuyingSignalsForTenant(profile, { allowDefaults: false });
+}
+
+function hasRuntimeValidBuyingSignals(profile = {}) {
+  const signals = buyingSignalList(profile);
+  if (signals.length === 0) return false;
+  return signals.every(signal => (
+    Array.isArray(signal.source_channels) && signal.source_channels.length > 0
+      && Array.isArray(signal.evidence_required) && signal.evidence_required.length > 0
+      && signal.stop_rules && Object.keys(signal.stop_rules).length > 0
+  ));
+}
+
+function buyingSignalBlocker(profile = {}) {
+  return hasRuntimeValidBuyingSignals(profile) ? null : TENANT_BUYING_SIGNALS_MISSING;
+}
+
+function inactiveProfileBlocker(reason, loaded = {}) {
+  return {
+    active: false,
+    reason,
+    blocker: reason,
+    tenant_profile_valid: false,
+    content_version: loaded.contentVersion || null,
+    schema_version: loaded.schemaVersion || null,
+  };
+}
+
+function legacyIcpBlocker(reason, loaded = {}) {
+  return {
+    blocked: true,
+    blocker: reason,
+    reason,
+    source: 'tenant_profiles',
+    tenant_profile_valid: false,
+    content_version: loaded.contentVersion || null,
+    schema_version: loaded.schemaVersion || null,
+    buying_signals: [],
+  };
+}
+
+function isBuyingSignalSchemaError(error) {
+  return Array.isArray(error?.issues)
+    && error.issues.some(issue => Array.isArray(issue.path) && issue.path[0] === 'buying_signals');
+}
+
 function buildConstraints(profile, channel) {
   const c = profile.constraints || {};
   return {
@@ -114,7 +169,7 @@ function projectForResearch(profile) {
   return {
     rendered,
     constraints: null,
-    fields: { identity: { company }, icp, buying_signals: normalizeBuyingSignalsForTenant(profile) },
+    fields: { identity: { company }, icp, buying_signals: runtimeBuyingSignals(profile) },
   };
 }
 
@@ -128,7 +183,7 @@ function projectForSales(profile, channel) {
   const sender   = identity.sender_persona || {};
   const offer    = profile.offer || {};
   const icp      = profile.icp || {};
-  const buyingSignals = normalizeBuyingSignalsForTenant(profile);
+  const buyingSignals = runtimeBuyingSignals(profile);
   const voice    = profile.voice || {};
   const examples = voice.examples || {};
   const approvedProof = (profile.proof || []).filter(p => p && p.approved_for_outreach === true);
@@ -195,7 +250,7 @@ function projectForEnforcer(profile, channel) {
   const voice    = profile.voice || {};
   const examples = voice.examples || {};
   const constraints = buildConstraints(profile, channel);
-  const buyingSignals = normalizeBuyingSignalsForTenant(profile);
+  const buyingSignals = runtimeBuyingSignals(profile);
 
   const rendered = [
     'CONSTRAINTS (hard rejection on violation):',
@@ -233,7 +288,7 @@ function projectForCaptain(profile) {
   const identity = profile.identity || {};
   const offer    = profile.offer || {};
   const icp      = profile.icp || {};
-  const buyingSignals = normalizeBuyingSignalsForTenant(profile);
+  const buyingSignals = runtimeBuyingSignals(profile);
 
   const rendered = [
     `TENANT: ${identity.company || '(unknown)'}`,
@@ -318,10 +373,17 @@ async function getTenantContext(authCtx, opts) {
   // render garbage.
   const parsed = profileSchema.safeParse(loaded.profile);
   if (!parsed.success) {
+    if (isBuyingSignalSchemaError(parsed.error)) {
+      return inactiveProfileBlocker(TENANT_BUYING_SIGNALS_MISSING, loaded);
+    }
     const err = new Error(`tenant profile validation failed: ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
     err.code = 'profile_invalid';
     err.zodIssues = parsed.error.issues;
     throw err;
+  }
+  const blocker = buyingSignalBlocker(parsed.data);
+  if (blocker) {
+    return inactiveProfileBlocker(blocker, loaded);
   }
 
   const projection = PROJECTIONS[role](parsed.data, channel);
@@ -339,13 +401,18 @@ async function getTenantContext(authCtx, opts) {
 
 function legacyIcpFromProfile(profile) {
   const icp = profile?.icp || {};
+  const activeIndustries = Array.isArray(icp.active_industries)
+    ? icp.active_industries.map(v => String(v || '').trim()).filter(Boolean)
+    : [];
   return {
     job_titles:  Array.isArray(icp.personas) ? icp.personas.join(', ') : '',
-    industries:  Array.isArray(icp.verticals) ? icp.verticals.join(', ') : '',
+    industries:  activeIndustries.join(', '),
+    verticals:   activeIndustries.join(', '),
+    active_industries: activeIndustries,
     geographies: Array.isArray(icp.geo) ? icp.geo.join(', ') : '',
     exclusions:  Array.isArray(icp.exclusions) ? icp.exclusions : [],
     competitor_offers: Array.isArray(icp.competitor_offers) ? icp.competitor_offers : [],
-    buying_signals: normalizeBuyingSignalsForTenant(profile),
+    buying_signals: runtimeBuyingSignals(profile),
     source: 'tenant_profiles',
   };
 }
@@ -359,10 +426,17 @@ async function getLegacyIcpForClient(clientId, { source = 'service', fallback = 
   if (loaded.found && loaded.status === 'active') {
     const parsed = profileSchema.safeParse(loaded.profile);
     if (!parsed.success) {
+      if (isBuyingSignalSchemaError(parsed.error)) {
+        return legacyIcpBlocker(TENANT_BUYING_SIGNALS_MISSING, loaded);
+      }
       const err = new Error(`tenant profile validation failed: ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
       err.code = 'profile_invalid';
       err.zodIssues = parsed.error.issues;
       throw err;
+    }
+    const blocker = buyingSignalBlocker(parsed.data);
+    if (blocker) {
+      return legacyIcpBlocker(blocker, loaded);
     }
     return {
       ...legacyIcpFromProfile(parsed.data),

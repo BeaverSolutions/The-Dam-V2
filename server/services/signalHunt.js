@@ -318,11 +318,9 @@ function countriesFromIcp(icp = {}) {
 
 function industriesFromIcp(icp = {}) {
   const industries = [
-    ...listFrom(icp.industries),
-    ...listFrom(icp.verticals),
-    ...listFrom(icp.segments),
+    ...listFrom(icp.active_industries),
   ];
-  const base = industries.length > 0 ? industries : ['B2B corporate training', 'professional services', 'managed IT services'];
+  const base = industries.length > 0 ? industries : [];
   const seen = new Set();
   return base
     .filter(value => {
@@ -330,8 +328,7 @@ function industriesFromIcp(icp = {}) {
       if (!key || seen.has(key)) return false;
       seen.add(key);
       return true;
-    })
-    .sort((a, b) => industryPriority(a) - industryPriority(b));
+    });
 }
 
 function titlesFromIcp(icp = {}) {
@@ -429,9 +426,7 @@ function matchedTerms(terms = [], text = '', options = {}) {
 
 function icpVerticalTerms(icp = {}) {
   return [
-    ...listFrom(icp.industries),
-    ...listFrom(icp.verticals),
-    ...listFrom(icp.segments),
+    ...listFrom(icp.active_industries),
   ];
 }
 
@@ -495,14 +490,6 @@ function evaluateSignalCompanyIcpGate(signal = {}, icp = {}) {
     icp_evidence: verticalMatches,
     reject_rules_checked: ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence'],
   };
-}
-
-function industryPriority(value) {
-  const s = String(value || '').toLowerCase();
-  if (/\b(agency|digital|marketing|creative|media|advertising|professional service|consult)/i.test(s)) return 0;
-  if (/\b(outbound|sales|growth|b2b service|smb|founder-led)/i.test(s)) return 1;
-  if (/\b(training|learning|l&d|development)/i.test(s)) return 3;
-  return 2;
 }
 
 function industryBucket(value) {
@@ -571,6 +558,7 @@ function fastProofQueriesForCountry(country = {}, industries = []) {
 
 function hasIcpSearchScope(icp = {}) {
   return [
+    ...listFrom(icp.active_industries),
     ...listFrom(icp.industries),
     ...listFrom(icp.verticals),
     ...listFrom(icp.segments),
@@ -583,13 +571,12 @@ function hasIcpSearchScope(icp = {}) {
 }
 
 function signalPlannerTenantFromIcp(icp = {}) {
-  const verticals = listFrom(icp.verticals).length > 0
-    ? listFrom(icp.verticals)
-    : [...listFrom(icp.industries), ...listFrom(icp.segments)];
+  const activeIndustries = listFrom(icp.active_industries);
   return {
     icp: {
       ...icp,
-      verticals: diversifyIndustriesForQueryRun(verticals),
+      active_industries: diversifyIndustriesForQueryRun(activeIndustries),
+      verticals: diversifyIndustriesForQueryRun(activeIndustries),
       geo: listFrom(icp.geo).length > 0
         ? listFrom(icp.geo)
         : [...listFrom(icp.geographies), ...listFrom(icp.countries), ...listFrom(icp.locations), ...listFrom(icp.target_markets)],
@@ -598,6 +585,12 @@ function signalPlannerTenantFromIcp(icp = {}) {
     },
     buying_signals: Array.isArray(icp.buying_signals) ? icp.buying_signals : undefined,
   };
+}
+
+function allowBuyingSignalDefaultsForIcp(icp = {}) {
+  return icp.source !== 'tenant_profiles'
+    && !icp.content_version
+    && !icp.tenant_profile_content_version;
 }
 
 function signalHuntQueryFromPlannerQuery(query = {}, plan = {}) {
@@ -628,7 +621,9 @@ function rotateQueryWindow(queries = [], offset = 0) {
 
 function buildSignalQueriesFromIcp(icp = {}) {
   const tenant = signalPlannerTenantFromIcp(icp);
-  const signals = normalizeBuyingSignalsForTenant(tenant).filter(signal => signal.enabled !== false);
+  const signals = normalizeBuyingSignalsForTenant(tenant, {
+    allowDefaults: allowBuyingSignalDefaultsForIcp(icp),
+  }).filter(signal => signal.enabled !== false);
   const countryObjects = countriesFromIcp(icp);
   const countries = countryObjects.map(country => country.code);
   const industries = tenant.icp?.verticals?.length > 0 ? tenant.icp.verticals : industriesFromIcp(icp);
@@ -885,6 +880,29 @@ function queriesFromConfigContent(content) {
   return [];
 }
 
+function profileContentVersion(icp = {}) {
+  const version = Number(
+    icp.content_version
+      || icp.tenant_profile_content_version
+      || icp.profile_content_version
+      || 0
+  );
+  return Number.isFinite(version) && version > 0 ? version : null;
+}
+
+function trustedSignalHuntConfigContent(content = {}, icp = {}) {
+  if (!content || typeof content !== 'object') return false;
+  if (content.trusted === true || content.trusted_signal_hunt_config === true) return true;
+  const profileVersion = profileContentVersion(icp);
+  const configVersion = Number(
+    content.tenant_profile_content_version
+      || content.profile_content_version
+      || content.content_version
+      || 0
+  );
+  return !!profileVersion && Number.isFinite(configVersion) && configVersion === profileVersion;
+}
+
 /**
  * Load the client's signal hunt config, or return defaults.
  */
@@ -913,13 +931,32 @@ async function loadSignalConfig(clientId, icp = {}, { maxPaidQueries = null } = 
     console.warn('[signalHunt] Failed to load config, using defaults:', err.message);
   }
 
-  const configuredQueries = queriesFromConfigContent(content);
+  const storedQueries = queriesFromConfigContent(content);
+  const trustedConfig = trustedSignalHuntConfigContent(content, icp);
+  const configuredQueries = trustedConfig ? storedQueries : [];
+  const rejectedConfigSource = storedQueries.length > 0 && !trustedConfig
+    ? {
+        key: SIGNAL_HUNT_CONFIG_KEY,
+        reason: 'stale_signal_hunt_config',
+        profile_content_version: profileContentVersion(icp),
+        config_content_version: content?.tenant_profile_content_version || content?.profile_content_version || content?.content_version || null,
+      }
+    : null;
+  if (rejectedConfigSource) {
+    console.warn('[signalHunt] Rejected stale signal_hunt_config:', rejectedConfigSource);
+    await logsService.createLog(clientId, {
+      agent: 'research_beaver',
+      action: 'signal_hunt_config_rejected',
+      target_type: 'config',
+      metadata: rejectedConfigSource,
+    }).catch(() => {});
+  }
   const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : [];
   const fallbackQueries = icpQueries.length > 0
-    ? [...icpQueries, ...configuredQueries]
+    ? icpQueries
     : (configuredQueries.length > 0 ? configuredQueries : DEFAULT_SIGNAL_QUERIES);
   const querySource = icpQueries.length > 0
-    ? (configuredQueries.length > 0 ? 'current_icp_signal_planner_then_config' : 'current_icp_signal_planner')
+    ? 'current_icp_signal_planner'
     : (configuredQueries.length > 0 ? 'stored_config' : 'default');
   const seenQueries = new Set();
   const fallbackCountry = countriesFromIcp(icp)[0]?.code || 'MY';
@@ -934,12 +971,14 @@ async function loadSignalConfig(clientId, icp = {}, { maxPaidQueries = null } = 
       return true;
     })
     .slice(0, queryWindow);
-  const requestedResults = Number(content?.max_results_per_query || MAX_SIGNAL_RESULTS_PER_QUERY);
+  const trustedContent = trustedConfig ? content : null;
+  const requestedResults = Number(trustedContent?.max_results_per_query || MAX_SIGNAL_RESULTS_PER_QUERY);
 
   return {
-    ...(content || {}),
+    ...(trustedContent || {}),
     queries,
     query_source: querySource,
+    rejected_config_source: rejectedConfigSource,
     query_window: queryWindow,
     max_results_per_query: Number.isFinite(requestedResults) && requestedResults > 0
       ? Math.min(requestedResults, MAX_SIGNAL_RESULTS_PER_QUERY)
@@ -1978,5 +2017,6 @@ module.exports = {
     signalPaidBudgetSplit,
     signalProviderFanoutCaps,
     executableDiscoveryQueriesForBudget,
+    trustedSignalHuntConfigContent,
   },
 };

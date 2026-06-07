@@ -37,6 +37,14 @@ describe('KPI recount truth contract', () => {
     expect(kpiSource).not.toContain('DATE(COALESCE(sent_at, updated_at))');
   });
 
+  it('excludes manual proof messages from autonomous output recounts', () => {
+    expect(kpiSource).toContain('autonomousSentMessageFilter');
+    expect(kpiSource).toContain("COALESCE(metadata->>'manual_proof', 'false') <> 'true'");
+    expect(kpiSource).toContain("COALESCE(metadata->>'source', '') <> 'manual_proof'");
+    expect(kpiSource).toContain("COALESCE(metadata->>'send_source', '') <> 'manual_proof'");
+    expect(kpiSource).toContain("COALESCE(metadata->>'autonomous_output', 'true') <> 'false'");
+  });
+
   it('keeps active business-day paths off UTC date shortcuts', () => {
     const forbiddenPatterns = [
       /new Date\(\)\.toISOString\(\)\.split\('T'\)\[0\]/,

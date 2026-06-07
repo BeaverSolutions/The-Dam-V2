@@ -61,6 +61,25 @@ function hiringRoleQuery(term) {
   return `("${cleanTerm}" OR "Sales Executive" OR "Account Executive" OR "Business Development Manager" OR "Sales Manager")`;
 }
 
+function quotedTerm(term) {
+  const cleanTerm = String(term || '').replace(/"/g, '').trim();
+  return cleanTerm ? `"${cleanTerm}"` : '';
+}
+
+function evidenceQueryForFamily(family) {
+  if (family === 'capital_budget_event') return '(funding OR grant OR investment OR acquired)';
+  if (family === 'expansion_growth') return '(expanding OR launched OR "new office" OR growth)';
+  if (family === 'hiring_capability_build') return '(hiring OR vacancy OR careers)';
+  if (family === 'category_vendor_research') return '(review OR compare OR alternative OR "buyer intent")';
+  if (family === 'technology_stack_change') return '(implementation OR migration OR integration OR RevOps OR CRM)';
+  if (family === 'leadership_org_change') return '(appointed OR joined OR "new CEO" OR "new CRO" OR "head of sales")';
+  if (family === 'regulatory_deadline_pressure') return '(deadline OR compliance OR permit OR audit OR regulation)';
+  if (family === 'pain_friction_evidence') return '("struggling with" OR bottleneck OR "manual process" OR delayed OR "hard to scale")';
+  if (family === 'event_market_presence') return '(sponsor OR exhibitor OR speaker OR webinar OR conference)';
+  if (family === 'active_gtm_spend') return '(demo OR "book a call" OR consultation OR "case study")';
+  return '';
+}
+
 function buildQueryForSignal({ signal, term, geo, industry, sourceChannel }) {
   const geoName = countryName(geo);
   const sourcePrefix = queryPrefixForSource(sourceChannel);
@@ -74,37 +93,16 @@ function buildQueryForSignal({ signal, term, geo, industry, sourceChannel }) {
       '-India -Delhi -NCR -Jaipur -Siliguri',
     ]);
   }
-  if (family === 'active_gtm_spend') {
-    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '']);
-  }
-  if (family === 'capital_budget_event') {
-    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(funding OR grant OR investment OR acquired)']);
-  }
-  if (family === 'expansion_growth') {
-    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(expanding OR launched OR "new office" OR growth)']);
-  }
-  if (family === 'hiring_capability_build') {
-    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(hiring OR vacancy OR careers)']);
-  }
-  if (family === 'category_vendor_research') {
-    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(review OR compare OR alternative OR "buyer intent")']);
-  }
-  if (family === 'technology_stack_change') {
-    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(implementation OR migration OR integration OR RevOps OR CRM)']);
-  }
-  if (family === 'leadership_org_change') {
-    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(appointed OR joined OR "new CEO" OR "new CRO" OR "head of sales")']);
-  }
-  if (family === 'regulatory_deadline_pressure') {
-    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(deadline OR compliance OR permit OR audit OR regulation)']);
-  }
-  if (family === 'pain_friction_evidence') {
-    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '("struggling with" OR bottleneck OR "manual process" OR delayed OR "hard to scale")']);
-  }
-  if (family === 'event_market_presence') {
-    return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '', '(sponsor OR exhibitor OR speaker OR webinar OR conference)']);
-  }
-  return compact([sourcePrefix, `"${term}"`, `"${geoName}"`, industry ? `"${industry}"` : '']);
+
+  // Industry stays out of the search string. It is enforced after company
+  // extraction by the ICP gate, where evidence can be evaluated directly.
+  void industry;
+  return compact([
+    sourcePrefix,
+    hiringLocationQuery(geoName),
+    quotedTerm(term),
+    evidenceQueryForFamily(family),
+  ]);
 }
 
 function stripCompetitorTerms(query, competitorOffers = []) {
@@ -133,7 +131,7 @@ function buildSignalPlan({
   const icp = tenant.icp || {};
   const geos = list(geo).length > 0 ? list(geo) : list(icp.geo);
   const finalGeos = geos.length > 0 ? geos : ['MY'];
-  const industries = list(icp.verticals);
+  const industries = list(icp.active_industries);
   const finalIndustries = industries.length > 0 ? industries : [null];
   const terms = list(signal.query_terms).length > 0 ? list(signal.query_terms) : [signal.family];
   const selectedSource = firstSourceChannel(signal, sourceChannel);
@@ -182,7 +180,7 @@ function buildSignalPlan({
       ...(signal.reject_rules || {}),
       competitor_offers: competitorOffers,
     },
-    filterLater: industries.length > 0 ? [] : ['industry'],
+    filterLater: industries.length > 0 ? ['industry'] : [],
   };
 }
 

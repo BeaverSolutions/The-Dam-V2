@@ -19,6 +19,7 @@ try {
 const tenantContext = {
   icp: {
     verticals: ['B2B agency'],
+    active_industries: ['B2B agency'],
     personas: ['Founder', 'CEO', 'Head of Sales'],
     geo: ['MY', 'SG'],
     exclusions: ['enterprise'],
@@ -77,6 +78,10 @@ const tenantContext = {
   ],
 };
 
+function hasThreeStackedRequiredQuotedPhrases(query) {
+  return /"[^"]+"\s+"[^"]+"\s+"[^"]+"/.test(String(query || ''));
+}
+
 describe('signal planner', () => {
   it('does not reintroduce agency as a Beaver fallback/default target', () => {
     const tenantConfigSource = readFileSync(resolve(__dirname, '../../services/tenantConfig.js'), 'utf-8');
@@ -114,7 +119,7 @@ describe('signal planner', () => {
     expect(research).toContain("require('./signalPlanner')");
     expect(research).toContain('buildQueryPoolFromSignalPlanner');
     expect(research).toContain('signal_id');
-    expect(tenantContext).toContain('buying_signals: normalizeBuyingSignalsForTenant');
+    expect(tenantContext).toContain('buying_signals: runtimeBuyingSignals');
   });
 
   it('builds hiring plans with role, geography, optional industry, and source channel evidence', () => {
@@ -156,6 +161,7 @@ describe('signal planner', () => {
         icp: {
           ...tenantContext.icp,
           verticals,
+          active_industries: verticals,
           geo: ['MY'],
         },
       },
@@ -165,15 +171,38 @@ describe('signal planner', () => {
     });
 
     const queryText = plan.queries.map(q => q.query).join('\n');
-    const coveredVerticals = verticals.filter(vertical => queryText.includes(`"${vertical}"`));
+    const coveredVerticals = new Set(plan.queries.map(q => q.industry));
     const coveredChannels = new Set(plan.queries.map(q => q.sourceChannel));
 
     expect(plan.queries).toHaveLength(5);
     expect(plan.queries[0]).toMatchObject({ industry: 'B2B corporate training', geo: 'MY', term: 'sales' });
-    expect(coveredVerticals.length).toBeGreaterThanOrEqual(3);
+    expect(verticals.filter(vertical => coveredVerticals.has(vertical)).length).toBeGreaterThanOrEqual(3);
     expect(coveredChannels.size).toBeGreaterThanOrEqual(2);
     expect(plan.queries.every(q => /Malaysia|MY/i.test(q.query))).toBe(true);
+    expect(plan.queries.every(q => !q.query.includes('"B2B corporate training"'))).toBe(true);
+    expect(plan.filterLater).toContain('industry');
     expect(queryText).not.toContain('site:*');
+  });
+
+  it('uses active_industries as the only planner industry scope for active tenant profiles', () => {
+    const plan = signalPlanner.buildSignalPlan({
+      tenant: {
+        ...tenantContext,
+        icp: {
+        ...tenantContext.icp,
+        verticals: ['digital agency', 'recruitment agency', 'outbound sales'],
+        active_industries: ['B2B corporate training'],
+          geo: ['MY'],
+        },
+      },
+      signalId: 'hiring_sales_roles',
+      geo: ['MY'],
+      maxQueries: 4,
+    });
+
+    expect(new Set(plan.queries.map(q => q.industry))).toEqual(new Set(['B2B corporate training']));
+    expect(plan.queries.map(q => q.query).join('\n')).not.toMatch(/digital agency|recruitment agency|outbound sales/i);
+    expect(plan.filterLater).toContain('industry');
   });
 
   it('preserves planner vertical metadata when Research builds the signal query pool', () => {
@@ -205,7 +234,7 @@ describe('signal planner', () => {
     const plan = signalPlanner.buildSignalPlan({
       tenant: {
         ...tenantContext,
-        icp: { ...tenantContext.icp, verticals: [] },
+        icp: { ...tenantContext.icp, active_industries: [] },
       },
       signalId: 'hiring_sales_roles',
       geo: ['SG'],
@@ -214,7 +243,69 @@ describe('signal planner', () => {
     expect(plan.queries.length).toBeGreaterThan(0);
     expect(plan.queries.every(q => /Singapore|SG/i.test(q.query))).toBe(true);
     expect(plan.queries.some(q => /sales|business development|SDR/i.test(q.query))).toBe(true);
-    expect(plan.filterLater).toContain('industry');
+    expect(plan.filterLater).not.toContain('industry');
+  });
+
+  it('does not stack term, geo, and industry as required quoted phrases for non-hiring families', () => {
+    const tenant = {
+      ...tenantContext,
+      icp: {
+        ...tenantContext.icp,
+        verticals: ['B2B corporate training'],
+        active_industries: ['B2B corporate training'],
+        geo: ['MY'],
+      },
+      buying_signals: [
+        ...tenantContext.buying_signals,
+        {
+          id: 'vendor_research',
+          family: 'category_vendor_research',
+          enabled: true,
+          priority: 5,
+          source_channels: ['review_sites', 'web_search'],
+          query_terms: ['sales automation'],
+          evidence_required: ['company', 'intent_topic', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 1 },
+        },
+        {
+          id: 'stack_change',
+          family: 'technology_stack_change',
+          enabled: true,
+          priority: 6,
+          source_channels: ['job_descriptions'],
+          query_terms: ['CRM'],
+          evidence_required: ['company', 'tool', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 1 },
+        },
+        {
+          id: 'pain_signal',
+          family: 'pain_friction_evidence',
+          enabled: true,
+          priority: 7,
+          source_channels: ['social_posts'],
+          query_terms: ['manual process'],
+          evidence_required: ['company', 'pain', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 1 },
+        },
+      ],
+    };
+    const signalIds = [
+      'expansion_markets',
+      'fresh_capital',
+      'active_ads',
+      'vendor_research',
+      'stack_change',
+      'pain_signal',
+    ];
+
+    for (const signalId of signalIds) {
+      const plan = signalPlanner.buildSignalPlan({ tenant, signalId, geo: ['MY'], maxQueries: 1 });
+      expect(plan.filterLater).toContain('industry');
+      expect(plan.queries).toHaveLength(1);
+      expect(plan.queries[0].industry).toBe('B2B corporate training');
+      expect(plan.queries[0].query).not.toContain('"B2B corporate training"');
+      expect(hasThreeStackedRequiredQuotedPhrases(plan.queries[0].query)).toBe(false);
+    }
   });
 
   it('builds expansion, funding, and active ads plans against the correct source surfaces', () => {

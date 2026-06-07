@@ -22,6 +22,38 @@ const DB_BUILDER_WINDOWS_UTC = [
 ];
 const DB_BUILDER_GRACE_MS = 20 * MINUTE;
 
+const AUTONOMY_DEGRADED_REASONS = new Set([
+  'tenant_buying_signals_missing',
+  'tenant_profile_invalid',
+  'profile_invalid',
+  'raw_candidates_zero',
+  'signals_zero_after_llm_parse',
+  'raw_candidates_zero_after_approved_cap',
+  'icp_zero_after_company_extract',
+  'decision_maker_zero',
+  'contact_zero',
+  'zero_outputs',
+  'low_yield_outputs',
+  'repeated_zero_output_query_set',
+  'same_query_set_failed',
+  'provider_cap_closed',
+]);
+
+const AUTONOMY_DEGRADED_PATTERNS = [
+  /tenant[_ -]buying[_ -]signals[_ -]missing/i,
+  /tenant[_ -]profile.*invalid/i,
+  /profile[_ -]invalid/i,
+  /raw[_ -]candidates[_ -]zero/i,
+  /signals[_ -]zero[_ -]after[_ -]llm[_ -]parse/i,
+  /icp[_ -]zero/i,
+  /decision[_ -]maker[_ -]zero/i,
+  /contact[_ -]zero/i,
+  /zero[_ -]outputs?/i,
+  /low[_ -]yield[_ -]outputs?/i,
+  /zero[-_ ]output/i,
+  /no output proof/i,
+];
+
 function ensureJob(jobName) {
   if (!jobs[jobName]) {
     jobs[jobName] = {
@@ -68,6 +100,62 @@ function markDegraded(jobName, reason, metadata = null) {
   jobs[jobName].lastDegradedAt = new Date().toISOString();
   jobs[jobName].lastDegradedReason = String(reason || 'degraded').slice(0, 200);
   jobs[jobName].lastMeta = metadata ? { ...metadata, reason: jobs[jobName].lastDegradedReason } : { reason: jobs[jobName].lastDegradedReason };
+}
+
+function normalizeReason(value) {
+  if (typeof value !== 'string') return null;
+  const reason = value.trim();
+  return reason || null;
+}
+
+function isAutonomyDegradedReason(value) {
+  const reason = normalizeReason(value);
+  if (!reason) return false;
+  return AUTONOMY_DEGRADED_REASONS.has(reason)
+    || AUTONOMY_DEGRADED_PATTERNS.some(pattern => pattern.test(reason));
+}
+
+function degradedReasonFromResult(result) {
+  const seen = new Set();
+
+  function visit(value, depth = 0) {
+    if (!value || depth > 8) return null;
+    if (typeof value === 'string') {
+      return isAutonomyDegradedReason(value) ? value : null;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = visit(item, depth + 1);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (typeof value !== 'object') return null;
+    if (seen.has(value)) return null;
+    seen.add(value);
+
+    for (const key of ['blocker', 'reason', 'code', 'error_code', 'circuit_breaker_tripped', 'status']) {
+      const reason = normalizeReason(value[key]);
+      if (isAutonomyDegradedReason(reason)) return reason;
+    }
+
+    if (value.tenant_profile_valid === false) {
+      return 'tenant_profile_invalid';
+    }
+
+    if (value.blocked === true && Number(value.total_output) === 0) {
+      return 'zero_outputs';
+    }
+
+    for (const key of Object.keys(value)) {
+      if (['blocker', 'reason', 'code', 'error_code', 'circuit_breaker_tripped', 'status'].includes(key)) continue;
+      const found = visit(value[key], depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  return visit(result);
 }
 
 function utcWindowFor(day, window) {
@@ -164,4 +252,13 @@ function getStatus() {
   return summary;
 }
 
-module.exports = { markRun, markSkipped, markError, markDegraded, getStatus, isDbBuilderStale };
+module.exports = {
+  markRun,
+  markSkipped,
+  markError,
+  markDegraded,
+  getStatus,
+  isDbBuilderStale,
+  degradedReasonFromResult,
+  isAutonomyDegradedReason,
+};

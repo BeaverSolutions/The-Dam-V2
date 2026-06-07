@@ -366,15 +366,16 @@ describe('P0 stabilization contracts', () => {
 
     expect(signalHunt).toContain('function hasIcpSearchScope');
     expect(signalHunt).toContain('const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : []');
-    expect(signalHunt).toContain('const fallbackQueries = icpQueries.length > 0');
-    expect(signalHunt).toContain('...icpQueries, ...configuredQueries');
+    expect(signalHunt).toContain('function trustedSignalHuntConfigContent');
+    expect(signalHunt).toContain('rejected_config_source');
+    expect(signalHunt).not.toContain('...icpQueries, ...configuredQueries');
     expect(signalHunt).toContain("require('./signalPlanner')");
     expect(signalHunt).toContain("require('../config/buyingSignals')");
-    expect(signalHunt).toContain('normalizeBuyingSignalsForTenant(tenant)');
+    expect(signalHunt).toContain('normalizeBuyingSignalsForTenant(tenant, {');
     expect(signalHunt).toContain('signalPlanner.buildSignalPlan({');
     expect(signalHunt).toContain('signalHuntQueryFromPlannerQuery(query, plan)');
     expect(signalHunt).toContain('const maxLength = Math.max(0, ...perSignalQueries.map(items => items.length))');
-    expect(signalHunt).toContain("'current_icp_signal_planner_then_config'");
+    expect(signalHunt).not.toContain("'current_icp_signal_planner_then_config'");
     expect(signalHunt).toContain('consumePaidQuery(1)');
     expect(signalHunt).not.toContain('consumePaidQuery(2)');
     expect(signalHunt).toContain('signal_hunt_complete');

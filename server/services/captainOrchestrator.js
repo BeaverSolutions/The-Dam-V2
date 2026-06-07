@@ -613,6 +613,8 @@ async function collectTeamKPIs(clientId) {
       name: cfg.name,
       icp: tenantIcpForSignalConfig(cfg),
       buying_signals: cfg.buying_signals || [],
+      tenant_profile_content_version: cfg.tenant_profile_content_version || null,
+      source: cfg.using_tenant_profile_icp ? 'tenant_profiles' : 'clients',
       daily_quality_lead_floor: cfg.daily_quality_lead_floor,
       vp_threshold_score: cfg.vp_threshold_score,
     },
@@ -2192,8 +2194,14 @@ function signalYield(scorecard = {}) {
   return (saved + sent) / raw;
 }
 
+function allowBuyingSignalDefaultsForTenant(tenant = {}) {
+  return !tenant?.tenant_profile_content_version && tenant?.source !== 'tenant_profiles';
+}
+
 function selectNextSignal({ tenant, signalScorecard = {}, currentSignalId, stopCurrent, spend, queue, channelReadiness } = {}) {
-  const signals = normalizeBuyingSignalsForTenant(tenant || {}).filter(signal => signal.enabled !== false);
+  const signals = normalizeBuyingSignalsForTenant(tenant || {}, {
+    allowDefaults: allowBuyingSignalDefaultsForTenant(tenant || {}),
+  }).filter(signal => signal.enabled !== false);
   const candidates = [];
 
   for (const signal of signals) {
@@ -2240,7 +2248,9 @@ function buildCaptainSignalOrchestration({
   queue = {},
   channelReadiness = {},
 } = {}) {
-  const signals = normalizeBuyingSignalsForTenant(tenant);
+  const signals = normalizeBuyingSignalsForTenant(tenant, {
+    allowDefaults: allowBuyingSignalDefaultsForTenant(tenant),
+  });
   const currentSignal = signals.find(signal => signal.id === currentSignalId) || signals[0] || null;
   const currentScore = currentSignal ? signalScorecard[currentSignal.id] : null;
   const stopCurrent = currentSignal

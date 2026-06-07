@@ -210,4 +210,228 @@ function buildBeaverScorecard(sc = {}, ctx = {}) {
   return { research, sales, enforcer, captain, all_hit };
 }
 
-module.exports = { BEAVER_TARGETS, scPct, buildBeaverScorecard, buildSignalScorecard };
+function pct(n, d) {
+  return d > 0 ? Math.round((n / d) * 100) : 0;
+}
+
+function money(value) {
+  return Number(asNumber(value)).toFixed(2);
+}
+
+function safeText(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function normalizeIndustryRow(row = {}) {
+  return {
+    industry: String(row.industry || row.segment || 'unknown'),
+    queries_run: asNumber(row.queries_run),
+    raw_candidates: asNumber(row.raw_candidates),
+    saved: asNumber(row.saved),
+    sent: asNumber(row.sent),
+    replies: asNumber(row.replies),
+    meetings: asNumber(row.meetings),
+  };
+}
+
+function mergeIndustryRows(activeIndustries = [], rows = []) {
+  const byIndustry = new Map();
+  for (const industry of activeIndustries || []) {
+    if (!industry) continue;
+    const key = String(industry);
+    byIndustry.set(key, normalizeIndustryRow({ industry: key }));
+  }
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const normalized = normalizeIndustryRow(row);
+    const existing = byIndustry.get(normalized.industry) || normalizeIndustryRow({ industry: normalized.industry });
+    byIndustry.set(normalized.industry, {
+      industry: normalized.industry,
+      queries_run: existing.queries_run + normalized.queries_run,
+      raw_candidates: existing.raw_candidates + normalized.raw_candidates,
+      saved: existing.saved + normalized.saved,
+      sent: existing.sent + normalized.sent,
+      replies: existing.replies + normalized.replies,
+      meetings: existing.meetings + normalized.meetings,
+    });
+  }
+  return Array.from(byIndustry.values());
+}
+
+function normalizeChannelRows(rows = []) {
+  const channels = {
+    email: { sent: 0, replies: 0 },
+    linkedin: { sent: 0, replies: 0 },
+  };
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const channel = String(row.channel || 'unknown').toLowerCase();
+    if (!channels[channel]) channels[channel] = { sent: 0, replies: 0 };
+    channels[channel].sent += asNumber(row.sent);
+    channels[channel].replies += asNumber(row.replies);
+  }
+  return channels;
+}
+
+function topRows(rows = [], key = 'count', limit = 5) {
+  return (Array.isArray(rows) ? rows : [])
+    .map(row => ({ ...row, [key]: asNumber(row[key]) }))
+    .sort((a, b) => asNumber(b[key]) - asNumber(a[key]))
+    .slice(0, limit);
+}
+
+function buildMonthlyObservations(report) {
+  if (report.period.type !== 'monthly') return [];
+  const observations = [];
+  for (const industry of report.industries) {
+    if (industry.sent > 0 && industry.replies === 0) {
+      observations.push(`${industry.industry}: 0 replies in period`);
+    }
+    if (industry.saved === 0) {
+      observations.push(`${industry.industry}: 0 saved leads in period`);
+    }
+  }
+  if (report.headline.sent === 0) observations.push('No autonomous sends in period');
+  if (report.blockers.length > 0) {
+    observations.push(`Top blocker: ${report.blockers[0].reason} (${report.blockers[0].count})`);
+  }
+  if (observations.length === 0) observations.push('No decision flags from captured data');
+  return observations;
+}
+
+function buildCaptainPeriodReport(input = {}) {
+  const period = input.period || {};
+  const targets = input.targets || {};
+  const totals = input.totals || {};
+  const funnel = input.funnel || {};
+  const spend = input.spend || {};
+  const enforcer = input.enforcer || {};
+  const target = asNumber(targets.outreach_sent || targets.sent || 0);
+  const sent = asNumber(totals.outreach_sent || totals.sent);
+  const replies = asNumber(totals.replies);
+  const leads = asNumber(totals.leads_found || totals.saved || totals.leads);
+  const meetings = asNumber(totals.meetings);
+  const llmCost = asNumber(spend.llm_cost_usd);
+  const providerCost = asNumber(spend.provider_cost_usd);
+  const totalCost = asNumber(spend.total_cost_usd || (llmCost + providerCost));
+
+  const report = {
+    period: {
+      type: period.type || 'weekly',
+      label: period.label || `${period.start_date || ''} to ${period.end_date || ''}`.trim(),
+      start_date: period.start_date || null,
+      end_date: period.end_date || null,
+      days: asNumber(period.days),
+    },
+    headline: {
+      sent,
+      target,
+      target_pct: target > 0 ? pct(sent, target) : 0,
+      replies,
+      meetings,
+    },
+    funnel: {
+      raw_candidates: asNumber(funnel.raw_candidates),
+      saved: asNumber(funnel.saved || leads),
+      drafted: asNumber(funnel.drafted),
+      approved: asNumber(funnel.approved),
+      sent,
+      replies,
+      meetings,
+      survival: {
+        saved_from_raw_pct: pct(asNumber(funnel.saved || leads), asNumber(funnel.raw_candidates)),
+        sent_from_saved_pct: pct(sent, asNumber(funnel.saved || leads)),
+        reply_from_sent_pct: pct(replies, sent),
+        meeting_from_reply_pct: pct(meetings, replies),
+      },
+    },
+    industries: mergeIndustryRows(input.active_industries || [], input.industries || []),
+    channels: normalizeChannelRows(input.channels || []),
+    spend: {
+      providers: spend.providers || {},
+      provider_units: spend.provider_units || {},
+      provider_cost_usd: providerCost,
+      llm_cost_usd: llmCost,
+      total_cost_usd: totalCost,
+      cost_per_lead_usd: leads > 0 ? totalCost / leads : null,
+      cost_per_reply_usd: replies > 0 ? totalCost / replies : null,
+      notes: spend.notes || [],
+    },
+    blockers: topRows(input.blockers || [], 'count'),
+    enforcer: {
+      reviewed: asNumber(enforcer.reviewed),
+      approved: asNumber(enforcer.approved),
+      rejected: asNumber(enforcer.rejected),
+      approve_rate_pct: pct(asNumber(enforcer.approved), asNumber(enforcer.reviewed)),
+      top_reject_reasons: topRows(enforcer.top_reject_reasons || [], 'count'),
+    },
+    observations: [],
+  };
+  report.observations = buildMonthlyObservations(report);
+  return report;
+}
+
+function formatCaptainPeriodReport(report = {}) {
+  const headline = report.headline || {};
+  const funnel = report.funnel || {};
+  const survival = funnel.survival || {};
+  const spend = report.spend || {};
+  const channels = report.channels || {};
+  const enforcer = report.enforcer || {};
+  const industryLines = (report.industries || []).length > 0
+    ? report.industries.map(row => `${safeText(row.industry)}: queries ${row.queries_run}, raw ${row.raw_candidates}, saved ${row.saved}, sent ${row.sent}, replies ${row.replies}, meetings ${row.meetings}`)
+    : ['no industry-attributed rows captured'];
+  const blockerLines = (report.blockers || []).length > 0
+    ? report.blockers.map(row => `${safeText(row.reason)} (${row.count})`)
+    : ['none captured'];
+  const observationLines = (report.observations || []).length > 0
+    ? report.observations.map(safeText)
+    : ['none'];
+  const providerLines = Object.entries(spend.provider_units || {})
+    .map(([provider, units]) => `${safeText(provider)} ${units}`)
+    .join(', ') || 'provider unit counts unavailable';
+
+  const lines = [
+    `<b>${safeText((report.period?.type || 'weekly').toUpperCase())} CAPTAIN REPORT</b>`,
+    safeText(report.period?.label || ''),
+    '',
+    '<b>HEADLINE VS TARGET</b>',
+    `${headline.sent || 0}/${headline.target || 0} sent (${headline.target_pct || 0}%). Replies ${headline.replies || 0}. Meetings ${headline.meetings || 0}.`,
+    '',
+    '<b>FUNNEL SURVIVAL</b>',
+    `raw ${funnel.raw_candidates || 0} -> saved ${funnel.saved || 0} (${survival.saved_from_raw_pct || 0}%) -> sent ${funnel.sent || 0} (${survival.sent_from_saved_pct || 0}%) -> replies ${funnel.replies || 0} (${survival.reply_from_sent_pct || 0}%) -> meetings ${funnel.meetings || 0} (${survival.meeting_from_reply_pct || 0}%)`,
+    '',
+    '<b>INDUSTRY BREAKDOWN</b>',
+    ...industryLines,
+    '',
+    '<b>CHANNEL SPLIT</b>',
+    `email sent ${channels.email?.sent || 0}, replies ${channels.email?.replies || 0}; linkedin sent ${channels.linkedin?.sent || 0}, replies ${channels.linkedin?.replies || 0}`,
+    '',
+    '<b>SPEND</b>',
+    `providers: ${providerLines}. LLM $${money(spend.llm_cost_usd)}. Total captured $${money(spend.total_cost_usd)}. Cost/lead ${spend.cost_per_lead_usd === null ? 'n/a' : `$${money(spend.cost_per_lead_usd)}`}. Cost/reply ${spend.cost_per_reply_usd === null ? 'n/a' : `$${money(spend.cost_per_reply_usd)}`}.`,
+    ...(spend.notes || []).map(note => `note: ${safeText(note)}`),
+    '',
+    '<b>TOP BLOCKERS</b>',
+    ...blockerLines,
+    '',
+    '<b>ENFORCER QUALITY</b>',
+    `reviewed ${enforcer.reviewed || 0}, approved ${enforcer.approved || 0}, rejected ${enforcer.rejected || 0}, approve rate ${enforcer.approve_rate_pct || 0}%`,
+  ];
+
+  if (report.period?.type === 'monthly') {
+    lines.push('', '<b>MONTHLY OBSERVATIONS</b>', ...observationLines);
+    lines.push('Captain surfaces these for human decision only. No auto-reweighting was applied.');
+  }
+
+  return lines.filter(line => line !== null && line !== undefined).join('\n');
+}
+
+module.exports = {
+  BEAVER_TARGETS,
+  scPct,
+  buildBeaverScorecard,
+  buildSignalScorecard,
+  buildCaptainPeriodReport,
+  formatCaptainPeriodReport,
+};
