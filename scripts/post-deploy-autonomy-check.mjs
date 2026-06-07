@@ -7,7 +7,7 @@ const API_URL = process.env.BEAVRDAM_API_URL || 'https://app.beaver.solutions';
 const API_KEY = process.env.BEAVRDAM_INTERNAL_API_KEY;
 const CLIENT_SLUG = (process.env.CLIENT_SLUG || 'beaver-solutions').trim();
 const EXPECT_DAILY_KICKOFF_ENABLED = process.env.EXPECT_DAILY_KICKOFF_ENABLED === 'true';
-const EXPECT_KPI_GAP_KICKOFF_ENABLED = process.env.EXPECT_KPI_GAP_KICKOFF_ENABLED === 'true';
+const EXPECT_KPI_GAP_KICKOFF_ENABLED = parseExpectation(process.env.EXPECT_KPI_GAP_KICKOFF_ENABLED);
 const EXPECT_MARKET_SENSING_ENABLED = process.env.EXPECT_MARKET_SENSING_ENABLED === 'true';
 const MAX_REVIEWABLE = Number(process.env.MAX_REVIEWABLE_APPROVALS || 20);
 const WAIT_FOR_JOBS_SECONDS = Number(process.env.WAIT_FOR_JOBS_SECONDS || 0);
@@ -17,6 +17,12 @@ const FRESH_UPTIME_SECONDS = Number(process.env.FRESH_UPTIME_SECONDS || 180);
 if (!API_KEY) {
   console.error('Missing env: BEAVRDAM_INTERNAL_API_KEY');
   process.exit(1);
+}
+
+function parseExpectation(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'auto') return 'auto';
+  return normalized === 'true';
 }
 
 async function getJson(path, headers = {}) {
@@ -142,17 +148,20 @@ function validateHealth(checks, health) {
 
   const kpiGap = jobStatus(health, 'kpi_gap_kickoff');
   const kpiGapWorker = scheduledWorkerState(health, 'kpi_gap_kickoff');
+  const kpiGapExpectedEnabled = EXPECT_KPI_GAP_KICKOFF_ENABLED === 'auto'
+    ? kpiGapWorker === true
+    : EXPECT_KPI_GAP_KICKOFF_ENABLED === true;
   if (!kpiGap) {
-    if (EXPECT_KPI_GAP_KICKOFF_ENABLED && kpiGapWorker === true) {
+    if (kpiGapExpectedEnabled && kpiGapWorker === true) {
       pass(checks, 'KPI-gap kickoff enabled', 'scheduled worker enabled');
-    } else if (!EXPECT_KPI_GAP_KICKOFF_ENABLED && kpiGapWorker === false) {
+    } else if (!kpiGapExpectedEnabled && kpiGapWorker === false) {
       pass(checks, 'KPI-gap kickoff safely disabled', 'scheduled worker disabled');
-    } else if (!EXPECT_KPI_GAP_KICKOFF_ENABLED && isGlobalScheduledPauseVisible(health)) {
+    } else if (!kpiGapExpectedEnabled && isGlobalScheduledPauseVisible(health)) {
       pass(checks, 'KPI-gap kickoff safely disabled', 'global scheduled pause visible before job marker');
     } else {
       fail(checks, 'KPI-gap kickoff job visible', 'job missing from /health');
     }
-  } else if (EXPECT_KPI_GAP_KICKOFF_ENABLED) {
+  } else if (kpiGapExpectedEnabled) {
     if (kpiGap.status === 'disabled') fail(checks, 'KPI-gap kickoff enabled', kpiGap.lastSkipReason || 'disabled');
     else pass(checks, 'KPI-gap kickoff enabled', `status=${kpiGap.status}`);
   } else if (isPausedOrDisabled(kpiGap, /(?:CAPTAIN_(KPI_GAP|DAILY)_KICKOFF_ENABLED disabled|SCHEDULED_AUTONOMY_PAUSED)/)) {

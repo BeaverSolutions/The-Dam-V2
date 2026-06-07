@@ -517,6 +517,8 @@ describe('P0 stabilization contracts', () => {
     expect(postDeployCheck).toContain("['disabled', 'skipped'].includes(job.status)");
     expect(postDeployCheck).toContain('global scheduled pause visible before job marker');
     expect(postDeployCheck).toContain('EXPECT_KPI_GAP_KICKOFF_ENABLED');
+    expect(postDeployCheck).toContain('kpiGapExpectedEnabled');
+    expect(postDeployCheck).toContain("EXPECT_KPI_GAP_KICKOFF_ENABLED === 'auto'");
     expect(postDeployCheck).toContain("jobStatus(lastHealth, 'kpi_gap_kickoff')");
     expect(postDeployCheck).toContain('WAIT_FOR_DEPLOY_SECONDS');
     expect(postDeployCheck).toContain('waitForFreshDeploy');
@@ -532,6 +534,7 @@ describe('P0 stabilization contracts', () => {
     expect(postDeployWorkflow).toContain('BEAVRDAM_INTERNAL_API_KEY');
     expect(postDeployWorkflow).toContain('expect_daily_kickoff_enabled');
     expect(postDeployWorkflow).toContain('expect_kpi_gap_kickoff_enabled');
+    expect(postDeployWorkflow).toContain("github.event_name == 'push' && 'auto'");
     expect(postDeployWorkflow).toContain('WAIT_FOR_DEPLOY_SECONDS');
     expect(postDeployWorkflow).toContain('WAIT_FOR_JOBS_SECONDS');
     expect(packageJson).toContain('"check:post-deploy"');
