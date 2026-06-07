@@ -18,6 +18,7 @@ describe('V2.1 research proof endpoint', () => {
 
     expect(body).toContain("router.post('/v2-1/research-proof', requireInternalKey");
     expect(body).toContain('const proofLimit = 5;');
+    expect(body).toContain('const proofPaidQueryCap = boundedResearchProofQueryCap(req.body?.max_paid_queries);');
     expect(body).toContain('previewSignalHuntPlan');
     expect(body).toContain('getLegacyIcpForClient(clientId');
     expect(body).toContain('TENANT_PROFILE_BLOCKED');
@@ -27,7 +28,8 @@ describe('V2.1 research proof endpoint', () => {
     expect(body).toContain('required_confirmation');
     expect(body).toContain('runWithClientContext(clientId, () => runSignalHunt(clientId, {');
     expect(body).toContain('maxLeads: proofLimit');
-    expect(body).toContain('maxPaidQueries: proofLimit');
+    expect(body).toContain('maxPaidQueries: proofPaidQueryCap');
+    expect(body).toContain('paid_query_cap: proofPaidQueryCap');
     expect(body).toContain('const saved = await saveSignalLeads(clientId, leads);');
     expect(body).toContain('signal_package');
     expect(body).toContain('messages_delta');

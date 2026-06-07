@@ -91,6 +91,12 @@ function boundedChatSignalQueryCap(requestedLimit) {
   return Math.max(3, Math.min(20, (Math.ceil(n) * 3) + 2));
 }
 
+function boundedResearchProofQueryCap(requestedCap) {
+  const n = Number(requestedCap);
+  if (!Number.isFinite(n) || n <= 0) return 5;
+  return Math.max(5, Math.min(18, Math.floor(n)));
+}
+
 function isChatCampaignIntent(message) {
   const msg = String(message || '').toLowerCase();
   return /\b(kickoff|kick off|start|execute|fire|begin|launch)\b/i.test(msg)
@@ -1226,6 +1232,7 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
   }
 
   const proofLimit = 5;
+  const proofPaidQueryCap = boundedResearchProofQueryCap(req.body?.max_paid_queries);
   const proofCounts = async () => {
     const { rows: [row] } = await pool.query(
       `WITH bounds AS (
@@ -1276,7 +1283,7 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
     const { runSignalHunt, saveSignalLeads, previewSignalHuntPlan } = require('../services/signalHunt');
     const queryPlan = await previewSignalHuntPlan(clientId, {
       icp,
-      maxPaidQueries: proofLimit,
+      maxPaidQueries: proofPaidQueryCap,
     });
     const confirmHash = String(req.body?.confirm_query_plan_hash || '').trim();
     const dryRun = req.body?.dry_run === true;
@@ -1288,6 +1295,7 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
           mode: 'v2_1_research_proof_query_plan',
           dry_run: true,
           requested_limit: proofLimit,
+          paid_query_cap: proofPaidQueryCap,
           before,
           query_plan: queryPlan,
           required_confirmation: 'Inspect query_plan.executable_queries, then rerun with confirm_query_plan_hash equal to query_plan.query_set_hash.',
@@ -1315,7 +1323,7 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
     const leads = await runWithClientContext(clientId, () => runSignalHunt(clientId, {
       maxLeads: proofLimit,
       icp,
-      maxPaidQueries: proofLimit,
+      maxPaidQueries: proofPaidQueryCap,
     }));
     const saved = await saveSignalLeads(clientId, leads);
     const after = await proofCounts();
@@ -1325,6 +1333,7 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
         client_id: clientId,
         mode: 'v2_1_research_proof',
         requested_limit: proofLimit,
+        paid_query_cap: proofPaidQueryCap,
         query_plan: queryPlan,
         candidates: Array.isArray(leads) ? leads.length : 0,
         saved: saved.length,
