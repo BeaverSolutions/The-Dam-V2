@@ -903,6 +903,25 @@ function trustedSignalHuntConfigContent(content = {}, icp = {}) {
   return !!profileVersion && Number.isFinite(configVersion) && configVersion === profileVersion;
 }
 
+function isActiveTenantProfileIcp(icp = {}) {
+  return icp.source === 'tenant_profiles' || !!profileContentVersion(icp);
+}
+
+function querySourceForSignalConfig(icp = {}, {
+  icpQueryCount = 0,
+  configuredQueryCount = 0,
+  tenantProfileBlocked = false,
+} = {}) {
+  if (tenantProfileBlocked) return 'tenant_profile_blocked';
+  if (icpQueryCount > 0) {
+    return isActiveTenantProfileIcp(icp)
+      ? 'active_tenant_profile_buying_signals'
+      : 'legacy_current_icp_signal_planner';
+  }
+  if (configuredQueryCount > 0) return 'stored_config';
+  return 'default';
+}
+
 /**
  * Load the client's signal hunt config, or return defaults.
  */
@@ -952,12 +971,19 @@ async function loadSignalConfig(clientId, icp = {}, { maxPaidQueries = null } = 
     }).catch(() => {});
   }
   const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : [];
-  const fallbackQueries = icpQueries.length > 0
+  const tenantProfileBlocked = isActiveTenantProfileIcp(icp)
+    && hasIcpSearchScope(icp)
+    && icpQueries.length === 0;
+  const fallbackQueries = tenantProfileBlocked
+    ? []
+    : (icpQueries.length > 0
     ? icpQueries
-    : (configuredQueries.length > 0 ? configuredQueries : DEFAULT_SIGNAL_QUERIES);
-  const querySource = icpQueries.length > 0
-    ? 'current_icp_signal_planner'
-    : (configuredQueries.length > 0 ? 'stored_config' : 'default');
+    : (configuredQueries.length > 0 ? configuredQueries : DEFAULT_SIGNAL_QUERIES));
+  const querySource = querySourceForSignalConfig(icp, {
+    icpQueryCount: icpQueries.length,
+    configuredQueryCount: configuredQueries.length,
+    tenantProfileBlocked,
+  });
   const seenQueries = new Set();
   const fallbackCountry = countriesFromIcp(icp)[0]?.code || 'MY';
   const queryWindow = signalQueryWindow(maxPaidQueries);
@@ -2018,5 +2044,6 @@ module.exports = {
     signalProviderFanoutCaps,
     executableDiscoveryQueriesForBudget,
     trustedSignalHuntConfigContent,
+    querySourceForSignalConfig,
   },
 };

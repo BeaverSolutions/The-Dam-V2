@@ -139,7 +139,9 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).toContain('const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : []');
     expect(src).toContain('function trustedSignalHuntConfigContent');
     expect(src).toContain('rejected_config_source');
-    expect(src).toContain('current_icp_signal_planner');
+    expect(src).toContain('active_tenant_profile_buying_signals');
+    expect(src).toContain('tenant_profile_blocked');
+    expect(src).toContain('legacy_current_icp_signal_planner');
     expect(src).not.toContain('...icpQueries, ...configuredQueries');
     expect(src).not.toContain('current_icp_signal_planner_then_config');
   });
@@ -160,6 +162,23 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(signalHunt._test.trustedSignalHuntConfigContent({
       signal_queries: [{ query: 'stale April query' }],
     }, { content_version: 5 })).toBe(false);
+  });
+
+  it('labels active tenant profile queries and blocks invalid active profiles instead of falling back', () => {
+    expect(signalHunt._test.querySourceForSignalConfig({
+      source: 'tenant_profiles',
+      content_version: 5,
+    }, { icpQueryCount: 2, configuredQueryCount: 0 })).toBe('active_tenant_profile_buying_signals');
+
+    expect(signalHunt._test.querySourceForSignalConfig({
+      source: 'tenant_profiles',
+      content_version: 5,
+    }, { icpQueryCount: 0, configuredQueryCount: 0, tenantProfileBlocked: true })).toBe('tenant_profile_blocked');
+
+    expect(signalHunt._test.querySourceForSignalConfig({}, {
+      icpQueryCount: 2,
+      configuredQueryCount: 0,
+    })).toBe('legacy_current_icp_signal_planner');
   });
 
   it('keeps bounded query windows on planner source channels instead of agency publication fallbacks', () => {
