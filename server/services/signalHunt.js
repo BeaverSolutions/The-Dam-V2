@@ -191,6 +191,16 @@ function executableDiscoveryQueriesForBudget(queries = [], paidQueryBudget = {})
   return queries.slice(0, limit);
 }
 
+function shouldStopSignalDiscovery({
+  discoveryQueriesRun = 0,
+  paidQueryBudget = {},
+} = {}) {
+  const discovery = paidQueryBudget?.discovery;
+  if (discovery === null || discovery === undefined) return false;
+  const limit = Math.max(0, Math.floor(Number(discovery) || 0));
+  return discoveryQueriesRun >= limit;
+}
+
 async function blockedByRepeatedZeroQuerySet(clientId, queries = []) {
   const hash = signalQuerySetHash(queries);
   const key = `signal_hunt_zero_query_set_${klDateString()}_${hash}`;
@@ -1617,8 +1627,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
 
   // Step 1: Run all signal queries in sequence (cost control)
   for (const q of config.queries) {
-    if (allSignals.length >= maxLeads * 2) break; // 2x buffer — some will fail contact lookup
-    if (paidQueryBudget.discovery !== null && discoveryQueriesRun >= paidQueryBudget.discovery) {
+    if (shouldStopSignalDiscovery({ discoveryQueriesRun, paidQueryBudget })) {
       console.log('[signalHunt] Discovery-query budget reached; reserving paid budget for decision-maker lookup');
       break;
     }
@@ -2093,6 +2102,7 @@ module.exports = {
     signalPaidBudgetSplit,
     signalProviderFanoutCaps,
     executableDiscoveryQueriesForBudget,
+    shouldStopSignalDiscovery,
     trustedSignalHuntConfigContent,
     querySourceForSignalConfig,
   },

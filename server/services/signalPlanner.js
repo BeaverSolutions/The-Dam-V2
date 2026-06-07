@@ -61,6 +61,18 @@ function hiringRoleQuery(term) {
   return `("${cleanTerm}" OR "Sales Executive" OR "Account Executive" OR "Business Development Manager" OR "Sales Manager")`;
 }
 
+function industryDiscoveryHint(industry) {
+  const s = String(industry || '').toLowerCase();
+  if (!s) return '';
+  if (/\b(training|learning|l&d|coaching|skills development)\b/i.test(s)) {
+    return '("corporate training" OR "leadership training" OR "sales training" OR "learning and development" OR "L&D" OR "executive coaching")';
+  }
+  if (/\b(agency|marketing|creative|digital|pr|communications|advertising|media|content studio)\b/i.test(s)) {
+    return '(marketing OR creative OR digital OR PR OR communications OR advertising OR "content studio") (agency OR firm OR studio)';
+  }
+  return '';
+}
+
 function quotedTerm(term) {
   const cleanTerm = String(term || '').replace(/"/g, '').trim();
   return cleanTerm ? `"${cleanTerm}"` : '';
@@ -83,23 +95,23 @@ function evidenceQueryForFamily(family) {
 function buildQueryForSignal({ signal, term, geo, industry, sourceChannel }) {
   const geoName = countryName(geo);
   const sourcePrefix = queryPrefixForSource(sourceChannel);
+  const industryHint = industryDiscoveryHint(industry);
   const family = signal.family;
 
   if (family === 'hiring_capability_build' && sourceChannel === 'linkedin_jobs') {
     return compact([
       sourcePrefix,
+      industryHint,
       hiringLocationQuery(geoName),
       hiringRoleQuery(term),
       '-India -Delhi -NCR -Jaipur -Siliguri',
     ]);
   }
 
-  // Industry stays out of the search string. It is enforced after company
-  // extraction by the ICP gate, where evidence can be evaluated directly.
-  void industry;
   return compact([
     sourcePrefix,
     hiringLocationQuery(geoName),
+    industryHint,
     quotedTerm(term),
     evidenceQueryForFamily(family),
   ]);

@@ -376,7 +376,8 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
 
   it('reserves bounded paid Signal Hunt budget for decision-maker lookup', () => {
     expect(src).toContain('function signalPaidBudgetSplit(maxPaidQueries = null, maxLeads = 1)');
-    expect(src).toContain('discoveryQueriesRun >= paidQueryBudget.discovery');
+    expect(src).toContain('function shouldStopSignalDiscovery');
+    expect(src).toContain('shouldStopSignalDiscovery({ discoveryQueriesRun, paidQueryBudget })');
     expect(src).toContain('Discovery-query budget reached; reserving paid budget for decision-maker lookup');
     expect(src).toContain('lookup_query_budget');
 
@@ -395,6 +396,22 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       discovery: 0,
       lookup: 0,
     });
+  });
+
+  it('does not stop discovery just because off-ICP raw candidates filled the lead buffer', () => {
+    expect(typeof signalHunt._test.shouldStopSignalDiscovery).toBe('function');
+    expect(signalHunt._test.shouldStopSignalDiscovery({
+      rawCandidatesCount: 10,
+      maxLeads: 5,
+      discoveryQueriesRun: 5,
+      paidQueryBudget: { discovery: 13 },
+    })).toBe(false);
+    expect(signalHunt._test.shouldStopSignalDiscovery({
+      rawCandidatesCount: 10,
+      maxLeads: 5,
+      discoveryQueriesRun: 13,
+      paidQueryBudget: { discovery: 13 },
+    })).toBe(true);
   });
 
   it('bounds Signal Hunt email-enrichment provider fanout', () => {

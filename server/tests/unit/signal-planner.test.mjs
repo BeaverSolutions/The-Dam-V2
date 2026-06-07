@@ -184,6 +184,33 @@ describe('signal planner', () => {
     expect(queryText).not.toContain('site:*');
   });
 
+  it('uses focus-industry discovery hints without forcing exact active-industry phrases', () => {
+    const plan = signalPlanner.buildSignalPlan({
+      tenant: {
+        ...tenantContext,
+        icp: {
+          ...tenantContext.icp,
+          active_industries: ['B2B corporate training', 'marketing agency'],
+          geo: ['MY'],
+        },
+      },
+      signalId: 'hiring_sales_roles',
+      geo: ['MY'],
+      maxQueries: 4,
+    });
+
+    const trainingQuery = plan.queries.find(q => q.industry === 'B2B corporate training')?.query || '';
+    const agencyQuery = plan.queries.find(q => q.industry === 'marketing agency')?.query || '';
+    const allQueries = plan.queries.map(q => q.query).join('\n');
+
+    expect(trainingQuery).toMatch(/corporate training|leadership training|sales training|learning and development|L&D/i);
+    expect(agencyQuery).toMatch(/marketing|creative|digital|communications|advertising|content studio/i);
+    expect(agencyQuery).toMatch(/agency|firm|studio/i);
+    expect(allQueries).not.toMatch(/"B2B corporate training"|"marketing agency"/i);
+    expect(plan.queries.every(q => !hasThreeStackedRequiredQuotedPhrases(q.query))).toBe(true);
+    expect(plan.filterLater).toContain('industry');
+  });
+
   it('uses active_industries as the only planner industry scope for active tenant profiles', () => {
     const plan = signalPlanner.buildSignalPlan({
       tenant: {
