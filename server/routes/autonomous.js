@@ -2543,7 +2543,7 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
 
 /**
  * Post-kickoff verification: checks if the kickoff actually produced results.
- * Writes a Captain blocker if this run produced zero or less than 20% usable outputs.
+ * Writes a Captain blocker if this run produced zero or less than 30% usable outputs.
  */
 async function writeKickoffBlocker(clientId, blocker) {
   const today = blocker.today || todayInMalaysia();
@@ -2652,7 +2652,7 @@ async function verifyKickoffOutput(clientId, target, options = {}) {
       await writeKickoffBlocker(clientId, {
         today,
         blocker: 'low_yield_outputs',
-        reason: `Scheduled kickoff produced only ${delivered}/${requested} usable outputs, below the 20% low-yield fallback.`,
+        reason: `Scheduled kickoff produced only ${delivered}/${requested} usable outputs, below the 30% low-yield fallback.`,
         target,
         requested,
         delivered,

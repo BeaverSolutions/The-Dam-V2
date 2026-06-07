@@ -2,7 +2,7 @@
 
 const DEFAULT_DAILY_TARGET = 50;
 const MAX_SINGLE_KICKOFF_LEADS = 20;
-const LOW_OUTPUT_STOP_RATIO = 0.2;
+const LOW_OUTPUT_STOP_RATIO = 0.3;
 const LOW_OUTPUT_STOP_THRESHOLD = LOW_OUTPUT_STOP_RATIO;
 
 function clampPositiveInt(value, fallback) {

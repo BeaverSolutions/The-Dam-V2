@@ -4663,7 +4663,7 @@ async function directorExecute(clientId, {
       const attemptLeadsFound = dbLeadsCount + signalLeadsCount;
 
       if (shouldStopForLowOutput({ requested: campaignRequested, delivered })) {
-        const captainPrompt = `Captain stopped this campaign because a full kickoff run produced only ${delivered}/${campaignRequested} approval-ready outputs, below the 20% low-yield fallback. No more paid searches will run until MJ decides whether to widen the signal, adjust ICP, or stop.`;
+        const captainPrompt = `Captain stopped this campaign because a full kickoff run produced only ${delivered}/${campaignRequested} approval-ready outputs, below the 30% low-yield fallback. No more paid searches will run until MJ decides whether to widen the signal, adjust ICP, or stop.`;
         const result = {
           plan_id,
           status: 'needs_input',
