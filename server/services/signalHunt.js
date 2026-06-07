@@ -1322,6 +1322,10 @@ function validSignalCompanyName(value = '') {
   if (/^(?:MYR|RM|USD|\$)?\s*\d[\d,.]*(?:\+)?(?:\s|$)/i.test(company)) return false;
   if (/\b(?:MYR|RM|USD)\s*\d[\d,.]*/i.test(company)) return false;
   if (/^\d[\d,.]*(?:\+)?\s+.*\bjobs?\s+in\b/i.test(company)) return false;
+  if (/^(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+20\d{2}$/i.test(company)) return false;
+  if (/^(?:at\s+)?least\s+\d+\s+(?:months?|years?)$/i.test(company)) return false;
+  if (/^(?:for|and|or|the|of|in|to|with|by|from)$/i.test(company)) return false;
+  if (/^(?:hays\b.*|michael page\b.*|jobstreet\b.*|indeed\b.*|glassdoor\b.*|linkedin\b.*|hiredly\b.*)$/i.test(company)) return false;
   if (/^(?:easy apply|top applicants|full[- ]time|on[- ]site|remote|hybrid)$/i.test(company)) return false;
   return true;
 }
@@ -1492,6 +1496,17 @@ function decisionMakerTitleAlternatives(icpTitles = []) {
     .join('|');
 }
 
+function validDecisionMakerName(value = '') {
+  const name = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!name || name.length < 5 || name.length > 80) return false;
+  if (/[.!?]/.test(name)) return false;
+  if (/\b(?:compare|pay|salary|jobs?|months?|agreed|least|insights|business)\b/i.test(name)) return false;
+  if (/^(?:for|and|or|the|of|in|to|with|by|from)\b/i.test(name)) return false;
+  const parts = name.split(/\s+/).filter(Boolean);
+  if (parts.length < 2 || parts.length > 5) return false;
+  return parts.every(part => /^[A-Z][A-Za-z'’`-]+$/.test(part));
+}
+
 function decisionMakerFromPublicEvidence(results = [], icpTitles = [], sourceLabel = 'decision_maker_public_evidence') {
   const titleAlternatives = decisionMakerTitleAlternatives(icpTitles);
   const titleRegex = new RegExp(`\\b(${titleAlternatives})\\b`, 'i');
@@ -1515,6 +1530,7 @@ function decisionMakerFromPublicEvidence(results = [], icpTitles = [], sourceLab
       const name = titleFirst ? second : first;
       const title = titleFirst ? first : second;
       if (!name || !title || titleRegex.test(name)) continue;
+      if (!validDecisionMakerName(name)) continue;
       return {
         name: name.trim(),
         title: title.trim(),
@@ -1569,7 +1585,7 @@ async function findDecisionMaker(companyName, icpTitles = [], country = 'MY', op
     };
 
     const sorted = profiles
-      .filter(p => p.name && p.linkedin_url)
+      .filter(p => validDecisionMakerName(p.name) && p.linkedin_url)
       .sort((a, b) => seniorityRank(b.title) - seniorityRank(a.title));
 
     const top = sorted[0] || null;
@@ -2096,6 +2112,7 @@ module.exports = {
     deterministicPublicationSignals,
     deterministicHiringSignals,
     validSignalCompanyName,
+    validDecisionMakerName,
     mergeExtractedSignalSets,
     signalQuerySetHash,
     signalQueryWindow,

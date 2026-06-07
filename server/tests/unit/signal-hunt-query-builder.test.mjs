@@ -966,7 +966,23 @@ describe('signal extraction helpers', () => {
   it('rejects salary and aggregate text as signal company names before lead lookup', () => {
     expect(signalHunt._test.validSignalCompanyName('MYR3,500')).toBe(false);
     expect(signalHunt._test.validSignalCompanyName('15,000+ Sales jobs in Malaysia')).toBe(false);
+    expect(signalHunt._test.validSignalCompanyName('Apr 2026')).toBe(false);
+    expect(signalHunt._test.validSignalCompanyName('May 2026')).toBe(false);
+    expect(signalHunt._test.validSignalCompanyName('Least 5 Months')).toBe(false);
+    expect(signalHunt._test.validSignalCompanyName('for')).toBe(false);
+    expect(signalHunt._test.validSignalCompanyName('Hays UK')).toBe(false);
+    expect(signalHunt._test.validSignalCompanyName('Michael Page')).toBe(false);
     expect(signalHunt._test.validSignalCompanyName('Allura Asia')).toBe(true);
+    expect(signalHunt._test.validSignalCompanyName('JustSimple Malaysia')).toBe(true);
+  });
+
+  it('rejects invalid decision-maker fragments before contact persistence', () => {
+    expect(typeof signalHunt._test.validDecisionMakerName).toBe('function');
+    expect(signalHunt._test.validDecisionMakerName('insights. Compare pay for')).toBe(false);
+    expect(signalHunt._test.validDecisionMakerName('Led Business')).toBe(false);
+    expect(signalHunt._test.validDecisionMakerName('agreed we')).toBe(false);
+    expect(signalHunt._test.validDecisionMakerName('Jane Tan')).toBe(true);
+    expect(signalHunt._test.validDecisionMakerName('Michael Jerry')).toBe(true);
   });
 });
 
