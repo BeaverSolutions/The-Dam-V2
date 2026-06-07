@@ -247,8 +247,7 @@ function applyIcpV2Filter(lead) {
  */
 function resolveSignalTier(lead) {
   const score = Number(lead.score || 0);
-  const verified = lead.email_verified === true
-    || lead.email_source === 'hunter';
+  const verified = lead.email_verified === true;
   if (score >= 85 && verified) return 'P1';
   if (score >= 75) return 'P2';
   if (score >= 65) return 'P3';
@@ -281,8 +280,7 @@ function selectChannel(lead, options = {}) {
   const { linkedinAlreadyTried = false } = options;
   const meta = lead.metadata || {};
   const linkedinFirstOverride = meta.linkedin_first_override === true || meta.linkedin_first_override === 'true';
-  const hasVerifiedEmail = lead.email
-    && (lead.email_verified === true || lead.email_source === 'hunter');
+  const hasVerifiedEmail = lead.email && lead.email_verified === true;
   const isLinkedinOnlyLead = lead.lead_tier === 'B' && lead.linkedin_url;
 
   if (linkedinFirstOverride && lead.linkedin_url && !linkedinAlreadyTried) {
@@ -3223,7 +3221,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
 
       // ── Email-priority rule ─────────────────────────────────────────────
       // If the lead has no email, use the autonomous order: public web/domain
-      // evidence -> Hunter -> MillionVerifier-backed pattern verification.
+      // evidence -> Lusha -> Snov -> Hunter -> MillionVerifier verification.
       // LinkedIn is used only when no usable email is available.
       await pipeline.enrichEmail(clientId, lead, {
         pipeline_path: 'signal-pipeline',
@@ -4233,7 +4231,7 @@ async function directorExecute(clientId, {
          AND LOWER(BTRIM(l.company)) NOT IN ('unknown', 'unknown company', 'independent', 'self-employed', 'self employed', 'stealth', 'confidential')
          AND (l.email IS NOT NULL OR l.linkedin_url IS NOT NULL)
          AND (
-           (l.email IS NOT NULL AND (l.email_verified IS TRUE OR l.email_source = 'hunter'))
+           (l.email IS NOT NULL AND l.email_verified IS TRUE)
            OR (
              l.linkedin_url IS NOT NULL
              AND NOT EXISTS (
@@ -4272,7 +4270,7 @@ async function directorExecute(clientId, {
           ${currentSignalPackageEligibilitySql('l')}
         ORDER BY
          CASE
-           WHEN l.email IS NOT NULL AND (l.email_verified IS TRUE OR l.email_source = 'hunter') THEN 0
+           WHEN l.email IS NOT NULL AND l.email_verified IS TRUE THEN 0
            ELSE 1
          END,
          CASE l.signal_tier WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
@@ -5605,9 +5603,9 @@ async function directorExecute(clientId, {
     // CHANNEL_HINTS moved to module scope (Jules F-03) so the signal pipeline shares it.
 
     // ── Email-priority enrichment via pipeline.enrichEmail ────────────────
-    // Autonomous order: public web/domain evidence -> Hunter ->
-    // MillionVerifier-backed pattern verification. VP is not used by Beaver
-    // kickoff sourcing/enrichment.
+    // Autonomous order: public web/domain evidence -> Lusha -> Snov ->
+    // Hunter -> MillionVerifier verification. VP is not used by Beaver kickoff
+    // sourcing/enrichment.
     let linkedinAlreadyTried = false;
     await pipeline.enrichEmail(clientId, lead, {
       pipeline_path: 'pipeline',

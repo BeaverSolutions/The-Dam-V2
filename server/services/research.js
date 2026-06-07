@@ -31,6 +31,8 @@ const ORDERED_RESEARCH_ENRICHMENT_STAGES = Object.freeze([
   'company_evidence',
   'icp_and_exclusion_checks',
   'decision_maker_lookup',
+  'lusha',
+  'snov',
   'hunter',
   'millionverifier',
   'contact_gate',
@@ -1380,7 +1382,7 @@ async function strategyCompanyFirst(clientId, icpMemory, limit, options = {}) {
           if (companyKey) seenCompanyKeys.add(companyKey);
 
           // Phase 3 order: company_evidence -> icp/exclusion checks ->
-          // decision_maker_lookup -> Hunter -> MillionVerifier -> contact_gate.
+          // decision_maker_lookup -> Lusha -> Snov -> Hunter -> MillionVerifier -> contact_gate.
           const companyEvidence = buildCompanyEvidence(item, c, companyName, domain);
           const context = companyDiscoveryContext(item, companyName);
           const signalContext = signalContextFromQueryItem(item, companyName, companyEvidence);

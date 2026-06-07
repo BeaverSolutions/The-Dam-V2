@@ -102,7 +102,7 @@ for (const stage of traceStages) {
 
 // 6. VP is not autonomous sourcing. It remains available only through explicit
 // manual/subscribed-client paths; Beaver autonomous source order is
-// web/LinkedIn -> Hunter -> MillionVerifier.
+// web/LinkedIn -> Lusha -> Snov -> Hunter -> MillionVerifier.
 const onDemandStart = dbBuilder.indexOf('async function sourceLeadsOnDemand');
 const onDemandEnd = dbBuilder.indexOf('module.exports', onDemandStart);
 const onDemandBody = dbBuilder.slice(onDemandStart, onDemandEnd);
@@ -113,11 +113,11 @@ const vpNotAutonomous = onDemandStart > -1
 check('VP is blocked from autonomous on-demand sourcing', vpNotAutonomous,
   vpNotAutonomous ? 'sourceLeadsOnDemand uses web/LinkedIn; VP remains a separate explicit function' : 'autonomous on-demand sourcing may still call VP');
 
-// 7. Autonomous email sourcing order is web/LinkedIn -> Hunter -> MillionVerifier.
+// 7. Autonomous email sourcing order is web/LinkedIn -> Lusha -> Snov -> Hunter -> MillionVerifier.
 const autonomousSourceOrder = onDemandBody.includes('source_order')
-  && onDemandBody.includes('web_linkedin_hunter_millionverifier')
+  && onDemandBody.includes('web_linkedin_lusha_snov_hunter_millionverifier')
   && dbBuilder.includes('maxPaidQueries');
-check('Autonomous source order is web/LinkedIn -> Hunter -> MillionVerifier', autonomousSourceOrder,
+check('Autonomous source order is web/LinkedIn -> Lusha -> Snov -> Hunter -> MillionVerifier', autonomousSourceOrder,
   autonomousSourceOrder ? 'source order logged and paid query cap passed to research' : 'autonomous source order or cap is missing');
 
 // 8. Enforcer model is Sonnet (not Haiku)
@@ -252,7 +252,9 @@ check('Captain preflight blocks unaffordable campaigns and expires stale runs', 
   captainCapacityTruth ? 'channel-ready capacity, paid shortfall, and stale exec guards found' : 'Captain can still queue underfunded, stale-blocked, or channel-exhausted campaigns');
 
 const dbFirstChannelReadyTruth = agents.includes("ml.channel = 'linkedin'")
-  && agents.includes("l.email_verified IS TRUE OR l.email_source = 'hunter'")
+  && agents.includes("l.email_verified IS TRUE")
+  && !agents.includes("l.email_verified IS TRUE OR l.email_source = 'hunter'")
+  && !agents.includes("lead.email_source === 'hunter'")
   && agents.includes("mr.status IN ('rejected', 'ranger_rejected')")
   && agents.includes(') < 2')
   && agents.includes('channel_exhausted');

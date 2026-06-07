@@ -286,7 +286,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
              AND LOWER(BTRIM(company)) NOT IN ('unknown', 'unknown company', 'independent', 'self-employed', 'self employed', 'stealth', 'confidential')
              AND (email IS NOT NULL OR linkedin_url IS NOT NULL)
              AND (
-               (email IS NOT NULL AND (email_verified IS TRUE OR email_source = 'hunter'))
+               (email IS NOT NULL AND email_verified IS TRUE)
                OR (
                  linkedin_url IS NOT NULL
                  AND NOT EXISTS (
@@ -3888,7 +3888,7 @@ router.post('/linkedin-sync-replies', requireInternalKey, async (req, res) => {
  * accepts a batch from the local Chrome-CDP scraper
  * (scripts/sync-linkedin-connections-to-beavrdam.mjs in MJxClaude) and:
  *   1. Normalizes linkedin slug, dedupes against existing leads.linkedin_url
- *   2. Enriches email via emailEnrichment (Brave primary, Hunter fallback)
+ *   2. Enriches email via emailEnrichment (Lusha -> Snov -> Hunter, MV-verified)
  *   3. Creates lead with source='linkedin_connection_sync', signal_tier='P3',
  *      pipeline_stage='prospecting', buying_signal_strength='lite'
  *
@@ -3955,6 +3955,8 @@ router.post('/linkedin-sync-connections', requireInternalKey, async (req, res) =
     let created = 0;
     let skippedDup = 0;
     let enrichedBrave = 0;
+    let enrichedLusha = 0;
+    let enrichedSnov = 0;
     let enrichedHunter = 0;
     let noEmail = 0;
 
@@ -3973,6 +3975,8 @@ router.post('/linkedin-sync-connections', requireInternalKey, async (req, res) =
         logger.warn({ msg: '[linkedin-sync-connections] enrichEmail failed', slug: c.slug, err: err.message });
       }
       if (enrich?.source === 'brave') enrichedBrave++;
+      else if (enrich?.source === 'lusha') enrichedLusha++;
+      else if (enrich?.source === 'snov') enrichedSnov++;
       else if (enrich?.source === 'hunter') enrichedHunter++;
       else noEmail++;
 
@@ -3980,6 +3984,8 @@ router.post('/linkedin-sync-connections', requireInternalKey, async (req, res) =
         const lead = await leadsService.createLead(client_id, {
           name: c.name,
           email: enrich?.email || null,
+          email_verified: enrich?.status === 'deliverable',
+          email_source: enrich?.source || enrich?.email_source || null,
           company: c.company,
           title: c.title,
           linkedin_url: c.profile_url,
@@ -3990,7 +3996,8 @@ router.post('/linkedin-sync-connections', requireInternalKey, async (req, res) =
           buying_signal_strength: 'lite',
           metadata: {
             connected_time: c.connected_time,
-            enrichment_source: enrich?.source || null,
+            enrichment_source: enrich?.source || enrich?.email_source || null,
+            enrichment_status: enrich?.status || null,
             enrichment_confidence: enrich?.confidence || null,
           },
         });
@@ -4001,7 +4008,8 @@ router.post('/linkedin-sync-connections', requireInternalKey, async (req, res) =
           slug: c.slug,
           status: 'created',
           lead_id: lead.id,
-          enriched: enrich ? enrich.source : 'none',
+          enriched: enrich ? (enrich.source || enrich.email_source) : 'none',
+          email_verified: enrich?.status === 'deliverable',
         });
       } catch (err) {
         logger.warn({ msg: '[linkedin-sync-connections] createLead failed', slug: c.slug, err: err.message });
@@ -4017,6 +4025,8 @@ router.post('/linkedin-sync-connections', requireInternalKey, async (req, res) =
         skipped_dup: skippedDup,
         skipped_invalid: skippedInvalid,
         enriched_brave: enrichedBrave,
+        enriched_lusha: enrichedLusha,
+        enriched_snov: enrichedSnov,
         enriched_hunter: enrichedHunter,
         no_email: noEmail,
         details,

@@ -12,6 +12,8 @@ const dbBuilderSource = readFileSync(resolve(__dirname, '../../services/dbBuilde
 const pipelineSource = readFileSync(resolve(__dirname, '../../services/pipeline.js'), 'utf-8');
 const emailEnrichmentSource = readFileSync(resolve(__dirname, '../../services/emailEnrichment.js'), 'utf-8');
 const signalHuntSource = readFileSync(resolve(__dirname, '../../services/signalHunt.js'), 'utf-8');
+const indexSource = readFileSync(resolve(__dirname, '../../index.js'), 'utf-8');
+const autonomousRouteSource = readFileSync(resolve(__dirname, '../../routes/autonomous.js'), 'utf-8');
 
 describe('Research Beaver decision-maker and contact enrichment order', () => {
   it('documents the canonical Phase 3 enrichment sequence as code', () => {
@@ -19,6 +21,8 @@ describe('Research Beaver decision-maker and contact enrichment order', () => {
       'company_evidence',
       'icp_and_exclusion_checks',
       'decision_maker_lookup',
+      'lusha',
+      'snov',
       'hunter',
       'millionverifier',
       'contact_gate',
@@ -79,12 +83,20 @@ describe('Research Beaver decision-maker and contact enrichment order', () => {
     expect(loopBody).toContain('!person || !person.name');
   });
 
-  it('runs Hunter before MillionVerifier and only verifies generated candidates', () => {
+  it('runs Lusha, then Snov, then Hunter before MillionVerifier verifies sourced emails', () => {
+    const lushaIdx = emailEnrichmentSource.indexOf('const lushaResult = await tryLusha');
+    const snovIdx = emailEnrichmentSource.indexOf('const snovResult = await trySnov');
     const hunterIdx = emailEnrichmentSource.indexOf('const hunterResult = await tryHunter');
-    const verifyCandidatesIdx = emailEnrichmentSource.indexOf('const verifyCandidates = candidates.slice(0, maxVerifierCalls)');
+    const providerVerifyIdx = emailEnrichmentSource.indexOf('await verifyProviderEmail');
+    const verifyCandidatesIdx = emailEnrichmentSource.indexOf('const verifyCandidates = candidates.slice(0, verifierCallsRemaining)');
     const millionVerifierIdx = emailEnrichmentSource.indexOf('await verifyEmail(email, clientId)');
 
+    expect(lushaIdx).toBeGreaterThan(-1);
+    expect(snovIdx).toBeGreaterThan(lushaIdx);
     expect(hunterIdx).toBeGreaterThan(-1);
+    expect(hunterIdx).toBeGreaterThan(snovIdx);
+    expect(providerVerifyIdx).toBeGreaterThan(lushaIdx);
+    expect(providerVerifyIdx).toBeLessThan(millionVerifierIdx);
     expect(verifyCandidatesIdx).toBeGreaterThan(hunterIdx);
     expect(millionVerifierIdx).toBeGreaterThan(verifyCandidatesIdx);
     expect(emailEnrichmentSource).toContain('const candidates = generateEmailCandidates(firstName, lastName, domain)');
@@ -94,10 +106,38 @@ describe('Research Beaver decision-maker and contact enrichment order', () => {
     expect(emailEnrichmentSource).toContain('function providerCapInt(value, fallback)');
     expect(emailEnrichmentSource).toContain('const maxDomainSearches = providerCapInt(lead.maxDomainSearches, 1)');
     expect(emailEnrichmentSource).toContain('if (maxDomainSearches > 0)');
+    expect(emailEnrichmentSource).toContain('const maxLushaCalls = providerCapInt(lead.maxLushaCalls, lead.skipLusha === true ? 0 : 1)');
+    expect(emailEnrichmentSource).toContain('const maxSnovCalls = providerCapInt(lead.maxSnovCalls, lead.skipSnov === true ? 0 : 1)');
     expect(emailEnrichmentSource).toContain('const maxHunterCalls = providerCapInt(lead.maxHunterCalls, lead.skipHunter === true ? 0 : 1)');
+    expect(emailEnrichmentSource).toContain('if (maxLushaCalls > 0)');
+    expect(emailEnrichmentSource).toContain('if (maxSnovCalls > 0)');
     expect(emailEnrichmentSource).toContain('if (maxHunterCalls > 0)');
     expect(emailEnrichmentSource).toContain('const maxVerifierCalls = providerCapInt(lead.maxVerifierCalls, 3)');
-    expect(emailEnrichmentSource).toContain('const verifyCandidates = candidates.slice(0, maxVerifierCalls)');
+    expect(emailEnrichmentSource).toContain('let verifierCallsRemaining = maxVerifierCalls');
+    expect(emailEnrichmentSource).toContain('const verifyCandidates = candidates.slice(0, verifierCallsRemaining)');
+  });
+
+  it('keeps legacy enrichEmail on the same findEmail provider waterfall', () => {
+    const start = emailEnrichmentSource.indexOf('async function enrichEmail(clientId, { name, company })');
+    const end = emailEnrichmentSource.indexOf('/* ════════════════════════════════════════════════════════════════════════', start);
+    const body = emailEnrichmentSource.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(body).toContain('const result = await findEmail({');
+    expect(body).toContain('return { ...result, source: result.email_source || result.source || null }');
+    expect(body).not.toContain('const hunter = await tryHunter');
+  });
+
+  it('persists MV verification metadata when legacy callers save enriched email', () => {
+    expect(indexSource).toContain('l.email_verified AS lead_email_verified');
+    expect(indexSource).toContain('let foundEmail = msg.lead_email_verified === true ? msg.lead_email : null');
+    expect(indexSource).toContain("if (result?.email && result.status === 'deliverable')");
+    expect(indexSource).toContain('email_verified = $2, email_source = $3');
+    expect(indexSource).toContain("result.status === 'deliverable'");
+    expect(indexSource).toContain("result.source || result.email_source || 'findemail'");
+
+    expect(autonomousRouteSource).toContain("email_verified: enrich?.status === 'deliverable'");
+    expect(autonomousRouteSource).toContain('email_source: enrich?.source || enrich?.email_source || null');
   });
 
   it('keeps autonomous Research sourcing off VP and routes save through contact gate with signal package metadata', () => {

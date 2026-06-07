@@ -100,7 +100,9 @@ describe('P0 stabilization contracts', () => {
     expect(captainPreflight).toContain("NULLIF(BTRIM(l.company), '') IS NOT NULL");
     expect(agents).toContain("NULLIF(BTRIM(l.company), '') IS NOT NULL");
     expect(agents).toContain("ml.channel = 'linkedin'");
-    expect(agents).toContain("l.email_verified IS TRUE OR l.email_source = 'hunter'");
+    expect(agents).toContain("l.email_verified IS TRUE");
+    expect(agents).not.toContain("l.email_verified IS TRUE OR l.email_source = 'hunter'");
+    expect(agents).not.toContain("lead.email_source === 'hunter'");
     expect(agents).toContain("mr.status IN ('rejected', 'ranger_rejected')");
     expect(agents).toContain(') < 2');
     expect(agents).toContain('Provider/search parser returned 0 usable candidates');

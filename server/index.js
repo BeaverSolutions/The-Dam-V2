@@ -2104,7 +2104,8 @@ none from this broken report; check app truth before approving batches.`;
       try {
         const { rows: staleMessages } = await pool.query(
           `SELECT m.id AS message_id, m.lead_id, m.client_id,
-                  l.name AS lead_name, l.company AS lead_company, l.email AS lead_email,
+                  l.name AS lead_name, l.company AS lead_company,
+                  l.email AS lead_email, l.email_verified AS lead_email_verified, l.email_source AS lead_email_source,
                   l.linkedin_url AS lead_linkedin, l.title AS lead_title
            FROM messages m
            JOIN leads l ON l.id = m.lead_id AND l.deleted_at IS NULL
@@ -2143,7 +2144,7 @@ none from this broken report; check app truth before approving batches.`;
               continue;
             }
 
-            let foundEmail = msg.lead_email;
+            let foundEmail = msg.lead_email_verified === true ? msg.lead_email : null;
 
             if (!foundEmail) {
               try {
@@ -2152,13 +2153,14 @@ none from this broken report; check app truth before approving batches.`;
                   name: msg.lead_name,
                   company: msg.lead_company,
                 });
-                if (result?.email) {
+                if (result?.email && result.status === 'deliverable') {
                   foundEmail = result.email;
+                  const emailSource = result.source || result.email_source || 'findemail';
                   await pool.query(
-                    `UPDATE leads SET email = $1, updated_at = NOW() WHERE id = $2 AND client_id = $3`,
-                    [foundEmail, msg.lead_id, msg.client_id]
+                    `UPDATE leads SET email = $1, email_verified = $2, email_source = $3, updated_at = NOW() WHERE id = $4 AND client_id = $5`,
+                    [foundEmail, result.status === 'deliverable', emailSource, msg.lead_id, msg.client_id]
                   );
-                  logger.info({ msg: `[linkedin-sweep] Found email for ${msg.lead_name}: ${foundEmail}` });
+                  logger.info({ msg: `[linkedin-sweep] Found verified email for ${msg.lead_name}: ${foundEmail}`, source: emailSource });
                 }
               } catch (err) {
                 logger.warn({ msg: `[linkedin-sweep] Email enrichment failed for ${msg.lead_name}`, err: err.message });

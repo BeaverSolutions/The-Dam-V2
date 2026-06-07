@@ -13,7 +13,7 @@
  *   2. Run planner-built source-channel queries across universal signal families
  *   3. Use Haiku to parse company name + signal summary from each result
  *   4. For each extracted company, run LinkedIn people search to find founder/decision-maker
- *   5. Enrich with Hunter first, then MillionVerifier-backed pattern fallback
+ *   5. Enrich with Lusha -> Snov -> Hunter sourcing, then MillionVerifier verification
  *   6. Return leads with P1 tag + signal + why_now + angle
  *
  * These leads become the FIRST batch the outreach pipeline processes
@@ -93,6 +93,8 @@ function signalProviderFanoutCaps(maxPaidQueries = null, maxLeads = 1) {
 
   return {
     maxDomainSearchesPerLead: 0,
+    maxLushaCallsPerLead: perLeadPaidEnrichment,
+    maxSnovCallsPerLead: perLeadPaidEnrichment,
     maxHunterCallsPerLead: perLeadPaidEnrichment,
     maxVerifierCallsPerLead: perLeadVerifierAttempts,
     maxEnrichmentLeads: lookup,
@@ -102,6 +104,8 @@ function signalProviderFanoutCaps(maxPaidQueries = null, maxLeads = 1) {
 function providerFanoutCapsLog(caps) {
   return {
     max_domain_searches_per_lead: caps.maxDomainSearchesPerLead,
+    max_lusha_calls_per_lead: caps.maxLushaCallsPerLead,
+    max_snov_calls_per_lead: caps.maxSnovCallsPerLead,
     max_hunter_calls_per_lead: caps.maxHunterCallsPerLead,
     max_verifier_calls_per_lead: caps.maxVerifierCallsPerLead,
     max_enrichment_leads: caps.maxEnrichmentLeads,
@@ -1837,8 +1841,8 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       continue;
     }
 
-    // Step 5: email enrichment. Uses Hunter while its cap allows, then falls
-    // through to pattern + MillionVerifier when Hunter is exhausted.
+    // Step 5: email enrichment. Sources via Lusha -> Snov -> Hunter, then
+    // trusts only MillionVerifier for deliverability.
     let email = null;
     let email_source = null;
     let email_verified = false;
@@ -1849,6 +1853,8 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         company: signal.company,
         clientId,
         maxDomainSearches: providerFanoutCaps.maxDomainSearchesPerLead,
+        maxLushaCalls: providerFanoutCaps.maxLushaCallsPerLead,
+        maxSnovCalls: providerFanoutCaps.maxSnovCallsPerLead,
         maxHunterCalls: providerFanoutCaps.maxHunterCallsPerLead,
         maxVerifierCalls: providerFanoutCaps.maxVerifierCallsPerLead,
       });

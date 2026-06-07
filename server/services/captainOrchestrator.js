@@ -114,7 +114,7 @@ async function getRunCampaignPreflight(clientId, command) {
                    AND mr.lead_id = l.id
                    AND mr.status IN ('rejected', 'ranger_rejected')
               ) AS prior_reject_count,
-              (l.email IS NOT NULL AND (l.email_verified IS TRUE OR l.email_source = 'hunter')) AS has_verified_email,
+              (l.email IS NOT NULL AND l.email_verified IS TRUE) AS has_verified_email,
               (l.linkedin_url IS NOT NULL AND NOT EXISTS (
                 SELECT 1 FROM messages ml
                  WHERE ml.client_id = $1

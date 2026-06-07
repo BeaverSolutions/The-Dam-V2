@@ -30,7 +30,7 @@ async function gatePendingMessage(row) {
     return { pass: false, reason: `unsupported channel: ${row.channel || 'missing'}` };
   }
   if (row.channel === 'email') {
-    const verified = row.email_verified === true || ['hunter', 'vibe_csv', 'apollo_csv', 'vp_chat', 'pattern+verify'].includes(row.email_source);
+    const verified = row.email_verified === true || ['vibe_csv', 'apollo_csv', 'vp_chat', 'pattern+verify'].includes(row.email_source);
     if (!row.lead_email) {
       return { pass: false, reason: 'email channel without lead email' };
     }

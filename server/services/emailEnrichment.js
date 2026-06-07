@@ -6,11 +6,12 @@
  * Primary: Brave Search via searchService.searchEmailDomain — searches the
  *   inferred company domain for email patterns, picks the one most likely
  *   to belong to the named person.
- * Fallback: Hunter.io email-finder via services/hunter.findEmail.
+ * Provider sourcing: Lusha -> Snov -> Hunter. Provider emails are candidates
+ *   only; MillionVerifier is the deliverability authority.
  *
  * Returns: { email, confidence, source } or null.
- *   confidence is 0-100 (Hunter's score) or a heuristic 0-100 for Brave.
- *   source is 'brave' | 'hunter' | null.
+ *   confidence is 0-100 from the provider/heuristic.
+ *   source is 'brave' | 'lusha' | 'snov' | 'hunter' | null.
  */
 
 const { searchEmailDomain } = require('./searchService');
@@ -92,6 +93,176 @@ async function tryBrave(firstName, lastName, company) {
   return null;
 }
 
+function envKey(...names) {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value && String(value).trim()) return String(value).trim().replace(/^["']|["']$/g, '');
+  }
+  return '';
+}
+
+function firstEmailFromValue(value) {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    const match = value.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    return match ? match[0].toLowerCase() : null;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const email = firstEmailFromValue(item);
+      if (email) return email;
+    }
+    return null;
+  }
+  if (typeof value === 'object') {
+    const priorityKeys = ['email', 'value', 'address', 'workEmail', 'work_email', 'emails'];
+    for (const key of priorityKeys) {
+      const email = firstEmailFromValue(value[key]);
+      if (email) return email;
+    }
+    for (const item of Object.values(value)) {
+      const email = firstEmailFromValue(item);
+      if (email) return email;
+    }
+  }
+  return null;
+}
+
+async function fetchJson(url, options = {}) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), options.timeoutMs || 12000);
+  try {
+    const res = await fetch(url, { ...options, signal: ctl.signal });
+    const text = await res.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = { raw: text };
+    }
+    return { res, data };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function tryLusha(clientId, { firstName, lastName, company, domain }) {
+  const apiKey = envKey('LUSHA_API_KEY');
+  if (!apiKey || !firstName || !company) return null;
+
+  const guard = await spendGuard.checkProvider('lusha', { clientId, estimatedUnits: 1 });
+  if (!guard.allowed) {
+    console.warn(`[emailEnrichment] Lusha blocked by spend guard: ${guard.reason}`);
+    return null;
+  }
+
+  try {
+    const { res, data } = await fetchJson('https://api.lusha.com/v3/contacts/search-and-enrich', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        api_key: apiKey,
+      },
+      body: JSON.stringify({
+        contacts: [{
+          firstName,
+          lastName: lastName || undefined,
+          companyName: company,
+          companyDomain: domain || undefined,
+        }],
+        reveal: ['emails'],
+        options: { includePartialProfiles: true },
+      }),
+    });
+    if (!res.ok) {
+      if ([401, 402, 403, 429].includes(res.status)) {
+        console.warn(`[emailEnrichment] Lusha HTTP ${res.status} - unavailable for this call`);
+      }
+      return null;
+    }
+    await spendGuard.logProviderUsage('lusha', {
+      clientId,
+      units: Math.max(1, Number(data?.billing?.creditsCharged) || 1),
+      metadata: { operation: 'contacts-search-and-enrich', domain: domain || null },
+    });
+    const email = firstEmailFromValue(data?.results);
+    return email ? { email, confidence: 75, source: 'lusha' } : null;
+  } catch (err) {
+    logger.warn({ msg: '[enrichment] Lusha lookup failed', err: err.message });
+    return null;
+  }
+}
+
+async function getSnovAccessToken() {
+  const clientId = envKey('SNOV_CLIENT_ID');
+  const clientSecret = envKey('SNOV_CLIENT_SECRET');
+  if (!clientId || !clientSecret) return null;
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: clientId,
+    client_secret: clientSecret,
+  });
+  const { res, data } = await fetchJson('https://api.snov.io/v1/oauth/access_token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  if (!res.ok || !data?.access_token) return null;
+  return data.access_token;
+}
+
+async function trySnov(clientId, { firstName, lastName, domain }) {
+  if (!firstName || !domain) return null;
+  const token = await getSnovAccessToken();
+  if (!token) return null;
+
+  const guard = await spendGuard.checkProvider('snov', { clientId, estimatedUnits: 1 });
+  if (!guard.allowed) {
+    console.warn(`[emailEnrichment] Snov blocked by spend guard: ${guard.reason}`);
+    return null;
+  }
+
+  try {
+    const params = new URLSearchParams({
+      firstName,
+      lastName: lastName || '',
+      domain,
+    });
+    const start = await fetchJson(`https://api.snov.io/v2/emails-by-domain-by-name/start?${params.toString()}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!start.res.ok) return null;
+    await spendGuard.logProviderUsage('snov', {
+      clientId,
+      units: 1,
+      metadata: { operation: 'emails-by-domain-by-name', domain },
+    });
+    const resultUrl = start.data?.links?.result;
+    const taskHash = start.data?.meta?.task_hash || start.data?.task_hash;
+    const url = resultUrl || (taskHash ? `https://api.snov.io/v2/emails-by-domain-by-name/result/${encodeURIComponent(taskHash)}` : null);
+    if (!url) return firstEmailFromValue(start.data) ? { email: firstEmailFromValue(start.data), confidence: 70, source: 'snov' } : null;
+    const maxPolls = providerCapInt(process.env.SNOV_RESULT_POLLS, 2);
+    const pollDelayMs = providerCapInt(process.env.SNOV_RESULT_POLL_MS, 750);
+    for (let i = 0; i < maxPolls; i++) {
+      if (i > 0 && pollDelayMs > 0) await new Promise(resolve => setTimeout(resolve, pollDelayMs));
+      const result = await fetchJson(url, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!result.res.ok) return null;
+      const email = firstEmailFromValue(result.data);
+      if (email) return { email, confidence: 70, source: 'snov' };
+      const status = String(result.data?.meta?.status || result.data?.status || '').toLowerCase();
+      if (status && !/progress|pending|process/.test(status)) return null;
+    }
+    return null;
+  } catch (err) {
+    logger.warn({ msg: '[enrichment] Snov lookup failed', err: err.message });
+    return null;
+  }
+}
+
 async function tryHunter(clientId, firstName, lastName, company) {
   try {
     const result = await hunter.findEmail(clientId, { firstName, lastName, company });
@@ -110,33 +281,25 @@ async function tryHunter(clientId, firstName, lastName, company) {
 
 /**
  * Find an email for a person at a company.
- * Brave primary → Hunter fallback.
+ * Legacy wrapper kept for older routes. It delegates to findEmail() so every
+ * caller uses Lusha -> Snov -> Hunter sourcing and MillionVerifier authority.
  */
 async function enrichEmail(clientId, { name, company }) {
-  if (!name || !company) return null;
-  const { firstName, lastName } = splitName(name);
-  if (!firstName) return null;
-
-  const brave = await tryBrave(firstName, lastName, company);
-  if (brave) return brave;
-
-  const hunter = await tryHunter(clientId, firstName, lastName, company);
-  if (hunter) return hunter;
-
-  return null;
+  const result = await findEmail({ name, company, clientId });
+  if (!result?.email) return null;
+  return { ...result, source: result.email_source || result.source || null };
 }
 
 /* ════════════════════════════════════════════════════════════════════════
  * Email-discovery v2 (P0 2026-05-23). Spec source: NEXT-SESSION.md P0
  * "Email-discovery service for Research Beaver".
  *
- * Replaces Hunter+VP in pipeline.enrichEmail. Hunter/VP stays in this file
- * for other callers (legacy enrichEmail above) per spec ("file kept").
+ * Replaces direct Hunter/VP in pipeline.enrichEmail. Hunter stays in this file
+ * as the final provider fallback inside findEmail().
  *
- * Architecture: discover domain (Brave 1-2 searches) → scrape /contact +
- * /about for published emails → generate 8 candidate patterns from name +
- * domain → verify via provider-agnostic interface (MillionVerifier impl)
- * → consensus scoring (≥80 only when 2+ sources agree).
+ * Architecture: discover domain (Brave 1-2 searches) -> Lusha -> Snov ->
+ * Hunter candidate sourcing -> scrape/pattern candidates -> verify via
+ * provider-agnostic interface (MillionVerifier impl) -> consensus scoring.
  *
  * Spend discipline (corrections.md 2026-05-23):
  *   - MillionVerifier 500 free credits is a finite asset. Free signals
@@ -374,18 +537,16 @@ async function verifyEmail(email, clientIdOverride = null) {
  *
  * Order (each step is conditional on prior step's confidence):
  *   1. Discover domain (Brave 1-2 searches, fallback to name-pattern guess)
- *   2. Scrape /contact + /about → emails published by the company
- *   3. Generate 8 candidate patterns from name + domain
- *   4. Score candidates against scraped emails (name-match heuristic)
- *      → return first deliverable WITHOUT calling MillionVerifier if
- *        score >= 90 AND scrape confirms exact match (consensus = high
- *        confidence, save the credit)
- *   5. For ambiguous candidates (score 50-89, or scrape empty), verify via
- *      MillionVerifier in priority order, return first deliverable
- *   6. Consensus scoring: 2+ sources agreeing → confidence 80+. Single-source
- *      on catch-all domain → cap confidence 50 + flag isCatchAll
+ *   2. Source via Lusha -> Snov -> Hunter while caps allow
+ *   3. Scrape /contact + /about -> emails published by the company
+ *   4. Generate 8 candidate patterns from name + domain
+ *   5. Score candidates against scraped emails (name-match heuristic)
+ *   6. Verify every selected email candidate through MillionVerifier
+ *   7. Consensus scoring: 2+ sources agreeing -> confidence 80+. Single-source
+ *      on catch-all domain -> cap confidence 50 + flag isCatchAll
  *
- * Spend: free signals first. MillionVerifier verify only when ambiguous.
+ * Spend: provider calls and MillionVerifier are spendGuard-capped. Provider
+ * emails are never trusted as deliverable until MillionVerifier confirms.
  *
  * @param {object} lead — { name, company, domain?, first_name?, last_name? }
  * @returns {Promise<{email, status, confidence, isCatchAll, email_source}|null>}
@@ -393,8 +554,11 @@ async function verifyEmail(email, clientIdOverride = null) {
 async function findEmail(lead) {
   if (!lead?.name || !lead?.company) return null;
   const clientId = lead.clientId || lead.client_id || null;
+  const maxLushaCalls = providerCapInt(lead.maxLushaCalls, lead.skipLusha === true ? 0 : 1);
+  const maxSnovCalls = providerCapInt(lead.maxSnovCalls, lead.skipSnov === true ? 0 : 1);
   const maxHunterCalls = providerCapInt(lead.maxHunterCalls, lead.skipHunter === true ? 0 : 1);
   const maxVerifierCalls = providerCapInt(lead.maxVerifierCalls, 3);
+  let verifierCallsRemaining = maxVerifierCalls;
 
   const domain = lead.domain || await discoverDomain(lead);
   if (!domain) return null;
@@ -408,6 +572,50 @@ async function findEmail(lead) {
     lastName = split.lastName;
   }
   if (!firstName) return null;
+
+  async function verifyProviderEmail(providerResult) {
+    if (!providerResult?.email || verifierCallsRemaining <= 0) return null;
+    verifierCallsRemaining--;
+    const candidateEmail = providerResult.email;
+    const v = await verifyEmail(candidateEmail, clientId);
+    if (v.status === 'deliverable') {
+      return {
+        email: candidateEmail,
+        status: 'deliverable',
+        confidence: Math.min(Math.max(providerResult.confidence || 50, 40) + v.score / 2, 95),
+        isCatchAll: v.isCatchAll,
+        email_source: providerResult.source,
+      };
+    }
+    if (v.status === 'risky' && v.isCatchAll) {
+      return {
+        email: candidateEmail,
+        status: 'risky',
+        confidence: 50,
+        isCatchAll: true,
+        email_source: `${providerResult.source}+catch_all`,
+      };
+    }
+    return null;
+  }
+
+  if (maxLushaCalls > 0) {
+    const lushaResult = await tryLusha(clientId, { firstName, lastName, company: lead.company, domain });
+    const verified = await verifyProviderEmail(lushaResult);
+    if (verified) return verified;
+  }
+
+  if (maxSnovCalls > 0) {
+    const snovResult = await trySnov(clientId, { firstName, lastName, domain });
+    const verified = await verifyProviderEmail(snovResult);
+    if (verified) return verified;
+  }
+
+  if (maxHunterCalls > 0) {
+    const hunterResult = await tryHunter(clientId, firstName, lastName, lead.company);
+    const verified = await verifyProviderEmail(hunterResult);
+    if (verified) return verified;
+  }
 
   // Step 2: scrape contact pages (free)
   const scraped = await scrapeContactEmails(domain);
@@ -427,16 +635,11 @@ async function findEmail(lead) {
   }).sort((a, b) => b.confidence - a.confidence);
 
   // If top candidate is name-scored 90+ AND confirmed by scrape, treat as deliverable
-  // without spending a MillionVerifier credit. Two-source consensus.
+  // only after MillionVerifier confirms deliverability.
   const top = scored[0];
   if (top && top.scrapeHit && top.nameScore >= 90) {
-    return {
-      email: top.email,
-      status: 'deliverable',
-      confidence: Math.min(top.confidence, 99),
-      isCatchAll: false,
-      email_source: 'scrape+pattern',
-    };
+    const verified = await verifyProviderEmail({ email: top.email, confidence: top.confidence, source: 'scrape+pattern' });
+    if (verified) return verified;
   }
 
   // If scraped emails contain ANY @domain address that name-matches, surface it
@@ -444,29 +647,8 @@ async function findEmail(lead) {
   for (const e of scraped) {
     const ns = scoreEmailNameMatch(e, firstName, lastName);
     if (ns >= 50) {
-      return {
-        email: e,
-        status: 'deliverable',
-        confidence: Math.min(ns + 10, 95),
-        isCatchAll: false,
-        email_source: 'scrape',
-      };
-    }
-  }
-
-  // Step 5: use Hunter while its configured free-credit budget is available.
-  // If Hunter is blocked or exhausted, hunter.findEmail returns null and the
-  // MillionVerifier pattern fallback below continues.
-  if (maxHunterCalls > 0) {
-    const hunterResult = await tryHunter(clientId, firstName, lastName, lead.company);
-    if (hunterResult?.email) {
-      return {
-        email: hunterResult.email,
-        status: hunterResult.verified ? 'deliverable' : 'unknown',
-        confidence: hunterResult.confidence || 0,
-        isCatchAll: false,
-        email_source: 'hunter',
-      };
+      const verified = await verifyProviderEmail({ email: e, confidence: ns + 10, source: 'scrape' });
+      if (verified) return verified;
     }
   }
 
@@ -475,7 +657,7 @@ async function findEmail(lead) {
   // order. Name-score over-weights "first.last" patterns that match BOTH
   // name tokens vs. simpler "first@" patterns that match one but are more
   // common in real B2B (Hunter/Apollo stats). Worst case: 3 credits/lead.
-  const verifyCandidates = candidates.slice(0, maxVerifierCalls);
+  const verifyCandidates = candidates.slice(0, verifierCallsRemaining);
   for (const email of verifyCandidates) {
     const nameScore = scoreEmailNameMatch(email, firstName, lastName);
     const v = await verifyEmail(email, clientId);

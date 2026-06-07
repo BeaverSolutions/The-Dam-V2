@@ -418,24 +418,32 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).toContain('function signalProviderFanoutCaps(maxPaidQueries = null, maxLeads = 1)');
     expect(src).toContain('const providerFanoutCaps = signalProviderFanoutCaps(maxPaidQueries, maxLeads)');
     expect(src).toContain('maxDomainSearches: providerFanoutCaps.maxDomainSearchesPerLead');
+    expect(src).toContain('maxLushaCalls: providerFanoutCaps.maxLushaCallsPerLead');
+    expect(src).toContain('maxSnovCalls: providerFanoutCaps.maxSnovCallsPerLead');
     expect(src).toContain('maxHunterCalls: providerFanoutCaps.maxHunterCallsPerLead');
     expect(src).toContain('maxVerifierCalls: providerFanoutCaps.maxVerifierCallsPerLead');
     expect(src).toContain('provider_fanout_caps');
 
     expect(signalHunt._test.signalProviderFanoutCaps(17, 5)).toEqual({
       maxDomainSearchesPerLead: 0,
+      maxLushaCallsPerLead: 1,
+      maxSnovCallsPerLead: 1,
       maxHunterCallsPerLead: 1,
       maxVerifierCallsPerLead: 3,
       maxEnrichmentLeads: 5,
     });
     expect(signalHunt._test.signalProviderFanoutCaps(0, 5)).toEqual({
       maxDomainSearchesPerLead: 0,
+      maxLushaCallsPerLead: 0,
+      maxSnovCallsPerLead: 0,
       maxHunterCallsPerLead: 0,
       maxVerifierCallsPerLead: 0,
       maxEnrichmentLeads: 0,
     });
     expect(signalHunt._test.signalProviderFanoutCaps(null, 20)).toEqual({
       maxDomainSearchesPerLead: 0,
+      maxLushaCallsPerLead: 1,
+      maxSnovCallsPerLead: 1,
       maxHunterCallsPerLead: 1,
       maxVerifierCallsPerLead: 3,
       maxEnrichmentLeads: 20,

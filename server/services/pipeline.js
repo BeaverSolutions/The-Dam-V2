@@ -218,7 +218,7 @@ async function processLead(clientId, lead, ctx = {}) {
       console.log(`[pipeline.processLead] Skipping open-web personalization for ${lead.name}: ${allowPersonalisationSearch ? 'missing signal_package' : 'paid signal disabled'}`);
     }
 
-    // ── 4. Email enrichment (Hunter -> MillionVerifier-backed pattern fallback) ──
+    // ── 4. Email enrichment (Lusha -> Snov -> Hunter -> MillionVerifier) ──
     await enrichEmail(clientId, lead, {
       pipeline_path: pipelinePath,
       hunterService,
@@ -678,7 +678,7 @@ async function persistDraft(clientId, params) {
 // Risk-correct path tonight: extract the two helpers with the highest
 // line-for-line duplication and zero behaviour change:
 //
-//   - enrichEmail(clientId, lead, options)         — Hunter -> MillionVerifier
+//   - enrichEmail(clientId, lead, options)         — Lusha -> Snov -> Hunter -> MillionVerifier
 //   - draftWithFallback(clientId, params)          — Sales Beaver + optional Captain fallback
 //
 // Caller wiring stays. Channel selection, dedup, Captain-validate, persistDraft
@@ -696,17 +696,17 @@ async function persistDraft(clientId, params) {
  * Enrich a lead's email if missing. Mutates `lead` in place and writes to DB.
  *
  * Mirrors the email-enrichment blocks in agents.js:
- *   signal_pipeline: Hunter -> MillionVerifier-backed pattern fallback
- *   kickoff_pipeline: Hunter -> MillionVerifier-backed pattern fallback
+ *   signal_pipeline: Lusha -> Snov -> Hunter -> MillionVerifier
+ *   kickoff_pipeline: Lusha -> Snov -> Hunter -> MillionVerifier
  * Phase 3 signal execution contract: Research must provide company evidence
  * and decision-maker context before this email enrichment step runs. This
- * helper remains the Hunter -> MillionVerifier contact layer only.
+ * helper remains the shared contact-enrichment layer.
  *
  * @param {string} clientId
  * @param {object} lead    Has .id, .name, .company, .email, .quality_score
  * @param {object} options
  *   - pipeline_path:        'signal_pipeline' | 'kickoff_pipeline' (for log prefix)
- *   - hunterService:        legacy injected service; findEmail orchestrator owns Hunter/MillionVerifier order
+ *   - hunterService:        legacy injected service; findEmail orchestrator owns provider order
  *
  * @returns {Promise<{ enriched: boolean, source: string|null, reason: string|null }>}
  *   Side-effect: lead.email / lead.email_source / lead.email_verified updated when found.
@@ -724,16 +724,15 @@ async function enrichEmail(clientId, lead, options = {}) {
 
   // ── v2 (P0 2026-05-23): findEmail orchestrator ───────────────────────
   // VP is not part of autonomous Beaver sourcing. findEmail discovers
-  // domain via Brave, scrapes /contact + /about, generates 8 patterns,
-  // verifies via MillionVerifier only when ambiguous (consensus scoring
-  // saves credits on high-confidence matches).
+  // domain via Brave, tries Lusha -> Snov -> Hunter, scrapes/patterns
+  // candidates, then verifies selected candidates via MillionVerifier.
   //
   // hunterService is legacy DI; the findEmail orchestrator owns the provider
-  // order: public web evidence -> Hunter -> MillionVerifier verification.
+  // order: public web evidence -> Lusha -> Snov -> Hunter -> MillionVerifier.
   //
-  // Spend gate: MillionVerifier 500 credits is finite (corrections.md
-  // 2026-05-23). findEmail prefers free signals (Brave + scrape + pattern)
-  // and only calls verifyEmail for the top 3 ambiguous candidates per lead.
+  // Spend gate: all provider calls are finite and spendGuard-capped.
+  // findEmail spends only within per-lead caps and uses MV as the final
+  // deliverability authority.
   // Per-tenant daily cap upstream (deferred — for now, count via metadata
   // on inserts). Worst case: 3 verify calls per lead × 50 leads/day = 150
   // credits/day. At 500-credit free cap, that's ~3 days. Monitor + paid

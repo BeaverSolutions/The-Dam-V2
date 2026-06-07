@@ -24,6 +24,8 @@ const CAPS = {
   vp: envNumber('VP_DAILY_CREDIT_CAP', 60),
   brave: envNumber('BRAVE_DAILY_QUERY_CAP', 70),
   google_cse: envNumber('GOOGLE_CSE_DAILY_QUERY_CAP', 0),
+  lusha: envNumber('LUSHA_DAILY_QUERY_CAP', 0),
+  snov: envNumber('SNOV_DAILY_QUERY_CAP', 0),
   hunter: envNumber('HUNTER_DAILY_QUERY_CAP', 0),
   millionverifier: envNumber('MILLIONVERIFIER_DAILY_VERIFY_CAP', envNumber('MILLION_VERIFIER_DAILY_CAP', 0)),
   apollo: envNumber('APOLLO_DAILY_QUERY_CAP', 0),
