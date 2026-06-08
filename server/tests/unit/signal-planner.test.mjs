@@ -140,8 +140,7 @@ describe('signal planner', () => {
     expect(plan.queries.every(q => /Malaysia|MY/i.test(q.query))).toBe(true);
     const linkedInJobsQuery = plan.queries.find(q => q.sourceChannel === 'linkedin_jobs')?.query || '';
     expect(linkedInJobsQuery).toMatch(/site:linkedin\.com\/jobs\/view/i);
-    expect(linkedInJobsQuery).toMatch(/site:my\.jobstreet\.com|site:jobstreet\.com\.my/i);
-    expect(linkedInJobsQuery).toMatch(/site:hiredly\.com/i);
+    expect(linkedInJobsQuery).not.toMatch(/jobstreet|hiredly/i);
     expect(linkedInJobsQuery).not.toMatch(/site:linkedin\.com\/jobs(?:\s|$)/i);
     expect(linkedInJobsQuery).toMatch(/Kuala Lumpur|Greater Kuala Lumpur|Malaysia/i);
     expect(linkedInJobsQuery).toMatch(/Sales Executive|Account Executive|Business Development Manager|Sales Manager/i);

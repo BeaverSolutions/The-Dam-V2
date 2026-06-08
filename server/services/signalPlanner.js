@@ -73,10 +73,7 @@ function localJobBoardDomains(geoName) {
 }
 
 function hiringSourcePrefix(sourceChannel, geoName) {
-  if (sourceChannel === 'linkedin_jobs') {
-    const domains = ['site:linkedin.com/jobs/view', ...localJobBoardDomains(geoName)];
-    return domains.length > 1 ? `(${domains.join(' OR ')})` : domains[0];
-  }
+  if (sourceChannel === 'linkedin_jobs') return 'site:linkedin.com/jobs/view';
   if (sourceChannel === 'job_boards') return localJobBoardPrefix(geoName);
   return queryPrefixForSource(sourceChannel);
 }
