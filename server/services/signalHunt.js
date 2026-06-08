@@ -40,7 +40,7 @@ function envInt(name, fallback) {
 const MAX_SIGNAL_QUERIES_PER_RUN = envInt('SIGNAL_HUNT_MAX_QUERIES', 6);
 const MAX_SIGNAL_QUERY_WINDOW = Math.max(MAX_SIGNAL_QUERIES_PER_RUN, envInt('SIGNAL_HUNT_MAX_QUERY_WINDOW', 20));
 const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
-const SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v2';
+const SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v3';
 
 function klDateString() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -227,7 +227,7 @@ function shouldStopSignalDiscovery({
 
 async function blockedByRepeatedZeroQuerySet(clientId, queries = []) {
   const hash = signalQuerySetHash(queries);
-  const key = `signal_hunt_zero_query_set_${klDateString()}_${hash}`;
+  const key = `signal_hunt_zero_query_set_${klDateString()}_${SIGNAL_HUNT_PARSER_VERSION}_${hash}`;
   const { rows } = await pool.query(
     `SELECT content FROM agent_memory
      WHERE client_id = $1 AND agent = 'research_beaver' AND key = $2
@@ -1103,7 +1103,7 @@ async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null
   const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
   const executableDiscoveryQueries = executableDiscoveryQueriesForBudget(config.queries, paidQueryBudget);
   const hash = signalQuerySetHash(executableDiscoveryQueries);
-  const key = `signal_hunt_zero_query_set_${klDateString()}_${hash}`;
+  const key = `signal_hunt_zero_query_set_${klDateString()}_${SIGNAL_HUNT_PARSER_VERSION}_${hash}`;
   const executableQueryCount = executableDiscoveryQueries.length;
   const { rows } = await pool.query(
     `SELECT content FROM agent_memory
@@ -1169,8 +1169,16 @@ Training-publication extraction guidance:
 
 function signalExtractionAgent(query = {}) {
   const signalType = String(query.signal_type || '').toLowerCase();
+  const signalFamily = String(query.signal_family || '').toLowerCase();
   const sourceChannel = String(query.source_channel || '').toLowerCase();
-  if (sourceChannel === 'industry_publication' || /publication|training_growth/.test(signalType)) {
+  if (
+    sourceChannel === 'industry_publication'
+    || (
+      ['press', 'company_news', 'news'].includes(sourceChannel)
+      && /expansion|growth|leadership|org_change|capital|budget/.test(`${signalType} ${signalFamily}`)
+    )
+    || /publication|training_growth/.test(signalType)
+  ) {
     return 'market_sensor';
   }
   return 'research_beaver';
@@ -1235,8 +1243,14 @@ function extractedSignalItems(parsed) {
 
 function isIndustryPublicationQuery(query = {}) {
   const signalType = String(query.signal_type || '').toLowerCase();
+  const signalFamily = String(query.signal_family || '').toLowerCase();
   const sourceChannel = String(query.source_channel || '').toLowerCase();
-  return sourceChannel === 'industry_publication' || /publication|training_growth/.test(signalType);
+  return sourceChannel === 'industry_publication'
+    || (
+      ['press', 'company_news', 'news'].includes(sourceChannel)
+      && /expansion|growth|leadership|org_change|capital|budget/.test(`${signalType} ${signalFamily}`)
+    )
+    || /publication|training_growth/.test(signalType);
 }
 
 function publicationTitle(result = {}) {

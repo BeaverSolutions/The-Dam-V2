@@ -550,6 +550,7 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).toContain('SIGNAL_HUNT_PARSER_VERSION');
     expect(src).toContain('parser_version');
     expect(src).toContain('signal_hunt_zero_query_set_');
+    expect(src).toContain('signal_hunt_zero_query_set_${klDateString()}_${SIGNAL_HUNT_PARSER_VERSION}_${hash}');
     expect(src).toContain("'signal_hunt_zero_query_set_blocked'");
     expect(src).toContain("'repeated_zero_output_query_set'");
     expect(src).toContain("'raw_candidates_zero'");
@@ -831,6 +832,11 @@ describe('signal extraction helpers', () => {
       source_channel: 'industry_publication',
     })).toBe('market_sensor');
     expect(signalHunt._test.signalExtractionAgent({
+      signal_type: 'leadership_change',
+      signal_family: 'leadership_org_change',
+      source_channel: 'press',
+    })).toBe('market_sensor');
+    expect(signalHunt._test.signalExtractionAgent({
       signal_type: 'hiring_sales',
       source_channel: 'web_search',
     })).toBe('research_beaver');
@@ -948,6 +954,31 @@ describe('signal extraction helpers', () => {
       'VLT Malaysia',
     ]);
     expect(signals.every(s => s.confidence >= 0.5 && s.source_url)).toBe(true);
+  });
+
+  it('deterministically extracts active-profile press expansion and leadership signals the LLM can miss', () => {
+    const results = [
+      {
+        title: 'PRecious Communications names first regional COO, expands leadership remit in Malaysia | Marketing-Interactive',
+        link: 'https://www.marketing-interactive.com/precious-communications-names-first-regional-coo-expands-leadership-remit-in-malaysia',
+        date: 'November 6, 2025',
+      },
+      {
+        title: 'Ruder Finn Asia Group Appoints General Manager of Ruder Finn Malaysia - MARKETING Magazine Asia',
+        link: 'https://archive.marketingmagazine.com.my/ruder-finn-asia-group-appoints-general-manager-of-ruder-finn-malaysia/',
+      },
+    ];
+
+    const leadership = signalHunt._test.deterministicPublicationSignals(results, {
+      signal_type: 'leadership_change',
+      signal_family: 'leadership_org_change',
+      source_channel: 'press',
+      country: 'MY',
+    });
+
+    expect(leadership.map(s => s.company)).toEqual(['PRecious Communications', 'Ruder Finn Malaysia']);
+    expect(leadership.every(s => s.signal_type === 'leadership_change')).toBe(true);
+    expect(leadership.every(s => s.confidence >= 0.5 && s.source_url)).toBe(true);
   });
 
   it('deterministically extracts local hiring companies from LinkedIn job result titles', () => {

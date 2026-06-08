@@ -35,7 +35,7 @@ function sourceChannelsForPlan(signal, preferred) {
 }
 
 function queryPrefixForSource(sourceChannel) {
-  if (sourceChannel === 'linkedin_jobs') return 'site:linkedin.com/jobs';
+  if (sourceChannel === 'linkedin_jobs') return 'site:linkedin.com/jobs/view';
   if (sourceChannel === 'company_careers') return '("careers" OR "jobs" OR "join our team")';
   if (sourceChannel === 'meta_ad_library') return 'site:facebook.com/ads/library';
   if (sourceChannel === 'google_ads_transparency') return 'site:adstransparency.google.com';

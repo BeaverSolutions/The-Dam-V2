@@ -139,6 +139,8 @@ describe('signal planner', () => {
     expect(plan.queries.some(q => /sales|business development|SDR/i.test(q.query))).toBe(true);
     expect(plan.queries.every(q => /Malaysia|MY/i.test(q.query))).toBe(true);
     const linkedInJobsQuery = plan.queries.find(q => q.sourceChannel === 'linkedin_jobs')?.query || '';
+    expect(linkedInJobsQuery).toMatch(/site:linkedin\.com\/jobs\/view/i);
+    expect(linkedInJobsQuery).not.toMatch(/site:linkedin\.com\/jobs(?:\s|$)/i);
     expect(linkedInJobsQuery).toMatch(/Kuala Lumpur|Greater Kuala Lumpur|Malaysia/i);
     expect(linkedInJobsQuery).toMatch(/Sales Executive|Account Executive|Business Development Manager|Sales Manager/i);
     expect(linkedInJobsQuery).not.toMatch(/B2B agency/i);
