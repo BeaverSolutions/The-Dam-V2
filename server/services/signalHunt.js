@@ -83,6 +83,135 @@ function signalPaidBudgetSplit(maxPaidQueries = null, maxLeads = 1) {
   };
 }
 
+function platformFunnelKeyFor(step = {}) {
+  const platform = String(step.platform || step.source_channel || 'unknown').trim() || 'unknown';
+  const queryHash = platformRegistry.hashQuery(step.query || '');
+  return `${platform}|${queryHash}`;
+}
+
+function platformFromLead(lead = {}) {
+  return String(
+    lead?.metadata?.platform
+    || lead?.metadata?.signal_package?.platform
+    || lead?.metadata?.source_platform
+    || lead?.platform
+    || ''
+  ).trim();
+}
+
+function createPlatformFunnelTracker({ mode = 'proof', planId = null } = {}) {
+  const rows = new Map();
+
+  const ensure = (step = {}) => {
+    const key = platformFunnelKeyFor(step);
+    if (!rows.has(key)) {
+      const provider = step.provider || 'brave';
+      const validation = platformRegistry.validateQuery(step.query || '', provider);
+      rows.set(key, {
+        plan_id: step.platform_plan_id || step.plan_id || planId || null,
+        platform: String(step.platform || step.source_channel || 'unknown').trim() || 'unknown',
+        provider,
+        mode: step.mode || mode || 'proof',
+        signal_id: step.signal_id || step.signal_type || null,
+        signal_family: step.signal_family || signalFamilyForType(step.signal_id || step.signal_type),
+        source_channel: step.source_channel || null,
+        geo: step.geo || step.country || null,
+        query: step.query || null,
+        query_hash: validation.query_hash,
+        query_chars: validation.chars,
+        query_words: validation.words,
+        query_valid: validation.valid,
+        paid_units: 0,
+        raw_results: 0,
+        extracted_signals: 0,
+        vertical_verified: 0,
+        saved_leads: 0,
+        blocker: null,
+        error_code: null,
+        metadata: {},
+      });
+    }
+    return rows.get(key);
+  };
+
+  const recordSearch = (step, results = []) => {
+    const row = ensure(step);
+    row.paid_units += 1;
+    row.raw_results += Array.isArray(results) ? results.length : 0;
+    return row;
+  };
+
+  const recordExtraction = (step, count = 0) => {
+    const row = ensure(step);
+    row.extracted_signals += Math.max(0, Number(count) || 0);
+    return row;
+  };
+
+  const recordBlocked = (step, blocker, validation = null) => {
+    const row = ensure(step);
+    row.blocker = blocker || row.blocker || 'platform_query_blocked';
+    row.error_code = row.error_code || row.blocker;
+    if (validation) {
+      row.query_hash = validation.query_hash || row.query_hash;
+      row.query_chars = validation.chars ?? row.query_chars;
+      row.query_words = validation.words ?? row.query_words;
+      row.query_valid = validation.valid !== false;
+    }
+    return row;
+  };
+
+  const recordVerticalVerified = (signal = {}) => {
+    const platform = platformFromLead(signal) || String(signal.platform || signal.source_channel || '').trim();
+    const queryHash = signal.query ? platformRegistry.hashQuery(signal.query) : null;
+    const row = [...rows.values()].find(item => {
+      if (platform && item.platform !== platform) return false;
+      return !queryHash || item.query_hash === queryHash;
+    });
+    if (row) row.vertical_verified += 1;
+    return row || null;
+  };
+
+  const events = () => [...rows.values()].map(row => ({ ...row, metadata: { ...(row.metadata || {}) } }));
+
+  const withSavedLeads = (savedLeads = []) => {
+    const savedByPlatform = new Map();
+    for (const lead of Array.isArray(savedLeads) ? savedLeads : []) {
+      const platform = platformFromLead(lead);
+      if (!platform) continue;
+      savedByPlatform.set(platform, (savedByPlatform.get(platform) || 0) + 1);
+    }
+    return events().map(row => ({
+      ...row,
+      saved_leads: savedByPlatform.get(row.platform) || 0,
+    }));
+  };
+
+  return {
+    recordSearch,
+    recordExtraction,
+    recordBlocked,
+    recordVerticalVerified,
+    events,
+    withSavedLeads,
+  };
+}
+
+function attachPlatformFunnelToSignalHuntResult(leads, platformFunnel = []) {
+  const result = Array.isArray(leads) ? leads : [];
+  Object.defineProperty(result, 'platform_funnel', {
+    value: Array.isArray(platformFunnel) ? platformFunnel : [],
+    enumerable: false,
+    configurable: true,
+  });
+  return result;
+}
+
+function platformFunnelFromSignalHuntResult(result = []) {
+  return Array.isArray(result) && Array.isArray(result.platform_funnel)
+    ? result.platform_funnel
+    : [];
+}
+
 function signalProviderFanoutCaps(maxPaidQueries = null, maxLeads = 1) {
   const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
   const target = Math.max(1, Math.ceil(Number(maxLeads) || 1));
@@ -1714,9 +1843,16 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   const providerFanoutCaps = signalProviderFanoutCaps(maxPaidQueries, maxLeads);
   const executableDiscoveryQueries = executableDiscoveryQueriesForBudget(config.queries, paidQueryBudget);
   const zeroSet = await blockedByRepeatedZeroQuerySet(clientId, executableDiscoveryQueries);
+  const platformFunnelTracker = createPlatformFunnelTracker({
+    mode: platformPlan?.mode || 'proof',
+    planId: activePlanId,
+  });
   if (zeroSet.blocked) {
     console.log('[signalHunt] Blocking repeated zero-output query set for today');
-    return [];
+    for (const q of executableDiscoveryQueries) {
+      platformFunnelTracker.recordBlocked(q, 'repeated_zero_query_set');
+    }
+    return attachPlatformFunnelToSignalHuntResult([], platformFunnelTracker.events());
   }
 
   const allSignals = [];
@@ -1747,6 +1883,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     const validation = platformRegistry.validateQuery(q.query, provider);
     if (!validation.valid) {
       const queryBlocker = validation.blocker || 'provider_query_limit_exceeded';
+      platformFunnelTracker.recordBlocked(q, queryBlocker, validation);
       await logsService.createLog(clientId, {
         agent: 'research_beaver',
         action: 'signal_query_blocked',
@@ -1786,7 +1923,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         }),
       }).catch(() => {});
       console.log(`[signalHunt] Query blocked before provider call: ${queryBlocker}`);
-      return [];
+      return attachPlatformFunnelToSignalHuntResult([], platformFunnelTracker.events());
     }
 
     if (!consumePaidQuery(1)) {
@@ -1802,6 +1939,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       const geoText = countryNameFromCode(country);
       const results = await searchOpenWeb(q.query, config.max_results_per_query || 5, { country, clientId });
       const safeResults = Array.isArray(results) ? results : [];
+      platformFunnelTracker.recordSearch(q, safeResults);
       rawResultsTotal += safeResults.length;
       stageStats.raw_results_total = rawResultsTotal;
       for (const result of safeResults.slice(0, 2)) {
@@ -1818,6 +1956,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
 
       const extracted = await extractSignalsFromResults(clientId, safeResults, q, geoText);
       const validSignals = extracted.filter(s => s.company && validSignalCompanyName(s.company) && s.confidence >= 0.5);
+      platformFunnelTracker.recordExtraction(q, validSignals.length);
 
       // Assign tier from the query config
       validSignals.forEach(s => {
@@ -1833,11 +1972,13 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         s.expected_evidence = q.expected_evidence || s.expected_evidence || [];
         s.source_term = q.source_term || q.term || s.source_term || null;
         s.reject_rules = q.reject_rules || s.reject_rules || {};
+        s.query = q.query;
       });
       allSignals.push(...validSignals);
 
       console.log(`[signalHunt] Query "${q.signal_type}" extracted ${validSignals.length} signals`);
     } catch (err) {
+      platformFunnelTracker.recordBlocked(q, 'provider_query_error');
       console.warn(`[signalHunt] Query failed: ${err.message}`);
     }
   }
@@ -1871,7 +2012,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         stageStats,
       }),
     }).catch(() => {});
-    return [];
+    return attachPlatformFunnelToSignalHuntResult([], platformFunnelTracker.events());
   }
 
   // Step 2: Dedupe by company name
@@ -1914,6 +2055,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       continue;
     }
     stageStats.icp_passed++;
+    platformFunnelTracker.recordVerticalVerified(signal);
 
     await assertLlmBudgetOpen(clientId);
     if (!consumePaidQuery(1)) {
@@ -2089,7 +2231,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   }
 
   console.log(`[signalHunt] Returning ${leads.length} leads with decision-makers`);
-  return leads;
+  return attachPlatformFunnelToSignalHuntResult(leads, platformFunnelTracker.events());
 }
 
 /**
@@ -2239,6 +2381,7 @@ module.exports = {
   saveSignalLeads,
   loadSignalConfig,
   previewSignalHuntPlan,
+  platformFunnelFromSignalHuntResult,
   _test: {
     applySignalPlaybookToConfig,
     attachSignalPackageToSignalLead,
@@ -2261,6 +2404,8 @@ module.exports = {
     signalQueryWindow,
     signalPaidBudgetSplit,
     signalProviderFanoutCaps,
+    createPlatformFunnelTracker,
+    platformFunnelFromSignalHuntResult,
     executableDiscoveryQueriesForBudget,
     shouldStopSignalDiscovery,
     trustedSignalHuntConfigContent,

@@ -1316,7 +1316,12 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
       });
     }
     const before = await proofCounts();
-    const { runSignalHunt, saveSignalLeads, previewSignalHuntPlan } = require('../services/signalHunt');
+    const {
+      runSignalHunt,
+      saveSignalLeads,
+      previewSignalHuntPlan,
+      platformFunnelFromSignalHuntResult,
+    } = require('../services/signalHunt');
     const { buildPlatformPlan, loadApprovedPlatformPlan } = require('../services/platformPlan');
     const platformPlanPreview = buildPlatformPlan({
       clientId,
@@ -1392,50 +1397,20 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
       platformPlan: approvedPlatformPlan,
     }));
     const saved = await saveSignalLeads(clientId, leads);
-    const { recordPlatformYield, updateStrategyStateFromPlan } = require('../services/platformYield');
-    const leadPlatform = lead => String(
-      lead?.metadata?.platform
-      || lead?.metadata?.signal_package?.platform
-      || lead?.metadata?.source_platform
-      || ''
-    );
-    const savedCountForPlatform = platform => saved.filter(lead => leadPlatform(lead) === platform).length;
-    const candidateCountForPlatform = platform => (Array.isArray(leads) ? leads : [])
-      .filter(lead => leadPlatform(lead) === platform).length;
-    const platformYieldEvents = [];
-    const executableQuerySet = new Set((queryPlan.executable_queries || []).map(q => String(q.query || '')));
-    const executedPlatformSteps = (approvedPlatformPlan.platform_sequence || [])
-      .filter(step => executableQuerySet.has(String(step.query || '')));
-    for (const step of executedPlatformSteps) {
-      const platform = String(step.platform || '').trim();
-      const savedForPlatform = savedCountForPlatform(platform);
-      const candidatesForPlatform = candidateCountForPlatform(platform);
-      const event = await recordPlatformYield(clientId, {
-        plan_id: approvedPlatformPlan.id,
-        platform: platform || 'unknown',
-        provider: step.provider || 'brave',
-        mode: 'proof',
-        signal_id: step.signal_id || null,
-        signal_family: step.signal_family || null,
-        source_channel: step.source_channel || null,
-        geo: step.geo || null,
-        query: step.query || null,
-        paid_units: step.query ? 1 : 0,
-        raw_candidates: candidatesForPlatform,
-        icp_passed: candidatesForPlatform,
-        decision_makers_found: candidatesForPlatform,
-        contacts_found: savedForPlatform,
-        saved_leads: savedForPlatform,
-        approval_ready: savedForPlatform,
-        blocker: savedForPlatform > 0 ? null : 'zero_saved_leads_for_platform',
-        metadata: {
-          source: 'v2_1_research_proof',
-          query_set_hash: queryPlan.query_set_hash,
-          plan_hash: approvedPlatformPlan.plan_hash,
-        },
-      });
-      platformYieldEvents.push(event);
-    }
+    const {
+      recordSignalHuntPlatformFunnel,
+      updateStrategyStateFromPlan,
+    } = require('../services/platformYield');
+    const platformYieldEvents = await recordSignalHuntPlatformFunnel(clientId, {
+      funnel: platformFunnelFromSignalHuntResult(leads),
+      savedLeads: saved,
+      plan: approvedPlatformPlan,
+      mode: 'proof',
+      source: 'v2_1_research_proof',
+      metadata: {
+        query_set_hash: queryPlan.query_set_hash,
+      },
+    });
     const strategyState = await updateStrategyStateFromPlan(clientId, approvedPlatformPlan, {
       saved_leads: saved.length,
       approval_ready: saved.length,

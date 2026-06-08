@@ -803,7 +803,8 @@ async function runDbBuilder() {
           const approvedPlatformPlanDirectives = researchDirectives.filter(d => d.directive_type === 'execute_approved_platform_plan');
           if (approvedPlatformPlanDirectives.length > 0) {
             const { loadApprovedPlatformPlan } = require('./platformPlan');
-            const { runSignalHunt, saveSignalLeads } = require('./signalHunt');
+            const { runSignalHunt, saveSignalLeads, platformFunnelFromSignalHuntResult } = require('./signalHunt');
+            const { recordSignalHuntPlatformFunnel } = require('./platformYield');
             const icpMemory = await loadCanonicalIcp(client.id);
 
             for (const directive of approvedPlatformPlanDirectives) {
@@ -842,6 +843,14 @@ async function runDbBuilder() {
                   plan_id: platformPlan.id,
                 });
                 const savedSignalLeads = await saveSignalLeads(client.id, signalLeads);
+                const platformYieldEvents = await recordSignalHuntPlatformFunnel(client.id, {
+                  funnel: platformFunnelFromSignalHuntResult(signalLeads),
+                  savedLeads: savedSignalLeads,
+                  plan: platformPlan,
+                  mode: payload.mode || platformPlan.mode || 'proof',
+                  directiveId: directive.id,
+                  source: 'db_builder_execute_approved_platform_plan',
+                });
 
                 await logsService.createLog(client.id, {
                   agent: 'research_beaver',
@@ -859,6 +868,7 @@ async function runDbBuilder() {
                     platform_sequence_count: platformPlan.platform_sequence.length,
                     found: signalLeads.length,
                     saved: savedSignalLeads.length,
+                    platform_yield_events: platformYieldEvents.map(row => row.id),
                   },
                 });
                 consumedDirectiveIds.push(directive.id);
@@ -889,7 +899,8 @@ async function runDbBuilder() {
           const signalPlaybookDirectives = researchDirectives.filter(d => d.directive_type === 'run_signal_playbook');
           if (signalPlaybookDirectives.length > 0) {
             const { loadApprovedPlatformPlan } = require('./platformPlan');
-            const { runSignalHunt, saveSignalLeads } = require('./signalHunt');
+            const { runSignalHunt, saveSignalLeads, platformFunnelFromSignalHuntResult } = require('./signalHunt');
+            const { recordSignalHuntPlatformFunnel } = require('./platformYield');
             const icpMemory = await loadCanonicalIcp(client.id);
 
             for (const directive of signalPlaybookDirectives) {
@@ -949,6 +960,16 @@ async function runDbBuilder() {
                   plan_id: platformPlan?.id || payload.plan_id || null,
                 });
                 const savedSignalLeads = await saveSignalLeads(client.id, signalLeads);
+                const platformYieldEvents = platformPlan
+                  ? await recordSignalHuntPlatformFunnel(client.id, {
+                    funnel: platformFunnelFromSignalHuntResult(signalLeads),
+                    savedLeads: savedSignalLeads,
+                    plan: platformPlan,
+                    mode: payload.mode || platformPlan.mode || 'proof',
+                    directiveId: directive.id,
+                    source: 'db_builder_run_signal_playbook',
+                  })
+                  : [];
 
                 await logsService.createLog(client.id, {
                   agent: 'research_beaver',
@@ -965,6 +986,7 @@ async function runDbBuilder() {
                     max_paid_queries: maxPaidQueries,
                     found: signalLeads.length,
                     saved: savedSignalLeads.length,
+                    platform_yield_events: platformYieldEvents.map(row => row.id),
                   },
                 });
                 consumedDirectiveIds.push(directive.id);

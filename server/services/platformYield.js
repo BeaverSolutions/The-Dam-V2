@@ -85,6 +85,70 @@ async function recordPlatformYield(clientId, event = {}) {
   return row;
 }
 
+async function recordSignalHuntPlatformFunnel(clientId, {
+  funnel = [],
+  savedLeads = [],
+  plan = {},
+  mode = 'proof',
+  directiveId = null,
+  source = 'signal_hunt',
+  metadata = {},
+} = {}) {
+  const savedByPlatform = new Map();
+  for (const lead of Array.isArray(savedLeads) ? savedLeads : []) {
+    const platform = String(
+      lead?.metadata?.platform
+      || lead?.metadata?.signal_package?.platform
+      || lead?.metadata?.source_platform
+      || ''
+    ).trim();
+    if (!platform) continue;
+    savedByPlatform.set(platform, (savedByPlatform.get(platform) || 0) + 1);
+  }
+
+  const events = [];
+  for (const row of Array.isArray(funnel) ? funnel : []) {
+    const platform = String(row.platform || '').trim() || 'unknown';
+    const savedCount = savedByPlatform.get(platform) || nonNegativeInteger(row.saved_leads);
+    const rawCandidates = nonNegativeInteger(row.raw_candidates ?? row.extracted_signals);
+    const event = await recordPlatformYield(clientId, {
+      plan_id: row.plan_id || plan.id || plan.plan_id || null,
+      directive_id: directiveId || row.directive_id || null,
+      platform,
+      provider: row.provider || null,
+      mode: row.mode || mode || plan.mode || 'proof',
+      signal_id: row.signal_id || null,
+      signal_family: row.signal_family || null,
+      source_channel: row.source_channel || null,
+      geo: row.geo || null,
+      query: row.query || null,
+      query_hash: row.query_hash || null,
+      query_chars: row.query_chars,
+      query_words: row.query_words,
+      query_valid: row.query_valid !== false,
+      paid_units: row.paid_units,
+      raw_results: row.raw_results,
+      raw_candidates: rawCandidates,
+      icp_passed: row.icp_passed ?? row.vertical_verified,
+      decision_makers_found: row.decision_makers_found,
+      contacts_found: row.contacts_found ?? savedCount,
+      saved_leads: savedCount,
+      approval_ready: savedCount,
+      blocker: row.blocker || (savedCount > 0 ? null : 'zero_saved_leads_for_platform'),
+      error_code: row.error_code || null,
+      metadata: {
+        source,
+        plan_hash: plan.plan_hash || null,
+        query_set_hash: plan.query_set_hash || null,
+        ...(row.metadata || {}),
+        ...(metadata || {}),
+      },
+    });
+    events.push(event);
+  }
+  return events;
+}
+
 async function updateStrategyStateFromPlan(clientId, plan = {}, result = {}) {
   const outputCount = nonNegativeInteger(result.approval_ready ?? result.saved_leads ?? result.saved);
   const health = classifyStrategyHealth({
@@ -164,5 +228,6 @@ module.exports = {
   classifyStrategyHealth,
   strategyKeyForPlan,
   recordPlatformYield,
+  recordSignalHuntPlatformFunnel,
   updateStrategyStateFromPlan,
 };

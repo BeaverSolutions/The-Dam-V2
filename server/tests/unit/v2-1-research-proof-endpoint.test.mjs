@@ -32,7 +32,8 @@ describe('V2.1 research proof endpoint', () => {
     expect(body).toContain('REPEATED_ZERO_QUERY_SET');
     expect(body).toContain('required_confirmation');
     expect(body).toContain('platformPlan: approvedPlatformPlan');
-    expect(body).toContain('recordPlatformYield');
+    expect(body).toContain('platformFunnelFromSignalHuntResult');
+    expect(body).toContain('recordSignalHuntPlatformFunnel');
     expect(body).toContain('updateStrategyStateFromPlan');
     expect(body).toContain('runWithClientContext(clientId, () => runSignalHunt(clientId, {');
     expect(body).toContain('maxLeads: proofLimit');

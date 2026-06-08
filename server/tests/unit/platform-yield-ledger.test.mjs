@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const platformYield = require('../../services/platformYield');
+const signalHunt = require('../../services/signalHunt');
 const pool = require('../../db/pool');
 const originalQuery = pool.query;
 
@@ -18,6 +19,9 @@ const migration = readFileSync(
   'utf-8'
 ).replace(/\r\n/g, '\n');
 const compactMigration = migration.replace(/\s+/g, ' ');
+const signalHuntSource = readFileSync(resolve(__dirname, '../../services/signalHunt.js'), 'utf-8');
+const autonomousSource = readFileSync(resolve(__dirname, '../../routes/autonomous.js'), 'utf-8');
+const dbBuilderSource = readFileSync(resolve(__dirname, '../../services/dbBuilder.js'), 'utf-8');
 
 describe('platform plan yield ledger migration', () => {
   const escapeSqlPattern = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
@@ -261,5 +265,65 @@ describe('platform yield pure helpers', () => {
     expect(params[16]).toBe(2);
     expect(params[26]).toBe('provider_query_limit_exceeded');
     expect(JSON.parse(params[28]).parser).toBe('hiring_job_board');
+  });
+
+  it('tracks execution-time per-platform raw, extracted, vertical, and saved counts', () => {
+    expect(typeof signalHunt._test.createPlatformFunnelTracker).toBe('function');
+    expect(typeof signalHunt._test.platformFunnelFromSignalHuntResult).toBe('function');
+
+    const tracker = signalHunt._test.createPlatformFunnelTracker({ mode: 'proof', planId: 'plan-1' });
+    const jobstreet = {
+      platform: 'jobstreet_my',
+      provider: 'brave',
+      signal_id: 'hiring_sales_roles',
+      signal_family: 'hiring_capability_build',
+      source_channel: 'job_boards',
+      geo: 'MY',
+      country: 'MY',
+      query: 'site:my.jobstreet.com ("sales executive") Malaysia',
+    };
+    const hiredly = {
+      ...jobstreet,
+      platform: 'hiredly_my',
+      source_channel: 'job_boards',
+      query: 'site:hiredly.com ("sales executive") Malaysia',
+    };
+
+    tracker.recordSearch(jobstreet, [{ title: 'A' }, { title: 'B' }, { title: 'C' }]);
+    tracker.recordExtraction(jobstreet, 2);
+    tracker.recordSearch(hiredly, [{ title: 'D' }, { title: 'E' }, { title: 'F' }]);
+    tracker.recordExtraction(hiredly, 1);
+    tracker.recordVerticalVerified({ platform: 'hiredly_my', provider: 'brave' });
+
+    const funnel = tracker.withSavedLeads([
+      { metadata: { signal_package: { platform: 'hiredly_my' } } },
+    ]);
+
+    expect(funnel).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        platform: 'jobstreet_my',
+        raw_results: 3,
+        extracted_signals: 2,
+        vertical_verified: 0,
+        saved_leads: 0,
+      }),
+      expect.objectContaining({
+        platform: 'hiredly_my',
+        raw_results: 3,
+        extracted_signals: 1,
+        vertical_verified: 1,
+        saved_leads: 1,
+      }),
+    ]));
+  });
+
+  it('records platform yield from the Signal Hunt funnel instead of reconstructing from saved leads only', () => {
+    expect(typeof platformYield.recordSignalHuntPlatformFunnel).toBe('function');
+    expect(autonomousSource).toContain('platformFunnelFromSignalHuntResult(leads)');
+    expect(autonomousSource).toContain('recordSignalHuntPlatformFunnel(clientId');
+    expect(autonomousSource).not.toContain('candidateCountForPlatform');
+    expect(autonomousSource).not.toContain('raw_candidates: candidatesForPlatform');
+    expect(dbBuilderSource).toContain('recordSignalHuntPlatformFunnel(client.id');
+    expect(signalHuntSource).toContain('platform_funnel');
   });
 });
