@@ -33,6 +33,7 @@ function platformPlanHashInput(plan = {}) {
   return {
     client_id: plan.client_id,
     mode: plan.mode,
+    discovery_mode: plan.discovery_mode || null,
     objective: plan.objective,
     requested_count: Number(plan.requested_count),
     max_paid_queries: Number(plan.max_paid_queries),
@@ -84,6 +85,23 @@ function activeIndustry(icp = {}) {
   return candidates[0] || 'corporate training';
 }
 
+function activeIndustries(icp = {}) {
+  const candidates = [
+    ...list(icp.icp?.active_industries),
+    ...list(icp.icp?.verticals),
+    ...list(icp.active_industries),
+    ...list(icp.verticals),
+  ];
+  const seen = new Set();
+  const unique = candidates.filter(item => {
+    const key = item.toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return unique.length > 0 ? unique : [activeIndustry(icp)];
+}
+
 function hiringLocation(geo) {
   if (geo === 'MY') return 'Malaysia';
   if (geo === 'SG') return 'Singapore';
@@ -101,16 +119,61 @@ function hiringQueryForPlatform(platformId, industry, geo) {
   return `${HIRING_ROLES} ${location}`;
 }
 
+function planModeForRequest(mode) {
+  return String(mode || 'proof') === 'vertical_first' ? 'proof' : String(mode || 'proof');
+}
+
+function discoveryModeForRequest(mode) {
+  return String(mode || '') === 'vertical_first' ? 'vertical_first' : 'signal_first';
+}
+
+function verticalQueryTerm(industry = '') {
+  const value = String(industry || '').trim();
+  if (/corporate training|professional training|l&d|learning|coaching|skills development/i.test(value)) {
+    return 'corporate training';
+  }
+  if (/marketing|digital|creative|advertising|media|content|pr|communications?/i.test(value)) {
+    return 'marketing agency';
+  }
+  return value || 'B2B services';
+}
+
+function verticalFirstQueryForPlatform(platformId, industry, geo) {
+  const location = hiringLocation(geo);
+  const term = verticalQueryTerm(industry);
+  const isAgency = /agency|marketing|digital|creative|advertising|media|content|pr/i.test(term);
+  const isTraining = /training|learning|coaching|skill/i.test(term);
+
+  if (platformId === 'agency_directory') {
+    return isAgency
+      ? `("marketing agency" OR "digital agency" OR "creative agency" OR "PR agency") ${location}`
+      : `("${term}" OR "${term} provider" OR "${term} company") ${location}`;
+  }
+  if (platformId === 'training_directory') {
+    return isTraining
+      ? `("corporate training provider" OR "training company" OR "learning and development provider") ${location}`
+      : `("${term}" OR "${term} firm" OR "${term} company") ${location}`;
+  }
+  return `"${term}" ${location} (company OR provider OR agency)`;
+}
+
 function positiveInteger(value, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number) || number < 1) return fallback;
   return Math.floor(number);
 }
 
-function excludedPlatformsFor(signalFamily, selectedPlatforms, allPlatforms) {
+function excludedPlatformsFor(signalFamily, selectedPlatforms, allPlatforms, discoveryMode = 'signal_first') {
   const selected = new Set(selectedPlatforms.map(platform => platform.id));
   const available = new Set(allPlatforms.map(platform => platform.id));
   const excluded = [];
+
+  if (discoveryMode === 'vertical_first') {
+    return ['jobstreet_my', 'hiredly_my', 'linkedin_jobs', 'company_careers'].map(platform => ({
+      platform,
+      reason: 'vertical-first discovery sources company vertical directly; hiring platforms stay secondary',
+    }));
+  }
 
   if (
     signalFamily === 'hiring_capability_build'
@@ -135,23 +198,38 @@ function buildPlatformPlan({
   mode = 'proof',
   allowedPlatforms = null,
 } = {}) {
+  const requestedMode = String(mode || 'proof');
+  const planMode = planModeForRequest(requestedMode);
+  const discoveryMode = discoveryModeForRequest(requestedMode);
   const signal = firstActiveSignal(icp);
-  const signalFamily = signal.family || signal.signal_family || 'hiring_capability_build';
-  const signalId = signal.id || signal.signal_id || 'hiring_sales_roles';
+  const signalFamily = discoveryMode === 'vertical_first'
+    ? 'vertical_first_discovery'
+    : (signal.family || signal.signal_family || 'hiring_capability_build');
+  const signalId = discoveryMode === 'vertical_first'
+    ? 'vertical_first_discovery'
+    : (signal.id || signal.signal_id || 'hiring_sales_roles');
   const geo = firstGeo(icp);
   const industry = activeIndustry(icp);
+  const industries = activeIndustries(icp);
   const requested = positiveInteger(requestedCount, 5);
   const paidQueryLimit = positiveInteger(maxPaidQueries, requested);
   const allowed = allowedPlatforms ? new Set(allowedPlatforms) : null;
-  const allPlatforms = registry.platformsFor({ signalFamily, geo });
-  const platforms = allPlatforms
-    .filter(platform => !allowed || allowed.has(platform.id))
+  const allPlatforms = discoveryMode === 'vertical_first'
+    ? registry.platformsFor({ discoveryMode, geo })
+    : registry.platformsFor({ signalFamily, geo });
+  const platformInputs = discoveryMode === 'vertical_first'
+    ? industries.flatMap(sourceIndustry => allPlatforms.map(platform => ({ platform, industry: sourceIndustry })))
+    : allPlatforms.map(platform => ({ platform, industry }));
+  const selectedInputs = platformInputs
+    .filter(item => !allowed || allowed.has(item.platform.id))
     .slice(0, paidQueryLimit);
 
-  const platformSequence = platforms.map((platform, index) => {
-    const query = signalFamily === 'hiring_capability_build'
-      ? hiringQueryForPlatform(platform.id, industry, geo)
-      : `"${industry}" "${geo}" "${signalId}"`;
+  const platformSequence = selectedInputs.map(({ platform, industry: sourceIndustry }, index) => {
+    const query = discoveryMode === 'vertical_first'
+      ? verticalFirstQueryForPlatform(platform.id, sourceIndustry, geo)
+      : (signalFamily === 'hiring_capability_build'
+        ? hiringQueryForPlatform(platform.id, sourceIndustry, geo)
+        : `"${sourceIndustry}" "${geo}" "${signalId}"`);
     const queryValidation = registry.validateQuery(query, platform.provider);
     return {
       order: index + 1,
@@ -160,20 +238,25 @@ function buildPlatformPlan({
       source_channel: platform.source_channel,
       signal_id: signalId,
       signal_family: signalFamily,
+      discovery_mode: discoveryMode,
       geo,
+      source_term: sourceIndustry,
       parser: platform.parser,
       evidence_required: platform.evidenceRequired,
       query,
       query_validation: queryValidation,
       paid_units_estimate: queryValidation.valid ? 1 : 0,
       success_condition: `${platform.evidenceRequired.join(' + ')} present and ICP gate passes`,
-      why: `${platform.label} is a configured ${geo} platform for ${signalFamily}`,
+      why: discoveryMode === 'vertical_first'
+        ? `${platform.label} discovers ${sourceIndustry} companies in ${geo} before attaching a signal`
+        : `${platform.label} is a configured ${geo} platform for ${signalFamily}`,
     };
   });
 
   const hashInput = platformPlanHashInput({
     client_id: clientId,
-    mode,
+    mode: planMode,
+    discovery_mode: discoveryMode,
     objective,
     requested_count: requested,
     max_paid_queries: paidQueryLimit,
@@ -188,7 +271,9 @@ function buildPlatformPlan({
 
   return {
     client_id: clientId,
-    mode,
+    mode: planMode,
+    requested_mode: requestedMode,
+    discovery_mode: discoveryMode,
     objective,
     requested_count: requested,
     max_paid_queries: paidQueryLimit,
@@ -200,7 +285,12 @@ function buildPlatformPlan({
       stop_on_provider_error_for_primary_platform: true,
     },
     platform_sequence: platformSequence,
-    excluded_platforms: excludedPlatformsFor(signalFamily, platforms, allPlatforms),
+    excluded_platforms: excludedPlatformsFor(
+      signalFamily,
+      selectedInputs.map(item => item.platform),
+      allPlatforms,
+      discoveryMode
+    ),
     query_set_hash: hashPlan(platformSequence.map(item => item.query)),
     plan_hash: planHash,
     required_confirmation: `Approve this exact platform plan by confirming plan_hash=${planHash}.`,

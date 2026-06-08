@@ -6,12 +6,55 @@ const BRAVE_LIMITS = Object.freeze({ maxChars: 400, maxWords: 50 });
 
 const PLATFORM_DEFINITIONS = Object.freeze([
   {
+    id: 'agency_directory',
+    label: 'Agency Directory',
+    provider: 'brave',
+    source_channel: 'vertical_directory',
+    supportedGeos: ['MY', 'SG', 'US', 'AU', 'UK'],
+    signalFamilies: [],
+    discoveryModes: ['vertical_first'],
+    priority: 5,
+    queryLimits: BRAVE_LIMITS,
+    parser: 'vertical_directory_company',
+    evidenceRequired: ['company', 'vertical_evidence', 'source_url'],
+    knownFailureModes: ['directory_page', 'thin_company_profile', 'publisher_as_company'],
+  },
+  {
+    id: 'training_directory',
+    label: 'Training Provider Directory',
+    provider: 'brave',
+    source_channel: 'vertical_directory',
+    supportedGeos: ['MY', 'SG', 'US', 'AU', 'UK'],
+    signalFamilies: [],
+    discoveryModes: ['vertical_first'],
+    priority: 6,
+    queryLimits: BRAVE_LIMITS,
+    parser: 'vertical_directory_company',
+    evidenceRequired: ['company', 'vertical_evidence', 'source_url'],
+    knownFailureModes: ['directory_page', 'course_page', 'thin_company_profile'],
+  },
+  {
+    id: 'vertical_web',
+    label: 'Vertical Web Discovery',
+    provider: 'brave',
+    source_channel: 'vertical_web',
+    supportedGeos: ['MY', 'SG', 'US', 'AU', 'UK'],
+    signalFamilies: [],
+    discoveryModes: ['vertical_first'],
+    priority: 7,
+    queryLimits: BRAVE_LIMITS,
+    parser: 'vertical_directory_company',
+    evidenceRequired: ['company', 'vertical_evidence', 'source_url'],
+    knownFailureModes: ['generic_directory', 'thin_evidence'],
+  },
+  {
     id: 'jobstreet_my',
     label: 'JobStreet MY',
     provider: 'brave',
     source_channel: 'job_boards',
     supportedGeos: ['MY'],
     signalFamilies: ['hiring_capability_build'],
+    discoveryModes: [],
     priority: 10,
     queryLimits: BRAVE_LIMITS,
     parser: 'hiring_job_board',
@@ -25,6 +68,7 @@ const PLATFORM_DEFINITIONS = Object.freeze([
     source_channel: 'job_boards',
     supportedGeos: ['MY'],
     signalFamilies: ['hiring_capability_build'],
+    discoveryModes: [],
     priority: 20,
     queryLimits: BRAVE_LIMITS,
     parser: 'hiring_job_board',
@@ -38,6 +82,7 @@ const PLATFORM_DEFINITIONS = Object.freeze([
     source_channel: 'linkedin_jobs',
     supportedGeos: ['MY', 'SG', 'US', 'AU', 'UK'],
     signalFamilies: ['hiring_capability_build'],
+    discoveryModes: [],
     priority: 30,
     queryLimits: BRAVE_LIMITS,
     parser: 'linkedin_job_detail',
@@ -51,6 +96,7 @@ const PLATFORM_DEFINITIONS = Object.freeze([
     source_channel: 'company_careers',
     supportedGeos: ['MY', 'SG', 'US', 'AU', 'UK'],
     signalFamilies: ['hiring_capability_build'],
+    discoveryModes: [],
     priority: 40,
     queryLimits: BRAVE_LIMITS,
     parser: 'company_careers',
@@ -69,6 +115,7 @@ const PLATFORM_DEFINITIONS = Object.freeze([
       'leadership_org_change',
       'capital_budget_event',
     ],
+    discoveryModes: [],
     priority: 80,
     queryLimits: BRAVE_LIMITS,
     parser: 'market_sensor',
@@ -82,6 +129,7 @@ const PLATFORM_DEFINITIONS = Object.freeze([
     source_channel: 'web_search',
     supportedGeos: ['MY', 'SG', 'US', 'AU', 'UK'],
     signalFamilies: ['category_vendor_research', 'active_gtm_spend', 'pain_friction_evidence'],
+    discoveryModes: [],
     priority: 90,
     queryLimits: BRAVE_LIMITS,
     parser: 'research_beaver',
@@ -102,10 +150,11 @@ function platformById(id) {
   return PLATFORM_DEFINITIONS.find(platform => platform.id === id) || null;
 }
 
-function platformsFor({ signalFamily, geo } = {}) {
+function platformsFor({ signalFamily, geo, discoveryMode } = {}) {
   const geoCode = String(geo || '').trim().toUpperCase();
   return PLATFORM_DEFINITIONS
-    .filter(platform => !signalFamily || platform.signalFamilies.includes(signalFamily))
+    .filter(platform => !discoveryMode || platform.discoveryModes.includes(discoveryMode))
+    .filter(platform => discoveryMode || !signalFamily || platform.signalFamilies.includes(signalFamily))
     .filter(platform => !geoCode || platform.supportedGeos.includes(geoCode))
     .sort((a, b) => a.priority - b.priority);
 }

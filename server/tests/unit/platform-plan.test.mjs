@@ -21,6 +21,15 @@ const tenantIcp = {
   },
 };
 
+const verticalFirstIcp = {
+  profile_version: 6,
+  icp: {
+    active_industries: ['marketing agency', 'B2B corporate training'],
+    geographies: ['MY'],
+    buying_signals: [],
+  },
+};
+
 describe('platform plan builder', () => {
   it('creates separate no-spend platform calls for MY hiring instead of one crammed query', () => {
     const plan = platformPlan.buildPlatformPlan({
@@ -67,6 +76,39 @@ describe('platform plan builder', () => {
     });
     expect(hiringReachQueries.find(item => item.platform === 'linkedin_jobs')?.query)
       .toContain('site:linkedin.com/jobs/view');
+  });
+
+  it('builds vertical-first discovery plans from active industries and geo without hiring terms', () => {
+    const plan = platformPlan.buildPlatformPlan({
+      clientId: 'client-1',
+      icp: verticalFirstIcp,
+      objective: 'discover in-ICP companies first',
+      requestedCount: 5,
+      maxPaidQueries: 5,
+      mode: 'vertical_first',
+    });
+    const queries = plan.platform_sequence.map(item => item.query);
+    const queryText = queries.join('\n').toLowerCase();
+
+    expect(plan.mode).toBe('proof');
+    expect(plan.requested_mode).toBe('vertical_first');
+    expect(plan.discovery_mode).toBe('vertical_first');
+    expect(plan.platform_sequence.map(item => item.platform)).toEqual(
+      expect.arrayContaining(['agency_directory', 'training_directory', 'vertical_web'])
+    );
+    expect(queryText).toContain('marketing agency');
+    expect(queryText).toContain('corporate training');
+    expect(queryText).toContain('malaysia');
+    expect(queryText).not.toMatch(/sales executive|business development|account manager|linkedin\.com\/jobs|jobstreet|hiredly/i);
+    expect(plan.platform_sequence.every(item => item.discovery_mode === 'vertical_first')).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.valid)).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.chars <= 400)).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.words <= 50)).toBe(true);
+    expect(plan.excluded_platforms).toEqual(expect.arrayContaining([
+      expect.objectContaining({ platform: 'jobstreet_my' }),
+      expect.objectContaining({ platform: 'linkedin_jobs' }),
+    ]));
+    expect(platformPlan.verifyPlatformPlanHash(plan)).toBe(true);
   });
 
   it('excludes press/news from first MY hiring proof when stronger job platforms exist', () => {
