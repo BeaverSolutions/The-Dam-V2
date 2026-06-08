@@ -20,29 +20,42 @@ describe('V2.1 research proof endpoint', () => {
     expect(body).toContain('const proofLimit = 5;');
     expect(body).toContain('const proofPaidQueryCap = boundedResearchProofQueryCap(req.body?.max_paid_queries);');
     expect(body).toContain('previewSignalHuntPlan');
+    expect(body).toContain('buildPlatformPlan');
+    expect(body).toContain('loadApprovedPlatformPlan');
     expect(body).toContain("loadIcpForSignalHunt(clientId, { source: 'http' })");
     expect(body).toContain('TENANT_PROFILE_BLOCKED');
-    expect(body).toContain('confirm_query_plan_hash');
-    expect(body).toContain('QUERY_PLAN_CONFIRMATION_MISMATCH');
+    expect(body).toContain('approvedPlatformPlanRequest(req.body)');
+    expect(body).toContain('approved_platform_plan_id');
+    expect(body).toContain('confirm_platform_plan_hash');
+    expect(body).toContain('APPROVED_PLATFORM_PLAN_REQUIRED');
+    expect(body).toContain('v2_1_research_proof_platform_plan');
     expect(body).toContain('REPEATED_ZERO_QUERY_SET');
     expect(body).toContain('required_confirmation');
+    expect(body).toContain('platformPlan: approvedPlatformPlan');
+    expect(body).toContain('recordPlatformYield');
+    expect(body).toContain('updateStrategyStateFromPlan');
     expect(body).toContain('runWithClientContext(clientId, () => runSignalHunt(clientId, {');
     expect(body).toContain('maxLeads: proofLimit');
-    expect(body).toContain('maxPaidQueries: proofPaidQueryCap');
-    expect(body).toContain('paid_query_cap: proofPaidQueryCap');
+    expect(body).toContain('maxPaidQueries: effectiveProofPaidQueryCap');
+    expect(body).toContain('paid_query_cap: effectiveProofPaidQueryCap');
     expect(body).toContain('const saved = await saveSignalLeads(clientId, leads);');
     expect(body).toContain('signal_package');
     expect(body).toContain('messages_delta');
     expect(body).toContain('approvals_delta');
     expect(body).toContain('send_queue_delta');
+    expect(body).not.toContain('confirm_query_plan_hash');
+    expect(body).not.toContain('QUERY_PLAN_CONFIRMATION_MISMATCH');
     expect(body).not.toContain('directorExecute');
     expect(body).not.toContain('rangerReview');
 
-    expect(body.indexOf('confirm_query_plan_hash')).toBeLessThan(
+    expect(body.indexOf('loadApprovedPlatformPlan')).toBeLessThan(
+      body.indexOf('previewSignalHuntPlan(clientId')
+    );
+    expect(body.indexOf('previewSignalHuntPlan(clientId')).toBeLessThan(
       body.indexOf('runWithClientContext(clientId, () => runSignalHunt')
     );
     expect(body.indexOf("loadIcpForSignalHunt(clientId, { source: 'http' })")).toBeLessThan(
-      body.indexOf('previewSignalHuntPlan(clientId')
+      body.indexOf('buildPlatformPlan')
     );
   });
 

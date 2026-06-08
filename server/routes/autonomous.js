@@ -99,6 +99,13 @@ function boundedResearchProofQueryCap(requestedCap) {
   return Math.max(5, Math.min(18, Math.floor(n)));
 }
 
+function approvedPlatformPlanRequest(body = {}) {
+  return {
+    planId: String(body.approved_platform_plan_id || body.platform_plan_id || body.plan_id || '').trim(),
+    planHash: String(body.confirm_platform_plan_hash || body.platform_plan_hash || body.confirm_plan_hash || '').trim(),
+  };
+}
+
 function isChatCampaignIntent(message) {
   const msg = String(message || '').toLowerCase();
   return /\b(kickoff|kick off|start|execute|fire|begin|launch)\b/i.test(msg)
@@ -1257,7 +1264,9 @@ router.get('/running', requireInternalKey, (req, res) => {
  * Bounded V2.1 validation trigger. This proves fresh Research can create
  * signal_package-backed leads without handing them to Sales, Enforcer, or send.
  *
- * Body: { client_id }
+ * Body:
+ *   Dry run: { client_id, dry_run: true }
+ *   Execute: { client_id, approved_platform_plan_id, confirm_platform_plan_hash }
  * Auth: x-internal-key
  */
 router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
@@ -1308,51 +1317,131 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
     }
     const before = await proofCounts();
     const { runSignalHunt, saveSignalLeads, previewSignalHuntPlan } = require('../services/signalHunt');
-    const queryPlan = await previewSignalHuntPlan(clientId, {
+    const { buildPlatformPlan, loadApprovedPlatformPlan } = require('../services/platformPlan');
+    const platformPlanPreview = buildPlatformPlan({
+      clientId,
       icp,
+      objective: `V2.1 research proof: find ${proofLimit} in-ICP approval-ready leads`,
+      requestedCount: proofLimit,
       maxPaidQueries: proofPaidQueryCap,
+      mode: 'proof',
+      allowedPlatforms: Array.isArray(req.body?.allowed_platforms) ? req.body.allowed_platforms : null,
     });
-    const confirmHash = String(req.body?.confirm_query_plan_hash || '').trim();
+    const requestedPlatformPlan = approvedPlatformPlanRequest(req.body);
     const dryRun = req.body?.dry_run === true;
 
-    if (dryRun || !confirmHash) {
-      return res.status(dryRun ? 200 : 409).json({
+    if (dryRun || !requestedPlatformPlan.planId || !requestedPlatformPlan.planHash) {
+      const previewPayload = {
+        client_id: clientId,
+        mode: 'v2_1_research_proof_platform_plan',
+        dry_run: true,
+        requested_limit: proofLimit,
+        paid_query_cap: proofPaidQueryCap,
+        before,
+        platform_plan: platformPlanPreview,
+        required_confirmation: 'Approve this exact platform plan through /api/autonomous/platform-plan/approve, then rerun with approved_platform_plan_id and confirm_platform_plan_hash.',
+        required_execution_fields: ['approved_platform_plan_id', 'confirm_platform_plan_hash'],
+      };
+      if (dryRun) return res.json({ data: previewPayload });
+      return res.status(409).json({
+        error: 'approved platform plan required',
+        code: 'APPROVED_PLATFORM_PLAN_REQUIRED',
+        data: previewPayload,
+      });
+    }
+
+    let approvedPlatformPlan;
+    try {
+      approvedPlatformPlan = await loadApprovedPlatformPlan(
+        clientId,
+        requestedPlatformPlan.planId,
+        requestedPlatformPlan.planHash
+      );
+    } catch (approvalErr) {
+      return res.status(409).json({
+        error: approvalErr.message,
+        code: String(approvalErr.code || 'APPROVED_PLATFORM_PLAN_REQUIRED').toUpperCase(),
         data: {
           client_id: clientId,
-          mode: 'v2_1_research_proof_query_plan',
-          dry_run: true,
-          requested_limit: proofLimit,
-          paid_query_cap: proofPaidQueryCap,
-          before,
-          query_plan: queryPlan,
-          required_confirmation: 'Inspect query_plan.executable_queries, then rerun with confirm_query_plan_hash equal to query_plan.query_set_hash.',
+          received_plan_id: requestedPlatformPlan.planId,
+          received_plan_hash: requestedPlatformPlan.planHash,
+          platform_plan_preview: platformPlanPreview,
         },
       });
     }
-    if (confirmHash !== queryPlan.query_set_hash) {
-      return res.status(409).json({
-        error: 'query plan hash mismatch',
-        code: 'QUERY_PLAN_CONFIRMATION_MISMATCH',
-        data: {
-          expected_hash: queryPlan.query_set_hash,
-          received_hash: confirmHash,
-          query_plan: queryPlan,
-        },
-      });
-    }
+
+    const approvedPlanPaidQueryCap = Number(approvedPlatformPlan.max_paid_queries) || proofPaidQueryCap;
+    const effectiveProofPaidQueryCap = Math.max(0, Math.min(proofPaidQueryCap, approvedPlanPaidQueryCap));
+    const queryPlan = await previewSignalHuntPlan(clientId, {
+      icp,
+      maxPaidQueries: effectiveProofPaidQueryCap,
+      maxLeads: proofLimit,
+      platformPlan: approvedPlatformPlan,
+    });
     if (queryPlan.repeated_zero_blocked) {
       return res.status(409).json({
         error: 'query plan already produced zero output today',
         code: 'REPEATED_ZERO_QUERY_SET',
-        data: { query_plan: queryPlan },
+        data: { platform_plan: approvedPlatformPlan, query_plan: queryPlan },
       });
     }
     const leads = await runWithClientContext(clientId, () => runSignalHunt(clientId, {
       maxLeads: proofLimit,
       icp,
-      maxPaidQueries: proofPaidQueryCap,
+      maxPaidQueries: effectiveProofPaidQueryCap,
+      platformPlan: approvedPlatformPlan,
     }));
     const saved = await saveSignalLeads(clientId, leads);
+    const { recordPlatformYield, updateStrategyStateFromPlan } = require('../services/platformYield');
+    const leadPlatform = lead => String(
+      lead?.metadata?.platform
+      || lead?.metadata?.signal_package?.platform
+      || lead?.metadata?.source_platform
+      || ''
+    );
+    const savedCountForPlatform = platform => saved.filter(lead => leadPlatform(lead) === platform).length;
+    const candidateCountForPlatform = platform => (Array.isArray(leads) ? leads : [])
+      .filter(lead => leadPlatform(lead) === platform).length;
+    const platformYieldEvents = [];
+    const executableQuerySet = new Set((queryPlan.executable_queries || []).map(q => String(q.query || '')));
+    const executedPlatformSteps = (approvedPlatformPlan.platform_sequence || [])
+      .filter(step => executableQuerySet.has(String(step.query || '')));
+    for (const step of executedPlatformSteps) {
+      const platform = String(step.platform || '').trim();
+      const savedForPlatform = savedCountForPlatform(platform);
+      const candidatesForPlatform = candidateCountForPlatform(platform);
+      const event = await recordPlatformYield(clientId, {
+        plan_id: approvedPlatformPlan.id,
+        platform: platform || 'unknown',
+        provider: step.provider || 'brave',
+        mode: 'proof',
+        signal_id: step.signal_id || null,
+        signal_family: step.signal_family || null,
+        source_channel: step.source_channel || null,
+        geo: step.geo || null,
+        query: step.query || null,
+        paid_units: step.query ? 1 : 0,
+        raw_candidates: candidatesForPlatform,
+        icp_passed: candidatesForPlatform,
+        decision_makers_found: candidatesForPlatform,
+        contacts_found: savedForPlatform,
+        saved_leads: savedForPlatform,
+        approval_ready: savedForPlatform,
+        blocker: savedForPlatform > 0 ? null : 'zero_saved_leads_for_platform',
+        metadata: {
+          source: 'v2_1_research_proof',
+          query_set_hash: queryPlan.query_set_hash,
+          plan_hash: approvedPlatformPlan.plan_hash,
+        },
+      });
+      platformYieldEvents.push(event);
+    }
+    const strategyState = await updateStrategyStateFromPlan(clientId, approvedPlatformPlan, {
+      saved_leads: saved.length,
+      approval_ready: saved.length,
+      blocker: saved.length > 0 ? null : 'zero_saved_leads',
+      trusted_by: 'v2_1_research_proof',
+    });
     const after = await proofCounts();
 
     return res.json({
@@ -1360,10 +1449,20 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
         client_id: clientId,
         mode: 'v2_1_research_proof',
         requested_limit: proofLimit,
-        paid_query_cap: proofPaidQueryCap,
+        paid_query_cap: effectiveProofPaidQueryCap,
+        approved_platform_plan_id: approvedPlatformPlan.id,
+        platform_plan_hash: approvedPlatformPlan.plan_hash,
+        platform_plan: approvedPlatformPlan,
         query_plan: queryPlan,
         candidates: Array.isArray(leads) ? leads.length : 0,
         saved: saved.length,
+        platform_yield_events: platformYieldEvents.map(row => row.id),
+        platform_strategy_state: {
+          strategy_key: strategyState?.strategy_key || null,
+          status: strategyState?.status || null,
+          last_yield_pct: strategyState?.last_yield_pct ?? null,
+          last_output_count: strategyState?.last_output_count ?? null,
+        },
         saved_leads: saved.map(l => ({
           id: l.id,
           name: l.name,

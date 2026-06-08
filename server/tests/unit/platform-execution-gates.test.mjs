@@ -40,4 +40,18 @@ describe('platform execution gates', () => {
     expect(validateIdx).toBeLessThan(searchIdx);
     expect(signalHuntSrc).toContain('provider_query_limit_exceeded');
   });
+
+  it('uses approved platform plans for both previews and execution runs', () => {
+    const previewIdx = signalHuntSrc.indexOf('async function previewSignalHuntPlan');
+    const runIdx = signalHuntSrc.indexOf('async function runSignalHunt');
+    const previewBody = signalHuntSrc.slice(previewIdx, runIdx);
+    const runBody = signalHuntSrc.slice(runIdx);
+
+    expect(previewBody).toContain('platformPlan = null');
+    expect(previewBody).toContain('applyApprovedPlatformPlanToConfig(config, platformPlan)');
+    expect(runBody).toContain('platformPlan = null');
+    expect(runBody).toContain('applyApprovedPlatformPlanToConfig(config, platformPlan)');
+    expect(runBody).toContain('s.platform = q.platform');
+    expect(runBody).toContain('platform: signal.platform');
+  });
 });

@@ -1143,9 +1143,10 @@ async function loadSignalConfig(clientId, icp = {}, { maxPaidQueries = null } = 
   };
 }
 
-async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null, maxLeads = 20, signalPlaybook = null } = {}) {
+async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null, maxLeads = 20, signalPlaybook = null, platformPlan = null } = {}) {
   let config = await loadSignalConfig(clientId, icp, { maxPaidQueries });
   config = applySignalPlaybookToConfig(config, signalPlaybook);
+  config = applyApprovedPlatformPlanToConfig(config, platformPlan);
   const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
   const executableDiscoveryQueries = executableDiscoveryQueriesForBudget(config.queries, paidQueryBudget);
   const hash = signalQuerySetHash(executableDiscoveryQueries);
@@ -1159,7 +1160,10 @@ async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null
   );
   const shapeQuery = q => ({
     query: q.query,
+    provider: q.provider || 'brave',
+    platform: q.platform || null,
     signal_type: q.signal_type,
+    signal_family: q.signal_family || null,
     tier: q.tier,
     country: q.country,
     signal_id: q.signal_id || null,
@@ -1822,6 +1826,9 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         s.signal_id = q.signal_id || q.signal_type;
         s.signal_family = q.signal_family || signalFamilyForType(q.signal_id || q.signal_type);
         s.source_channel = q.source_channel || 'web_search';
+        s.platform = q.platform || q.source_channel || null;
+        s.provider = provider;
+        s.platform_plan_id = activePlanId || null;
         s.expected_industry = q.industry || s.expected_industry || null;
         s.expected_evidence = q.expected_evidence || s.expected_evidence || [];
         s.source_term = q.source_term || q.term || s.source_term || null;
@@ -2015,6 +2022,9 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         signal_id: signal.signal_id || signal.signal_type,
         signal_family: signal.signal_family || signalFamilyForType(signal.signal_id || signal.signal_type),
         source_channel: signal.source_channel || 'web_search',
+        platform: signal.platform || null,
+        provider: signal.provider || null,
+        platform_plan_id: signal.platform_plan_id || null,
         source_url: signal.source_url,
         evidence: signal.signal_summary || signal.raw_snippet || signal.why_now,
         signal: signal.signal_summary,
