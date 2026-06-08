@@ -85,18 +85,20 @@ function activeIndustry(icp = {}) {
 }
 
 function hiringLocation(geo) {
-  if (geo === 'MY') return '"Kuala Lumpur" "Malaysia"';
-  if (geo === 'SG') return '"Singapore"';
-  return `"${geo}"`;
+  if (geo === 'MY') return 'Malaysia';
+  if (geo === 'SG') return 'Singapore';
+  return geo;
 }
+
+const HIRING_ROLES = '("sales executive" OR "business development" OR "account manager")';
 
 function hiringQueryForPlatform(platformId, industry, geo) {
   const location = hiringLocation(geo);
-  if (platformId === 'jobstreet_my') return `site:my.jobstreet.com "sales" "${industry}" ${location}`;
-  if (platformId === 'hiredly_my') return `site:hiredly.com "sales" "${industry}" ${location}`;
-  if (platformId === 'linkedin_jobs') return `site:linkedin.com/jobs/view "Sales Executive" "${industry}" ${location}`;
-  if (platformId === 'company_careers') return `("careers" OR "jobs") "sales" "${industry}" ${location}`;
-  return `"${industry}" ${location}`;
+  if (platformId === 'jobstreet_my') return `site:my.jobstreet.com ${HIRING_ROLES} ${location}`;
+  if (platformId === 'hiredly_my') return `site:hiredly.com ${HIRING_ROLES} ${location}`;
+  if (platformId === 'linkedin_jobs') return `site:linkedin.com/jobs/view ${HIRING_ROLES} ${location}`;
+  if (platformId === 'company_careers') return `("careers" OR "jobs") ${HIRING_ROLES} ${location}`;
+  return `${HIRING_ROLES} ${location}`;
 }
 
 function positiveInteger(value, fallback) {

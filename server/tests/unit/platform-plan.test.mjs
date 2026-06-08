@@ -43,6 +43,32 @@ describe('platform plan builder', () => {
     expect(plan.platform_sequence[0].query).not.toContain(' OR site:hiredly.com');
   });
 
+  it('plans hiring reach queries by role and geo without quoted tenant vertical', () => {
+    const plan = platformPlan.buildPlatformPlan({
+      clientId: 'client-1',
+      icp: tenantIcp,
+      objective: 'find 5 in-ICP approval-ready leads',
+      requestedCount: 5,
+      maxPaidQueries: 5,
+      mode: 'proof',
+    });
+    const hiringReachQueries = plan.platform_sequence.filter(item => (
+      ['jobstreet_my', 'hiredly_my', 'linkedin_jobs', 'company_careers'].includes(item.platform)
+    ));
+
+    expect(hiringReachQueries.length).toBeGreaterThanOrEqual(3);
+    hiringReachQueries.forEach(item => {
+      expect(item.query).not.toContain('"B2B corporate training"');
+      expect(item.query).toContain('"sales executive"');
+      expect(item.query).toContain('Malaysia');
+      expect(item.query_validation.valid).toBe(true);
+      expect(item.query_validation.chars).toBeLessThanOrEqual(400);
+      expect(item.query_validation.words).toBeLessThanOrEqual(50);
+    });
+    expect(hiringReachQueries.find(item => item.platform === 'linkedin_jobs')?.query)
+      .toContain('site:linkedin.com/jobs/view');
+  });
+
   it('excludes press/news from first MY hiring proof when stronger job platforms exist', () => {
     const plan = platformPlan.buildPlatformPlan({
       clientId: 'client-1',
