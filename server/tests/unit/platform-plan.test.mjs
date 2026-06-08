@@ -2,6 +2,13 @@ import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
 const platformPlan = require('../../services/platformPlan');
+const pool = require('../../db/pool');
+
+const originalQuery = pool.query;
+
+afterEach(() => {
+  pool.query = originalQuery;
+});
 
 const tenantIcp = {
   profile_version: 6,
@@ -98,5 +105,53 @@ describe('platform plan builder', () => {
     expect(plan.max_paid_queries).toBe(5);
     expect(plan.platform_sequence).toHaveLength(5);
     expect(JSON.stringify(plan)).not.toContain('NaN');
+  });
+
+  it('loads approved unexpired platform plans and normalizes stored json', async () => {
+    let sql = '';
+    let params = [];
+    pool.query = async (query, values) => {
+      sql = query;
+      params = values;
+      return {
+        rows: [{
+          id: 'plan-1',
+          client_id: 'client-1',
+          status: 'approved',
+          mode: 'proof',
+          objective: 'find leads',
+          requested_count: 5,
+          max_paid_queries: 3,
+          budget_cap_usd: null,
+          platform_sequence: '[{"platform":"jobstreet_my","query":"site:my.jobstreet.com sales"}]',
+          excluded_platforms: '[]',
+          stop_rule: '{"stop_on_invalid_query":true}',
+          query_set_hash: 'queryhash',
+          plan_hash: 'planhash',
+          approved_by: 'mj',
+          approved_at: '2026-06-08T00:00:00.000Z',
+          expires_at: '2026-06-09T00:00:00.000Z',
+        }],
+      };
+    };
+
+    const loaded = await platformPlan.loadApprovedPlatformPlan('client-1', 'plan-1', 'planhash');
+
+    expect(sql).toContain("AND status = 'approved'");
+    expect(sql).toContain('AND expires_at > NOW()');
+    expect(params).toEqual(['client-1', 'plan-1', 'planhash']);
+    expect(loaded.platform_sequence).toEqual([
+      expect.objectContaining({ platform: 'jobstreet_my' }),
+    ]);
+    expect(loaded.excluded_platforms).toEqual([]);
+    expect(loaded.stop_rule.stop_on_invalid_query).toBe(true);
+  });
+
+  it('throws platform_plan_required when an approved plan cannot be loaded', async () => {
+    pool.query = async () => ({ rows: [] });
+
+    await expect(
+      platformPlan.loadApprovedPlatformPlan('client-1', 'missing-plan', 'planhash')
+    ).rejects.toMatchObject({ code: 'platform_plan_required' });
   });
 });

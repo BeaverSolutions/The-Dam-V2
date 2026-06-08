@@ -800,14 +800,117 @@ async function runDbBuilder() {
             }
           }
 
+          const approvedPlatformPlanDirectives = researchDirectives.filter(d => d.directive_type === 'execute_approved_platform_plan');
+          if (approvedPlatformPlanDirectives.length > 0) {
+            const { loadApprovedPlatformPlan } = require('./platformPlan');
+            const { runSignalHunt, saveSignalLeads } = require('./signalHunt');
+            const icpMemory = await loadCanonicalIcp(client.id);
+
+            for (const directive of approvedPlatformPlanDirectives) {
+              const payload = directive.payload || {};
+              if (!payload.plan_id || !payload.plan_hash) {
+                consumedDirectiveIds.push(directive.id);
+                await logsService.createLog(client.id, {
+                  agent: 'research_beaver',
+                  action: 'platform_plan_skipped',
+                  target_type: 'system',
+                  metadata: {
+                    reason: 'platform_plan_required',
+                    directive_id: directive.id,
+                    payload,
+                  },
+                }).catch(() => {});
+                continue;
+              }
+
+              const budget = await checkBudget(client.id);
+              if (!budget.allowed) {
+                logger.info({ msg: '[db-builder] Budget exhausted, keeping execute_approved_platform_plan pending', plan_id: payload.plan_id });
+                break;
+              }
+
+              try {
+                const platformPlan = await loadApprovedPlatformPlan(client.id, payload.plan_id, payload.plan_hash);
+                const cap = Math.max(1, Number(payload.cap || platformPlan.requested_count || 5) || 5);
+                const maxPaidQueries = Math.max(1, Number(platformPlan.max_paid_queries || cap) || cap);
+                logger.info({ msg: '[db-builder] Processing execute_approved_platform_plan', plan_id: platformPlan.id, cap });
+                const signalLeads = await runSignalHunt(client.id, {
+                  maxLeads: cap,
+                  icp: icpMemory || {},
+                  maxPaidQueries,
+                  platformPlan,
+                  plan_id: platformPlan.id,
+                });
+                const savedSignalLeads = await saveSignalLeads(client.id, signalLeads);
+
+                await logsService.createLog(client.id, {
+                  agent: 'research_beaver',
+                  action: 'platform_plan_consumed',
+                  target_type: 'system',
+                  metadata: {
+                    directive_id: directive.id,
+                    plan_id: platformPlan.id,
+                    plan_hash: platformPlan.plan_hash,
+                    query_set_hash: platformPlan.query_set_hash,
+                    mode: payload.mode || platformPlan.mode || null,
+                    send_allowed: false,
+                    cap,
+                    max_paid_queries: maxPaidQueries,
+                    platform_sequence_count: platformPlan.platform_sequence.length,
+                    found: signalLeads.length,
+                    saved: savedSignalLeads.length,
+                  },
+                });
+                consumedDirectiveIds.push(directive.id);
+                logger.info({ msg: '[db-builder] execute_approved_platform_plan complete', plan_id: platformPlan.id, found: signalLeads.length, saved: savedSignalLeads.length });
+              } catch (err) {
+                const errorCode = err.code || null;
+                logger.warn({ msg: '[db-builder] execute_approved_platform_plan failed', plan_id: payload.plan_id, err: err.message, code: errorCode });
+                await logsService.createLog(client.id, {
+                  agent: 'research_beaver',
+                  action: errorCode === 'platform_plan_required' ? 'platform_plan_skipped' : 'platform_plan_error',
+                  target_type: 'system',
+                  metadata: {
+                    reason: errorCode === 'platform_plan_required' ? 'platform_plan_required' : 'execution_failed',
+                    directive_id: directive.id,
+                    plan_id: payload.plan_id || null,
+                    plan_hash: payload.plan_hash || null,
+                    error: err.message,
+                    code: errorCode,
+                  },
+                }).catch(() => {});
+                if (errorCode === 'platform_plan_required') {
+                  consumedDirectiveIds.push(directive.id);
+                }
+              }
+            }
+          }
+
           const signalPlaybookDirectives = researchDirectives.filter(d => d.directive_type === 'run_signal_playbook');
           if (signalPlaybookDirectives.length > 0) {
+            const { loadApprovedPlatformPlan } = require('./platformPlan');
             const { runSignalHunt, saveSignalLeads } = require('./signalHunt');
             const icpMemory = await loadCanonicalIcp(client.id);
 
             for (const directive of signalPlaybookDirectives) {
               const payload = directive.payload || {};
-              if (!payload.signal_id && payload.replacement_for_rejection !== true) {
+              const hasApprovedPlatformPlanRef = !!(payload.plan_id && payload.plan_hash);
+              if (!hasApprovedPlatformPlanRef && payload.allow_legacy_paid_signal_playbook !== true) {
+                consumedDirectiveIds.push(directive.id);
+                await logsService.createLog(client.id, {
+                  agent: 'research_beaver',
+                  action: 'signal_playbook_skipped',
+                  target_type: 'system',
+                  metadata: {
+                    reason: 'platform_plan_required',
+                    directive_id: directive.id,
+                    payload,
+                  },
+                }).catch(() => {});
+                continue;
+              }
+
+              if (!payload.signal_id && payload.replacement_for_rejection !== true && !hasApprovedPlatformPlanRef) {
                 consumedDirectiveIds.push(directive.id);
                 await logsService.createLog(client.id, {
                   agent: 'research_beaver',
@@ -830,12 +933,20 @@ async function runDbBuilder() {
 
               try {
                 const cap = Math.max(1, Number(payload.cap || 6) || 6);
+                const platformPlan = hasApprovedPlatformPlanRef
+                  ? await loadApprovedPlatformPlan(client.id, payload.plan_id, payload.plan_hash)
+                  : null;
+                const maxPaidQueries = platformPlan
+                  ? Math.max(1, Number(platformPlan.max_paid_queries || cap) || cap)
+                  : cap;
                 logger.info({ msg: '[db-builder] Processing run_signal_playbook', signal_id: payload.signal_id, cap });
                 const signalLeads = await runSignalHunt(client.id, {
                   maxLeads: cap,
                   icp: icpMemory || {},
-                  maxPaidQueries: cap,
+                  maxPaidQueries,
                   signalPlaybook: payload,
+                  platformPlan,
+                  plan_id: platformPlan?.id || payload.plan_id || null,
                 });
                 const savedSignalLeads = await saveSignalLeads(client.id, signalLeads);
 
@@ -848,7 +959,10 @@ async function runDbBuilder() {
                     signal_id: payload.signal_id,
                     source_channel: payload.source_channel || null,
                     geo: payload.geo || [],
+                    plan_id: platformPlan?.id || payload.plan_id || null,
+                    plan_hash: platformPlan?.plan_hash || payload.plan_hash || null,
                     cap,
+                    max_paid_queries: maxPaidQueries,
                     found: signalLeads.length,
                     saved: savedSignalLeads.length,
                   },
@@ -856,17 +970,25 @@ async function runDbBuilder() {
                 consumedDirectiveIds.push(directive.id);
                 logger.info({ msg: '[db-builder] run_signal_playbook complete', signal_id: payload.signal_id, found: signalLeads.length, saved: savedSignalLeads.length });
               } catch (err) {
-                logger.warn({ msg: '[db-builder] run_signal_playbook failed', signal_id: payload.signal_id, err: err.message });
+                const errorCode = err.code || null;
+                logger.warn({ msg: '[db-builder] run_signal_playbook failed', signal_id: payload.signal_id, err: err.message, code: errorCode });
                 await logsService.createLog(client.id, {
                   agent: 'research_beaver',
-                  action: 'signal_playbook_error',
+                  action: errorCode === 'platform_plan_required' ? 'signal_playbook_skipped' : 'signal_playbook_error',
                   target_type: 'system',
                   metadata: {
                     directive_id: directive.id,
                     signal_id: payload.signal_id,
+                    reason: errorCode === 'platform_plan_required' ? 'platform_plan_required' : 'execution_failed',
+                    plan_id: payload.plan_id || null,
+                    plan_hash: payload.plan_hash || null,
                     error: err.message,
+                    code: errorCode,
                   },
                 }).catch(() => {});
+                if (errorCode === 'platform_plan_required') {
+                  consumedDirectiveIds.push(directive.id);
+                }
               }
             }
           }

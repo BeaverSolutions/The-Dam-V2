@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const pool = require('../db/pool');
 const registry = require('./platformRegistry');
 
 function list(value) {
@@ -204,9 +205,56 @@ function buildPlatformPlan({
   };
 }
 
+function normalizeStoredJson(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+async function loadApprovedPlatformPlan(clientId, planId, planHash) {
+  if (!clientId || !planId || !planHash) {
+    const err = new Error('Approved platform plan is required before paid signal execution');
+    err.code = 'platform_plan_required';
+    throw err;
+  }
+
+  const { rows } = await pool.query(
+    `SELECT id, client_id, status, mode, objective, requested_count, max_paid_queries,
+            budget_cap_usd, platform_sequence, excluded_platforms, stop_rule,
+            query_set_hash, plan_hash, approved_by, approved_at, expires_at
+       FROM platform_plans
+      WHERE client_id = $1
+        AND id = $2
+        AND plan_hash = $3
+        AND status = 'approved'
+        AND expires_at > NOW()
+      LIMIT 1`,
+    [clientId, planId, planHash]
+  );
+
+  if (rows.length === 0) {
+    const err = new Error('Approved platform plan is required before paid signal execution');
+    err.code = 'platform_plan_required';
+    throw err;
+  }
+
+  const row = rows[0];
+  return {
+    ...row,
+    platform_sequence: array(normalizeStoredJson(row.platform_sequence, [])),
+    excluded_platforms: array(normalizeStoredJson(row.excluded_platforms, [])),
+    stop_rule: normalizeStoredJson(row.stop_rule, {}) || {},
+  };
+}
+
 module.exports = {
   buildPlatformPlan,
   hashPlan,
+  loadApprovedPlatformPlan,
   stableJson,
   verifyPlatformPlanHash,
 };

@@ -27,6 +27,7 @@ const { callAgent } = require('./claude');
 const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
 const { attachSignalPackageToLead, signalPackageMissingFields } = require('./research');
 const signalPlanner = require('./signalPlanner');
+const platformRegistry = require('./platformRegistry');
 const { normalizeBuyingSignalsForTenant } = require('../config/buyingSignals');
 const crypto = require('crypto');
 
@@ -694,6 +695,51 @@ function signalHuntQueryFromPlannerQuery(query = {}, plan = {}) {
     term: query.term || null,
     source_term: query.term || null,
     reject_rules: plan.rejectRules || {},
+  };
+}
+
+function signalHuntQueryFromPlatformStep(step = {}) {
+  const country = String(step.geo || countryCodeFromText(step.query) || 'MY').toUpperCase();
+  const signalId = step.signal_id || step.signalId || 'approved_platform_plan';
+  return {
+    query: String(step.query || '').trim(),
+    provider: step.provider || 'brave',
+    platform: step.platform || step.source_channel || 'unknown',
+    signal_type: step.signal_type || step.type || signalId,
+    signal_id: signalId,
+    signal_family: step.signal_family || step.signalFamily || signalFamilyForType(signalId),
+    source_channel: step.source_channel || step.sourceChannel || step.platform || 'web_search',
+    tier: step.tier || 'P1',
+    country,
+    cost_class: step.cost_class || step.costClass || 'paid_search',
+    expected_evidence: step.evidence_required || step.expected_evidence || step.expectedEvidence || [],
+    industry: step.industry || null,
+    term: step.term || step.source_term || null,
+    source_term: step.source_term || step.term || null,
+    parser: step.parser || null,
+  };
+}
+
+function applyApprovedPlatformPlanToConfig(config = {}, platformPlan = null) {
+  if (!platformPlan || typeof platformPlan !== 'object') return config;
+  const plannedQueries = Array.isArray(platformPlan.platform_sequence)
+    ? platformPlan.platform_sequence
+      .map(signalHuntQueryFromPlatformStep)
+      .filter(q => q.query)
+    : [];
+  if (plannedQueries.length === 0) return config;
+
+  return {
+    ...config,
+    queries: plannedQueries,
+    query_source: 'approved_platform_plan',
+    approved_platform_plan: {
+      id: platformPlan.id || platformPlan.plan_id || null,
+      plan_hash: platformPlan.plan_hash || null,
+      query_set_hash: platformPlan.query_set_hash || null,
+      mode: platformPlan.mode || null,
+      stop_rule: platformPlan.stop_rule || {},
+    },
   };
 }
 
@@ -1652,12 +1698,14 @@ async function findDecisionMaker(companyName, icpTitles = [], country = 'MY', op
  * @param {object} options.icp - ICP memory for seniority ranking
  * @returns {Promise<Array<Lead>>}
  */
-async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries = null, signalPlaybook = null, plan_id = null } = {}) {
+async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries = null, signalPlaybook = null, platformPlan = null, plan_id = null } = {}) {
   console.log(`[signalHunt] Starting signal hunt for client ${clientId} (target: ${maxLeads})`);
   await assertLlmBudgetOpen(clientId);
 
   let config = await loadSignalConfig(clientId, icp, { maxPaidQueries });
   config = applySignalPlaybookToConfig(config, signalPlaybook);
+  config = applyApprovedPlatformPlanToConfig(config, platformPlan);
+  const activePlanId = platformPlan?.id || platformPlan?.plan_id || plan_id;
   const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
   const providerFanoutCaps = signalProviderFanoutCaps(maxPaidQueries, maxLeads);
   const executableDiscoveryQueries = executableDiscoveryQueriesForBudget(config.queries, paidQueryBudget);
@@ -1691,6 +1739,52 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     }
 
     await assertLlmBudgetOpen(clientId);
+    const provider = q.provider || 'brave';
+    const validation = platformRegistry.validateQuery(q.query, provider);
+    if (!validation.valid) {
+      const queryBlocker = validation.blocker || 'provider_query_limit_exceeded';
+      await logsService.createLog(clientId, {
+        agent: 'research_beaver',
+        action: 'signal_query_blocked',
+        target_type: 'system',
+        metadata: {
+          blocker: queryBlocker,
+          plan_id: activePlanId || null,
+          platform: q.platform || null,
+          provider,
+          query_hash: validation.query_hash,
+          query_chars: validation.chars,
+          query_words: validation.words,
+          limits: validation.limits || null,
+        },
+      }).catch(() => {});
+      await rememberZeroQuerySet(clientId, {
+        key: zeroSet.key,
+        hash: zeroSet.hash,
+        queries: executableDiscoveryQueries,
+        queriesRun,
+        rawResultsTotal,
+        blocker: queryBlocker,
+      }).catch(() => {});
+      await logsService.createLog(clientId, {
+        agent: 'research_beaver',
+        action: 'signal_hunt_complete',
+        metadata: signalHuntCompleteMetadata({
+          planId: activePlanId,
+          config,
+          queriesRun,
+          paidQueryBudget,
+          providerFanoutCaps,
+          paidQueriesRemaining,
+          rawSample,
+          blocker: queryBlocker,
+          stageStats,
+        }),
+      }).catch(() => {});
+      console.log(`[signalHunt] Query blocked before provider call: ${queryBlocker}`);
+      return [];
+    }
+
     if (!consumePaidQuery(1)) {
       console.log('[signalHunt] Paid-query budget exhausted before open-web signal search');
       break;
@@ -1759,7 +1853,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       agent: 'research_beaver',
       action: 'signal_hunt_complete',
       metadata: signalHuntCompleteMetadata({
-        planId: plan_id,
+        planId: activePlanId,
         config,
         queriesRun,
         paidQueryBudget,
@@ -1957,7 +2051,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     agent: 'research_beaver',
     action: 'signal_hunt_complete',
     metadata: signalHuntCompleteMetadata({
-      planId: plan_id,
+      planId: activePlanId,
       config,
       queriesRun,
       paidQueryBudget,

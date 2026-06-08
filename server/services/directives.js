@@ -31,6 +31,25 @@ function buildRunSignalPlaybookDirective({
   };
 }
 
+function buildExecuteApprovedPlatformPlanDirective({
+  plan_id,
+  plan_hash,
+  cap = 5,
+  mode = 'proof',
+} = {}) {
+  return {
+    directive_type: 'execute_approved_platform_plan',
+    target_agent: 'research_beaver',
+    payload: {
+      plan_id,
+      plan_hash,
+      cap: Math.max(1, Number(cap) || 5),
+      mode,
+      send_allowed: false,
+    },
+  };
+}
+
 function fixSignalCopyInstruction(signalFamily, rejectReason) {
   if (signalFamily === 'hiring_capability_build' && rejectReason === 'generic_message') {
     return 'lead with role hiring implication, not generic company observation';
@@ -202,6 +221,7 @@ async function recentDirectives(clientId, hours = 24) {
 
 module.exports = {
   buildRunSignalPlaybookDirective,
+  buildExecuteApprovedPlatformPlanDirective,
   buildFixSignalCopyDirective,
   buildRepairSignalPackageDirective,
   writeDirective,
