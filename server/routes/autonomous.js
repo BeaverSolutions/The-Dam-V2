@@ -2541,10 +2541,18 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
   }
 
   // ── Kickoff verification - block follow-on auto-kickoffs on zero/low output ──
-  await verifyKickoffOutput(clientId, target, { runStartedAt: kickoffRunStartedAt });
+  const kickoffVerification = await verifyKickoffOutput(clientId, target, { runStartedAt: kickoffRunStartedAt });
   await require('../services/kpi').recountKpi(clientId).catch(err =>
     logger.warn({ msg: '[kickoff] final kpi recount failed', clientId, err: err?.message })
   );
+  return {
+    fired: kickoffVerification?.blocked !== true,
+    blocked: kickoffVerification?.blocked === true,
+    blocker: kickoffVerification?.blocker || null,
+    delivered: kickoffVerification?.delivered ?? null,
+    total_output: kickoffVerification?.total_output ?? null,
+    verification: kickoffVerification,
+  };
 }
 
 /**
