@@ -18,6 +18,8 @@ describe('platform plan endpoint contracts', () => {
 
     expect(body).toContain('buildPlatformPlan');
     expect(body).toContain('dry_run: true');
+    expect(body).toContain('sourcing_lane_defaulted');
+    expect(body).toContain("'sourcing_lane_defaulted'");
     expect(body).not.toContain('runSignalHunt(');
     expect(body).not.toContain('saveSignalLeads(');
   });

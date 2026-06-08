@@ -15,19 +15,32 @@ const repairPolicy = require('./repairPolicy');
 
 function buildRunSignalPlaybookDirective({
   signal_id,
+  signal_family,
   source_channel,
   geo = [],
   cap = 6,
+  queries = null,
+  mode = null,
+  discovery_mode = null,
+  platform_plan_required = false,
+  sourcing_lane_defaulted = null,
 } = {}) {
+  const payload = {
+    signal_id,
+    source_channel,
+    geo: Array.isArray(geo) ? geo : [geo].filter(Boolean),
+    cap: Number(cap) || 6,
+  };
+  if (signal_family) payload.signal_family = signal_family;
+  if (Array.isArray(queries) && queries.length > 0) payload.queries = queries;
+  if (mode) payload.mode = mode;
+  if (discovery_mode) payload.discovery_mode = discovery_mode;
+  if (platform_plan_required) payload.platform_plan_required = true;
+  if (sourcing_lane_defaulted) payload.sourcing_lane_defaulted = sourcing_lane_defaulted;
   return {
     directive_type: 'run_signal_playbook',
     target_agent: 'research_beaver',
-    payload: {
-      signal_id,
-      source_channel,
-      geo: Array.isArray(geo) ? geo : [geo].filter(Boolean),
-      cap: Number(cap) || 6,
-    },
+    payload,
   };
 }
 

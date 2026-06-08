@@ -2201,6 +2201,31 @@ function allowBuyingSignalDefaultsForTenant(tenant = {}) {
   return !tenant?.tenant_profile_content_version && tenant?.source !== 'tenant_profiles';
 }
 
+function configuredBuyingSignalsForTenant(tenant = {}) {
+  return Array.isArray(tenant?.buying_signals)
+    ? tenant.buying_signals.filter(signal => signal && signal.enabled !== false)
+    : [];
+}
+
+function verticalTermsForTenant(tenant = {}) {
+  const seen = new Set();
+  return [
+    ...list(tenant?.icp?.active_industries),
+    ...list(tenant?.icp?.verticals),
+    ...list(tenant?.icp?.industries),
+  ].filter(term => {
+    const key = term.toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function shouldDefaultVerticalFirstLane(tenant = {}) {
+  return configuredBuyingSignalsForTenant(tenant).length === 0
+    && verticalTermsForTenant(tenant).length > 0;
+}
+
 function selectNextSignal({ tenant, signalScorecard = {}, currentSignalId, stopCurrent, spend, queue, channelReadiness } = {}) {
   const signals = normalizeBuyingSignalsForTenant(tenant || {}, {
     allowDefaults: allowBuyingSignalDefaultsForTenant(tenant || {}),
@@ -2243,6 +2268,27 @@ function buildPlaybookForSignal({ tenant, signal, geo } = {}) {
   };
 }
 
+function buildVerticalFirstPlaybookForTenant({ tenant = {}, geo = [] } = {}) {
+  const resolvedGeo = list(geo).length > 0 ? list(geo) : (list(tenant?.icp?.geo).length > 0 ? list(tenant.icp.geo) : ['MY']);
+  return {
+    signal_id: 'vertical_first_discovery',
+    signal_family: 'vertical_first_discovery',
+    source_channel: 'vertical_first',
+    mode: 'vertical_first',
+    discovery_mode: 'vertical_first',
+    geo: resolvedGeo,
+    cap: 6,
+    queries: [],
+    platform_plan_required: true,
+    sourcing_lane_defaulted: {
+      from: 'signal_first',
+      to: 'vertical_first',
+      reason: 'tenant_buying_signals_empty_vertical_icp',
+      active_industries: verticalTermsForTenant(tenant),
+    },
+  };
+}
+
 function buildCaptainSignalOrchestration({
   tenant = {},
   currentSignalId = null,
@@ -2251,7 +2297,8 @@ function buildCaptainSignalOrchestration({
   queue = {},
   channelReadiness = {},
 } = {}) {
-  const signals = normalizeBuyingSignalsForTenant(tenant, {
+  const verticalFirstDefault = shouldDefaultVerticalFirstLane(tenant);
+  const signals = verticalFirstDefault ? [] : normalizeBuyingSignalsForTenant(tenant, {
     allowDefaults: allowBuyingSignalDefaultsForTenant(tenant),
   });
   const currentSignal = signals.find(signal => signal.id === currentSignalId) || signals[0] || null;
@@ -2269,7 +2316,9 @@ function buildCaptainSignalOrchestration({
     channelReadiness,
   });
   const geo = list(tenant?.icp?.geo).length > 0 ? list(tenant.icp.geo) : ['MY'];
-  const nextPlaybook = buildPlaybookForSignal({ tenant, signal: nextSignal, geo });
+  const nextPlaybook = verticalFirstDefault && !nextSignal
+    ? buildVerticalFirstPlaybookForTenant({ tenant, geo })
+    : buildPlaybookForSignal({ tenant, signal: nextSignal, geo });
 
   const genericSpike = Object.values(signalScorecard).find(score =>
     Number(score.blocker_reasons?.generic_message || 0) >= 1

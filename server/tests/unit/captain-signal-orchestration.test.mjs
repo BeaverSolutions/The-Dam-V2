@@ -43,6 +43,18 @@ const tenant = {
   ],
 };
 
+const verticalOnlyTenant = {
+  source: 'tenant_profiles',
+  tenant_profile_content_version: 9,
+  icp: {
+    verticals: ['marketing agency', 'B2B corporate training'],
+    active_industries: ['marketing agency', 'B2B corporate training'],
+    geo: ['MY'],
+    personas: ['Founder', 'CEO', 'Managing Director'],
+  },
+  buying_signals: [],
+};
+
 describe('Captain signal orchestration (V2.1 Phase 5)', () => {
   it('builds a per-signal scorecard from Research, Sales, Enforcer, and send events', () => {
     const scorecard = buildSignalScorecard([
@@ -177,6 +189,39 @@ describe('Captain signal orchestration (V2.1 Phase 5)', () => {
     });
     expect(emptyScorecardGuard).toBeGreaterThan(sweepStart);
     expect(writeDirectives).toBeGreaterThan(emptyScorecardGuard);
+  });
+
+  it('defaults empty-signals vertical tenants to Captain vertical-first primary lane', () => {
+    const decision = captain._test.buildCaptainSignalOrchestration({
+      tenant: verticalOnlyTenant,
+      currentSignalId: null,
+      signalScorecard: {},
+      spend: { provider_cap_closed: false, daily_budget_remaining_usd: 5 },
+      queue: { pending_approvals: 0, capacity: 20 },
+      channelReadiness: { email: true, linkedin: true },
+    });
+
+    expect(decision.next_playbook).toMatchObject({
+      signal_id: 'vertical_first_discovery',
+      signal_family: 'vertical_first_discovery',
+      source_channel: 'vertical_first',
+      mode: 'vertical_first',
+      discovery_mode: 'vertical_first',
+      platform_plan_required: true,
+      sourcing_lane_defaulted: {
+        reason: 'tenant_buying_signals_empty_vertical_icp',
+      },
+    });
+    expect(decision.next_playbook.queries).toEqual([]);
+    expect(directiveBus.buildRunSignalPlaybookDirective(decision.next_playbook).payload).toMatchObject({
+      signal_id: 'vertical_first_discovery',
+      source_channel: 'vertical_first',
+      mode: 'vertical_first',
+      discovery_mode: 'vertical_first',
+      platform_plan_required: true,
+    });
+    expect(captainSource).toContain('buildVerticalFirstPlaybookForTenant');
+    expect(captainSource).toContain('sourcing_lane_defaulted');
   });
 
   it('treats provider caps, repeated zero query sets, full queues, and channel readiness as dry-spend stops', () => {

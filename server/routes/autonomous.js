@@ -1498,6 +1498,21 @@ router.post('/platform-plan/preview', requireInternalKey, async (req, res) => {
       mode: req.body?.mode || 'proof',
       allowedPlatforms: Array.isArray(req.body?.allowed_platforms) ? req.body.allowed_platforms : null,
     });
+    if (plan.sourcing_lane_defaulted) {
+      const logsService = require('../services/logs');
+      await logsService.createLog(clientId, {
+        agent: 'captain',
+        action: 'sourcing_lane_defaulted',
+        target_type: 'platform_plan',
+        metadata: {
+          ...plan.sourcing_lane_defaulted,
+          plan_hash: plan.plan_hash,
+          requested_mode: plan.requested_mode,
+          discovery_mode: plan.discovery_mode,
+          query_set_hash: plan.query_set_hash,
+        },
+      }).catch(() => {});
+    }
 
     return res.json({
       data: {

@@ -111,6 +111,31 @@ describe('platform plan builder', () => {
     expect(platformPlan.verifyPlatformPlanHash(plan)).toBe(true);
   });
 
+  it('defaults empty-signals vertical ICPs to vertical-first instead of silent hiring fallback', () => {
+    const plan = platformPlan.buildPlatformPlan({
+      clientId: 'client-1',
+      icp: verticalFirstIcp,
+      objective: 'find 5 in-ICP approval-ready leads',
+      requestedCount: 5,
+      maxPaidQueries: 5,
+      mode: 'proof',
+    });
+    const queryText = plan.platform_sequence.map(item => item.query).join('\n').toLowerCase();
+
+    expect(plan.mode).toBe('proof');
+    expect(plan.requested_mode).toBe('proof');
+    expect(plan.discovery_mode).toBe('vertical_first');
+    expect(plan.sourcing_lane_defaulted).toMatchObject({
+      from: 'signal_first',
+      to: 'vertical_first',
+      reason: 'tenant_buying_signals_empty_vertical_icp',
+    });
+    expect(queryText).toContain('marketing agency');
+    expect(queryText).toContain('corporate training');
+    expect(queryText).not.toMatch(/sales executive|business development|account manager|linkedin\.com\/jobs|jobstreet|hiredly/i);
+    expect(platformPlan.verifyPlatformPlanHash(plan)).toBe(true);
+  });
+
   it('excludes press/news from first MY hiring proof when stronger job platforms exist', () => {
     const plan = platformPlan.buildPlatformPlan({
       clientId: 'client-1',

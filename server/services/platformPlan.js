@@ -65,6 +65,10 @@ function firstActiveSignal(icp = {}) {
   };
 }
 
+function hasConfiguredBuyingSignals(icp = {}) {
+  return signalCandidates(icp).some(signal => signal && signal.enabled !== false);
+}
+
 function firstGeo(icp = {}) {
   const candidates = [
     ...list(icp.icp?.geographies),
@@ -85,7 +89,7 @@ function activeIndustry(icp = {}) {
   return candidates[0] || 'corporate training';
 }
 
-function activeIndustries(icp = {}) {
+function configuredActiveIndustries(icp = {}) {
   const candidates = [
     ...list(icp.icp?.active_industries),
     ...list(icp.icp?.verticals),
@@ -99,6 +103,11 @@ function activeIndustries(icp = {}) {
     seen.add(key);
     return true;
   });
+  return unique;
+}
+
+function activeIndustries(icp = {}) {
+  const unique = configuredActiveIndustries(icp);
   return unique.length > 0 ? unique : [activeIndustry(icp)];
 }
 
@@ -125,6 +134,17 @@ function planModeForRequest(mode) {
 
 function discoveryModeForRequest(mode) {
   return String(mode || '') === 'vertical_first' ? 'vertical_first' : 'signal_first';
+}
+
+function sourcingLaneDefaultForPlan(icp = {}, requestedMode = 'proof') {
+  if (discoveryModeForRequest(requestedMode) === 'vertical_first') return null;
+  if (hasConfiguredBuyingSignals(icp)) return null;
+  if (configuredActiveIndustries(icp).length === 0) return null;
+  return {
+    from: 'signal_first',
+    to: 'vertical_first',
+    reason: 'tenant_buying_signals_empty_vertical_icp',
+  };
 }
 
 function verticalQueryTerm(industry = '') {
@@ -200,7 +220,10 @@ function buildPlatformPlan({
 } = {}) {
   const requestedMode = String(mode || 'proof');
   const planMode = planModeForRequest(requestedMode);
-  const discoveryMode = discoveryModeForRequest(requestedMode);
+  const sourcingLaneDefaulted = sourcingLaneDefaultForPlan(icp, requestedMode);
+  const discoveryMode = sourcingLaneDefaulted
+    ? 'vertical_first'
+    : discoveryModeForRequest(requestedMode);
   const signal = firstActiveSignal(icp);
   const signalFamily = discoveryMode === 'vertical_first'
     ? 'vertical_first_discovery'
@@ -293,6 +316,7 @@ function buildPlatformPlan({
     ),
     query_set_hash: hashPlan(platformSequence.map(item => item.query)),
     plan_hash: planHash,
+    sourcing_lane_defaulted: sourcingLaneDefaulted,
     required_confirmation: `Approve this exact platform plan by confirming plan_hash=${planHash}.`,
   };
 }
