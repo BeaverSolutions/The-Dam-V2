@@ -1,8 +1,18 @@
 import { readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
+import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+const platformYield = require('../../services/platformYield');
+const pool = require('../../db/pool');
+const originalQuery = pool.query;
+
+afterEach(() => {
+  pool.query = originalQuery;
+});
+
 const migration = readFileSync(
   resolve(__dirname, '../../db/migrations/082_platform_plans_and_yield.sql'),
   'utf-8'
@@ -171,5 +181,85 @@ describe('platform plan yield ledger migration', () => {
     expect(migration.trim().startsWith('BEGIN;')).toBe(true);
     expect(migration.trim().endsWith('COMMIT;')).toBe(true);
     expect(migration).toContain('INSERT INTO schema_migrations (version) VALUES (82) ON CONFLICT (version) DO NOTHING');
+  });
+});
+
+describe('platform yield pure helpers', () => {
+  it('calculates yield percentage against requested count', () => {
+    expect(platformYield.calculateYieldPct({ outputCount: 2, requestedCount: 5 })).toBe(40);
+    expect(platformYield.calculateYieldPct({ outputCount: 0, requestedCount: 5 })).toBe(0);
+    expect(platformYield.calculateYieldPct({ outputCount: 3, requestedCount: 0 })).toBe(300);
+  });
+
+  it('classifies trust transition above 30 percent and downgrades zero output', () => {
+    expect(platformYield.classifyStrategyHealth({
+      requestedCount: 5,
+      outputCount: 2,
+      blocker: null,
+    })).toEqual({
+      status: 'trusted_candidate',
+      yield_pct: 40,
+      reason: 'yield_above_threshold',
+    });
+
+    expect(platformYield.classifyStrategyHealth({
+      requestedCount: 5,
+      outputCount: 0,
+      blocker: 'signals_zero_after_llm_parse',
+    })).toEqual({
+      status: 'proof',
+      yield_pct: 0,
+      reason: 'signals_zero_after_llm_parse',
+    });
+
+    expect(platformYield.classifyStrategyHealth({
+      requestedCount: 10,
+      outputCount: 3,
+      blocker: null,
+    })).toEqual({
+      status: 'proof',
+      yield_pct: 30,
+      reason: 'yield_below_threshold',
+    });
+  });
+
+  it('records invalid provider queries in the platform yield ledger', async () => {
+    let sql = '';
+    let params = [];
+    pool.query = async (query, values) => {
+      sql = query;
+      params = values;
+      return { rows: [{ id: 'event-1' }] };
+    };
+
+    const longQuery = Array.from({ length: 60 }, (_, i) => `term${i}`).join(' ');
+    const row = await platformYield.recordPlatformYield('client-1', {
+      plan_id: 'plan-1',
+      directive_id: 'directive-1',
+      platform: 'jobstreet_my',
+      provider: 'brave',
+      mode: 'proof',
+      signal_id: 'hiring_sales_roles',
+      signal_family: 'hiring_capability_build',
+      source_channel: 'job_boards',
+      geo: 'MY',
+      query: longQuery,
+      paid_units: 1,
+      raw_results: 2,
+      blocker: 'provider_query_limit_exceeded',
+      metadata: { parser: 'hiring_job_board' },
+    });
+
+    expect(row.id).toBe('event-1');
+    expect(sql).toContain('INSERT INTO platform_yield_events');
+    expect(params[0]).toBe('client-1');
+    expect(params[3]).toBe('jobstreet_my');
+    expect(params[12]).toBeGreaterThan(0);
+    expect(params[13]).toBe(60);
+    expect(params[14]).toBe(false);
+    expect(params[15]).toBe(1);
+    expect(params[16]).toBe(2);
+    expect(params[26]).toBe('provider_query_limit_exceeded');
+    expect(JSON.parse(params[28]).parser).toBe('hiring_job_board');
   });
 });
