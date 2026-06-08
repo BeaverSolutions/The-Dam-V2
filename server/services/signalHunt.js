@@ -1351,6 +1351,9 @@ function validSignalCompanyName(value = '') {
   if (/^(?:at\s+)?least\s+\d+\s+(?:months?|years?)$/i.test(company)) return false;
   if (/^(?:for|and|or|the|of|in|to|with|by|from)$/i.test(company)) return false;
   if (/^(?:hays\b.*|michael page\b.*|jobstreet\b.*|indeed\b.*|glassdoor\b.*|linkedin\b.*|hiredly\b.*)$/i.test(company)) return false;
+  if (/^(?:resume\s*box|resume[-\s]*library|cv[-\s]*library|foundit|wobb|naukri|jobsdb)\b/i.test(company)) return false;
+  if (/^(?:shah alam|petaling jaya|cyberjaya|kuala lumpur|subang jaya|klang|putrajaya|johor bahru|penang|greater kuala lumpur|klang valley)$/i.test(company)) return false;
+  if (/\b(?:job board|job portal|career portal|career platform|resume database|cv database|salary guide)\b/i.test(company)) return false;
   if (/^(?:easy apply|top applicants|full[- ]time|on[- ]site|remote|hybrid)$/i.test(company)) return false;
   return true;
 }

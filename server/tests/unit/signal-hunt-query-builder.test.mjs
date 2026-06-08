@@ -286,6 +286,38 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     });
   });
 
+  it.each([
+    'Resume Box',
+    'Resume-Library',
+    'CV-Library',
+    'Foundit',
+    'Wobb',
+    'Naukri',
+    'JobsDB',
+  ])('rejects career-platform names before company enrichment: %s', (company) => {
+    expect(signalHunt._test.validSignalCompanyName(company)).toBe(false);
+  });
+
+  it.each([
+    'Shah Alam',
+    'Petaling Jaya',
+    'Cyberjaya',
+    'Kuala Lumpur',
+    'Subang Jaya',
+    'Klang',
+    'Putrajaya',
+    'Johor Bahru',
+    'Penang',
+    'Greater Kuala Lumpur',
+    'Klang Valley',
+  ])('rejects location-only names before company enrichment: %s', (company) => {
+    expect(signalHunt._test.validSignalCompanyName(company)).toBe(false);
+  });
+
+  it('keeps real companies valid after career/location blocklists', () => {
+    expect(signalHunt._test.validSignalCompanyName('Acme Learning Sdn Bhd')).toBe(true);
+  });
+
   it('passes company ICP gate only when extracted company evidence proves a configured vertical', () => {
     const gate = signalHunt._test.evaluateSignalCompanyIcpGate({
       company: 'Acme Training',
