@@ -103,7 +103,26 @@ function isChatCampaignIntent(message) {
   const msg = String(message || '').toLowerCase();
   return /\b(kickoff|kick off|start|execute|fire|begin|launch)\b/i.test(msg)
     || /\brun\b[\s\S]{0,80}\b(campaign|outreach|batch)\b/i.test(msg)
-    || /\bfind\b[\s\S]{0,120}\b(leads?|prospects?|founders?|ceos?|directors?|agenc(?:y|ies))\b/i.test(msg);
+    || isImpromptuLeadRequest(msg);
+}
+
+function isImpromptuLeadRequest(message) {
+  const msg = String(message || '').toLowerCase();
+  return /\b(find|source|research|get)\b[\s\S]{0,120}\b(leads?|prospects?|founders?|ceos?|directors?|agenc(?:y|ies))\b/i.test(msg)
+    || /\b(leads?|prospects?)\b[\s\S]{0,80}\b(on top|extra|additional|more)\b/i.test(msg);
+}
+
+function hasExplicitImpromptuPlatformBoundary(body = {}) {
+  const requestedCount = body.requested_count ?? body.requestedCount ?? body.limit;
+  const spendCap = body.spend_cap ?? body.spend_cap_usd ?? body.budget_cap_usd;
+  const stopRule = body.stop_rule ?? body.stopRule;
+  const allowedPlatforms = body.allowed_platforms ?? body.allowedPlatforms;
+  return Number(requestedCount) > 0
+    && spendCap !== undefined
+    && spendCap !== null
+    && String(spendCap).trim() !== ''
+    && !!stopRule
+    && (Array.isArray(allowedPlatforms) ? allowedPlatforms.length > 0 : String(allowedPlatforms || '').trim() !== '');
 }
 
 function basicOperatingSurfaceForTenant(snapshot = {}) {
@@ -242,6 +261,18 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
 
     // ── Intent 2: KICKOFF / EXECUTE ──────────────────────────────────
     else if (isChatCampaignIntent(lowerMsg)) {
+      if (isImpromptuLeadRequest(lowerMsg) && !hasExplicitImpromptuPlatformBoundary(req.body || {})) {
+        response.reply = 'This extra lead request needs a no-spend platform plan preview first. Approve requested count, spend cap, stop rule, and allowed platforms before paid sourcing.';
+        response.actions_taken.push('platform_plan_preview_required');
+        response.data = {
+          mode: 'platform_plan_preview_required',
+          request_type: 'extra_daily_request',
+          required_fields: ['requested_count', 'spend_cap', 'stop_rule', 'allowed_platforms'],
+          next_step: 'Call /api/autonomous/platform-plan/preview or ask MJ to approve cap and stop rule.',
+        };
+        return res.json(response);
+      }
+
       // Calendar gate — must have Google Calendar OR Calendly connected
       const calendarService = require('../services/googleCalendar');
       const hasCalendar = await calendarService.hasAnyCalendar(client_id);

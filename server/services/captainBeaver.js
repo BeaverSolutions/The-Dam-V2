@@ -106,6 +106,11 @@ run_campaign fires Research Beaver in parallel — 10x faster, handles dedup, Sa
 User-requested counts are outcome counts: if MJ asks for 5 leads, success means 5 approval-ready outreach items surfaced. Dropped, exhausted, duplicate, rejected, or incomplete leads do NOT count toward the request.
 web_search_brave is ONLY for one-off lookups (a specific person, a company signal, a news item) — never for building a lead list.
 
+IMPROMPTU EXTRA-DAILY LEAD REQUESTS:
+If MJ asks for extra leads outside scheduled daily kickoff, treat it as request_type=extra_daily_request.
+Do not execute paid sourcing or call run_campaign unless MJ explicitly gives requested_count, spend_cap, stop_rule, and allowed_platforms.
+If any field is missing, return action platform_plan_preview_required and ask for a no-spend platform plan preview first.
+
 CRITICAL RULE — ICP ENFORCEMENT (READ BEFORE EVERY LEAD SEARCH):
 Before calling search_internal_leads, run_campaign, or draft_email_for_leads, you MUST:
 1. Call get_client_config to load the current ICP (industries, location, must-have criteria).

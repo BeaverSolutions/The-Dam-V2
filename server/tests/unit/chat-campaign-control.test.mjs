@@ -6,6 +6,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const autonomousSource = readFileSync(resolve(__dirname, '../../routes/autonomous.js'), 'utf-8').replace(/\r\n/g, '\n');
 const agentsSource = readFileSync(resolve(__dirname, '../../services/agents.js'), 'utf-8').replace(/\r\n/g, '\n');
 const approvalsSource = readFileSync(resolve(__dirname, '../../services/approvals.js'), 'utf-8').replace(/\r\n/g, '\n');
+const captainSource = readFileSync(resolve(__dirname, '../../services/captainBeaver.js'), 'utf-8').replace(/\r\n/g, '\n');
 
 describe('chat campaign control', () => {
   const chatStart = autonomousSource.indexOf('// ── Intent 2: KICKOFF / EXECUTE');
@@ -32,6 +33,17 @@ describe('chat campaign control', () => {
   it('releases the chat signal cap while preserving bounded manual proof runs', () => {
     expect(autonomousSource).toContain('function boundedChatSignalQueryCap(requestedLimit)');
     expect(autonomousSource).toContain('return Math.max(3, Math.min(20, (Math.ceil(n) * 3) + 2))');
+  });
+
+  it('impromptu find-leads requests require no-spend platform plan unless cap and stop rule are explicit', () => {
+    expect(autonomousSource).toContain('platform_plan_preview_required');
+    expect(autonomousSource).toContain('extra_daily_request');
+    expect(autonomousSource).toContain('spend_cap');
+    expect(autonomousSource).toContain('stop_rule');
+    expect(captainSource).toContain('platform_plan_preview_required');
+    expect(captainSource).toContain('extra_daily_request');
+    expect(captainSource).toContain('spend_cap');
+    expect(captainSource).toContain('stop_rule');
   });
 });
 
