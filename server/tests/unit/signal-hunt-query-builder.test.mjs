@@ -670,6 +670,103 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     });
   });
 
+  it('packages vertical-first company discoveries as signal-lite leads without dropping them', () => {
+    expect(typeof signalHunt._test.isVerticalFirstPlatformPlan).toBe('function');
+    expect(typeof signalHunt._test.verticalFirstSignalsFromResults).toBe('function');
+
+    const platformPlan = {
+      mode: 'proof',
+      discovery_mode: 'vertical_first',
+    };
+    expect(signalHunt._test.isVerticalFirstPlatformPlan(platformPlan)).toBe(true);
+
+    const signals = signalHunt._test.verticalFirstSignalsFromResults([
+      {
+        title: 'Acme Digital - Marketing Agency Malaysia',
+        link: 'https://acme.example/about',
+        snippet: 'Acme Digital is a Malaysia marketing agency serving B2B companies.',
+      },
+      {
+        title: 'Beta Training Provider',
+        url: 'https://beta.example',
+        snippet: 'Corporate training provider for Malaysian sales teams.',
+      },
+    ], {
+      query: '"marketing agency" Malaysia',
+      platform: 'agency_directory',
+      provider: 'brave',
+      country: 'MY',
+      source_channel: 'vertical_directory',
+      platform_plan_id: 'plan-1',
+      source_term: 'marketing agency',
+      expected_evidence: ['company', 'vertical_evidence', 'source_url'],
+    });
+
+    expect(signals).toHaveLength(2);
+    expect(signals[0]).toMatchObject({
+      company: 'Acme Digital',
+      signal_id: 'vertical_first_discovery',
+      signal_family: 'vertical_first_discovery',
+      signal_lite: true,
+      discovery_lane: 'vertical_first',
+      platform: 'agency_directory',
+      provider: 'brave',
+      country: 'MY',
+    });
+    expect(signals[0].signal_summary).toContain('vertical-first company discovery');
+    expect(signals[0].metadata).toMatchObject({
+      signal_lite: true,
+      discovery_lane: 'vertical_first',
+      platform: 'agency_directory',
+      source_term: 'marketing agency',
+    });
+
+    const packaged = signalHunt._test.attachSignalPackageToSignalLead({
+      name: 'Jane Tan',
+      title: 'Founder',
+      company: 'Acme Digital',
+      linkedin_url: 'https://www.linkedin.com/in/janetan',
+      data_source: 'signal_hunt',
+      metadata: {
+        signal_id: 'vertical_first_discovery',
+        signal_family: 'vertical_first_discovery',
+        source_channel: 'vertical_directory',
+        platform: 'agency_directory',
+        provider: 'brave',
+        platform_plan_id: 'plan-1',
+        source_url: 'https://acme.example/about',
+        evidence: 'Acme Digital is a Malaysia marketing agency serving B2B companies.',
+        signal: 'Signal-lite vertical-first company discovery for Acme Digital.',
+        why_now: 'Signal-lite vertical-first company discovery.',
+        signal_lite: true,
+        discovery_lane: 'vertical_first',
+        country: 'Malaysia',
+        industry_match: 'marketing agency',
+        icp_evidence: ['marketing agency'],
+        reject_rules_checked: ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence'],
+      },
+    });
+
+    expect(packaged.metadata.signal_package).toMatchObject({
+      signal_id: 'vertical_first_discovery',
+      signal_family: 'vertical_first_discovery',
+      source_channel: 'vertical_directory',
+      signal_lite: true,
+      discovery_lane: 'vertical_first',
+      source_url: 'https://acme.example/about',
+      company_icp_fit: {
+        vertical_match: 'marketing agency',
+      },
+    });
+    expect(signalHunt._test.signalPackageMissingFields(packaged.metadata.signal_package)).toEqual([]);
+
+    const runStart = src.indexOf('async function runSignalHunt');
+    const verticalBranch = src.indexOf('verticalFirstSignalsFromResults', runStart);
+    const extractBranch = src.indexOf('extractSignalsFromResults(clientId', runStart);
+    expect(verticalBranch).toBeGreaterThan(runStart);
+    expect(verticalBranch).toBeLessThan(extractBranch);
+  });
+
   it('refuses incomplete Signal Hunt packages before contactGate persistence', () => {
     const saveStart = src.indexOf('async function saveSignalLeads');
     const packageGate = src.indexOf('signalPackageMissingFields', saveStart);

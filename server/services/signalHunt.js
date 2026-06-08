@@ -847,6 +847,7 @@ function signalHuntQueryFromPlatformStep(step = {}) {
     term: step.term || step.source_term || null,
     source_term: step.source_term || step.term || null,
     parser: step.parser || null,
+    discovery_mode: step.discovery_mode || step.discoveryMode || null,
   };
 }
 
@@ -868,6 +869,8 @@ function applyApprovedPlatformPlanToConfig(config = {}, platformPlan = null) {
       plan_hash: platformPlan.plan_hash || null,
       query_set_hash: platformPlan.query_set_hash || null,
       mode: platformPlan.mode || null,
+      requested_mode: platformPlan.requested_mode || null,
+      discovery_mode: platformPlan.discovery_mode || null,
       stop_rule: platformPlan.stop_rule || {},
     },
   };
@@ -1061,6 +1064,8 @@ function applySignalPlaybookToConfig(config = {}, signalPlaybook = null) {
 
 function attachSignalPackageToSignalLead(lead = {}, options = {}) {
   const metadata = { ...(lead.metadata || {}) };
+  const signalLite = metadata.signal_lite === true || lead.signal_lite === true;
+  const discoveryLane = metadata.discovery_lane || lead.discovery_lane || null;
   const signalType = metadata.signal_id
     || metadata.signal_type
     || lead.signal_type
@@ -1098,7 +1103,7 @@ function attachSignalPackageToSignalLead(lead = {}, options = {}) {
     linkedin_url: lead.linkedin_url || null,
   };
 
-  return attachSignalPackageToLead({
+  const packaged = attachSignalPackageToLead({
     ...lead,
     signal: signalType,
     why_now: whyNow,
@@ -1122,6 +1127,15 @@ function attachSignalPackageToSignalLead(lead = {}, options = {}) {
       sales_angle: metadata.sales_angle || metadata.angle || `${signalType}: ${whyNow || evidence || 'signal-backed outreach angle'}`,
     },
   }, options);
+  packaged.metadata.signal_package = {
+    ...(packaged.metadata.signal_package || {}),
+    ...(signalLite ? { signal_lite: true } : {}),
+    ...(discoveryLane ? { discovery_lane: discoveryLane } : {}),
+    ...(metadata.platform ? { platform: metadata.platform } : {}),
+    ...(metadata.provider ? { provider: metadata.provider } : {}),
+    ...(metadata.platform_plan_id ? { platform_plan_id: metadata.platform_plan_id } : {}),
+  };
+  return packaged;
 }
 
 function queriesFromConfigContent(content) {
@@ -1620,6 +1634,128 @@ function deterministicHiringSignals(results = [], query = {}) {
     .filter(Boolean);
 }
 
+function isVerticalFirstPlatformPlan(platformPlan = null, config = {}) {
+  const plan = platformPlan && typeof platformPlan === 'object' ? platformPlan : {};
+  const approved = config?.approved_platform_plan || {};
+  const modeCandidates = [
+    plan.discovery_mode,
+    plan.discoveryMode,
+    plan.requested_mode,
+    plan.requestedMode,
+    plan.mode,
+    approved.discovery_mode,
+    approved.discoveryMode,
+    approved.requested_mode,
+    approved.mode,
+  ].map(value => String(value || '').toLowerCase());
+  if (modeCandidates.includes('vertical_first')) return true;
+  return Array.isArray(plan.platform_sequence)
+    && plan.platform_sequence.some(step => String(step?.discovery_mode || step?.discoveryMode || '').toLowerCase() === 'vertical_first');
+}
+
+function isVerticalFirstQuery(query = {}) {
+  return String(query.discovery_mode || query.discoveryMode || '').toLowerCase() === 'vertical_first'
+    || String(query.signal_id || query.signal_type || query.signal_family || '').toLowerCase() === 'vertical_first_discovery';
+}
+
+function escapeRegex(value = '') {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function cleanVerticalFirstCompanyName(value = '', query = {}) {
+  let company = String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+\|\s+.*$/i, '')
+    .replace(/\s+[-–]\s+(?:marketing|digital|creative|pr|corporate training|training|learning|sales).+$/i, '')
+    .replace(/\s+\b(?:Malaysia|Singapore|Kuala Lumpur|Selangor|Klang Valley)\b\s*$/i, '')
+    .replace(/^[,\s-]+|[,\s-]+$/g, '')
+    .trim();
+
+  const sourceTerm = String(query.source_term || query.term || query.industry || '').trim();
+  if (sourceTerm) {
+    company = company
+      .replace(new RegExp(`\\s+[-–]?\\s*${escapeRegex(sourceTerm)}\\b.*$`, 'i'), '')
+      .trim();
+  }
+
+  company = company
+    .replace(/\s+\b(?:marketing agency|digital agency|creative agency|pr agency|corporate training provider|training provider|training company)\b.*$/i, '')
+    .trim();
+
+  if (!validSignalCompanyName(company)) return '';
+  return company;
+}
+
+function verticalFirstCompanyFromResult(result = {}, query = {}) {
+  const title = String(result.title || result.name || '').trim();
+  const snippet = String(result.snippet || result.description || '').trim();
+  const titleCompany = cleanVerticalFirstCompanyName(title, query);
+  if (titleCompany) return titleCompany;
+
+  const snippetPatterns = [
+    /\b([A-Z][A-Za-z0-9&.'() ,-]{2,80})\s+is\s+(?:a|an)\s+(?:Malaysia\s+)?(?:marketing|digital|creative|PR|corporate training|training|learning)/i,
+    /\b(?:provider|agency|company):\s*([A-Z][A-Za-z0-9&.'() ,-]{2,80})\b/i,
+  ];
+  for (const pattern of snippetPatterns) {
+    const match = snippet.match(pattern);
+    const company = cleanVerticalFirstCompanyName(match?.[1], query);
+    if (company) return company;
+  }
+  return '';
+}
+
+function verticalFirstSignalsFromResults(results = [], query = {}) {
+  const country = query.country || countryCodeFromText(query.query) || 'MY';
+  const platform = query.platform || query.source_channel || 'vertical_web';
+  const sourceChannel = query.source_channel || platform || 'vertical_web';
+  return (Array.isArray(results) ? results : [])
+    .map(result => {
+      const company = verticalFirstCompanyFromResult(result, query);
+      if (!company) return null;
+      const title = String(result.title || result.name || '').trim();
+      const snippet = String(result.snippet || result.description || title).trim();
+      const sourceUrl = result.link || result.url || '';
+      const evidence = snippet || title || `${company} matched vertical-first discovery.`;
+      return {
+        company,
+        signal_type: query.signal_type || query.signal_id || 'vertical_first_discovery',
+        signal_id: query.signal_id || 'vertical_first_discovery',
+        signal_family: query.signal_family || 'vertical_first_discovery',
+        source_channel: sourceChannel,
+        platform,
+        provider: query.provider || 'brave',
+        platform_plan_id: query.platform_plan_id || query.plan_id || null,
+        source_url: sourceUrl,
+        signal_summary: `Signal-lite vertical-first company discovery for ${company}: ${title || evidence}.`,
+        why_now: `${company} matched the tenant vertical in a vertical-first discovery source; use a cold-outreach-no-signal opener unless a richer signal is attached later.`,
+        angle: `Open on the relevant vertical and ask how ${company} is building outbound pipeline this quarter.`,
+        raw_snippet: evidence,
+        company_description: evidence,
+        signal_lite: true,
+        discovery_lane: 'vertical_first',
+        signal_date: result.date || '',
+        confidence: 0.6,
+        country,
+        expected_industry: query.industry || null,
+        expected_evidence: query.expected_evidence || [],
+        source_term: query.source_term || query.term || null,
+        query: query.query || null,
+        metadata: {
+          signal_lite: true,
+          discovery_lane: 'vertical_first',
+          platform,
+          provider: query.provider || 'brave',
+          platform_plan_id: query.platform_plan_id || query.plan_id || null,
+          source_channel: sourceChannel,
+          source_url: sourceUrl,
+          evidence,
+          source_term: query.source_term || query.term || null,
+        },
+      };
+    })
+    .filter(Boolean);
+}
+
 function mergeExtractedSignalSets(primary = [], fallback = []) {
   const merged = [];
   const seen = new Set();
@@ -1840,6 +1976,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   config = applySignalPlaybookToConfig(config, signalPlaybook);
   config = applyApprovedPlatformPlanToConfig(config, platformPlan);
   const activePlanId = platformPlan?.id || platformPlan?.plan_id || plan_id;
+  const verticalFirstExecution = isVerticalFirstPlatformPlan(platformPlan, config);
   const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
   const providerFanoutCaps = signalProviderFanoutCaps(maxPaidQueries, maxLeads);
   const executableDiscoveryQueries = executableDiscoveryQueriesForBudget(config.queries, paidQueryBudget);
@@ -1955,7 +2092,9 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       }
       if (safeResults.length === 0) continue;
 
-      const extracted = await extractSignalsFromResults(clientId, safeResults, q, geoText);
+      const extracted = (verticalFirstExecution || isVerticalFirstQuery(q))
+        ? verticalFirstSignalsFromResults(safeResults, { ...q, platform_plan_id: activePlanId || q.platform_plan_id || null })
+        : await extractSignalsFromResults(clientId, safeResults, q, geoText);
       const validSignals = extracted.filter(s => s.company && validSignalCompanyName(s.company) && s.confidence >= 0.5);
       platformFunnelTracker.recordExtraction(q, validSignals.length);
 
@@ -1973,6 +2112,15 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         s.expected_evidence = q.expected_evidence || s.expected_evidence || [];
         s.source_term = q.source_term || q.term || s.source_term || null;
         s.reject_rules = q.reject_rules || s.reject_rules || {};
+        s.discovery_mode = q.discovery_mode || s.discovery_mode || null;
+        s.discovery_lane = s.discovery_lane || s.metadata?.discovery_lane || null;
+        s.signal_lite = s.signal_lite === true || s.metadata?.signal_lite === true;
+        s.metadata = {
+          ...(s.metadata || {}),
+          ...(s.signal_lite ? { signal_lite: true } : {}),
+          ...(s.discovery_lane ? { discovery_lane: s.discovery_lane } : {}),
+          ...(s.discovery_mode ? { discovery_mode: s.discovery_mode } : {}),
+        };
         s.query = q.query;
       });
       allSignals.push(...validSignals);
@@ -2203,6 +2351,9 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         platform: signal.platform || null,
         provider: signal.provider || null,
         platform_plan_id: signal.platform_plan_id || null,
+        discovery_mode: signal.discovery_mode || null,
+        discovery_lane: signal.discovery_lane || signal.metadata?.discovery_lane || null,
+        signal_lite: signal.signal_lite === true || signal.metadata?.signal_lite === true,
         source_url: signal.source_url,
         evidence: signal.signal_summary || signal.raw_snippet || signal.why_now,
         signal: signal.signal_summary,
@@ -2432,6 +2583,8 @@ module.exports = {
     extractedSignalItems,
     deterministicPublicationSignals,
     deterministicHiringSignals,
+    isVerticalFirstPlatformPlan,
+    verticalFirstSignalsFromResults,
     missingSignalPackageSaveMetadata,
     validSignalCompanyName,
     validDecisionMakerName,
