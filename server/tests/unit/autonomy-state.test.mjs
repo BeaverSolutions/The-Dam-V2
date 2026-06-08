@@ -67,4 +67,18 @@ describe('autonomy state', () => {
     expect(isScheduledAutonomyPaused({})).toBe(true);
     expect(isScheduledAutonomyPaused({ SCHEDULED_AUTONOMY_PAUSED: 'false' })).toBe(false);
   });
+
+  it('surfaces trusted platform strategy spend state without arming scheduled autonomy', () => {
+    const defaultState = getAutonomyState({});
+    expect(defaultState.trusted_daily_spend_enabled).toBe(false);
+    expect(defaultState.trusted_platform_strategy_required).toBe(true);
+    expect(defaultState.trusted_platform_min_yield_pct).toBe(30);
+
+    const enabledState = getAutonomyState({
+      CAPTAIN_TRUSTED_DAILY_SPEND_ENABLED: 'true',
+    });
+    expect(enabledState.trusted_daily_spend_enabled).toBe(true);
+    expect(enabledState.scheduled_actions_allowed).toBe(false);
+    expect(enabledState.spend_allowed).toBe(false);
+  });
 });

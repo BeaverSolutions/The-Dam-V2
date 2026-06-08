@@ -26,6 +26,7 @@ function getAutonomyState(env = process.env) {
   const enabledTenants = envList(env, 'AUTONOMOUS_ENABLED_CLIENTS');
   const dbBuilderTenants = envList(env, 'DB_BUILDER_ENABLED_CLIENTS');
   const dryRun = envTrue(env, 'AUTONOMY_DRY_RUN');
+  const trustedDailySpendEnabled = envTrue(env, 'CAPTAIN_TRUSTED_DAILY_SPEND_ENABLED');
 
   const scheduledSpendWorkers = {
     db_builder: dbBuilderTenants.length > 0,
@@ -68,6 +69,9 @@ function getAutonomyState(env = process.env) {
     reason,
     enabled_tenants: enabledTenants,
     scheduled_spend_workers: scheduledSpendWorkers,
+    trusted_daily_spend_enabled: trustedDailySpendEnabled,
+    trusted_platform_strategy_required: true,
+    trusted_platform_min_yield_pct: 30,
     rearm_requires: REARM_REQUIRES,
   };
 }

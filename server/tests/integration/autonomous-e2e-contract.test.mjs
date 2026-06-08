@@ -92,6 +92,16 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(kickoffBody).not.toContain('vp_rescue');
   });
 
+  it('scheduled kickoff may spend on platform sourcing only through trusted strategy state', () => {
+    const kickoffBody = functionBody(autonomousSource, 'async function _runAutonomousKickoffInner', '/**\n * Post-kickoff verification');
+
+    expect(kickoffBody).toContain('platform_strategy_state');
+    expect(kickoffBody).toContain('trusted');
+    expect(kickoffBody).toContain('CAPTAIN_TRUSTED_DAILY_SPEND_ENABLED');
+    expect(kickoffBody).toContain('trusted_platform_strategy_required');
+    expect(kickoffBody).toContain('maxPaidQueries');
+  });
+
   it('Captain blocks KPI-gap auto-kickoffs after scheduled zero or low-yield kickoff output', () => {
     const kickoffBody = functionBody(autonomousSource, 'async function writeKickoffBlocker', 'function buildAutonomousBrief');
     const kpiGapBody = functionBody(indexSource, 'async function runKpiGapKickoff', 'async function runCaptainDirectiveSweep');

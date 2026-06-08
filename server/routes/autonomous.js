@@ -1508,6 +1508,21 @@ router.get('/vp-schema', requireInternalKey, async (req, res) => {
 
 /* ─── Core: Autonomous kickoff logic ─────────────────────── */
 
+async function loadTrustedPlatformStrategy(clientId, strategyKey = null) {
+  const { rows } = await pool.query(
+    `SELECT *
+     FROM platform_strategy_state
+     WHERE client_id = $1
+       AND status = 'trusted'
+       AND last_yield_pct > 30
+       AND ($2::text IS NULL OR strategy_key = $2)
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [clientId, strategyKey]
+  );
+  return rows[0] || null;
+}
+
 async function runAutonomousKickoff(clientId) {
   if (_runningKickoffs.has(clientId)) {
     console.log(`[Autonomous] Client ${clientId} kickoff already running — skipping concurrent trigger`);
@@ -1538,6 +1553,28 @@ async function _runAutonomousKickoffInner(clientId, options = {}) {
   const PENDING_CEILING = 30;
   const CHANNEL_ESCALATION_DAILY_CAP = Number(process.env.CHANNEL_ESCALATION_DAILY_CAP) || 5;
   const DAILY_WEB_LINKEDIN_SIGNAL_CAP = Math.max(0, Number(process.env.DAILY_WEB_LINKEDIN_SIGNAL_CAP || 6));
+  const trustedDailySpendEnabled = String(process.env.CAPTAIN_TRUSTED_DAILY_SPEND_ENABLED || 'false').toLowerCase() === 'true';
+  const trustedPlatformStrategy = trustedDailySpendEnabled
+    ? await loadTrustedPlatformStrategy(clientId).catch(() => null)
+    : null;
+  const blockUntrustedScheduledPlatformSpend = async (context, metadata = {}) => {
+    await logAction(clientId, 'director', 'trusted_platform_strategy_required', 'system', null, {
+      ...metadata,
+      context,
+      reason: trustedDailySpendEnabled ? 'no_trusted_strategy_above_threshold' : 'trusted_daily_spend_disabled',
+      required_yield_pct: 30,
+      gate: 'platform_strategy_state',
+      required_status: 'trusted',
+      trusted_daily_spend_enabled: trustedDailySpendEnabled,
+    });
+    return {
+      blocked: true,
+      reason: 'trusted_platform_strategy_required',
+      context,
+      required_yield_pct: 30,
+      trusted_daily_spend_enabled: trustedDailySpendEnabled,
+    };
+  };
 
   const budgetState = await checkBudget(clientId).catch(err => ({
     allowed: false,
@@ -2312,6 +2349,13 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
           context: 'pool_dry_on_demand_research', boundary: 'no_generic_paid_fallback',
         });
         if (!webLinkedinTopupAttempted && DAILY_WEB_LINKEDIN_SIGNAL_CAP > 0) {
+          if (!trustedPlatformStrategy) {
+            return await blockUntrustedScheduledPlatformSpend('pool_dry_channel_target', {
+              batch,
+              cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+              maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+            });
+          }
           webLinkedinTopupAttempted = true;
           await logAction(clientId, 'director', 'web_linkedin_topup_attempted', 'system', null, {
             batch,
@@ -2367,8 +2411,18 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         break;
       }
 
-      poolDryResearchAttempts++;
       const neededChannel = emailGap > 0 ? 'email' : 'linkedin';
+      if (!trustedPlatformStrategy) {
+        return await blockUntrustedScheduledPlatformSpend('pool_dry_on_demand_research', {
+          batch,
+          neededChannel,
+          attempt: poolDryResearchAttempts + 1,
+          cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+          maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+        });
+      }
+
+      poolDryResearchAttempts++;
       console.log(`[Autonomous] Triggering on-demand Research Beaver (attempt ${poolDryResearchAttempts}/${MAX_POOL_DRY_RESEARCH}, channel=${neededChannel})`);
       await logAction(clientId, 'director', 'pool_dry_triggering_research', 'system', null, {
         batch, neededChannel, attempt: poolDryResearchAttempts,
@@ -2566,6 +2620,13 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
           boundary: 'one_topup_attempt_per_kickoff',
         });
         break;
+      }
+      if (!trustedPlatformStrategy) {
+        return await blockUntrustedScheduledPlatformSpend('cold_research_fallback', {
+          batch,
+          cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+          maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+        });
       }
       webLinkedinTopupAttempted = true;
       await logAction(clientId, 'director', 'web_linkedin_topup_attempted', 'system', null, {
