@@ -190,23 +190,6 @@ async function logSignalHuntMiss(clientId, {
   }).catch(() => {});
 }
 
-function missingSignalPackageSaveMetadata(lead = {}, missingPackageFields = []) {
-  const companyFit = lead.metadata?.signal_package?.company_icp_fit;
-  const hasEmptyCompanyIcpEvidence =
-    missingPackageFields.includes('company_icp_fit') &&
-    companyFit &&
-    !String(companyFit.vertical_match || '').trim() &&
-    (!Array.isArray(companyFit.icp_evidence) || companyFit.icp_evidence.filter(Boolean).length === 0);
-  return {
-    blocker: hasEmptyCompanyIcpEvidence ? 'icp_zero_after_company_extract' : 'contact_zero',
-    reason: hasEmptyCompanyIcpEvidence ? 'empty_company_icp_evidence' : 'missing_signal_package_before_signal_save',
-    missing_fields: missingPackageFields,
-    lead_name: lead.name || null,
-    lead_company: lead.company || null,
-    source: 'signal_hunt',
-  };
-}
-
 function executableDiscoveryQueriesForBudget(queries = [], paidQueryBudget = {}) {
   if (!Array.isArray(queries)) return [];
   const discovery = paidQueryBudget?.discovery;
@@ -550,11 +533,10 @@ function evaluateSignalCompanyIcpGate(signal = {}, icp = {}) {
   const verticals = icpVerticalTerms(icp);
   if (verticals.length === 0) {
     return {
-      pass: false,
-      blocker: 'icp_no_active_verticals_configured',
-      reason: 'tenant_active_industries_not_set',
-      expected_verticals: [],
-      reject_rules_checked: ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence'],
+      pass: true,
+      vertical_match: null,
+      icp_evidence: [],
+      reject_rules_checked: ['tenant_exclusions', 'competitor_offers'],
     };
   }
 
@@ -1351,9 +1333,6 @@ function validSignalCompanyName(value = '') {
   if (/^(?:at\s+)?least\s+\d+\s+(?:months?|years?)$/i.test(company)) return false;
   if (/^(?:for|and|or|the|of|in|to|with|by|from)$/i.test(company)) return false;
   if (/^(?:hays\b.*|michael page\b.*|jobstreet\b.*|indeed\b.*|glassdoor\b.*|linkedin\b.*|hiredly\b.*)$/i.test(company)) return false;
-  if (/^(?:resume\s*box|resume[-\s]*library|cv[-\s]*library|foundit|wobb|naukri|jobsdb)\b/i.test(company)) return false;
-  if (/^(?:shah alam|petaling jaya|cyberjaya|kuala lumpur|subang jaya|klang|putrajaya|johor bahru|penang|greater kuala lumpur|klang valley)$/i.test(company)) return false;
-  if (/\b(?:job board|job portal|career portal|career platform|resume database|cv database|salary guide)\b/i.test(company)) return false;
   if (/^(?:easy apply|top applicants|full[- ]time|on[- ]site|remote|hybrid)$/i.test(company)) return false;
   return true;
 }
@@ -1999,7 +1978,14 @@ async function saveSignalLeads(clientId, leads) {
         agent: 'research_beaver',
         action: 'research_blocker',
         target_type: 'research',
-        metadata: missingSignalPackageSaveMetadata(lead, missingPackageFields),
+        metadata: {
+          blocker: 'contact_zero',
+          reason: 'missing_signal_package_before_signal_save',
+          missing_fields: missingPackageFields,
+          lead_name: lead.name || null,
+          lead_company: lead.company || null,
+          source: 'signal_hunt',
+        },
       }).catch(() => {});
       console.log(`[signalHunt] Skipping ${lead.name || lead.company || 'lead'} - incomplete signal_package: ${missingPackageFields.join(',')}`);
       continue;
@@ -2135,7 +2121,6 @@ module.exports = {
     extractedSignalItems,
     deterministicPublicationSignals,
     deterministicHiringSignals,
-    missingSignalPackageSaveMetadata,
     validSignalCompanyName,
     validDecisionMakerName,
     mergeExtractedSignalSets,

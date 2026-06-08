@@ -448,20 +448,9 @@ async function getLegacyIcpForClient(clientId, { source = 'service', fallback = 
   return fallback || null;
 }
 
-async function loadIcpForSignalHunt(clientId, { source = 'service' } = {}) {
-  const { rows } = await pool.query(
-    `SELECT content FROM agent_memory
-     WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
-    [clientId]
-  );
-  const fallback = rows[0]?.content || null;
-  return await getLegacyIcpForClient(clientId, { source, fallback }) || fallback || {};
-}
-
 module.exports = {
   getTenantContext,
   getLegacyIcpForClient,
-  loadIcpForSignalHunt,
   createAuthContext,
   // Internal projections exported for unit/smoke testing only.
   // Production code uses getTenantContext.

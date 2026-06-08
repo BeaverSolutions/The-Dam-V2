@@ -146,26 +146,10 @@ async function fetchJson(url, options = {}) {
   }
 }
 
-async function logUnconfiguredProviderSkip(provider, clientId, metadata = {}) {
-  await spendGuard.logProviderUsage(provider, {
-    clientId,
-    units: 0,
-    metadata: {
-      status: 'unconfigured',
-      reason: 'missing_api_key',
-      ...metadata,
-    },
-  });
-}
-
 async function tryAnymail(clientId, { firstName, lastName, fullName, company, domain, linkedinUrl }) {
   const apiKey = envKey('ANYMAIL_API_KEY');
   const displayName = fullName || [firstName, lastName].filter(Boolean).join(' ');
-  if (!apiKey) {
-    await logUnconfiguredProviderSkip('anymail', clientId);
-    return null;
-  }
-  if (!firstName || (!domain && !company)) return null;
+  if (!apiKey || !firstName || (!domain && !company)) return null;
 
   const guard = await spendGuard.checkProvider('anymail', { clientId, estimatedUnits: 1 });
   if (!guard.allowed) {
@@ -215,11 +199,7 @@ async function tryAnymail(clientId, { firstName, lastName, fullName, company, do
 async function tryIcypeas(clientId, { firstName, lastName, company, domain }) {
   const apiKey = envKey('ICYPEAS_API_KEY');
   const domainOrCompany = domain || company;
-  if (!apiKey) {
-    await logUnconfiguredProviderSkip('icypeas', clientId);
-    return null;
-  }
-  if (!firstName || !domainOrCompany) return null;
+  if (!apiKey || !firstName || !domainOrCompany) return null;
 
   const guard = await spendGuard.checkProvider('icypeas', { clientId, estimatedUnits: 1 });
   if (!guard.allowed) {
@@ -303,15 +283,6 @@ async function getSnovAccessToken() {
 
 async function trySnov(clientId, { firstName, lastName, domain }) {
   if (!firstName || !domain) return null;
-  const snovClientId = envKey('SNOV_CLIENT_ID');
-  const snovClientSecret = envKey('SNOV_CLIENT_SECRET');
-  if (!snovClientId || !snovClientSecret) {
-    await logUnconfiguredProviderSkip('snov', clientId, {
-      missing_client_id: !snovClientId,
-      missing_client_secret: !snovClientSecret,
-    });
-    return null;
-  }
   const token = await getSnovAccessToken();
   if (!token) return null;
 

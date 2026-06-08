@@ -20,7 +20,7 @@ describe('V2.1 research proof endpoint', () => {
     expect(body).toContain('const proofLimit = 5;');
     expect(body).toContain('const proofPaidQueryCap = boundedResearchProofQueryCap(req.body?.max_paid_queries);');
     expect(body).toContain('previewSignalHuntPlan');
-    expect(body).toContain("loadIcpForSignalHunt(clientId, { source: 'http' })");
+    expect(body).toContain('getLegacyIcpForClient(clientId');
     expect(body).toContain('TENANT_PROFILE_BLOCKED');
     expect(body).toContain('confirm_query_plan_hash');
     expect(body).toContain('QUERY_PLAN_CONFIRMATION_MISMATCH');
@@ -41,7 +41,7 @@ describe('V2.1 research proof endpoint', () => {
     expect(body.indexOf('confirm_query_plan_hash')).toBeLessThan(
       body.indexOf('runWithClientContext(clientId, () => runSignalHunt')
     );
-    expect(body.indexOf("loadIcpForSignalHunt(clientId, { source: 'http' })")).toBeLessThan(
+    expect(body.indexOf('getLegacyIcpForClient(clientId')).toBeLessThan(
       body.indexOf('previewSignalHuntPlan(clientId')
     );
   });
