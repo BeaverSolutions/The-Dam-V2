@@ -28,6 +28,7 @@ const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./b
 const { attachSignalPackageToLead, signalPackageMissingFields } = require('./research');
 const signalPlanner = require('./signalPlanner');
 const platformRegistry = require('./platformRegistry');
+const { resolveCompanyEvidence } = require('./companyEvidenceResolver');
 const { normalizeBuyingSignalsForTenant } = require('../config/buyingSignals');
 const crypto = require('crypto');
 
@@ -2039,6 +2040,41 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
 
     const country = signal.country || countryCodeFromText(signal.raw_snippet || signal.signal_summary || '') || 'MY';
     const countryName = countryNameFromCode(country);
+    const companyEvidence = await resolveCompanyEvidence(signal, icp).catch(err => ({
+      company: signal.company,
+      vertical_match: null,
+      evidence: [],
+      source: 'resolver_error',
+      confidence: 0,
+      error: err.message,
+    }));
+    if (!companyEvidence?.vertical_match) {
+      await logSignalHuntMiss(clientId, {
+        signal,
+        blocker: 'company_vertical_unproven',
+        reason: 'company_vertical_unproven',
+        metadata: {
+          expected_verticals: icpVerticalTerms(icp),
+          resolver_source: companyEvidence?.source || null,
+          resolver_confidence: companyEvidence?.confidence ?? null,
+          resolver_error: companyEvidence?.error || null,
+        },
+      });
+      console.log(`[signalHunt] Company evidence resolver blocked ${signal.company}: vertical unproven`);
+      continue;
+    }
+    const resolverEvidenceText = (companyEvidence.evidence || [])
+      .map(item => item?.text || item)
+      .filter(Boolean)
+      .join(' ');
+    signal.company_description = [
+      signal.company_description,
+      resolverEvidenceText,
+    ].filter(Boolean).join(' ');
+    signal.metadata = {
+      ...(signal.metadata || {}),
+      company_evidence_resolver: companyEvidence,
+    };
     const companyGate = evaluateSignalCompanyIcpGate(signal, icp);
     if (!companyGate.pass) {
       await logSignalHuntMiss(clientId, {
