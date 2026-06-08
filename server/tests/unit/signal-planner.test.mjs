@@ -140,12 +140,47 @@ describe('signal planner', () => {
     expect(plan.queries.every(q => /Malaysia|MY/i.test(q.query))).toBe(true);
     const linkedInJobsQuery = plan.queries.find(q => q.sourceChannel === 'linkedin_jobs')?.query || '';
     expect(linkedInJobsQuery).toMatch(/site:linkedin\.com\/jobs\/view/i);
+    expect(linkedInJobsQuery).toMatch(/site:my\.jobstreet\.com|site:jobstreet\.com\.my/i);
+    expect(linkedInJobsQuery).toMatch(/site:hiredly\.com/i);
     expect(linkedInJobsQuery).not.toMatch(/site:linkedin\.com\/jobs(?:\s|$)/i);
     expect(linkedInJobsQuery).toMatch(/Kuala Lumpur|Greater Kuala Lumpur|Malaysia/i);
     expect(linkedInJobsQuery).toMatch(/Sales Executive|Account Executive|Business Development Manager|Sales Manager/i);
     expect(linkedInJobsQuery).not.toMatch(/B2B agency/i);
     expect(linkedInJobsQuery).toMatch(/-India -Delhi -NCR -Jaipur -Siliguri/i);
     expect(plan.queries[0].expectedEvidence).toEqual(['company', 'role', 'source_url']);
+  });
+
+  it('uses Malaysia local job portals for MY job-board hiring queries', () => {
+    const plan = signalPlanner.buildSignalPlan({
+      tenant: tenantContext,
+      signalId: 'hiring_sales_roles',
+      geo: ['MY'],
+      sourceChannel: 'job_boards',
+      maxQueries: 1,
+    });
+    const query = plan.queries[0]?.query || '';
+
+    expect(plan.queries[0]).toMatchObject({ sourceChannel: 'job_boards', geo: 'MY' });
+    expect(query).toMatch(/site:my\.jobstreet\.com|site:jobstreet\.com\.my/i);
+    expect(query).toMatch(/site:hiredly\.com/i);
+    expect(query).toMatch(/Kuala Lumpur|Greater Kuala Lumpur|Malaysia/i);
+    expect(query).toMatch(/Sales Executive|Account Executive|Business Development Manager|Sales Manager/i);
+    expect(query).not.toMatch(/site:linkedin\.com\/jobs/i);
+  });
+
+  it('does not apply Malaysia job portals to non-MY job-board queries', () => {
+    const plan = signalPlanner.buildSignalPlan({
+      tenant: tenantContext,
+      signalId: 'hiring_sales_roles',
+      geo: ['SG'],
+      sourceChannel: 'job_boards',
+      maxQueries: 1,
+    });
+    const query = plan.queries[0]?.query || '';
+
+    expect(plan.queries[0]).toMatchObject({ sourceChannel: 'job_boards', geo: 'SG' });
+    expect(query).not.toMatch(/my\.jobstreet\.com|jobstreet\.com\.my|hiredly\.com/i);
+    expect(query).toMatch(/Singapore/i);
   });
 
   it('diversifies small paid query windows across ICP verticals and source channels', () => {

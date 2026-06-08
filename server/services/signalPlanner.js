@@ -61,6 +61,26 @@ function hiringRoleQuery(term) {
   return `("${cleanTerm}" OR "Sales Executive" OR "Account Executive" OR "Business Development Manager" OR "Sales Manager")`;
 }
 
+function localJobBoardPrefix(geoName) {
+  const domains = localJobBoardDomains(geoName);
+  return domains.length > 0 ? `(${domains.join(' OR ')})` : '';
+}
+
+function localJobBoardDomains(geoName) {
+  return /malaysia/i.test(geoName)
+    ? ['site:my.jobstreet.com', 'site:jobstreet.com.my', 'site:hiredly.com']
+    : [];
+}
+
+function hiringSourcePrefix(sourceChannel, geoName) {
+  if (sourceChannel === 'linkedin_jobs') {
+    const domains = ['site:linkedin.com/jobs/view', ...localJobBoardDomains(geoName)];
+    return domains.length > 1 ? `(${domains.join(' OR ')})` : domains[0];
+  }
+  if (sourceChannel === 'job_boards') return localJobBoardPrefix(geoName);
+  return queryPrefixForSource(sourceChannel);
+}
+
 function industryDiscoveryHint(industry) {
   const s = String(industry || '').toLowerCase();
   if (!s) return '';
@@ -100,11 +120,21 @@ function buildQueryForSignal({ signal, term, geo, industry, sourceChannel }) {
 
   if (family === 'hiring_capability_build' && sourceChannel === 'linkedin_jobs') {
     return compact([
-      sourcePrefix,
+      hiringSourcePrefix(sourceChannel, geoName),
       industryHint,
       hiringLocationQuery(geoName),
       hiringRoleQuery(term),
       '-India -Delhi -NCR -Jaipur -Siliguri',
+    ]);
+  }
+
+  if (family === 'hiring_capability_build' && sourceChannel === 'job_boards') {
+    return compact([
+      hiringSourcePrefix(sourceChannel, geoName),
+      industryHint,
+      hiringLocationQuery(geoName),
+      hiringRoleQuery(term),
+      /malaysia/i.test(geoName) ? '-India -Delhi -NCR -Jaipur -Siliguri' : '',
     ]);
   }
 
