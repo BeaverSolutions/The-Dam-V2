@@ -28,6 +28,27 @@ function hashPlan(value) {
   return crypto.createHash('sha256').update(stableJson(value)).digest('hex').slice(0, 16);
 }
 
+function platformPlanHashInput(plan = {}) {
+  return {
+    client_id: plan.client_id,
+    mode: plan.mode,
+    objective: plan.objective,
+    requested_count: Number(plan.requested_count),
+    max_paid_queries: Number(plan.max_paid_queries),
+    platform_sequence: array(plan.platform_sequence).map(item => ({
+      platform: item.platform,
+      query: item.query,
+      signal_id: item.signal_id,
+      geo: item.geo,
+    })),
+  };
+}
+
+function verifyPlatformPlanHash(plan = {}) {
+  if (!plan || typeof plan !== 'object' || !plan.plan_hash) return false;
+  return hashPlan(platformPlanHashInput(plan)) === plan.plan_hash;
+}
+
 function signalCandidates(icp = {}) {
   return [
     ...array(icp.icp?.buying_signals),
@@ -147,7 +168,7 @@ function buildPlatformPlan({
     };
   });
 
-  const hashInput = {
+  const hashInput = platformPlanHashInput({
     client_id: clientId,
     mode,
     objective,
@@ -159,7 +180,7 @@ function buildPlatformPlan({
       signal_id: item.signal_id,
       geo: item.geo,
     })),
-  };
+  });
   const planHash = hashPlan(hashInput);
 
   return {
@@ -187,4 +208,5 @@ module.exports = {
   buildPlatformPlan,
   hashPlan,
   stableJson,
+  verifyPlatformPlanHash,
 };

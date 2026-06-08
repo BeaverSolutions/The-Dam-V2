@@ -1358,6 +1358,141 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
   }
 });
 
+router.post('/platform-plan/preview', requireInternalKey, async (req, res) => {
+  const clientId = req.body?.client_id;
+  if (!clientId) {
+    return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+  }
+
+  const requestedRaw = Number(req.body?.requested_count);
+  const requestedCount = Number.isFinite(requestedRaw) && requestedRaw > 0
+    ? Math.max(1, Math.min(50, Math.floor(requestedRaw)))
+    : 5;
+  const maxPaidRaw = Number(req.body?.max_paid_queries);
+  const maxPaidQueries = Number.isFinite(maxPaidRaw) && maxPaidRaw >= 0
+    ? Math.max(0, Math.min(20, Math.floor(maxPaidRaw)))
+    : requestedCount;
+
+  try {
+    const icp = await loadIcpForSignalHunt(clientId, { source: 'http' });
+    if (icp.blocked) {
+      return res.status(409).json({
+        error: 'tenant profile blocked',
+        code: 'TENANT_PROFILE_BLOCKED',
+        data: { blocker: icp.blocker || icp.reason || 'tenant_profile_blocked', icp },
+      });
+    }
+
+    const { buildPlatformPlan } = require('../services/platformPlan');
+    const plan = buildPlatformPlan({
+      clientId,
+      icp,
+      objective: req.body?.objective || `find ${requestedCount} in-ICP leads`,
+      requestedCount,
+      maxPaidQueries,
+      mode: req.body?.mode || 'proof',
+      allowedPlatforms: Array.isArray(req.body?.allowed_platforms) ? req.body.allowed_platforms : null,
+    });
+
+    return res.json({
+      data: {
+        mode: 'platform_plan_preview',
+        dry_run: true,
+        plan,
+        required_confirmation: plan.required_confirmation,
+      },
+    });
+  } catch (err) {
+    logger.error({ msg: 'platform plan preview failed', client_id: clientId, err: err.message });
+    return res.status(500).json({ error: err.message, code: 'PLATFORM_PLAN_PREVIEW_FAILED' });
+  }
+});
+
+router.post('/platform-plan/approve', requireInternalKey, async (req, res) => {
+  const clientId = req.body?.client_id;
+  const plan = req.body?.plan;
+  const confirmHash = String(req.body?.confirm_plan_hash || '').trim();
+
+  if (!clientId) {
+    return res.status(400).json({ error: 'client_id required', code: 'MISSING_CLIENT_ID' });
+  }
+  if (!plan || typeof plan !== 'object') {
+    return res.status(400).json({ error: 'plan required', code: 'MISSING_PLAN' });
+  }
+  if (!plan.plan_hash) {
+    return res.status(400).json({ error: 'plan_hash required', code: 'MISSING_PLAN_HASH' });
+  }
+  if (!plan.query_set_hash) {
+    return res.status(400).json({ error: 'query_set_hash required', code: 'MISSING_QUERY_SET_HASH' });
+  }
+  if (!Array.isArray(plan.platform_sequence) || plan.platform_sequence.length === 0) {
+    return res.status(400).json({ error: 'platform_sequence required', code: 'MISSING_PLATFORM_SEQUENCE' });
+  }
+  if (plan.client_id && plan.client_id !== clientId) {
+    return res.status(409).json({
+      error: 'platform plan client mismatch',
+      code: 'PLATFORM_PLAN_CLIENT_MISMATCH',
+      data: { expected_client_id: clientId, received_client_id: plan.client_id },
+    });
+  }
+  if (confirmHash !== plan.plan_hash) {
+    return res.status(409).json({
+      error: 'platform plan hash mismatch',
+      code: 'PLATFORM_PLAN_CONFIRMATION_MISMATCH',
+      data: { expected_hash: plan.plan_hash, received_hash: confirmHash },
+    });
+  }
+
+  const { verifyPlatformPlanHash } = require('../services/platformPlan');
+  if (!verifyPlatformPlanHash(plan)) {
+    return res.status(409).json({
+      error: 'platform plan hash invalid',
+      code: 'PLATFORM_PLAN_HASH_INVALID',
+      data: { plan_hash: plan.plan_hash },
+    });
+  }
+
+  try {
+    const { rows: [row] } = await pool.query(
+      `INSERT INTO platform_plans
+         (client_id, mode, status, objective, requested_count, max_paid_queries, stop_rule,
+          platform_sequence, excluded_platforms, query_set_hash, plan_hash, approval_required,
+          approved_by, approved_at, created_by)
+       VALUES ($1, $2, 'approved', $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, TRUE, $11, NOW(), 'captain')
+       ON CONFLICT (client_id, plan_hash)
+         WHERE status IN ('preview', 'pending_approval', 'approved')
+         DO UPDATE SET status = 'approved', approved_by = EXCLUDED.approved_by, approved_at = NOW()
+       RETURNING id, plan_hash, status, approved_at`,
+      [
+        clientId,
+        plan.mode || 'proof',
+        plan.objective || 'platform plan',
+        Number(plan.requested_count) || 5,
+        Number(plan.max_paid_queries) || 0,
+        JSON.stringify(plan.stop_rule || {}),
+        JSON.stringify(plan.platform_sequence),
+        JSON.stringify(Array.isArray(plan.excluded_platforms) ? plan.excluded_platforms : []),
+        plan.query_set_hash,
+        plan.plan_hash,
+        String(req.body?.approved_by || 'MJ').trim() || 'MJ',
+      ]
+    );
+
+    return res.json({
+      data: {
+        approved: true,
+        plan_id: row.id,
+        plan_hash: row.plan_hash,
+        status: row.status,
+        approved_at: row.approved_at,
+      },
+    });
+  } catch (err) {
+    logger.error({ msg: 'platform plan approval failed', client_id: clientId, err: err.message });
+    return res.status(500).json({ error: err.message, code: 'PLATFORM_PLAN_APPROVAL_FAILED' });
+  }
+});
+
 /* ─── GET /api/autonomous/vp-schema — Explorium tool catalog (diagnostic) ── */
 router.get('/vp-schema', requireInternalKey, async (req, res) => {
   const { client_id } = req.query;

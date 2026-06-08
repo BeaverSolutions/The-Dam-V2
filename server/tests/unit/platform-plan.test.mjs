@@ -72,6 +72,17 @@ describe('platform plan builder', () => {
     expect(first.plan_hash).toMatch(/^[a-f0-9]{16}$/);
     expect(first.plan_hash).toBe(second.plan_hash);
     expect(first.required_confirmation).toContain(first.plan_hash);
+    expect(platformPlan.verifyPlatformPlanHash(first)).toBe(true);
+
+    const tampered = {
+      ...first,
+      platform_sequence: first.platform_sequence.map(item => (
+        item.platform === 'linkedin_jobs'
+          ? { ...item, query: `${item.query} extra` }
+          : item
+      )),
+    };
+    expect(platformPlan.verifyPlatformPlanHash(tampered)).toBe(false);
   });
 
   it('normalizes invalid requested and paid query counts without leaking NaN', () => {
