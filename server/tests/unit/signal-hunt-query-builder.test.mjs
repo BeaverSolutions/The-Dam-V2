@@ -579,6 +579,11 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
         signal_source_url: 'https://www.linkedin.com/jobs/view/123',
         signal_confidence: 0.92,
         country: 'Malaysia',
+        company_icp_fit: {
+          vertical_match: 'B2B corporate training',
+          icp_evidence: ['B2B corporate training'],
+          reject_rules_checked: ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence'],
+        },
         source: 'signal_hunt',
       },
     }, { evidenceDate: '2026-06-03' });

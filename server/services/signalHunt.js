@@ -190,6 +190,23 @@ async function logSignalHuntMiss(clientId, {
   }).catch(() => {});
 }
 
+function missingSignalPackageSaveMetadata(lead = {}, missingPackageFields = []) {
+  const companyFit = lead.metadata?.signal_package?.company_icp_fit;
+  const hasEmptyCompanyIcpEvidence =
+    missingPackageFields.includes('company_icp_fit') &&
+    companyFit &&
+    !String(companyFit.vertical_match || '').trim() &&
+    (!Array.isArray(companyFit.icp_evidence) || companyFit.icp_evidence.filter(Boolean).length === 0);
+  return {
+    blocker: hasEmptyCompanyIcpEvidence ? 'icp_zero_after_company_extract' : 'contact_zero',
+    reason: hasEmptyCompanyIcpEvidence ? 'empty_company_icp_evidence' : 'missing_signal_package_before_signal_save',
+    missing_fields: missingPackageFields,
+    lead_name: lead.name || null,
+    lead_company: lead.company || null,
+    source: 'signal_hunt',
+  };
+}
+
 function executableDiscoveryQueriesForBudget(queries = [], paidQueryBudget = {}) {
   if (!Array.isArray(queries)) return [];
   const discovery = paidQueryBudget?.discovery;
@@ -533,10 +550,11 @@ function evaluateSignalCompanyIcpGate(signal = {}, icp = {}) {
   const verticals = icpVerticalTerms(icp);
   if (verticals.length === 0) {
     return {
-      pass: true,
-      vertical_match: null,
-      icp_evidence: [],
-      reject_rules_checked: ['tenant_exclusions', 'competitor_offers'],
+      pass: false,
+      blocker: 'icp_no_active_verticals_configured',
+      reason: 'tenant_active_industries_not_set',
+      expected_verticals: [],
+      reject_rules_checked: ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence'],
     };
   }
 
@@ -1978,14 +1996,7 @@ async function saveSignalLeads(clientId, leads) {
         agent: 'research_beaver',
         action: 'research_blocker',
         target_type: 'research',
-        metadata: {
-          blocker: 'contact_zero',
-          reason: 'missing_signal_package_before_signal_save',
-          missing_fields: missingPackageFields,
-          lead_name: lead.name || null,
-          lead_company: lead.company || null,
-          source: 'signal_hunt',
-        },
+        metadata: missingSignalPackageSaveMetadata(lead, missingPackageFields),
       }).catch(() => {});
       console.log(`[signalHunt] Skipping ${lead.name || lead.company || 'lead'} - incomplete signal_package: ${missingPackageFields.join(',')}`);
       continue;
@@ -2121,6 +2132,7 @@ module.exports = {
     extractedSignalItems,
     deterministicPublicationSignals,
     deterministicHiringSignals,
+    missingSignalPackageSaveMetadata,
     validSignalCompanyName,
     validDecisionMakerName,
     mergeExtractedSignalSets,

@@ -294,6 +294,14 @@ function signalPackageMissingFields(signalPackage = {}) {
   ]) {
     if (!signalPackage[field]) missing.push(field);
   }
+  const companyFit = signalPackage.company_icp_fit;
+  if (companyFit && !missing.includes('company_icp_fit')) {
+    const verticalMatch = String(companyFit.vertical_match || '').trim();
+    const evidence = Array.isArray(companyFit.icp_evidence)
+      ? companyFit.icp_evidence.map(item => String(item || '').trim()).filter(Boolean)
+      : [];
+    if (!verticalMatch && evidence.length === 0) missing.push('company_icp_fit');
+  }
   return missing;
 }
 
