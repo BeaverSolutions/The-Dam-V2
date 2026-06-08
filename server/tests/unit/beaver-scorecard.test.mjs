@@ -146,6 +146,36 @@ describe('Captain weekly/monthly period reports', () => {
     expect(formatCaptainPeriodReport(report)).toContain('MONTHLY OBSERVATIONS');
   });
 
+  it('renders Captain weekly report with platform judgement and approval-required next moves', () => {
+    const report = buildCaptainPeriodReport({
+      period: { type: 'weekly', label: '2026-06-01 to 2026-06-08', start_date: '2026-06-01', end_date: '2026-06-08', days: 7 },
+      targets: { outreach_sent: 350 },
+      totals: { outreach_sent: 50, replies: 3, meetings: 1, leads_found: 12 },
+      funnel: { raw_candidates: 30, saved: 12, drafted: 8, approved: 5 },
+      platform_yield: [
+        { platform: 'jobstreet_my', signal_id: 'hiring_sales_roles', paid_units: 3, raw_results: 15, raw_candidates: 6, saved_leads: 3, approval_ready: 2, blocker: null },
+        { platform: 'press_news', signal_id: 'expansion_markets', paid_units: 2, raw_results: 6, raw_candidates: 0, saved_leads: 0, approval_ready: 0, blocker: 'directory_pages' },
+      ],
+      hook_of_week: 'Noticed you are hiring sales roles in KL. Are you building outbound capacity internally or still founder-led?',
+      weekly_lesson: 'This week used hiring_sales_roles and JobStreet MY produced the strongest company-specific signal.',
+      next_week_judgement: [
+        { recommendation: 'Double down on JobStreet MY for hiring-signal campaigns', requires_approval: true },
+      ],
+    });
+    const text = formatCaptainPeriodReport(report);
+    expect(text).toContain('This week, the team executed a total outreach of 50.');
+    expect(text).toContain('Hot leads');
+    expect(text).toContain('Total New Outreach');
+    expect(text).toContain('Total Follow Up');
+    expect(text).toContain('Weekly Lesson');
+    expect(text).toContain('Hook Of The Week');
+    expect(text).toContain('What Went Wrong');
+    expect(text).toContain('Total Weekly Spend');
+    expect(text).toContain('Captain Judgement For Next Week');
+    expect(text).toContain('Requires MJ approval');
+    expect(text).toContain('No new platform spend was armed by this report.');
+  });
+
   it('wires report collection through kpi.js, scorecard rendering, Telegram, and agent_memory artifacts', () => {
     expect(kpiSource).toContain('async function collectCaptainPeriodReport');
     expect(kpiSource).toContain('buildCaptainPeriodReport');
@@ -153,6 +183,7 @@ describe('Captain weekly/monthly period reports', () => {
     expect(kpiSource).toContain("l.metadata->'signal_package'->'company_icp_fit'->>'vertical_match'");
     expect(kpiSource).toContain("logs.action = 'provider_usage'");
     expect(kpiSource).toContain('FROM llm_usage');
+    expect(kpiSource).toContain('FROM platform_yield_events');
     expect(kpiSource).toContain("profile->'icp'->'active_industries'");
     expect(kpiSource).toContain("INSERT INTO agent_memory (client_id, agent, key, content, memory_type)");
     expect(kpiSource).toContain('captain_weekly_report_');

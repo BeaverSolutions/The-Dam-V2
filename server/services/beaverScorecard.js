@@ -274,11 +274,87 @@ function normalizeChannelRows(rows = []) {
   return channels;
 }
 
+function normalizePlatformYieldRows(rows = []) {
+  return (Array.isArray(rows) ? rows : []).map(row => ({
+    platform: String(firstNonEmpty(row.platform, row.source_platform, 'unknown_platform')),
+    signal_id: String(firstNonEmpty(row.signal_id, row.signal, 'unknown_signal')),
+    signal_family: firstNonEmpty(row.signal_family, row.family),
+    geo: firstNonEmpty(row.geo, row.market),
+    paid_units: asNumber(row.paid_units),
+    raw_results: asNumber(row.raw_results),
+    raw_candidates: asNumber(row.raw_candidates),
+    icp_passed: asNumber(row.icp_passed),
+    saved_leads: asNumber(firstNonEmpty(row.saved_leads, row.saved)),
+    approval_ready: asNumber(firstNonEmpty(row.approval_ready, row.approved)),
+    replies: asNumber(row.replies),
+    meetings: asNumber(row.meetings),
+    blocker: firstNonEmpty(row.blocker, row.reason),
+  }));
+}
+
 function topRows(rows = [], key = 'count', limit = 5) {
   return (Array.isArray(rows) ? rows : [])
     .map(row => ({ ...row, [key]: asNumber(row[key]) }))
     .sort((a, b) => asNumber(b[key]) - asNumber(a[key]))
     .slice(0, limit);
+}
+
+function strongestPlatformYield(rows = []) {
+  return [...rows].sort((a, b) => {
+    const savedDelta = asNumber(b.saved_leads) - asNumber(a.saved_leads);
+    if (savedDelta !== 0) return savedDelta;
+    const readyDelta = asNumber(b.approval_ready) - asNumber(a.approval_ready);
+    if (readyDelta !== 0) return readyDelta;
+    return asNumber(b.raw_candidates) - asNumber(a.raw_candidates);
+  })[0] || null;
+}
+
+function defaultWeeklyLesson(platformYield = []) {
+  const best = strongestPlatformYield(platformYield);
+  if (!best) {
+    return 'No platform yield data was captured this week, so Captain cannot recommend platform reweighting yet.';
+  }
+  return `This week campaign is based on ${best.signal_id} buying signals and leads generation was done via ${best.platform}. ${best.platform} produced ${best.saved_leads} saved leads and ${best.approval_ready} approval-ready leads.`;
+}
+
+function defaultWhatWentWrong(platformYield = [], blockers = []) {
+  const platformBlockers = platformYield
+    .filter(row => row.blocker && row.blocker !== 'none')
+    .map(row => `${row.platform}: ${row.blocker}`);
+  if (platformBlockers.length > 0) return platformBlockers.slice(0, 3).join('; ');
+
+  const zeroSaveRows = platformYield
+    .filter(row => asNumber(row.raw_candidates) > 0 && asNumber(row.saved_leads) === 0)
+    .map(row => `${row.platform}: 0 saved leads from ${row.raw_candidates} raw candidates`);
+  if (zeroSaveRows.length > 0) return zeroSaveRows.slice(0, 3).join('; ');
+
+  if ((blockers || []).length > 0) {
+    return topRows(blockers, 'count', 3).map(row => `${row.reason} (${row.count})`).join('; ');
+  }
+  return 'No major blocker captured this week.';
+}
+
+function normalizeNextWeekJudgement(rows = [], platformYield = []) {
+  if (Array.isArray(rows) && rows.length > 0) {
+    return rows.map(row => {
+      if (typeof row === 'string') return { recommendation: row, requires_approval: true };
+      return {
+        recommendation: String(firstNonEmpty(row.recommendation, row.action, row.summary, 'Review next-week platform plan')),
+        requires_approval: row.requires_approval !== false,
+      };
+    });
+  }
+  const best = strongestPlatformYield(platformYield);
+  if (!best) {
+    return [{
+      recommendation: 'Keep next week in no-spend platform preview mode until a proof run records platform yield.',
+      requires_approval: true,
+    }];
+  }
+  return [{
+    recommendation: `Use ${best.platform} first for ${best.signal_id} before expanding paid platform spend.`,
+    requires_approval: true,
+  }];
 }
 
 function buildMonthlyObservations(report) {
@@ -307,6 +383,7 @@ function buildCaptainPeriodReport(input = {}) {
   const funnel = input.funnel || {};
   const spend = input.spend || {};
   const enforcer = input.enforcer || {};
+  const platformYield = normalizePlatformYieldRows(input.platform_yield || input.platformYield || []);
   const target = asNumber(targets.outreach_sent || targets.sent || 0);
   const sent = asNumber(totals.outreach_sent || totals.sent);
   const replies = asNumber(totals.replies);
@@ -346,8 +423,20 @@ function buildCaptainPeriodReport(input = {}) {
         meeting_from_reply_pct: pct(meetings, replies),
       },
     },
+    breakdown: {
+      hot_leads: asNumber(firstNonEmpty(totals.hot_leads, totals.approval_ready, funnel.approved, funnel.approval_ready)),
+      total_new_outreach: sent,
+      total_follow_up: asNumber(firstNonEmpty(totals.followups_sent, totals.follow_up, totals.followups)),
+      approval_ready_drafts: asNumber(firstNonEmpty(totals.approval_ready, funnel.approved, funnel.approval_ready)),
+      replies,
+      positive_replies: asNumber(firstNonEmpty(totals.positive_replies, totals.positive_reply, totals.positive_replies_count)),
+      meetings_booked: meetings,
+      pending_approval: asNumber(firstNonEmpty(totals.pending_approval, funnel.pending_approval, funnel.drafted)),
+      blocked_rejected: asNumber(firstNonEmpty(totals.blocked_rejected, totals.rejected, funnel.rejected)),
+    },
     industries: mergeIndustryRows(input.active_industries || [], input.industries || []),
     channels: normalizeChannelRows(input.channels || []),
+    platform_yield: platformYield,
     spend: {
       providers: spend.providers || {},
       provider_units: spend.provider_units || {},
@@ -366,8 +455,13 @@ function buildCaptainPeriodReport(input = {}) {
       approve_rate_pct: pct(asNumber(enforcer.approved), asNumber(enforcer.reviewed)),
       top_reject_reasons: topRows(enforcer.top_reject_reasons || [], 'count'),
     },
+    weekly_lesson: firstNonEmpty(input.weekly_lesson, input.weeklyLesson) || defaultWeeklyLesson(platformYield),
+    hook_of_week: firstNonEmpty(input.hook_of_week, input.hookOfWeek) || 'No hook of the week captured yet.',
+    what_went_wrong: firstNonEmpty(input.what_went_wrong, input.whatWentWrong) || null,
+    next_week_judgement: normalizeNextWeekJudgement(input.next_week_judgement || input.nextWeekJudgement, platformYield),
     observations: [],
   };
+  report.what_went_wrong = report.what_went_wrong || defaultWhatWentWrong(platformYield, report.blockers);
   report.observations = buildMonthlyObservations(report);
   return report;
 }
@@ -379,9 +473,13 @@ function formatCaptainPeriodReport(report = {}) {
   const spend = report.spend || {};
   const channels = report.channels || {};
   const enforcer = report.enforcer || {};
+  const breakdown = report.breakdown || {};
   const industryLines = (report.industries || []).length > 0
     ? report.industries.map(row => `${safeText(row.industry)}: queries ${row.queries_run}, raw ${row.raw_candidates}, saved ${row.saved}, sent ${row.sent}, replies ${row.replies}, meetings ${row.meetings}`)
     : ['no industry-attributed rows captured'];
+  const platformYieldLines = (report.platform_yield || []).length > 0
+    ? report.platform_yield.map(row => `${safeText(row.platform)} / ${safeText(row.signal_id)}: paid units ${row.paid_units}, raw ${row.raw_results}, candidates ${row.raw_candidates}, saved ${row.saved_leads}, approval-ready ${row.approval_ready}${row.blocker && row.blocker !== 'none' ? `, blocker ${safeText(row.blocker)}` : ''}`)
+    : ['no platform yield rows captured'];
   const blockerLines = (report.blockers || []).length > 0
     ? report.blockers.map(row => `${safeText(row.reason)} (${row.count})`)
     : ['none captured'];
@@ -395,7 +493,50 @@ function formatCaptainPeriodReport(report = {}) {
   const lines = [
     `<b>${safeText((report.period?.type || 'weekly').toUpperCase())} CAPTAIN REPORT</b>`,
     safeText(report.period?.label || ''),
-    '',
+  ];
+
+  if (report.period?.type === 'weekly') {
+    lines.push(
+      '',
+      `This week, the team executed a total outreach of ${headline.sent || 0}.`,
+      '',
+      '<b>BREAKDOWN</b>',
+      `1. Hot leads: ${breakdown.hot_leads || 0}`,
+      `2. Total New Outreach: ${breakdown.total_new_outreach || 0}`,
+      `3. Total Follow Up: ${breakdown.total_follow_up || 0}`,
+      `4. Approval-ready Drafts: ${breakdown.approval_ready_drafts || 0}`,
+      `5. Replies: ${breakdown.replies || 0}`,
+      `6. Positive Replies: ${breakdown.positive_replies || 0}`,
+      `7. Meetings Booked: ${breakdown.meetings_booked || 0}`,
+      `8. Pending Approval: ${breakdown.pending_approval || 0}`,
+      `9. Blocked / Rejected: ${breakdown.blocked_rejected || 0}`,
+      '',
+      '<b>Weekly Lesson</b>',
+      safeText(report.weekly_lesson || 'No weekly lesson captured yet.'),
+      '',
+      '<b>Hook Of The Week</b>',
+      safeText(report.hook_of_week || 'No hook of the week captured yet.'),
+      '',
+      '<b>What Went Wrong</b>',
+      safeText(report.what_went_wrong || 'No major blocker captured this week.'),
+      '',
+      '<b>Total Weekly Spend</b>',
+      `$${money(spend.total_cost_usd)} captured. Providers $${money(spend.provider_cost_usd)}. LLM $${money(spend.llm_cost_usd)}.`,
+      '',
+      '<b>Captain Judgement For Next Week</b>',
+      'Requires MJ approval:',
+      ...(report.next_week_judgement || []).map(row => `- ${safeText(row.recommendation || row)}${row.requires_approval === false ? '' : ' (Requires MJ approval)'}`),
+      'Captain judgement is advisory until MJ approves the next-week plan. No new platform spend was armed by this report.',
+      '',
+      '<b>PLATFORM YIELD</b>',
+      ...platformYieldLines,
+      ''
+    );
+  } else {
+    lines.push('');
+  }
+
+  lines.push(
     '<b>HEADLINE VS TARGET</b>',
     `${headline.sent || 0}/${headline.target || 0} sent (${headline.target_pct || 0}%). Replies ${headline.replies || 0}. Meetings ${headline.meetings || 0}.`,
     '',
@@ -417,7 +558,7 @@ function formatCaptainPeriodReport(report = {}) {
     '',
     '<b>ENFORCER QUALITY</b>',
     `reviewed ${enforcer.reviewed || 0}, approved ${enforcer.approved || 0}, rejected ${enforcer.rejected || 0}, approve rate ${enforcer.approve_rate_pct || 0}%`,
-  ];
+  );
 
   if (report.period?.type === 'monthly') {
     lines.push('', '<b>MONTHLY OBSERVATIONS</b>', ...observationLines);

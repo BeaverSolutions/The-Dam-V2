@@ -276,6 +276,31 @@ async function collectCaptainPeriodReport(clientId, options = {}) {
     params
   );
 
+  const platformYieldPromise = pool.query(
+    `${boundsSql}
+     SELECT
+       platform,
+       signal_id,
+       signal_family,
+       geo,
+       SUM(paid_units)::int AS paid_units,
+       SUM(raw_results)::int AS raw_results,
+       SUM(raw_candidates)::int AS raw_candidates,
+       SUM(icp_passed)::int AS icp_passed,
+       SUM(saved_leads)::int AS saved_leads,
+       SUM(approval_ready)::int AS approval_ready,
+       SUM(replies)::int AS replies,
+       SUM(meetings)::int AS meetings,
+       COALESCE(blocker, 'none') AS blocker
+     FROM platform_yield_events, bounds
+     WHERE client_id = $1
+       AND created_at >= bounds.start_at
+       AND created_at < bounds.end_at
+     GROUP BY platform, signal_id, signal_family, geo, COALESCE(blocker, 'none')
+     ORDER BY saved_leads DESC, approval_ready DESC, raw_candidates DESC`,
+    params
+  ).catch(() => ({ rows: [] }));
+
   const blockersPromise = pool.query(
     `${boundsSql}
      SELECT COALESCE(metadata->>'blocker', metadata->>'reason', reason, 'unknown') AS reason,
@@ -330,6 +355,7 @@ async function collectCaptainPeriodReport(clientId, options = {}) {
     industryRes,
     spendRes,
     llmSpendRes,
+    platformYieldRes,
     blockersRes,
     enforcerRes,
     rejectReasonsRes,
@@ -341,6 +367,7 @@ async function collectCaptainPeriodReport(clientId, options = {}) {
     industryPromise,
     spendPromise,
     llmSpendPromise,
+    platformYieldPromise,
     blockersPromise,
     enforcerPromise,
     rejectReasonsPromise,
@@ -381,6 +408,7 @@ async function collectCaptainPeriodReport(clientId, options = {}) {
     },
     industries: industryRes.rows || [],
     channels: channelRes.rows || [],
+    platform_yield: platformYieldRes.rows || [],
     spend: {
       providers,
       provider_units: providerUnits,
