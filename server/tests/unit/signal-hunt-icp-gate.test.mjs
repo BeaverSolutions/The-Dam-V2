@@ -17,6 +17,26 @@ function evaluate(signal) {
 
 describe('Signal Hunt locked Beaver ICP gate', () => {
   it.each([
+    ['missing ICP object', {}],
+    ['empty active industries', { active_industries: [] }],
+    ['legacy industries without active industries', { industries: ['B2B corporate training'], active_industries: null }],
+  ])('fails closed when %s cannot prove active tenant verticals', (_label, icp) => {
+    const gate = signalHunt._test.evaluateSignalCompanyIcpGate({
+      company: 'Resume Box',
+      signal_summary: 'Resume Box is hiring sales roles in Kuala Lumpur.',
+      raw_snippet: 'Sales Executive | Resume Box | LinkedIn Jobs',
+      source_channel: 'linkedin_jobs',
+    }, icp);
+
+    expect(gate).toMatchObject({
+      pass: false,
+      blocker: 'icp_no_active_verticals_configured',
+      reason: 'tenant_active_industries_not_set',
+      reject_rules_checked: ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence'],
+    });
+  });
+
+  it.each([
     ['recruitment agency', 'Talent Bridge is a recruitment agency hiring sales consultants in Kuala Lumpur.'],
     ['staffing agency', 'PeopleHire Malaysia is a staffing agency expanding its employer services.'],
   ])('rejects %s evidence', (_label, raw_snippet) => {

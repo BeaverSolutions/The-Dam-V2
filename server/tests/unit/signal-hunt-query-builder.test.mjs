@@ -286,6 +286,38 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     });
   });
 
+  it.each([
+    'Resume Box',
+    'Resume-Library',
+    'CV-Library',
+    'Foundit',
+    'Wobb',
+    'Naukri',
+    'JobsDB',
+  ])('rejects career-platform names before company enrichment: %s', (company) => {
+    expect(signalHunt._test.validSignalCompanyName(company)).toBe(false);
+  });
+
+  it.each([
+    'Shah Alam',
+    'Petaling Jaya',
+    'Cyberjaya',
+    'Kuala Lumpur',
+    'Subang Jaya',
+    'Klang',
+    'Putrajaya',
+    'Johor Bahru',
+    'Penang',
+    'Greater Kuala Lumpur',
+    'Klang Valley',
+  ])('rejects location-only names before company enrichment: %s', (company) => {
+    expect(signalHunt._test.validSignalCompanyName(company)).toBe(false);
+  });
+
+  it('keeps real companies valid after career/location blocklists', () => {
+    expect(signalHunt._test.validSignalCompanyName('Acme Learning Sdn Bhd')).toBe(true);
+  });
+
   it('passes company ICP gate only when extracted company evidence proves a configured vertical', () => {
     const gate = signalHunt._test.evaluateSignalCompanyIcpGate({
       company: 'Acme Training',
@@ -579,6 +611,11 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
         signal_source_url: 'https://www.linkedin.com/jobs/view/123',
         signal_confidence: 0.92,
         country: 'Malaysia',
+        company_icp_fit: {
+          vertical_match: 'B2B corporate training',
+          icp_evidence: ['B2B corporate training'],
+          reject_rules_checked: ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence'],
+        },
         source: 'signal_hunt',
       },
     }, { evidenceDate: '2026-06-03' });

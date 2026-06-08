@@ -19,6 +19,7 @@ const { todayInMalaysia } = require('../utils/businessDay');
 const { parseRequestedLeadCount } = require('../utils/requestedLeadCount');
 const { shouldStopForLowOutput } = require('../utils/campaignLimits');
 const spendGuard = require('../services/spendGuard');
+const { loadIcpForSignalHunt } = require('../services/tenantContext');
 
 /* ─── Auth helper ─────────────────────────────────────────── */
 
@@ -402,13 +403,15 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
     // ── Intent 4: SIGNAL HUNT ────────────────────────────────────────
     else if (/\b(signal|hunt|hiring|funding|trigger|buying)\b/i.test(lowerMsg)) {
       const { runSignalHunt, saveSignalLeads, previewSignalHuntPlan } = require('../services/signalHunt');
-
-      // Load ICP for signal hunt
-      const { rows: icpRows } = await pool.query(
-        `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
-        [client_id]
-      );
-      const icp = icpRows[0]?.content || {};
+      const icp = await loadIcpForSignalHunt(client_id, { source: 'http' });
+      if (icp?.blocked) {
+        return res.status(409).json({
+          ...response,
+          error: 'tenant profile blocked',
+          code: 'TENANT_PROFILE_BLOCKED',
+          data: { blocker: icp.blocker || icp.reason || 'tenant_profile_blocked', icp },
+        });
+      }
       const signalLimit = Math.max(1, Math.min(
         Number(req.body?.signal_limit || req.body?.limit || parseRequestedLeadLimit(message, 5)) || 5,
         5
@@ -1264,15 +1267,7 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
   const n = value => Number(value) || 0;
 
   try {
-    const { rows: icpRows } = await pool.query(
-      `SELECT content FROM agent_memory
-        WHERE client_id = $1 AND agent = 'director' AND key = 'icp'
-        LIMIT 1`,
-      [clientId]
-    );
-    const fallbackIcp = icpRows[0]?.content || null;
-    const { getLegacyIcpForClient } = require('../services/tenantContext');
-    const icp = await getLegacyIcpForClient(clientId, { source: 'http', fallback: fallbackIcp }) || {};
+    const icp = await loadIcpForSignalHunt(clientId, { source: 'http' });
     if (icp.blocked) {
       return res.status(409).json({
         error: 'tenant profile blocked',
@@ -1922,12 +1917,23 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     return;
   }
 
-  // Load ICP from memory
-  const { rows: icpRows } = await pool.query(
-    `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
-    [clientId]
-  );
-  const icp = icpRows[0]?.content || {};
+  const icp = await loadIcpForSignalHunt(clientId, { source: 'cron' });
+  if (icp?.blocked) {
+    const blocker = icp.blocker || icp.reason || 'tenant_profile_invalid';
+    await logAction(clientId, 'director', 'autonomous_kickoff_blocked', 'system', null, {
+      reason: blocker,
+      source: 'loadIcpForSignalHunt',
+    });
+    console.warn(`[Autonomous] Client ${clientId} blocked before kickoff: ${blocker}`);
+    return {
+      blocked: true,
+      code: 'TENANT_PROFILE_BLOCKED',
+      blocker,
+      reason: blocker,
+      source: 'loadIcpForSignalHunt',
+      tenant_profile_valid: false,
+    };
+  }
 
   // Load last week's learnings
   const { rows: learnings } = await pool.query(
@@ -2535,10 +2541,18 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
   }
 
   // ── Kickoff verification - block follow-on auto-kickoffs on zero/low output ──
-  await verifyKickoffOutput(clientId, target, { runStartedAt: kickoffRunStartedAt });
+  const kickoffVerification = await verifyKickoffOutput(clientId, target, { runStartedAt: kickoffRunStartedAt });
   await require('../services/kpi').recountKpi(clientId).catch(err =>
     logger.warn({ msg: '[kickoff] final kpi recount failed', clientId, err: err?.message })
   );
+  return {
+    fired: kickoffVerification?.blocked !== true,
+    blocked: kickoffVerification?.blocked === true,
+    blocker: kickoffVerification?.blocker || null,
+    delivered: kickoffVerification?.delivered ?? null,
+    total_output: kickoffVerification?.total_output ?? null,
+    verification: kickoffVerification,
+  };
 }
 
 /**

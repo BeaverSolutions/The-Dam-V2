@@ -27,6 +27,7 @@ const { todayInMalaysia } = require('../utils/businessDay');
 const { parseRequestedLeadCount } = require('../utils/requestedLeadCount');
 const { resolveCampaignTarget } = require('../utils/campaignKpiTarget');
 const { shouldStopForLowOutput } = require('../utils/campaignLimits');
+const { loadIcpForSignalHunt } = require('./tenantContext');
 
 // Channel-specific drafting instructions injected into the Sales Beaver prompt.
 // Module scope (2026-05-16, Jules F-03): was a local const inside
@@ -505,7 +506,7 @@ async function getFounderFeedback(clientId) {
 async function buildDirectorMemoryBrief(clientId) {
   try {
     const [icp, weeklyLearnings, rangerPatterns, salesMistakes, researchMistakes, leadSelectionDirectives] = await Promise.all([
-      getMemory(clientId, 'director', 'icp'),
+      loadIcpForSignalHunt(clientId, { source: 'service' }),
       getMemory(clientId, 'director', 'weekly_learnings'),
       getRangerRejectionPatterns(clientId),
       getMemory(clientId, 'sales_beaver', 'mistakes'),
@@ -560,8 +561,8 @@ async function researchSearch(clientId, { query, command = null, filters = {} })
     },
   });
 
-  // Load ICP memory upfront — used by both search query builder and Claude fallback
-  const icpMemory = await getMemory(clientId, 'director', 'icp');
+  // Load canonical tenant ICP upfront — used by both search query builder and Claude fallback.
+  const icpMemory = await loadIcpForSignalHunt(clientId, { source: 'service' });
 
   let researchResult = null;   // hoisted so the no-results diagnostic log can read its stats
   let researchDiagnostics = null;
@@ -4046,8 +4047,8 @@ async function directorExecute(clientId, {
     memoryContext = '\n\n[MEMORY UNAVAILABLE — previous context could not be loaded]';
   }
 
-  // Load ICP memory for the ICP gate below — must be in directorExecute scope
-  const icpMemory = await getMemory(clientId, 'director', 'icp') || {};
+  // Load canonical tenant ICP for the ICP gate below — must be in directorExecute scope.
+  const icpMemory = await loadIcpForSignalHunt(clientId, { source: 'service' }) || {};
 
   // ── ICP Pre-flight check ─────────────────────────────────
   // Captain Beaver rule: before ANY kickoff, confirm ICP is defined in memory.
@@ -4540,6 +4541,7 @@ async function directorExecute(clientId, {
     diagnostics.signal_first_buffer_leads = signalPlan.bufferLeads;
     try {
       const { runSignalHunt, saveSignalLeads } = require('./signalHunt');
+      const signalIcp = await loadIcpForSignalHunt(clientId, { source: 'service' });
       await logsService.createLog(clientId, {
         agent: 'director',
         action: 'signal_first_started',
@@ -4555,7 +4557,7 @@ async function directorExecute(clientId, {
 
       const signalLeads = await runSignalHunt(clientId, {
         maxLeads: signalPlan.maxSignalLeads,
-        icp: icpMemory,
+        icp: signalIcp,
         maxPaidQueries: signalBudget,
         plan_id,
       });
@@ -6474,11 +6476,7 @@ function buildPersonaContext(persona) {
  * =========================
  */
 async function directorGetICP(clientId) {
-  const res = await pool.query(
-    `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'director' AND key = 'icp' LIMIT 1`,
-    [clientId]
-  );
-  return res.rows[0]?.content || {};
+  return await loadIcpForSignalHunt(clientId, { source: 'http' }) || {};
 }
 
 async function directorUpsertICP(clientId, data) {
