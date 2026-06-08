@@ -230,6 +230,7 @@ function IntegrationChips({ integrations, loading }) {
     { key: 'agentmail',       label: 'AgentMail',      icon: Send,         info: integrations?.agentmail },
     { key: 'apollo',          label: 'Apollo',         icon: Search,       info: integrations?.apollo },
     { key: 'hunter',          label: 'Hunter',         icon: AtSign,       info: integrations?.hunter },
+    { key: 'brave',           label: 'Brave',          icon: Search,       info: integrations?.brave },
     { key: 'calendly',        label: 'Calendly',       icon: ExternalLink, info: integrations?.calendly },
   ];
   return (

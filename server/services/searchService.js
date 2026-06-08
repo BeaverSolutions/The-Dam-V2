@@ -17,6 +17,7 @@ try {
 const GOOGLE_CSE_URL = 'https://www.googleapis.com/customsearch/v1';
 const DDG_URL        = 'https://api.duckduckgo.com/';
 const spendGuard = require('./spendGuard');
+const braveService = require('./brave');
 const pool = require('../db/pool');
 const { getCurrentClientId } = require('../middleware/clientContext');
 
@@ -223,9 +224,9 @@ function parseCompanyItems(items) {
 // ── Provider calls (throw on failure so the fallback chain can catch) ────────
 
 async function callBrave(searchQuery, num, country = 'MY') {
-  const apiKey = process.env.BRAVE_API_KEY;
-  if (!apiKey) throw new Error('BRAVE_API_KEY not set');
   const clientId = currentClientId();
+  const apiKey = await braveService.getApiKey(clientId);
+  if (!apiKey) throw new Error('Brave Search API key not configured for client');
   const guard = await spendGuard.checkProvider('brave', { clientId, estimatedUnits: 1 });
   if (!guard.allowed) throw providerBlockedError('brave', guard);
   const braveCountry = braveCountryFor(country);
@@ -521,9 +522,9 @@ async function searchOpenWeb(query, limit = 5, options = {}) {
 
   // Brave Search (primary) — fast, no site: restrictions, gentle rate limits
   try {
-    const braveKey = process.env.BRAVE_API_KEY;
-    if (!braveKey) throw new Error('BRAVE_API_KEY not set');
     const clientId = currentClientId(options);
+    const braveKey = await braveService.getApiKey(clientId);
+    if (!braveKey) throw new Error('Brave Search API key not configured for client');
     const guard = await spendGuard.checkProvider('brave', { clientId, estimatedUnits: 1 });
     if (!guard.allowed) throw providerBlockedError('brave', guard);
 

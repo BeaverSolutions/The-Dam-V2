@@ -24,6 +24,7 @@ const pool = require('../db/pool');
 const logger = require('../utils/logger');
 const { callAgent } = require('./claude');
 const spendGuard = require('./spendGuard');
+const braveService = require('./brave');
 const { todayInMalaysia } = require('../utils/businessDay');
 const { checkBudget, BudgetExceededError } = require('./budget');
 
@@ -117,9 +118,9 @@ async function loadTenantContext(clientId) {
  */
 async function fetchSignals(clientId) {
   const { topSignals, verticalsClause } = await loadTenantContext(clientId);
-  const apiKey = process.env.BRAVE_API_KEY;
+  const apiKey = await braveService.getApiKey(clientId);
   if (!apiKey) {
-    logger.warn({ msg: '[market-sensing] BRAVE_API_KEY not set, returning empty' });
+    logger.warn({ msg: '[market-sensing] Brave Search API key not configured for client, returning empty' });
     return [];
   }
   if (topSignals.length === 0) {

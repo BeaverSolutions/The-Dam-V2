@@ -27,6 +27,7 @@ const { callAgent } = require('./claude');
 const { getMonthlyBudget } = require('./budget');
 const tenantConfig = require('./tenantConfig');
 const jobHealth = require('./jobHealth');
+const braveService = require('./brave');
 const { todayInMalaysia } = require('../utils/businessDay');
 const { parseRequestedLeadCount } = require('../utils/requestedLeadCount');
 const pipelineTrace = require('./pipelineTrace');
@@ -175,8 +176,9 @@ async function getRunCampaignPreflight(clientId, command) {
     ? minPaidQueriesForExternalTarget(externalShortfall)
     : 0;
   const apolloKey = await require('./apollo').getApiKey(clientId).catch(() => null);
+  const braveConfigured = await braveService.isConfigured(clientId).catch(() => false);
   const providers = {
-    brave: !!process.env.BRAVE_API_KEY && braveRemaining > 0,
+    brave: braveConfigured && braveRemaining > 0,
     google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX) && googleRemaining > 0,
     apollo_available_not_campaign_capacity: !!apolloKey && apolloRemaining > 0,
   };
@@ -575,15 +577,16 @@ async function collectTeamKPIs(clientId) {
        (SELECT COUNT(*) FROM logs WHERE client_id = $1 AND created_at >= ${klTodayStart} AND action = 'autonomous_kickoff') AS captain_kickoffs_today`,
     [clientId]
   ).catch(() => ({ rows: [{}] }));
+  const braveConfiguredPromise = braveService.isConfigured(clientId).catch(() => false);
 
   const [research, sales, enforcer, rejectReasons, pipeline,
           dbOk, cronHealth,
           spendToday, spendMtd, meetingsWeek, meetingsMtd,
-          channelMix, targets, spendMaxDay, businessTruth, funnelRows, scorecardRes, signalScorecardRows] = await Promise.all([
+          channelMix, targets, spendMaxDay, businessTruth, funnelRows, scorecardRes, signalScorecardRows, braveConfigured] = await Promise.all([
     researchPromise, salesPromise, enforcerPromise, rejectReasonsPromise, pipelinePromise,
     dbCheckPromise, cronHealthPromise,
     spendTodayPromise, spendMtdPromise, meetingsThisWeekPromise, meetingsMtdPromise,
-    channelMixPromise, targetsPromise, spendMaxDayPromise, businessTruthPromise, funnelPromise, scorecardPromise, signalScorecardPromise,
+    channelMixPromise, targetsPromise, spendMaxDayPromise, businessTruthPromise, funnelPromise, scorecardPromise, signalScorecardPromise, braveConfiguredPromise,
   ]);
 
   // Stale jobs derived from cronHealth — jobs in 'stale' state
@@ -676,7 +679,7 @@ async function collectTeamKPIs(clientId) {
       db_ok: dbOk,
       encryption_key_ok: !!process.env.ENCRYPTION_KEY,
       ...getLLMHealth(),
-      brave_set: !!process.env.BRAVE_API_KEY,
+      brave_set: braveConfigured,
       vp_set: !!process.env.VIBE_PROSPECTING_API_KEY,
       gmail_oauth_set: !!process.env.GMAIL_CLIENT_ID,
       stale_jobs: staleJobs,

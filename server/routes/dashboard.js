@@ -6,6 +6,7 @@ const gmailService = require('../services/gmail');
 const apolloService = require('../services/apollo');
 const agentmailService = require('../services/agentmail');
 const hunterService = require('../services/hunter');
+const braveService = require('../services/brave');
 
 function todayInMalaysia() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kuala_Lumpur' });
@@ -189,15 +190,17 @@ router.get('/stats', async (req, res, next) => {
         googleCalendarService.isConnected(clientId).catch(() => false),
         googleCalendarService.getConnectedEmail(clientId).catch(() => null),
         apolloService.getApiKey(clientId).then(k => !!k).catch(() => false),
-        Promise.resolve(agentmailService.isConnected()),
-        agentmailService.getInboxEmail(clientId).catch(() => null),
+        agentmailService.getStoredInbox(clientId).catch(() => null),
         hunterService.getApiKey(clientId).then(k => !!k).catch(() => false),
+        braveService.getStatus(clientId).catch(() => ({ connected: false, label: 'Not configured' })),
         googleCalendarService.getCalendlyUrl(clientId).catch(() => null),
       ]),
     ]);
 
     const stats = statsRes.rows[0];
-    const [gmailConnected, gmailEmail, calendarConnected, calendarEmail, apolloConnected, agentmailConnected, agentmailEmail, hunterConnected, calendlyUrl] = integrationsResult;
+    const [gmailConnected, gmailEmail, calendarConnected, calendarEmail, apolloConnected, agentmailInbox, hunterConnected, braveStatus, calendlyUrl] = integrationsResult;
+    const agentmailConnected = agentmailService.isConnected() && !!agentmailInbox;
+    const agentmailEmail = agentmailConnected ? agentmailInbox.email : null;
 
     const byStage = stats.leads_by_stage || {};
 
@@ -263,6 +266,7 @@ router.get('/stats', async (req, res, next) => {
           agentmail:        { connected: agentmailConnected, email: agentmailEmail },
           apollo:           { connected: apolloConnected },
           hunter:           { connected: hunterConnected },
+          brave:            braveStatus,
           calendly:         { connected: !!calendlyUrl,      url: calendlyUrl },
         },
       },

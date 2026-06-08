@@ -19,7 +19,7 @@ export default function Settings() {
   const { request } = useApi();
   const user = getUser();
 
-  const [integrations, setIntegrations] = useState({ gmail: { connected: false }, agentmail: { connected: false }, apollo: { connected: false }, hunter: { connected: false } });
+  const [integrations, setIntegrations] = useState({ gmail: { connected: false }, agentmail: { connected: false }, apollo: { connected: false }, hunter: { connected: false }, brave: { connected: false } });
   const [intLoading, setIntLoading] = useState(true);
 
   const [icp, setIcp] = useState({ industries: '', company_size: '', geographies: '', job_titles: '' });
@@ -55,6 +55,13 @@ export default function Settings() {
   const [hunterSaving, setHunterSaving] = useState(false);
   const [hunterSaved, setHunterSaved] = useState(false);
   const [hunterError, setHunterError] = useState('');
+
+  // Brave Search key state
+  const [braveKey, setBraveKey] = useState('');
+  const [braveKeyVisible, setBraveKeyVisible] = useState(false);
+  const [braveSaving, setBraveSaving] = useState(false);
+  const [braveSaved, setBraveSaved] = useState(false);
+  const [braveError, setBraveError] = useState('');
 
   // Gmail disconnect
   const [gmailDisconnecting, setGmailDisconnecting] = useState(false);
@@ -383,6 +390,29 @@ export default function Settings() {
     try {
       await request('/integrations/hunter/key', { method: 'DELETE' });
       setIntegrations(prev => ({ ...prev, hunter: { connected: false, label: 'Not configured' } }));
+    } catch {}
+  };
+
+  const handleSaveBraveKey = async () => {
+    if (!braveKey.trim()) return;
+    setBraveSaving(true);
+    setBraveError('');
+    try {
+      await request('/integrations/brave/key', { method: 'POST', body: JSON.stringify({ api_key: braveKey.trim() }) });
+      setBraveSaved(true);
+      setBraveKey('');
+      setTimeout(() => setBraveSaved(false), 2500);
+      loadIntegrations();
+    } catch (err) {
+      setBraveError(err?.message || 'Failed to save key');
+    }
+    setBraveSaving(false);
+  };
+
+  const handleDisconnectBrave = async () => {
+    try {
+      await request('/integrations/brave/key', { method: 'DELETE' });
+      setIntegrations(prev => ({ ...prev, brave: { connected: false, tenant_key: false, platform_fallback: false, label: 'Not configured' } }));
     } catch {}
   };
 
@@ -787,21 +817,77 @@ export default function Settings() {
 
             {/* Brave Search */}
             <div style={{ padding: '0.875rem 0', borderTop: '1px solid var(--border)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: braveInfo?.connected ? '0' : '0.875rem' }}>
                 <div style={{ width: 36, height: 36, borderRadius: 'var(--radius)', background: 'var(--bg)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                   <Search size={18} style={{ color: braveInfo?.connected ? 'var(--lime)' : 'var(--text-muted)' }} />
                 </div>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 500, fontSize: '0.875rem' }}>Brave Search</div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>LinkedIn profile discovery via web search (server env var)</div>
+                  <div style={{ fontWeight: 500, fontSize: '0.875rem' }}>
+                    Brave Search
+                    <a
+                      href="https://api-dashboard.search.brave.com/"
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ fontSize: '0.7rem', color: 'var(--blue)', marginLeft: '0.5rem', textDecoration: 'none' }}
+                    >
+                      Get API key →
+                    </a>
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
+                    Web search for profile discovery and buying-signal research
+                  </div>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem' }}>
-                  {braveInfo?.connected
-                    ? <><CheckCircle size={13} style={{ color: 'var(--lime)' }} /> <span style={{ color: 'var(--lime)' }}>{braveInfo.label}</span></>
-                    : <><XCircle size={13} style={{ color: 'var(--orange)' }} /> <span style={{ color: 'var(--orange)' }}>{braveInfo?.label || 'Not configured'}</span></>
-                  }
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem' }}>
+                    {braveInfo?.connected
+                      ? <><CheckCircle size={13} style={{ color: 'var(--lime)' }} /> <span style={{ color: 'var(--lime)' }}>{braveInfo.label || 'Connected'}</span></>
+                      : <><XCircle size={13} style={{ color: 'var(--orange)' }} /> <span style={{ color: 'var(--orange)' }}>{braveInfo?.label || 'Not configured'}</span></>
+                    }
+                  </div>
+                  {braveInfo?.connected && braveInfo?.tenant_key && (
+                    <button
+                      className="btn btn-secondary"
+                      style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem', color: 'var(--orange)', borderColor: 'var(--orange)' }}
+                      onClick={handleDisconnectBrave}
+                    >
+                      Remove
+                    </button>
+                  )}
                 </div>
               </div>
+
+              {!braveInfo?.connected && (
+                <div style={{ paddingLeft: 52 }}>
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <div style={{ position: 'relative', flex: 1 }}>
+                      <input
+                        className="form-input"
+                        type={braveKeyVisible ? 'text' : 'password'}
+                        placeholder="Paste Brave Search API key…"
+                        value={braveKey}
+                        onChange={e => setBraveKey(e.target.value)}
+                        style={{ paddingRight: '2.5rem', fontSize: '0.875rem' }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setBraveKeyVisible(v => !v)}
+                        style={{ position: 'absolute', right: '0.6rem', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 0, display: 'flex', alignItems: 'center' }}
+                      >
+                        {braveKeyVisible ? <EyeOff size={14} /> : <Eye size={14} />}
+                      </button>
+                    </div>
+                    <button
+                      className="btn btn-primary"
+                      style={{ fontSize: '0.75rem', padding: '0.45rem 0.875rem', whiteSpace: 'nowrap' }}
+                      onClick={handleSaveBraveKey}
+                      disabled={braveSaving || !braveKey.trim()}
+                    >
+                      {braveSaving ? 'Saving…' : braveSaved ? '✓ Saved' : 'Save Key'}
+                    </button>
+                  </div>
+                  {braveError && <div style={{ fontSize: '0.75rem', color: 'var(--orange)', marginTop: '0.375rem' }}>{braveError}</div>}
+                </div>
+              )}
             </div>
 
             {/* Google Calendar */}

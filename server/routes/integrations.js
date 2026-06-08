@@ -10,6 +10,7 @@ const googleCalendarService = require('../services/googleCalendar');
 const apolloService = require('../services/apollo');
 const agentmailService = require('../services/agentmail');
 const hunterService = require('../services/hunter');
+const braveService = require('../services/brave');
 const secrets = require('../services/secrets');
 
 /* ─── Integration status ─────────────────────────────────── */
@@ -17,7 +18,6 @@ const secrets = require('../services/secrets');
 router.get('/status', async (req, res, next) => {
   try {
     const agentmailOk = agentmailService.isConnected();
-    const braveOk = !!process.env.BRAVE_API_KEY;
 
     // Check if ENCRYPTION_KEY is valid (needed for Apollo/Hunter/Gmail)
     let encKeyOk = true;
@@ -27,11 +27,13 @@ router.get('/status', async (req, res, next) => {
       encKeyOk = false;
     }
 
-    const [gmailConnected, calendarConnected, apolloKey, hunterKey, calendlyRow, whatsappRow] = await Promise.all([
+    const [gmailConnected, calendarConnected, apolloKey, hunterKey, braveStatus, agentmailInbox, calendlyRow, whatsappRow] = await Promise.all([
       gmailService.isConnected(req.clientId),
       googleCalendarService.isConnected(req.clientId),
       encKeyOk ? apolloService.getApiKey(req.clientId) : Promise.resolve(null),
       encKeyOk ? hunterService.getApiKey(req.clientId) : Promise.resolve(null),
+      encKeyOk ? braveService.getStatus(req.clientId) : Promise.resolve({ connected: false, tenant_key: false, platform_fallback: false, label: 'Encryption key error' }),
+      agentmailOk ? agentmailService.getStoredInbox(req.clientId) : Promise.resolve(null),
       pool.query(
         `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'system' AND key = 'calendly_url' LIMIT 1`,
         [req.clientId]
@@ -52,10 +54,8 @@ router.get('/status', async (req, res, next) => {
       calendarEmail = await googleCalendarService.getConnectedEmail(req.clientId).catch(() => null);
     }
 
-    let agentmailEmail = null;
-    if (agentmailOk) {
-      agentmailEmail = await agentmailService.getInboxEmail(req.clientId).catch(() => null);
-    }
+    const agentmailConnected = agentmailOk && !!agentmailInbox;
+    const agentmailEmail = agentmailConnected ? agentmailInbox.email : null;
 
     const calendlyContent = calendlyRow.rows[0]?.content;
     const calendlyUrl = calendlyContent
@@ -75,9 +75,9 @@ router.get('/status', async (req, res, next) => {
           label: calendarConnected ? (calendarEmail || 'Connected') : 'Not connected',
         },
         agentmail: {
-          connected: agentmailOk,
+          connected: agentmailConnected,
           email: agentmailEmail,
-          label: agentmailOk ? (agentmailEmail || 'Connected') : 'Not connected',
+          label: agentmailConnected ? (agentmailEmail || 'Inbox ready') : 'Not connected',
         },
         apollo: {
           connected: !!apolloKey,
@@ -88,8 +88,8 @@ router.get('/status', async (req, res, next) => {
           label: !encKeyOk ? 'Encryption key error' : hunterKey ? 'Connected' : 'Not configured',
         },
         brave: {
-          connected: braveOk,
-          label: braveOk ? 'Connected (env var)' : 'BRAVE_API_KEY not set',
+          ...braveStatus,
+          label: !encKeyOk ? 'Encryption key error' : braveStatus.label,
         },
         calendly: {
           connected: !!calendlyUrl,
@@ -243,7 +243,7 @@ async function sendMessageById(clientId, message_id, provider) {
   try {
     if (provider === 'auto') {
       const gmailOk = await gmailService.isConnected(clientId);
-      const agentmailOk = agentmailService.isConnected();
+      const agentmailOk = agentmailService.isConnected() && await agentmailService.hasInbox(clientId);
       usedProvider = gmailOk ? 'gmail' : agentmailOk ? 'agentmail' : 'none';
     }
 
@@ -257,7 +257,10 @@ async function sendMessageById(clientId, message_id, provider) {
     if (usedProvider === 'gmail') {
       sendResult = await gmailService.sendEmail(clientId, emailPayload);
     } else if (usedProvider === 'agentmail') {
-      sendResult = await agentmailService.sendEmail(clientId, emailPayload);
+      const agentmailOk = agentmailService.isConnected() && await agentmailService.hasInbox(clientId);
+      sendResult = agentmailOk
+        ? await agentmailService.sendEmail(clientId, emailPayload)
+        : { status: 'simulated', reason: 'agentmail_inbox_not_provisioned', messageId: null, threadId: null };
     } else {
       sendResult = { status: 'simulated', reason: 'no_provider', messageId: null, threadId: null };
     }
@@ -384,8 +387,8 @@ router.get('/agentmail/inbox', async (req, res, next) => {
   try {
     const connected = agentmailService.isConnected();
     if (!connected) return res.json({ data: { connected: false, email: null } });
-    const email = await agentmailService.getInboxEmail(req.clientId).catch(() => null);
-    res.json({ data: { connected: true, email } });
+    const inbox = await agentmailService.getStoredInbox(req.clientId).catch(() => null);
+    res.json({ data: { connected: !!inbox, email: inbox?.email || null } });
   } catch (err) { next(err); }
 });
 
@@ -477,6 +480,43 @@ router.get('/hunter/status', async (req, res, next) => {
 router.delete('/hunter/key', async (req, res, next) => {
   try {
     await secrets.deleteClientSecret(req.clientId, 'system', 'hunter_api_key');
+    res.json({ data: { status: 'removed' } });
+  } catch (err) { next(err); }
+});
+
+/* ─── Brave Search ───────────────────────────────────────── */
+
+router.post('/brave/key',
+  [body('api_key').isString().trim().notEmpty(), validate],
+  async (req, res, next) => {
+    try {
+      await braveService.setApiKey(req.clientId, req.body.api_key);
+      await logsService.createLog(req.clientId, {
+        agent: 'system', action: 'brave_key_saved', target_type: 'integration', metadata: {},
+      });
+      res.json({ data: { status: 'saved' } });
+    } catch (err) {
+      if (err.message?.includes('ENCRYPTION_KEY')) {
+        return res.status(500).json({ error: 'Server encryption key is misconfigured. Check ENCRYPTION_KEY env var.', code: 'ENCRYPTION_KEY_INVALID' });
+      }
+      next(err);
+    }
+  }
+);
+
+router.get('/brave/status', async (req, res, next) => {
+  try {
+    const status = await braveService.getStatus(req.clientId);
+    res.json({ data: status });
+  } catch (err) { next(err); }
+});
+
+router.delete('/brave/key', async (req, res, next) => {
+  try {
+    await braveService.deleteApiKey(req.clientId);
+    await logsService.createLog(req.clientId, {
+      agent: 'system', action: 'brave_key_removed', target_type: 'integration', metadata: {},
+    });
     res.json({ data: { status: 'removed' } });
   } catch (err) { next(err); }
 });

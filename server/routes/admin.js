@@ -437,7 +437,7 @@ router.get('/clients/:id/credentials',
   [param('id').isUUID(), validate],
   async (req, res, next) => {
     try {
-      const secretKeys = ['apollo_api_key', 'hunter_api_key', 'gmail_tokens'];
+      const secretKeys = ['apollo_api_key', 'hunter_api_key', 'brave_api_key', 'gmail_tokens'];
       const result = await adminQuery(
         `SELECT key, updated_at FROM agent_memory
           WHERE client_id = $1
@@ -454,7 +454,7 @@ router.get('/clients/:id/credentials',
         configured[publicKey] = { configured: true, updated_at: row.updated_at };
       }
 
-      const expected = ['apollo_api_key', 'hunter_api_key', 'gmail_refresh_token'];
+      const expected = ['apollo_api_key', 'hunter_api_key', 'brave_api_key', 'gmail_refresh_token'];
       for (const k of expected) {
         if (!configured[k]) configured[k] = { configured: false, updated_at: null };
       }

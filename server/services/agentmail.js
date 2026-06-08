@@ -24,8 +24,13 @@ function isConnected() {
 
 /* ─── Inbox management (per client) ─────────────────────── */
 
-async function getOrCreateInbox(clientId, clientSlug) {
-  // Check if already stored in agent_memory
+function normalizeInboxContent(content) {
+  if (!content) return null;
+  const parsed = typeof content === 'string' ? JSON.parse(content) : content;
+  return parsed?.inbox_id ? parsed : null;
+}
+
+async function getStoredInbox(clientId) {
   const { rows } = await pool.query(
     `SELECT content FROM agent_memory
      WHERE client_id = $1 AND agent = 'sales_beaver' AND key = 'agentmail_inbox'
@@ -33,9 +38,16 @@ async function getOrCreateInbox(clientId, clientSlug) {
     [clientId]
   );
 
-  if (rows.length && rows[0].content?.inbox_id) {
-    return rows[0].content;
-  }
+  return normalizeInboxContent(rows[0]?.content);
+}
+
+async function hasInbox(clientId) {
+  return !!(await getStoredInbox(clientId));
+}
+
+async function getOrCreateInbox(clientId, clientSlug) {
+  const existingInbox = await getStoredInbox(clientId);
+  if (existingInbox) return existingInbox;
 
   // Create a new inbox via SDK
   const client = getClient();
@@ -94,7 +106,10 @@ async function sendEmail(clientId, { to, subject, body, clientSlug }) {
   }
 
   try {
-    const inboxData = await getOrCreateInbox(clientId, clientSlug || 'beaver');
+    const inboxData = await getStoredInbox(clientId);
+    if (!inboxData) {
+      return { status: 'simulated', reason: 'agentmail_inbox_not_provisioned', messageId: null, threadId: null };
+    }
     const client = getClient();
 
     const result = await client.inboxes.messages.send(inboxData.inbox_id, {
@@ -130,7 +145,7 @@ async function registerWebhook(url) {
 async function getThread(clientId, threadId) {
   if (!isConnected()) return null;
   try {
-    const inboxData = await getOrCreateInbox(clientId, 'beaver').catch(() => null);
+    const inboxData = await getStoredInbox(clientId).catch(() => null);
     if (!inboxData) return null;
     const client = getClient();
     const thread = await client.inboxes.threads.get(inboxData.inbox_id, threadId);
@@ -152,6 +167,8 @@ async function disconnect(clientId) {
 
 module.exports = {
   isConnected,
+  getStoredInbox,
+  hasInbox,
   getOrCreateInbox,
   getInboxEmail,
   sendEmail,

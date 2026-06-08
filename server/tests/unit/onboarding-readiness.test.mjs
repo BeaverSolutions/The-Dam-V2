@@ -1,10 +1,14 @@
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const route = name => readFileSync(resolve(__dirname, `../../routes/${name}`), 'utf-8');
 const service = name => readFileSync(resolve(__dirname, `../../services/${name}`), 'utf-8');
+const optionalService = name => {
+  const path = resolve(__dirname, `../../services/${name}`);
+  return existsSync(path) ? readFileSync(path, 'utf-8') : '';
+};
 const middleware = name => readFileSync(resolve(__dirname, `../../middleware/${name}`), 'utf-8');
 const clientPage = name => readFileSync(resolve(__dirname, `../../../client/src/pages/${name}`), 'utf-8');
 
@@ -263,6 +267,74 @@ describe('onboarding readiness contracts', () => {
     expect(autonomousSource).toContain('no_fresh_red_blocker');
     expect(autonomousSource).toContain('tin_city_status');
     expect(autonomousSource).toContain('inactive_until_gate_passes');
+  });
+
+  it('AgentMail status and auto-send require a tenant-provisioned inbox, not only the global API key', () => {
+    const integrationsSource = route('integrations.js');
+    const dashboardSource = route('dashboard.js');
+    const agentmailSource = service('agentmail.js');
+
+    expect(agentmailSource).toContain('async function getStoredInbox');
+    expect(agentmailSource).toContain('async function hasInbox');
+    expect(integrationsSource).toContain('agentmailService.getStoredInbox(req.clientId)');
+    expect(integrationsSource).toContain('const agentmailConnected = agentmailOk && !!agentmailInbox');
+    expect(integrationsSource).toContain('agentmailService.hasInbox(clientId)');
+    expect(dashboardSource).toContain('agentmailService.getStoredInbox(clientId)');
+    expect(integrationsSource).not.toContain("const agentmailOk = agentmailService.isConnected();\n      usedProvider = gmailOk ? 'gmail' : agentmailOk ? 'agentmail' : 'none';");
+    expect(integrationsSource).not.toContain('agentmailService.getInboxEmail(req.clientId).catch(() => null)');
+    expect(dashboardSource).not.toContain('agentmailService.getInboxEmail(clientId).catch(() => null)');
+  });
+
+  it('Brave status does not report the global platform key as a tenant-owned connection', () => {
+    const integrationsSource = route('integrations.js');
+
+    expect(integrationsSource).toContain('braveService.getStatus(req.clientId)');
+    expect(integrationsSource).toContain('...braveStatus');
+    expect(integrationsSource).not.toContain('connected: braveOk');
+    expect(integrationsSource).not.toContain('Platform-managed search provider');
+  });
+
+  it('Brave Search BYOK is encrypted, tenant-scoped, and used by every Brave caller', () => {
+    const braveSource = optionalService('brave.js');
+    const integrationsSource = route('integrations.js');
+    const adminSource = route('admin.js');
+    const searchSource = service('searchService.js');
+    const marketSensingSource = service('marketSensing.js');
+    const agentsSource = service('agents.js');
+    const captainSource = service('captainOrchestrator.js');
+    const settingsSource = clientPage('Settings.jsx');
+
+    expect(braveSource).toContain("getClientSecret(clientId, 'system', 'brave_api_key')");
+    expect(braveSource).toContain("setClientSecret(clientId, 'system', 'brave_api_key'");
+    expect(braveSource).toContain("deleteClientSecret(clientId, 'system', 'brave_api_key')");
+    expect(braveSource).toContain('BEAVER_SOLUTIONS_CLIENT_ID');
+    expect(braveSource).toContain('isBeaverClient(clientId)');
+    expect(braveSource).toContain('process.env.BRAVE_API_KEY');
+
+    expect(integrationsSource).toContain("router.post('/brave/key'");
+    expect(integrationsSource).toContain("router.delete('/brave/key'");
+    expect(integrationsSource).toContain('braveService.getStatus(req.clientId)');
+    expect(integrationsSource).toContain("action: 'brave_key_saved'");
+    expect(integrationsSource).toContain("action: 'brave_key_removed'");
+    expect(adminSource).toContain("'brave_api_key'");
+
+    expect(searchSource).toContain("const braveService = require('./brave')");
+    expect(searchSource).toContain('await braveService.getApiKey(clientId)');
+    expect(marketSensingSource).toContain("const braveService = require('./brave')");
+    expect(marketSensingSource).toContain('await braveService.getApiKey(clientId)');
+    expect(agentsSource).toContain("const braveService = require('./brave')");
+    expect(agentsSource).toContain('await braveService.isConfigured(clientId)');
+    expect(captainSource).toContain("const braveService = require('./brave')");
+    expect(captainSource).toContain('await braveService.isConfigured(clientId)');
+
+    expect(searchSource).not.toContain('process.env.BRAVE_API_KEY');
+    expect(marketSensingSource).not.toContain('process.env.BRAVE_API_KEY');
+    expect(agentsSource).not.toContain('process.env.BRAVE_API_KEY');
+    expect(captainSource).not.toContain('process.env.BRAVE_API_KEY');
+
+    expect(settingsSource).toContain("request('/integrations/brave/key', { method: 'POST'");
+    expect(settingsSource).toContain("request('/integrations/brave/key', { method: 'DELETE'");
+    expect(settingsSource).toContain('braveKeyVisible');
   });
 });
 

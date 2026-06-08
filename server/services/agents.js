@@ -11,6 +11,7 @@ const pipeline = require('./pipeline');
 const pool = require('../db/pool');
 const apolloService = require('./apollo');
 const hunterService = require('./hunter');
+const braveService = require('./brave');
 const researchModule = require('./research');
 const { getClientConfig, buildClientContext } = require('./clientConfig');
 const { evaluateLeadQuality } = require('../utils/leadQuality');
@@ -628,13 +629,14 @@ async function researchSearch(clientId, { query, command = null, filters = {} })
   // Self-sourcing needs ONE working search provider: Brave (primary), Google CSE
   // (fallback), or Apollo. DuckDuckGo is a crash-guard, not a real source.
   const apolloKey = await apolloService.getApiKey(clientId).catch(() => null);
+  const braveConfigured = await braveService.isConfigured(clientId).catch(() => false);
   const providers = {
-    brave:      !!process.env.BRAVE_API_KEY,
+    brave:      braveConfigured,
     google_cse: !!(process.env.GOOGLE_CSE_API_KEY && process.env.GOOGLE_CSE_CX),
     apollo:     !!apolloKey && Number(process.env.APOLLO_DAILY_QUERY_CAP || 0) > 0,
   };
   const missingKeys = [];
-  if (!providers.brave) missingKeys.push('BRAVE_API_KEY');
+  if (!providers.brave) missingKeys.push('brave_api_key');
   if (!providers.google_cse) missingKeys.push('GOOGLE_CSE_API_KEY/CX');
   const noProviderConfigured = !providers.brave && !providers.google_cse && !providers.apollo;
   const verificationStats = researchResult?.verification_stats || {};
@@ -2526,10 +2528,11 @@ function screenCommand(command) {
 
 async function getSearchProviderCapacity(clientId) {
   const { CAPS, providerUsageToday } = require('./spendGuard');
+  const braveConfigured = await braveService.isConfigured(clientId).catch(() => false);
   const providers = [
     {
       provider: 'brave',
-      configured: !!process.env.BRAVE_API_KEY,
+      configured: braveConfigured,
       cap: CAPS.brave,
       spent: await providerUsageToday('brave', clientId).catch(() => CAPS.brave),
     },
