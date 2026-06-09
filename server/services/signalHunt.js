@@ -77,7 +77,7 @@ function signalQueryWindow(maxPaidQueries = null) {
   return Math.max(1, Math.min(MAX_SIGNAL_QUERY_WINDOW, Math.max(MAX_SIGNAL_QUERIES_PER_RUN, paidQueryBudget)));
 }
 
-function signalPaidBudgetSplit(maxPaidQueries = null, maxLeads = 1) {
+function signalPaidBudgetSplit(maxPaidQueries = null, maxLeads = 1, { verticalFirst = false } = {}) {
   if (maxPaidQueries === null || maxPaidQueries === undefined || maxPaidQueries === '') {
     return { total: null, discovery: null, lookup: null };
   }
@@ -89,7 +89,15 @@ function signalPaidBudgetSplit(maxPaidQueries = null, maxLeads = 1) {
 
   const total = Math.max(0, Math.floor(n));
   const target = Math.max(1, Math.ceil(Number(maxLeads) || 1));
-  const lookup = Math.max(1, Math.min(target, Math.floor(total / 2)));
+  // Vertical-first widens discovery (Commit 1) → more candidates pass the
+  // cheap gate → more paid decision-maker lookups needed. Reserve a bigger
+  // lookup share so the survivor set isn't starved by discovery + the first
+  // few lookups. Cap at 60% of total so discovery still gets meaningful
+  // breadth. The decision-maker fallback can consume an extra unit per
+  // survivor, so target*2 is the realistic ceiling.
+  const lookup = verticalFirst
+    ? Math.max(1, Math.min(target * 2, Math.ceil(total * 0.6)))
+    : Math.max(1, Math.min(target, Math.floor(total / 2)));
   return {
     total,
     discovery: Math.max(0, total - lookup),
@@ -1371,7 +1379,8 @@ async function previewSignalHuntPlan(clientId, { icp = {}, maxPaidQueries = null
   let config = await loadSignalConfig(clientId, icp, { maxPaidQueries });
   config = applySignalPlaybookToConfig(config, signalPlaybook);
   config = applyApprovedPlatformPlanToConfig(config, platformPlan);
-  const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
+  const verticalFirstPlan = isVerticalFirstPlatformPlan(platformPlan, config);
+  const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads, { verticalFirst: verticalFirstPlan });
   const executableDiscoveryQueries = executableDiscoveryQueriesForBudget(config.queries, paidQueryBudget);
   const hash = signalQuerySetHash(executableDiscoveryQueries);
   const key = `signal_hunt_zero_query_set_${klDateString()}_${SIGNAL_HUNT_PARSER_VERSION}_${hash}`;
@@ -2093,7 +2102,34 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   config = applyApprovedPlatformPlanToConfig(config, platformPlan);
   const activePlanId = platformPlan?.id || platformPlan?.plan_id || plan_id;
   const verticalFirstExecution = isVerticalFirstPlatformPlan(platformPlan, config);
-  const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads);
+  // Vertical-first decision-maker lookup wants a Brave + Google CSE pair; with
+  // google_cse cap=0 the lookup falls back to Brave only, sharing the same
+  // pool as discovery. Surface this UPFRONT so MJ sees it before the proof
+  // runs instead of buried inside a mid-run provider_blocked log.
+  let decisionMakerProviders = null;
+  if (verticalFirstExecution) {
+    try {
+      const { CAPS: providerCaps } = require('./spendGuard');
+      const googleCseCap = Number(providerCaps?.google_cse) || 0;
+      const braveCap = Number(providerCaps?.brave) || 0;
+      decisionMakerProviders = { brave_cap: braveCap, google_cse_cap: googleCseCap };
+      if (googleCseCap <= 0) {
+        console.warn(`[signalHunt] Vertical-first run starting with google_cse cap=0; decision-maker lookup will rely on Brave only (shares discovery pool). Top up GOOGLE_CSE_DAILY_QUERY_CAP if you want a parallel lookup channel.`);
+        await logsService.createLog(clientId, {
+          agent: 'research_beaver',
+          action: 'provider_capacity_warning',
+          metadata: {
+            reason: 'google_cse_cap_zero_for_vertical_first',
+            provider: 'google_cse',
+            cap: googleCseCap,
+            fallback: 'brave_only',
+            plan_id: activePlanId,
+          },
+        }).catch(() => {});
+      }
+    } catch { /* spendGuard import optional — never block the run */ }
+  }
+  const paidQueryBudget = signalPaidBudgetSplit(maxPaidQueries, maxLeads, { verticalFirst: verticalFirstExecution });
   const providerFanoutCaps = signalProviderFanoutCaps(maxPaidQueries, maxLeads);
   const executableDiscoveryQueries = executableDiscoveryQueriesForBudget(config.queries, paidQueryBudget);
   const zeroSet = await blockedByRepeatedZeroQuerySet(clientId, executableDiscoveryQueries);
@@ -2115,6 +2151,7 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   let queriesRun = 0;
   let rawResultsTotal = 0;
   const stageStats = initSignalHuntStageStats();
+  if (decisionMakerProviders) stageStats.decision_maker_providers = decisionMakerProviders;
   let paidQueriesRemaining = paidQueryBudget.total;
   let discoveryQueriesRun = 0;
   const consumePaidQuery = (units = 1) => {

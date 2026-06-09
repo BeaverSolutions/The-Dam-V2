@@ -411,12 +411,13 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
   });
 
   it('reserves bounded paid Signal Hunt budget for decision-maker lookup', () => {
-    expect(src).toContain('function signalPaidBudgetSplit(maxPaidQueries = null, maxLeads = 1)');
+    expect(src).toContain('function signalPaidBudgetSplit(maxPaidQueries = null, maxLeads = 1, { verticalFirst = false } = {})');
     expect(src).toContain('function shouldStopSignalDiscovery');
     expect(src).toContain('shouldStopSignalDiscovery({ discoveryQueriesRun, paidQueryBudget })');
     expect(src).toContain('Discovery-query budget reached; reserving paid budget for decision-maker lookup');
     expect(src).toContain('lookup_query_budget');
 
+    // Signal-first (default) split: lookup capped at min(target, total/2).
     expect(signalHunt._test.signalPaidBudgetSplit(12, 20)).toEqual({
       total: 12,
       discovery: 6,
@@ -432,6 +433,35 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       discovery: 0,
       lookup: 0,
     });
+  });
+
+  it('biases the lookup share UP for vertical-first runs so wider gate survivors are not starved', () => {
+    // Same total budget as signal-first, more reserved for decision-maker lookup.
+    const verticalSplit = signalHunt._test.signalPaidBudgetSplit(10, 5, { verticalFirst: true });
+    const signalSplit = signalHunt._test.signalPaidBudgetSplit(10, 5);
+    expect(verticalSplit.lookup).toBeGreaterThan(signalSplit.lookup);
+    // Vertical-first lookup is capped at min(target*2, ceil(total*0.6)) so it
+    // doesn't starve discovery either.
+    expect(verticalSplit.lookup).toBeLessThanOrEqual(Math.ceil(10 * 0.6));
+    expect(verticalSplit.discovery + verticalSplit.lookup).toBe(verticalSplit.total);
+  });
+
+  it('keeps signal-first budget split unchanged (regression guard)', () => {
+    expect(signalHunt._test.signalPaidBudgetSplit(10, 5)).toEqual({
+      total: 10,
+      discovery: 5,
+      lookup: 5,
+    });
+  });
+
+  it('surfaces google_cse cap=0 upfront for vertical-first runs (not buried inside the lookup)', () => {
+    const runStart = src.indexOf('async function runSignalHunt');
+    const warnIdx = src.indexOf("'provider_capacity_warning'", runStart);
+    const discoveryLoop = src.indexOf('// Step 1: Run all signal queries', runStart);
+    expect(warnIdx).toBeGreaterThan(runStart);
+    expect(warnIdx).toBeLessThan(discoveryLoop);
+    expect(src).toContain('google_cse_cap_zero_for_vertical_first');
+    expect(src).toContain('decision_maker_providers');
   });
 
   it('does not stop discovery just because off-ICP raw candidates filled the lead buffer', () => {
