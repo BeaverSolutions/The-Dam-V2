@@ -6,7 +6,7 @@
 const API_URL = process.env.BEAVRDAM_API_URL || 'https://app.beaver.solutions';
 const API_KEY = process.env.BEAVRDAM_INTERNAL_API_KEY;
 const CLIENT_SLUG = (process.env.CLIENT_SLUG || 'beaver-solutions').trim();
-const EXPECT_DAILY_KICKOFF_ENABLED = process.env.EXPECT_DAILY_KICKOFF_ENABLED === 'true';
+const EXPECT_DAILY_KICKOFF_ENABLED = parseExpectation(process.env.EXPECT_DAILY_KICKOFF_ENABLED);
 const EXPECT_KPI_GAP_KICKOFF_ENABLED = parseExpectation(process.env.EXPECT_KPI_GAP_KICKOFF_ENABLED);
 const EXPECT_MARKET_SENSING_ENABLED = process.env.EXPECT_MARKET_SENSING_ENABLED === 'true';
 const MAX_REVIEWABLE = Number(process.env.MAX_REVIEWABLE_APPROVALS || 20);
@@ -65,6 +65,29 @@ function isGlobalScheduledPauseVisible(health) {
     && /SCHEDULED_AUTONOMY_PAUSED/.test(autonomy.reason || '');
 }
 
+function dailyKickoffExpectedEnabled(health) {
+  if (EXPECT_DAILY_KICKOFF_ENABLED === 'auto') {
+    return scheduledWorkerState(health, 'daily_kickoff') === true
+      && !isGlobalScheduledPauseVisible(health);
+  }
+  return EXPECT_DAILY_KICKOFF_ENABLED === true;
+}
+
+function kpiGapKickoffExpectedEnabled(health) {
+  if (EXPECT_KPI_GAP_KICKOFF_ENABLED === 'auto') {
+    return scheduledWorkerState(health, 'kpi_gap_kickoff') === true
+      && !isGlobalScheduledPauseVisible(health);
+  }
+  return EXPECT_KPI_GAP_KICKOFF_ENABLED === true;
+}
+
+function systemDailyKickoffExpectedEnabled(data) {
+  if (EXPECT_DAILY_KICKOFF_ENABLED === 'auto') {
+    return data?.autonomy_state?.scheduled_paused !== true;
+  }
+  return EXPECT_DAILY_KICKOFF_ENABLED === true;
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -121,23 +144,24 @@ function validateHealth(checks, health) {
   if (autonomy.mode) pass(checks, 'public health exposes autonomy state', autonomy.mode);
   else fail(checks, 'public health exposes autonomy state', 'missing');
 
-  if (autonomy.scheduled_paused === true && !EXPECT_DAILY_KICKOFF_ENABLED) {
+  if (autonomy.scheduled_paused === true && EXPECT_DAILY_KICKOFF_ENABLED !== true) {
     pass(checks, 'scheduled autonomy pause visible', autonomy.reason || 'paused');
   }
 
   const daily = jobStatus(health, 'daily_kickoff');
   const dailyWorker = scheduledWorkerState(health, 'daily_kickoff');
+  const dailyExpectedEnabled = dailyKickoffExpectedEnabled(health);
   if (!daily) {
-    if (EXPECT_DAILY_KICKOFF_ENABLED && dailyWorker === true) {
+    if (dailyExpectedEnabled && dailyWorker === true) {
       pass(checks, 'daily kickoff enabled', 'scheduled worker enabled');
-    } else if (!EXPECT_DAILY_KICKOFF_ENABLED && dailyWorker === false) {
+    } else if (!dailyExpectedEnabled && dailyWorker === false) {
       pass(checks, 'daily kickoff safely disabled', 'scheduled worker disabled');
-    } else if (!EXPECT_DAILY_KICKOFF_ENABLED && isGlobalScheduledPauseVisible(health)) {
+    } else if (!dailyExpectedEnabled && isGlobalScheduledPauseVisible(health)) {
       pass(checks, 'daily kickoff safely disabled', 'global scheduled pause visible before job marker');
     } else {
       fail(checks, 'daily kickoff job visible', 'job missing from /health');
     }
-  } else if (EXPECT_DAILY_KICKOFF_ENABLED) {
+  } else if (dailyExpectedEnabled) {
     if (daily.status === 'disabled') fail(checks, 'daily kickoff enabled', daily.lastSkipReason || 'disabled');
     else pass(checks, 'daily kickoff enabled', `status=${daily.status}`);
   } else if (isPausedOrDisabled(daily, /(CAPTAIN_DAILY_KICKOFF_ENABLED disabled|SCHEDULED_AUTONOMY_PAUSED)/)) {
@@ -148,9 +172,7 @@ function validateHealth(checks, health) {
 
   const kpiGap = jobStatus(health, 'kpi_gap_kickoff');
   const kpiGapWorker = scheduledWorkerState(health, 'kpi_gap_kickoff');
-  const kpiGapExpectedEnabled = EXPECT_KPI_GAP_KICKOFF_ENABLED === 'auto'
-    ? kpiGapWorker === true
-    : EXPECT_KPI_GAP_KICKOFF_ENABLED === true;
+  const kpiGapExpectedEnabled = kpiGapKickoffExpectedEnabled(health);
   if (!kpiGap) {
     if (kpiGapExpectedEnabled && kpiGapWorker === true) {
       pass(checks, 'KPI-gap kickoff enabled', 'scheduled worker enabled');
@@ -211,7 +233,8 @@ function validateSystemHealth(checks, data) {
   pass(checks, 'target tenant health present', target.name);
 
   const kickoffState = target.kickoff_today?.state || 'missing';
-  if (EXPECT_DAILY_KICKOFF_ENABLED) {
+  const dailyExpectedEnabled = systemDailyKickoffExpectedEnabled(data);
+  if (dailyExpectedEnabled) {
     if (['disabled', 'missed', 'missing', 'started'].includes(kickoffState)) {
       fail(checks, 'kickoff state has work proof', kickoffState);
     } else {
@@ -263,6 +286,14 @@ async function readHealthWithJobs(initialHealth = null) {
   let lastHealth = initialHealth;
   for (;;) {
     if (!lastHealth) lastHealth = await getJson('/health');
+    if (
+      isGlobalScheduledPauseVisible(lastHealth)
+      && EXPECT_DAILY_KICKOFF_ENABLED !== true
+      && EXPECT_KPI_GAP_KICKOFF_ENABLED !== true
+      && EXPECT_MARKET_SENSING_ENABLED !== true
+    ) {
+      return lastHealth;
+    }
     if (jobStatus(lastHealth, 'daily_kickoff') && jobStatus(lastHealth, 'kpi_gap_kickoff') && jobStatus(lastHealth, 'market_sensing')) {
       return lastHealth;
     }

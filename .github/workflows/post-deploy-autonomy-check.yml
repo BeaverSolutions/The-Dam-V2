@@ -36,10 +36,11 @@ jobs:
           BEAVRDAM_API_URL: ${{ secrets.BEAVRDAM_API_URL || 'https://app.beaver.solutions' }}
           BEAVRDAM_INTERNAL_API_KEY: ${{ secrets.BEAVRDAM_INTERNAL_API_KEY }}
           CLIENT_SLUG: ${{ github.event.inputs.client_slug || 'beaver-solutions' }}
-          # Daily kickoff is ARMED (MJ approved scheduled autonomy 2026-05-29), so on push expect it ENABLED.
+          # Push checks follow live /health safety state. Manual dispatch can
+          # still demand armed daily kickoff explicitly via the input above.
           # KPI-gap push checks use /health scheduled worker truth because env differs across deploy states.
           # Market sensing remains disabled unless explicitly approved.
-          EXPECT_DAILY_KICKOFF_ENABLED: ${{ github.event.inputs.expect_daily_kickoff_enabled || 'true' }}
+          EXPECT_DAILY_KICKOFF_ENABLED: ${{ github.event_name == 'push' && 'auto' || github.event.inputs.expect_daily_kickoff_enabled || 'true' }}
           EXPECT_KPI_GAP_KICKOFF_ENABLED: ${{ github.event_name == 'push' && 'auto' || github.event.inputs.expect_kpi_gap_kickoff_enabled || 'false' }}
           EXPECT_MARKET_SENSING_ENABLED: ${{ github.event.inputs.expect_market_sensing_enabled || 'false' }}
           WAIT_FOR_DEPLOY_SECONDS: ${{ github.event_name == 'push' && '720' || '0' }}
