@@ -802,6 +802,58 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     }
   });
 
+  it('lifts max_results_per_query for vertical-first plans so SMEs surface past top-3 giants', () => {
+    const baseConfig = { queries: [], max_results_per_query: 3, query_source: 'icp' };
+    const verticalPlan = {
+      id: 'plan-vertical',
+      mode: 'proof',
+      requested_mode: 'vertical_first',
+      discovery_mode: 'vertical_first',
+      platform_sequence: [{
+        platform: 'agency_directory', provider: 'brave', source_channel: 'vertical_directory',
+        discovery_mode: 'vertical_first', signal_id: 'vertical_first_discovery',
+        signal_family: 'vertical_first_discovery', source_term: 'marketing agency',
+        query: '"marketing agency" Malaysia', country: 'MY',
+        query_validation: { valid: true, chars: 30, words: 3 },
+      }],
+    };
+    const verticalConfig = signalHunt._test.applyApprovedPlatformPlanToConfig(baseConfig, verticalPlan);
+    expect(verticalConfig.max_results_per_query).toBe(signalHunt._test.MAX_VERTICAL_RESULTS_PER_QUERY);
+    expect(verticalConfig.max_results_per_query).toBeGreaterThanOrEqual(10);
+    expect(verticalConfig.query_source).toBe('approved_platform_plan');
+    expect(verticalConfig.approved_platform_plan.discovery_mode).toBe('vertical_first');
+  });
+
+  it('keeps signal-first plans at the normal results-per-query cap', () => {
+    const baseConfig = { queries: [], max_results_per_query: 3, query_source: 'icp' };
+    const signalPlan = {
+      id: 'plan-signal',
+      mode: 'proof',
+      requested_mode: 'proof',
+      discovery_mode: 'signal_first',
+      platform_sequence: [{
+        platform: 'jobstreet_my', provider: 'brave', source_channel: 'linkedin_jobs',
+        discovery_mode: 'signal_first', signal_id: 'hiring_sales_roles',
+        signal_family: 'hiring_capability_build',
+        query: 'site:my.jobstreet.com "sales executive" Malaysia', country: 'MY',
+        query_validation: { valid: true, chars: 50, words: 5 },
+      }],
+    };
+    const signalConfig = signalHunt._test.applyApprovedPlatformPlanToConfig(baseConfig, signalPlan);
+    expect(signalConfig.max_results_per_query).toBe(3);
+    expect(signalConfig.max_results_per_query).toBeLessThan(signalHunt._test.MAX_VERTICAL_RESULTS_PER_QUERY);
+  });
+
+  it('widens the candidate loop for vertical-first runs so gate-passing SMEs are not truncated', () => {
+    // Source-level assertion: the candidate loop slice is widened only when
+    // verticalFirstExecution is true.
+    expect(src).toContain('const candidateLoopCap = verticalFirstExecution');
+    expect(src).toContain('Math.max(maxLeads * 4, 12)');
+    expect(src).toContain('uniqueSignals.slice(0, candidateLoopCap)');
+    // And the candidate loop existed before this change (regression guard).
+    expect(src.indexOf('candidateLoopCap')).toBeGreaterThan(src.indexOf('async function runSignalHunt'));
+  });
+
   it('refuses incomplete Signal Hunt packages before contactGate persistence', () => {
     const saveStart = src.indexOf('async function saveSignalLeads');
     const packageGate = src.indexOf('signalPackageMissingFields', saveStart);

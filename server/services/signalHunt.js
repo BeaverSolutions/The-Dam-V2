@@ -47,6 +47,13 @@ function envInt(name, fallback) {
 const MAX_SIGNAL_QUERIES_PER_RUN = envInt('SIGNAL_HUNT_MAX_QUERIES', 6);
 const MAX_SIGNAL_QUERY_WINDOW = Math.max(MAX_SIGNAL_QUERIES_PER_RUN, envInt('SIGNAL_HUNT_MAX_QUERY_WINDOW', 20));
 const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
+// Vertical-first discovery searches SEO-ranked web for vertical terms. The
+// top-3 results are almost always the biggest/most-authoritative players (the
+// giants the ICP gate then correctly rejects). Widen the result window for
+// vertical-first runs so the SME long-tail past the top-3 also enters the
+// funnel — the candidate-side cost is free (regex + cheap homepage fetch);
+// only gate-passing candidates spend the paid decision-maker budget.
+const MAX_VERTICAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_VERTICAL_RESULTS_PER_QUERY', 12);
 const SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v3';
 
 function klDateString() {
@@ -907,10 +914,35 @@ function applyApprovedPlatformPlanToConfig(config = {}, platformPlan = null) {
     : [];
   if (plannedQueries.length === 0) return config;
 
+  // Detect vertical-first at apply time so we can lift the results cap for
+  // the SME long-tail. Mirrors isVerticalFirstPlatformPlan (declared below)
+  // without taking a forward reference.
+  const modeCandidates = [
+    platformPlan.discovery_mode,
+    platformPlan.discoveryMode,
+    platformPlan.requested_mode,
+    platformPlan.requestedMode,
+    platformPlan.mode,
+  ].map(value => String(value || '').toLowerCase());
+  const stepIsVerticalFirst = Array.isArray(platformPlan.platform_sequence)
+    && platformPlan.platform_sequence.some(step => String(step?.discovery_mode || step?.discoveryMode || '').toLowerCase() === 'vertical_first');
+  const isVerticalFirst = modeCandidates.includes('vertical_first') || stepIsVerticalFirst;
+
+  // Plan-level override wins if explicitly set; otherwise vertical-first gets
+  // the wider cap, signal-first keeps the existing signal-hunt cap.
+  const planLevelMax = Number(platformPlan.max_results_per_query);
+  const verticalCap = Number.isFinite(planLevelMax) && planLevelMax > 0
+    ? Math.min(planLevelMax, MAX_VERTICAL_RESULTS_PER_QUERY)
+    : MAX_VERTICAL_RESULTS_PER_QUERY;
+  const maxResultsPerQuery = isVerticalFirst
+    ? verticalCap
+    : (config.max_results_per_query || MAX_SIGNAL_RESULTS_PER_QUERY);
+
   return {
     ...config,
     queries: plannedQueries,
     query_source: 'approved_platform_plan',
+    max_results_per_query: maxResultsPerQuery,
     approved_platform_plan: {
       id: platformPlan.id || platformPlan.plan_id || null,
       plan_hash: platformPlan.plan_hash || null,
@@ -2266,7 +2298,15 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
   // Step 4: For each signal, find the decision-maker
   const icpTitles = titlesFromIcp(icp);
 
-  for (const signal of uniqueSignals.slice(0, maxLeads * 2)) {
+  // Vertical-first runs surface a wider candidate set (raised results-per-query)
+  // because the ICP gate correctly rejects the top-ranked giants; we need
+  // enough loop budget to reach the SME long-tail beneath them. The cheap
+  // resolver + gate run for free before any paid lookup, so widening here
+  // does not spend more paid budget per non-matching candidate.
+  const candidateLoopCap = verticalFirstExecution
+    ? Math.max(maxLeads * 4, 12)
+    : maxLeads * 2;
+  for (const signal of uniqueSignals.slice(0, candidateLoopCap)) {
     if (leads.length >= maxLeads) break;
 
     const country = signal.country || countryCodeFromText(signal.raw_snippet || signal.signal_summary || '') || 'MY';
@@ -2673,6 +2713,9 @@ module.exports = {
   platformFunnelFromSignalHuntResult,
   _test: {
     applySignalPlaybookToConfig,
+    applyApprovedPlatformPlanToConfig,
+    MAX_SIGNAL_RESULTS_PER_QUERY,
+    MAX_VERTICAL_RESULTS_PER_QUERY,
     attachSignalPackageToSignalLead,
     signalPackageMissingFields,
     signalFamilyForType,
