@@ -874,16 +874,17 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(signalConfig.max_results_per_query).toBeLessThan(signalHunt._test.MAX_VERTICAL_RESULTS_PER_QUERY);
   });
 
-  it('runs the cheap enterprise/global marker check BEFORE consuming paid decision-maker budget', () => {
+  it('runs the shared company-shape gate (name+snippet) BEFORE consuming paid decision-maker budget', () => {
     const runStart = src.indexOf('async function runSignalHunt');
     const icpPassedIdx = src.indexOf('stageStats.icp_passed++', runStart);
-    const markerCheckIdx = src.indexOf('detectEnterpriseOrGlobalMarkers', runStart);
+    const shapeCheckIdx = src.indexOf('companyShapeRejection(shapeText)', runStart);
     const consumeForLookupIdx = src.indexOf("'paid_query_budget_exhausted_before_decision_maker_lookup'", runStart);
     expect(icpPassedIdx).toBeGreaterThan(runStart);
-    expect(markerCheckIdx).toBeGreaterThan(icpPassedIdx);
-    expect(markerCheckIdx).toBeLessThan(consumeForLookupIdx);
-    expect(src).toContain('enterprise_or_global_pre_lookup');
-    expect(src).toContain('enterprise_or_global_marker_matched');
+    expect(shapeCheckIdx).toBeGreaterThan(icpPassedIdx);
+    expect(shapeCheckIdx).toBeLessThan(consumeForLookupIdx);
+    expect(src).toContain('company_shape_pre_lookup');
+    // Pre-lookup gate matches on NAME + SNIPPET only (not scraped homepage prose).
+    expect(src).toContain("[signal.company, signal.raw_snippet, signal.signal_summary]");
   });
 
   it('widens the candidate loop for vertical-first runs so gate-passing SMEs are not truncated', () => {

@@ -31,7 +31,6 @@ const platformRegistry = require('./platformRegistry');
 const {
   resolveCompanyEvidence,
   resolveCompanyIdentity,
-  detectEnterpriseOrGlobalMarkers,
   isAggregatorUrl,
   companyNameFromDomain,
 } = require('./companyEvidenceResolver');
@@ -2421,27 +2420,29 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     stageStats.icp_passed++;
     platformFunnelTracker.recordVerticalVerified(signal);
 
-    // Cheap pre-lookup gate: catch global/enterprise giants on free homepage
-    // text BEFORE consuming paid decision-maker budget. Vertical-first
-    // homepages frequently advertise "global", "offices in N countries",
-    // "Fortune 500" — the ICP gate would reject them anyway, but only AFTER
-    // a paid lookup. Doing this here costs zero paid units.
-    const enterpriseMarkers = detectEnterpriseOrGlobalMarkers(
-      [signal.company_description, signal.signal_summary, signal.raw_snippet]
-        .filter(Boolean)
-        .join(' ')
-    );
-    if (enterpriseMarkers.matches.length > 0) {
+    // Cheap pre-lookup gate: drop wrong-TYPE/SIZE companies (gov/NGO/edu,
+    // global agency networks, enterprise brands) BEFORE spending a paid
+    // decision-maker lookup. Reuses the SAME companyShapeRejection the
+    // post-lookup ICP filter uses — one source of truth, not a parallel
+    // heuristic. Match on company NAME + original Brave snippet only (NOT the
+    // scraped homepage prose) so we catch named giants without false-rejecting
+    // SMEs whose copy merely mentions "government clients" / "universities".
+    const { companyShapeRejection } = require('./agents');
+    const shapeText = [signal.company, signal.raw_snippet, signal.signal_summary]
+      .filter(Boolean)
+      .join(' ');
+    const shapeRejection = companyShapeRejection(shapeText);
+    if (shapeRejection) {
       await logSignalHuntMiss(clientId, {
         signal,
-        blocker: 'enterprise_or_global_pre_lookup',
-        reason: 'enterprise_or_global_marker_matched',
+        blocker: 'company_shape_pre_lookup',
+        reason: shapeRejection.reason,
         metadata: {
-          matched_markers: enterpriseMarkers.matches.map(m => m.marker),
-          evidence_samples: enterpriseMarkers.matches.map(m => m.evidence),
+          rejected_status: shapeRejection.status,
+          matched_on: 'name_and_snippet',
         },
       });
-      console.log(`[signalHunt] Pre-lookup enterprise/global block on ${signal.company}: ${enterpriseMarkers.matches.map(m => m.marker).join(', ')}`);
+      console.log(`[signalHunt] Pre-lookup company-shape block on ${signal.company}: ${shapeRejection.reason}`);
       continue;
     }
 

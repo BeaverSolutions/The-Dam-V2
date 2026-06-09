@@ -151,6 +151,35 @@ function resolveSenderName(clientId, persona) {
 }
 
 /**
+ * Company-shape exclusion (industry body / gov-NGO-edu / freelance / global
+ * agency / enterprise brand). The single source of truth for "is this company
+ * the wrong TYPE/SIZE for our ICP", independent of persona/title. Returns a
+ * `{ status, reason }` rejection or null to pass.
+ *
+ * Used in two places: by applyIcpV2Filter (post-lookup, full lead text) AND by
+ * Signal Hunt PRE-lookup (company name + snippet only) so named giants are
+ * dropped before any paid decision-maker lookup is spent. Pass NAME + SNIPPET
+ * pre-lookup — NOT scraped homepage prose, which over-matches gov/edu/global
+ * terms and false-rejects real SMEs whose copy merely mentions "government
+ * clients" or "universities".
+ */
+function companyShapeRejection(allText = '') {
+  if (ICP_INDUSTRY_BODIES.test(allText)) {
+    return { status: 'rejected_vertical', reason: 'industry body / association / chamber' };
+  }
+  if (ICP_GOV_NGO_EDU.test(allText)) {
+    return { status: 'rejected_vertical', reason: 'government / NGO / academic / training provider' };
+  }
+  if (ICP_FREELANCE.test(allText)) {
+    return { status: 'rejected_vertical', reason: 'freelance / solo / independent operator' };
+  }
+  if (ICP_LARGE_GLOBAL_AGENCIES.test(allText) || ICP_ENTERPRISE_BRANDS.test(allText)) {
+    return { status: 'rejected_size', reason: 'global agency / enterprise brand — outside 5-50 sweet spot' };
+  }
+  return null;
+}
+
+/**
  * ICP v2 hard filter. Runs AFTER existing geo/industry/corp gate.
  * Returns { pass: true } or { pass: false, status: 'rejected_*', reason: '...' }.
  *
@@ -192,17 +221,9 @@ function applyIcpV2Filter(lead) {
   }
 
   // Gate 2: Vertical / company shape exclusions.
-  if (ICP_INDUSTRY_BODIES.test(allText)) {
-    return { pass: false, status: 'rejected_vertical', reason: 'industry body / association / chamber' };
-  }
-  if (ICP_GOV_NGO_EDU.test(allText)) {
-    return { pass: false, status: 'rejected_vertical', reason: 'government / NGO / academic / training provider' };
-  }
-  if (ICP_FREELANCE.test(allText)) {
-    return { pass: false, status: 'rejected_vertical', reason: 'freelance / solo / independent operator' };
-  }
-  if (ICP_LARGE_GLOBAL_AGENCIES.test(allText) || ICP_ENTERPRISE_BRANDS.test(allText)) {
-    return { pass: false, status: 'rejected_size', reason: 'global agency / enterprise brand — outside 5-50 sweet spot' };
+  const shapeRejection = companyShapeRejection(allText);
+  if (shapeRejection) {
+    return { pass: false, ...shapeRejection };
   }
 
   // Gate 3: Persona / title. Senior standalone passes immediately. Senior leader (Director/Head/VP/GM/Chief)
@@ -6691,6 +6712,7 @@ module.exports = {
   autoFixMessage,                // NEW: exposed for Captain Beaver draft flow
   brandSafetyCheck,              // NEW: exposed for Captain Beaver draft flow
   applyIcpV2Filter,              // 2026-05-06: exposed for kickoff pool re-validation against legacy MNC junk
+  companyShapeRejection,         // 2026-06-09: shared company-type/size gate, reused by Signal Hunt pre-lookup
   selectChannel,                 // 2026-05-06: exposed for callers that want to test channel routing without a full draft
   // Win/Loss capture
   captureWinLoss,

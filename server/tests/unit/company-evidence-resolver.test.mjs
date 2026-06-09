@@ -150,29 +150,14 @@ describe('company evidence resolver', () => {
     expect(identity.source).toBe('provisional');
   });
 
-  it.each([
-    ['global agency phrasing', 'TEAM LEWIS is a global communications agency that helps brands tell their stories worldwide.'],
-    ['offices in N countries', 'We have offices in 25 countries and serve clients across the globe.'],
-    ['worldwide presence', 'Trusted by Fortune 500 brands with a worldwide presence in marketing and PR.'],
-    ['Fortune 500 marker', 'A leader trusted by Fortune 500 customers since 1980.'],
-    ['100+ employees', 'Our team of 450 professionals operates across multiple regions.'],
-    ['part of WPP group', 'We are part of the WPP group of communications companies.'],
-    ['HQ in London', 'Headquartered in London with offices around the world.'],
-  ])('flags %s on free homepage text', (_label, text) => {
-    const result = resolver.detectEnterpriseOrGlobalMarkers(text);
-    expect(result.matches.length).toBeGreaterThan(0);
-    expect(result.matches[0]).toHaveProperty('marker');
-    expect(result.matches[0]).toHaveProperty('evidence');
-  });
-
-  it.each([
-    ['MY SME corporate training', 'Thriving Talents is a corporate training provider in Malaysia, focused on B2B leadership development.'],
-    ['MY boutique agency', 'BrandMint is a boutique creative agency in Kuala Lumpur serving local SMEs.'],
-    ['MY headquartered training co', 'Acme Learning is headquartered in Kuala Lumpur. We design custom workshops for our clients.'],
-    ['small numeric markers', 'A small team of 12 specialists serving 4 industries.'],
-  ])('does not flag %s as enterprise/global', (_label, text) => {
-    const result = resolver.detectEnterpriseOrGlobalMarkers(text);
-    expect(result.matches).toEqual([]);
+  it('treats agency-directory aggregators (techbehemoths etc.) as non-companies', () => {
+    for (const url of [
+      'https://techbehemoths.com/companies/marketing/malaysia',
+      'https://themanifest.com/my/agencies',
+      'https://topdevelopers.co/directory',
+    ]) {
+      expect(resolver.isAggregatorUrl(url)).toBe(true);
+    }
   });
 
   it('runs before the strict ICP gate and before paid decision-maker lookup', () => {
