@@ -2222,8 +2222,23 @@ function verticalTermsForTenant(tenant = {}) {
 }
 
 function shouldDefaultVerticalFirstLane(tenant = {}) {
-  return configuredBuyingSignalsForTenant(tenant).length === 0
-    && verticalTermsForTenant(tenant).length > 0;
+  // Vertical-first primary applies when the tenant has explicit active_industries
+  // (a vertical-defined ICP). Generic job-board signals (hiring, expansion, leadership)
+  // become why-now hooks, not discovery primitives.
+  const activeIndustries = list(tenant?.icp?.active_industries);
+  if (activeIndustries.length === 0) return false;
+
+  const signals = configuredBuyingSignalsForTenant(tenant);
+  // No signals at all → definitely vertical-first
+  if (signals.length === 0) return true;
+
+  // Any signal that explicitly targets vertical-first discovery already handles the lane choice
+  const hasVerticalFirstSignal = signals.some(s =>
+    (Array.isArray(s.source_channels) && s.source_channels.includes('vertical_first')) ||
+    s.family === 'vertical_first_discovery'
+  );
+  // Vertical ICP with only generic (job-board/news) signals → use vertical-first primary
+  return !hasVerticalFirstSignal;
 }
 
 function selectNextSignal({ tenant, signalScorecard = {}, currentSignalId, stopCurrent, spend, queue, channelReadiness } = {}) {
@@ -2306,7 +2321,9 @@ function buildCaptainSignalOrchestration({
   const stopCurrent = currentSignal
     ? evaluateSignalDryStop({ signal: currentSignal, scorecard: currentScore || {}, spend, queue, channelReadiness })
     : { signal_id: null, stop_for_today: false, reasons: [] };
-  const nextSignal = selectNextSignal({
+  // Skip signal selection entirely for vertical-first tenants — buying signals become
+  // why-now hooks (attached during execution), not discovery primitives.
+  const nextSignal = verticalFirstDefault ? null : selectNextSignal({
     tenant,
     signalScorecard,
     currentSignalId: currentSignal?.id || null,
@@ -2316,7 +2333,7 @@ function buildCaptainSignalOrchestration({
     channelReadiness,
   });
   const geo = list(tenant?.icp?.geo).length > 0 ? list(tenant.icp.geo) : ['MY'];
-  const nextPlaybook = verticalFirstDefault && !nextSignal
+  const nextPlaybook = verticalFirstDefault
     ? buildVerticalFirstPlaybookForTenant({ tenant, geo })
     : buildPlaybookForSignal({ tenant, signal: nextSignal, geo });
 

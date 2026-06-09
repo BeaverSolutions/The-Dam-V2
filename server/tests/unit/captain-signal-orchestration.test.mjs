@@ -224,6 +224,81 @@ describe('Captain signal orchestration (V2.1 Phase 5)', () => {
     expect(captainSource).toContain('sourcing_lane_defaulted');
   });
 
+  it('defaults vertical tenants with generic signals (no vertical_first source_channel) to vertical-first primary lane', () => {
+    // This is the Beaver Solutions production scenario:
+    // active_industries configured + buying_signals exist but are all generic job-board/news signals.
+    // The generic signals become why-now hooks, not discovery primitives.
+    const beaverLikeTenant = {
+      source: 'tenant_profiles',
+      icp: {
+        active_industries: ['marketing agency', 'B2B corporate training'],
+        verticals: ['marketing agency', 'B2B corporate training'],
+        geo: ['MY'],
+        personas: ['Founder', 'CEO', 'Managing Director'],
+      },
+      buying_signals: [
+        {
+          id: 'hiring_sales_roles',
+          family: 'hiring_capability_build',
+          enabled: true,
+          priority: 1,
+          source_channels: ['linkedin_jobs', 'company_careers', 'job_boards', 'web_search'],
+          query_terms: ['sales', 'business development'],
+          evidence_required: ['company', 'role', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 6 },
+        },
+        {
+          id: 'expansion_markets',
+          family: 'expansion_growth',
+          enabled: true,
+          priority: 2,
+          source_channels: ['company_news', 'press', 'web_search'],
+          query_terms: ['expanding', 'new office'],
+          evidence_required: ['company', 'expansion_fact', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 6 },
+        },
+      ],
+    };
+
+    const decision = captain._test.buildCaptainSignalOrchestration({
+      tenant: beaverLikeTenant,
+      currentSignalId: null,
+      signalScorecard: {},
+      spend: { provider_cap_closed: false, daily_budget_remaining_usd: 5 },
+      queue: { pending_approvals: 0, capacity: 20 },
+      channelReadiness: { email: true, linkedin: true },
+    });
+
+    expect(decision.next_playbook).toMatchObject({
+      signal_id: 'vertical_first_discovery',
+      signal_family: 'vertical_first_discovery',
+      source_channel: 'vertical_first',
+      mode: 'vertical_first',
+      discovery_mode: 'vertical_first',
+      platform_plan_required: true,
+      sourcing_lane_defaulted: {
+        reason: 'tenant_buying_signals_empty_vertical_icp',
+        active_industries: expect.arrayContaining(['marketing agency', 'B2B corporate training']),
+      },
+    });
+  });
+
+  it('keeps signal-first for broad-ICP tenants (no active_industries, has buying signals)', () => {
+    // tenant fixture has icp.verticals but no active_industries — stays signal-first
+    const decision = captain._test.buildCaptainSignalOrchestration({
+      tenant,
+      currentSignalId: null,
+      signalScorecard: {},
+      spend: { provider_cap_closed: false, daily_budget_remaining_usd: 5 },
+      queue: { pending_approvals: 0, capacity: 20 },
+      channelReadiness: { email: true, linkedin: true },
+    });
+    expect(decision.next_playbook).toMatchObject({
+      signal_id: 'hiring_sales_roles',
+      signal_family: 'hiring_capability_build',
+    });
+  });
+
   it('treats provider caps, repeated zero query sets, full queues, and channel readiness as dry-spend stops', () => {
     const stop = captain._test.evaluateSignalDryStop({
       signal: tenant.buying_signals[0],
