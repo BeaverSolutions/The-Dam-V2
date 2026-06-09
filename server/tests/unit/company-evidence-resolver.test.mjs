@@ -75,6 +75,81 @@ describe('company evidence resolver', () => {
     });
   });
 
+  it('flags listicle / directory / SEO ranking URLs as aggregators, not companies', () => {
+    const agg = [
+      'https://corporatetrainingmalaysia.com/top-training-providers-malaysia',
+      'https://example.com/best-marketing-agencies-in-malaysia',
+      'https://blog.site.com/category/training/',
+      'https://www.clutch.co/my/agencies',
+      'https://x.com/top-10-agencies',
+    ];
+    for (const url of agg) expect(resolver.isAggregatorUrl(url)).toBe(true);
+
+    const real = [
+      'https://thrivingtalents.com/',
+      'https://mmt.my/',
+      'https://www.invensislearning.com/my/',
+      'https://brandmint.com.my/about',
+    ];
+    for (const url of real) expect(resolver.isAggregatorUrl(url)).toBe(false);
+  });
+
+  it('derives a provisional company name from the domain', () => {
+    expect(resolver.companyNameFromDomain('https://thrivingtalents.com/')).toBe('Thrivingtalents');
+    expect(resolver.companyNameFromDomain('https://mmt.my/')).toBe('Mmt');
+    expect(resolver.companyNameFromDomain('https://brand-mint.com.my')).toBe('Brand Mint');
+  });
+
+  it('extracts the canonical company name from homepage HTML (og:site_name first)', () => {
+    expect(resolver.companyNameFromHtml(
+      '<html><head><meta property="og:site_name" content="Thriving Talents"><title>Malaysia\'s Leading Corporate Training Providers</title></head></html>'
+    )).toBe('Thriving Talents');
+
+    expect(resolver.companyNameFromHtml(
+      '<html><head><script type="application/ld+json">{"@type":"Organization","name":"Invensis Learning"}</script></head></html>'
+    )).toBe('Invensis Learning');
+
+    expect(resolver.companyNameFromHtml(
+      '<html><head><title>MMT Academy | Corporate Training Malaysia</title></head></html>'
+    )).toBe('MMT Academy');
+  });
+
+  it('resolveCompanyIdentity upgrades a domain anchor to the real homepage name', async () => {
+    resolver.clearCompanyEvidenceCache();
+    let fetchCount = 0;
+    const fetchImpl = async (url) => {
+      fetchCount++;
+      expect(url).toBe('https://thrivingtalents.com');
+      return {
+        ok: true,
+        text: async () => '<html><head><meta property="og:site_name" content="Thriving Talents"></head><body>We are a corporate training provider in Malaysia.</body></html>',
+      };
+    };
+    const signal = {
+      company: 'Thrivingtalents',
+      company_website: 'https://thrivingtalents.com/',
+      source_url: 'https://thrivingtalents.com/',
+    };
+    const first = await resolver.resolveCompanyIdentity(signal, { fetchImpl });
+    expect(first).toMatchObject({ company: 'Thriving Talents', source: 'homepage', resolved: true });
+    expect(first.page_text).toMatch(/corporate training provider/i);
+
+    const second = await resolver.resolveCompanyIdentity(signal, { fetchImpl });
+    expect(second.from_cache).toBe(true);
+    expect(fetchCount).toBe(1);
+  });
+
+  it('resolveCompanyIdentity does not fetch aggregator URLs', async () => {
+    resolver.clearCompanyEvidenceCache();
+    const identity = await resolver.resolveCompanyIdentity({
+      company: 'Top 10 Corporate Training Providers',
+      company_website: 'https://corporatetrainingmalaysia.com/top-training-providers-malaysia',
+      source_url: 'https://corporatetrainingmalaysia.com/top-training-providers-malaysia',
+    }, { fetchImpl: async () => { throw new Error('should not fetch aggregator'); } });
+    expect(identity.resolved).toBe(false);
+    expect(identity.source).toBe('provisional');
+  });
+
   it('runs before the strict ICP gate and before paid decision-maker lookup', () => {
     const runStart = signalHuntSource.indexOf('async function runSignalHunt');
     const resolverIdx = signalHuntSource.indexOf('resolveCompanyEvidence(signal, icp', runStart);

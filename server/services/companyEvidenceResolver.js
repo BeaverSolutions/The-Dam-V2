@@ -124,6 +124,106 @@ function isLikelyCompanyWebsite(url = '') {
   }
 }
 
+// A vertical web search returns listicles, directories and SEO ranking pages
+// far more often than individual company homepages. Those pages are not
+// companies — their <title> is a headline ("Top 10 ... Providers in Malaysia").
+// Detect and skip them so discovery anchors on real company domains instead.
+const AGGREGATOR_HOSTS = /(clutch\.co|goodfirms|sortlist|designrush|trustpilot|yelp|yellowpages|glassdoor|crunchbase|wikipedia|facebook\.com|instagram\.com|youtube\.com|medium\.com|quora|reddit)/i;
+function isAggregatorUrl(url = '') {
+  const raw = String(url || '').toLowerCase();
+  if (!raw) return false;
+  let path = raw;
+  let host = '';
+  try {
+    const u = new URL(urlWithProtocol(raw));
+    host = u.hostname.replace(/^www\./, '');
+    path = `${u.pathname}${u.search}`;
+  } catch { /* treat the whole string as a path */ }
+  if (host && AGGREGATOR_HOSTS.test(host)) return true;
+  // Listicle / directory / SEO ranking path shapes.
+  if (/top[-\s]?\d+/.test(path)) return true;                                  // "top 10", "top-20"
+  if (/\btop[-\s][a-z]/.test(path)) return true;                               // "top-training-..."
+  if (/\bbest[-\s]/.test(path)) return true;                                   // "best-agencies-..."
+  if (/(providers?|companies|agencies|firms|vendors)[-\s](in|malaysia|singapore|my|sg|kl|asia)\b/.test(path)) return true;
+  if (/[-/](list|listing|listicle|directory|ranking|rankings|reviews?|comparison|guide)\b/.test(path)) return true;
+  if (/\/(category|categories|tag|tags|blog|news|article|articles)\//.test(path)) return true;
+  return false;
+}
+
+function companyNameFromDomain(url = '') {
+  try {
+    const host = new URL(urlWithProtocol(url)).hostname.replace(/^www\./, '');
+    const root = host.split('.')[0];
+    if (!root || root.length < 2) return '';
+    return root
+      .replace(/[-_]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase())
+      .trim();
+  } catch {
+    return '';
+  }
+}
+
+function decodeHtmlEntities(value = '') {
+  return String(value || '')
+    .replace(/&amp;/gi, '&')
+    .replace(/&(?:apos|#0*39|#x0*27);/gi, "'")
+    .replace(/&(?:quot|#0*34|#x0*22);/gi, '"')
+    .replace(/&(?:nbsp|#0*160);/gi, ' ')
+    .replace(/&(?:#0*38|#x0*26);/gi, '&');
+}
+
+// Many sites stuff a tagline into og:site_name / <title> ("Brand | We do X").
+// Keep the brand portion before the first separator.
+function brandPortion(value = '') {
+  return String(value || '').split(/\s*[|–—\-:·»]\s*/)[0];
+}
+
+function cleanResolvedName(value = '', { keepFull = false } = {}) {
+  const decoded = decodeHtmlEntities(value);
+  const candidate = keepFull ? decoded : brandPortion(decoded);
+  const name = candidate
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s,|·\-–—]+|[\s,|·\-–—]+$/g, '')
+    .trim();
+  if (!name || name.length < 2 || name.length > 80) return '';
+  // Reject obvious non-company headlines.
+  if (/\b(top\s*\d+|best\s|listicle|ranking|reviews?|directory|guide|how to|in\s+malaysia\b.*\bprovider|leading\s+corporate\s+training)/i.test(name)) return '';
+  return name;
+}
+
+// Canonical company name from the homepage HTML: og:site_name, then a
+// schema.org Organization/LocalBusiness name, then the brand portion of <title>.
+function companyNameFromHtml(html = '') {
+  if (!html) return '';
+  const og = html.match(/<meta[^>]+property=["']og:site_name["'][^>]*content=["']([^"']+)["']/i)
+    || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]*property=["']og:site_name["']/i);
+  if (og) {
+    const name = cleanResolvedName(og[1]);
+    if (name) return name;
+  }
+  for (const m of html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const data = JSON.parse(m[1].trim());
+      const nodes = Array.isArray(data) ? data : [data, ...(Array.isArray(data['@graph']) ? data['@graph'] : [])];
+      for (const node of nodes) {
+        if (node && /organization|localbusiness|corporation/i.test(String(node['@type'])) && node.name) {
+          const name = cleanResolvedName(node.name, { keepFull: true });
+          if (name) return name;
+        }
+      }
+    } catch { /* malformed ld+json — skip */ }
+  }
+  const title = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+  if (title) {
+    const brand = title[1].split(/[|–—\-:·»]/)[0];
+    const name = cleanResolvedName(brand);
+    if (name && name.split(' ').length <= 6) return name;
+  }
+  return '';
+}
+
 function evidenceUrls(signal = {}) {
   const urls = [];
   const website = signal.company_website || signal.website || signal.company_url || signal.domain;
@@ -219,12 +319,62 @@ async function resolveCompanyEvidence(signal = {}, icp = {}, {
   return value;
 }
 
+const identityCache = new Map();
+
+// Resolve a real company identity for a vertical-first discovery candidate.
+// Anchors on the result domain (not the scraped page title) and reads the
+// canonical company name from the homepage (og:site_name / schema.org / title
+// brand). Returns the homepage text too, so the caller can confirm the vertical
+// without a second fetch. Free (native fetch) + cached by origin.
+async function resolveCompanyIdentity(signal = {}, {
+  fetchImpl = global.fetch,
+  now = Date.now(),
+  ttlMs = DEFAULT_TTL_MS,
+} = {}) {
+  const provisional = String(signal.company || signal.company_name || '').trim();
+  const website = signal.company_website || signal.website || signal.company_url
+    || signal.domain || signal.source_url || signal.url;
+  const origin = originFor(website);
+
+  if (!origin || !isLikelyCompanyWebsite(origin) || isAggregatorUrl(website) || isAggregatorUrl(origin)) {
+    return { company: provisional, website: origin, source: 'provisional', page_text: '', resolved: false };
+  }
+
+  const cacheKey = `identity:${origin}`;
+  const cached = identityCache.get(cacheKey);
+  if (cached && cached.expires_at > now) {
+    return { ...cached.value, from_cache: true };
+  }
+
+  let html = '';
+  try {
+    const res = await fetchImpl(origin, { headers: { 'user-agent': 'BeavrDamEvidenceResolver/1.0' } });
+    if (res && res.ok !== false) html = await res.text();
+  } catch { /* fall back to domain-derived name */ }
+
+  const name = companyNameFromHtml(html) || companyNameFromDomain(origin) || provisional;
+  const value = {
+    company: name || provisional,
+    website: origin,
+    source: html ? (companyNameFromHtml(html) ? 'homepage' : 'domain') : 'domain',
+    page_text: htmlToText(html),
+    resolved: Boolean(name && name !== provisional),
+  };
+  identityCache.set(cacheKey, { value, expires_at: now + ttlMs });
+  return value;
+}
+
 function clearCompanyEvidenceCache() {
   evidenceCache.clear();
+  identityCache.clear();
 }
 
 module.exports = {
   resolveCompanyEvidence,
+  resolveCompanyIdentity,
+  isAggregatorUrl,
+  companyNameFromDomain,
+  companyNameFromHtml,
   clearCompanyEvidenceCache,
   _test: {
     activeVerticals,
@@ -233,5 +383,8 @@ module.exports = {
     matchedVertical,
     normalizeCompanyName,
     snippetEvidenceText,
+    isAggregatorUrl,
+    companyNameFromDomain,
+    companyNameFromHtml,
   },
 };

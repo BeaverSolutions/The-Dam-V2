@@ -28,7 +28,12 @@ const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./b
 const { attachSignalPackageToLead, signalPackageMissingFields } = require('./research');
 const signalPlanner = require('./signalPlanner');
 const platformRegistry = require('./platformRegistry');
-const { resolveCompanyEvidence } = require('./companyEvidenceResolver');
+const {
+  resolveCompanyEvidence,
+  resolveCompanyIdentity,
+  isAggregatorUrl,
+  companyNameFromDomain,
+} = require('./companyEvidenceResolver');
 const { normalizeBuyingSignalsForTenant } = require('../config/buyingSignals');
 const crypto = require('crypto');
 
@@ -1704,6 +1709,26 @@ function escapeRegex(value = '') {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function withProtocol(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (/^[a-z0-9.-]+\.[a-z]{2,}/i.test(raw)) return `https://${raw}`;
+  return null;
+}
+
+function originFor(value = '') {
+  const raw = withProtocol(value);
+  if (!raw) return null;
+  try { return new URL(raw).origin; } catch { return null; }
+}
+
+function hostFromUrl(value = '') {
+  const raw = withProtocol(value);
+  if (!raw) return null;
+  try { return new URL(raw).hostname.replace(/^www\./, '').toLowerCase(); } catch { return null; }
+}
+
 function cleanVerticalFirstCompanyName(value = '', query = {}) {
   let company = String(value || '')
     .replace(/\s+/g, ' ')
@@ -1750,16 +1775,32 @@ function verticalFirstSignalsFromResults(results = [], query = {}) {
   const country = query.country || countryCodeFromText(query.query) || 'MY';
   const platform = query.platform || query.source_channel || 'vertical_web';
   const sourceChannel = query.source_channel || platform || 'vertical_web';
+  const seenDomains = new Set();
   return (Array.isArray(results) ? results : [])
     .map(result => {
-      const company = verticalFirstCompanyFromResult(result, query);
+      const sourceUrl = result.link || result.url || '';
+      // Anchor on the result domain, not the scraped page title. Skip
+      // listicles / directories / SEO ranking pages — they are not companies.
+      if (isAggregatorUrl(sourceUrl)) return null;
+      const origin = originFor(sourceUrl);
+      const host = hostFromUrl(sourceUrl);
+      // Dedup by company domain (multiple results from the same site = one company).
+      if (host) {
+        if (seenDomains.has(host)) return null;
+        seenDomains.add(host);
+      }
+      // Provisional name from the title; resolveCompanyIdentity upgrades it to
+      // the canonical og:site_name downstream. Domain is the stable fallback
+      // when the title is an SEO headline rather than a company.
+      const company = verticalFirstCompanyFromResult(result, query) || companyNameFromDomain(sourceUrl);
       if (!company) return null;
       const title = String(result.title || result.name || '').trim();
       const snippet = String(result.snippet || result.description || title).trim();
-      const sourceUrl = result.link || result.url || '';
       const evidence = snippet || title || `${company} matched vertical-first discovery.`;
       return {
         company,
+        company_website: origin || sourceUrl || null,
+        domain: host || null,
         signal_type: query.signal_type || query.signal_id || 'vertical_first_discovery',
         signal_id: query.signal_id || 'vertical_first_discovery',
         signal_family: query.signal_family || 'vertical_first_discovery',
@@ -2230,6 +2271,25 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
 
     const country = signal.country || countryCodeFromText(signal.raw_snippet || signal.signal_summary || '') || 'MY';
     const countryName = countryNameFromCode(country);
+
+    // Vertical-first candidates are domain-anchored, not title-scraped. Resolve
+    // the real company name from the homepage (og:site_name) before the gate and
+    // the paid decision-maker lookup, so we don't burn budget chasing a page
+    // title ("Top 10 Corporate Training Providers …") instead of a company.
+    if (signal.discovery_lane === 'vertical_first' || signal.signal_lite === true || isVerticalFirstQuery(signal)) {
+      const identity = await resolveCompanyIdentity(signal, {}).catch(() => null);
+      if (identity) {
+        if (identity.company && identity.company !== signal.company) {
+          signal.metadata = { ...(signal.metadata || {}), provisional_company: signal.company, company_identity_source: identity.source };
+          signal.company = identity.company;
+        }
+        if (identity.website && !signal.company_website) signal.company_website = identity.website;
+        if (identity.page_text) {
+          signal.company_description = [signal.company_description, identity.page_text].filter(Boolean).join(' ');
+        }
+      }
+    }
+
     const companyEvidence = await resolveCompanyEvidence(signal, icp).catch(err => ({
       company: signal.company,
       vertical_match: null,

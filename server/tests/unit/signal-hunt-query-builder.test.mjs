@@ -771,6 +771,37 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(verticalBranch).toBeLessThan(extractBranch);
   });
 
+  it('skips listicle/directory results and anchors vertical-first candidates on the company domain', () => {
+    const signals = signalHunt._test.verticalFirstSignalsFromResults([
+      // Real company homepage with an SEO-y title (the 2026-06-09 failure shape).
+      { title: "Malaysia's Leading Corporate Training Providers", link: 'https://thrivingtalents.com/', snippet: 'We are a corporate training provider in Malaysia.' },
+      // Listicle — must be skipped, not treated as a company.
+      { title: 'Top 10 Corporate Training Providers in Malaysia 2026', link: 'https://corporatetrainingmalaysia.com/top-training-providers-malaysia', snippet: 'A verified list of providers.' },
+      // Second result from the same domain — deduped.
+      { title: 'Thriving Talents Courses', link: 'https://thrivingtalents.com/courses', snippet: 'Our corporate training courses.' },
+      // Another real company.
+      { title: 'In House Corporate Training', link: 'https://mmt.my/', snippet: 'Corporate training company.' },
+    ], {
+      query: '"corporate training" Malaysia',
+      platform: 'training_directory',
+      provider: 'brave',
+      country: 'MY',
+      source_channel: 'vertical_directory',
+      signal_id: 'vertical_first_discovery',
+      signal_family: 'vertical_first_discovery',
+      source_term: 'B2B corporate training',
+    });
+
+    // Listicle dropped + same-domain duplicate dropped => 2 unique companies.
+    expect(signals).toHaveLength(2);
+    const domains = signals.map(s => s.domain).sort();
+    expect(domains).toEqual(['mmt.my', 'thrivingtalents.com']);
+    for (const s of signals) {
+      expect(s.company_website).toMatch(/^https?:\/\//);
+      expect(s.domain).not.toContain('corporatetrainingmalaysia');
+    }
+  });
+
   it('refuses incomplete Signal Hunt packages before contactGate persistence', () => {
     const saveStart = src.indexOf('async function saveSignalLeads');
     const packageGate = src.indexOf('signalPackageMissingFields', saveStart);
