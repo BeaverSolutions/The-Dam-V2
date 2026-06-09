@@ -560,19 +560,40 @@ function corporateTrainingEvidenceMatches(normalizedText = '') {
   return /\b(corporate training|professional training|workplace training|employee training|training provider|training company|training firm|training consultancy|learning and development|l and d|executive coaching|leadership coaching|sales coaching|skills development|skill development|upskill|upskilling|workforce development)\b/.test(normalizedText);
 }
 
-function competitorOfferWordingMatches(text = '') {
+// Competitor wording that describes a company's OWN service offering (agency /
+// service / consultancy shape). A company whose page reads this way IS a
+// competitor regardless of its claimed vertical — always disqualifies.
+function competitorServiceWordingMatches(text = '') {
+  const normalizedText = normalizedEvidenceText(text);
+  if (!normalizedText) return [];
+  const patterns = [
+    ['outbound agency', /\boutbound\s+(agency|agencies|service|services|consulting|consultancy|firm|firms)\b/],
+    ['lead generation agency', /\b(lead\s*(gen|generation)|leadgen)\s+(agency|agencies|service|services|consulting|consultancy|firm|firms|provider|providers)\b/],
+    ['cold email/outreach agency', /\bcold\s+(email|outreach|calling)\s+(agency|agencies|service|services|consulting|consultancy|firm|firms|provider|providers|specialist|specialists)\b/],
+    ['SDR-as-a-service', /\b(sdr|bdr)\s+(as\s+a\s+)?service\b/],
+    ['appointment setting', /\bappointment\s+setting\b/],
+    ['demand generation agency', /\bdemand\s*(gen|generation)\s+(agency|agencies|service|services|consulting|consultancy|firm|firms|provider|providers)\b/],
+    ['GTM agency', /\b(gtm|go to market)\s+(agency|agencies|service|services|consulting|consultancy|firm|firms)\b/],
+    ['AI sales/outbound brand', /\bai\s+(sales|outbound|sdr|lead\s*(gen|generation)|gtm)\b/],
+    ['LinkedIn outreach agency', /\blinkedin\s+(outreach|lead\s*(gen|generation)|appointment|automation)\b/],
+  ];
+  return patterns
+    .filter(([, pattern]) => pattern.test(normalizedText))
+    .map(([label]) => label);
+}
+
+// Bare topic wording (cold email, lead gen) with NO agency/service context.
+// On a confirmed in-ICP vertical (e.g. a corporate training provider that
+// teaches cold outreach, or an agency that ran a lead-gen campaign for a
+// client) this is a topic mention, not the company's own competitor offer —
+// so it only disqualifies when the company's vertical is NOT confirmed.
+function competitorTopicWordingMatches(text = '') {
   const normalizedText = normalizedEvidenceText(text);
   if (!normalizedText) return [];
   const patterns = [
     ['lead generation', /\b(lead\s*(gen|generation)|leadgen)\b/],
     ['cold email outreach', /\bcold\s+(email|outreach)\b/],
-    ['outbound agency', /\boutbound\s+(agency|agencies|service|services|consulting|consultancy|firm|firms)\b/],
-    ['SDR-as-a-service', /\b(sdr|bdr)\s+(as\s+a\s+)?service\b/],
-    ['appointment setting', /\bappointment\s+setting\b/],
-    ['demand generation agency', /\bdemand\s*(gen|generation)\b/],
-    ['GTM agency', /\b(gtm|go to market)\s+(agency|agencies|service|services|consulting|consultancy|firm|firms)\b/],
-    ['AI sales outbound', /\bai\s+(sales|outbound|sdr|lead\s*(gen|generation)|gtm)\b/],
-    ['LinkedIn outreach', /\blinkedin\s+(outreach|lead\s*(gen|generation)|appointment|automation)\b/],
+    ['demand generation', /\bdemand\s*(gen|generation)\b/],
   ];
   return patterns
     .filter(([, pattern]) => pattern.test(normalizedText))
@@ -660,20 +681,24 @@ function evaluateSignalCompanyIcpGate(signal = {}, icp = {}) {
     };
   }
 
-  const competitorMatches = [...new Set([
+  // Hard competitor signals — disqualify regardless of vertical:
+  //   1. configured competitor_offers (brand names: Apollo, Lemlist, …)
+  //   2. service-shaped wording (the company describes its OWN offer as
+  //      outbound/lead-gen/cold-email/SDR agency).
+  const hardCompetitorMatches = [...new Set([
     ...matchedTerms([
       ...listFrom(icp.competitor_offers),
       ...listFrom(signal.competitor_offers),
       ...listFrom(signal.reject_rules?.competitor_offers),
     ], text),
-    ...competitorOfferWordingMatches(text),
+    ...competitorServiceWordingMatches(text),
   ])];
-  if (competitorMatches.length > 0) {
+  if (hardCompetitorMatches.length > 0) {
     return {
       pass: false,
       blocker: 'competitor_offer_disqualified',
       reason: 'competitor_offer_matched',
-      matched_terms: competitorMatches,
+      matched_terms: hardCompetitorMatches,
       reject_rules_checked: ['tenant_exclusions', 'competitor_offers'],
     };
   }
@@ -689,8 +714,25 @@ function evaluateSignalCompanyIcpGate(signal = {}, icp = {}) {
     };
   }
 
+  // Confirm the company's vertical BEFORE the bare-topic competitor check.
+  // A confirmed in-ICP vertical (corporate training provider / marketing
+  // agency) that merely mentions "cold email" or "lead generation" as a
+  // course topic or client outcome is a TARGET, not a competitor.
   const verticalMatches = matchedTerms(verticals, text, { flexible: true });
   if (verticalMatches.length === 0) {
+    // Vertical unconfirmed — bare competitor-topic wording now disqualifies
+    // (a generic page heavy on lead-gen/cold-email language with no proven
+    // in-ICP vertical is most likely a competitor or irrelevant).
+    const topicMatches = competitorTopicWordingMatches(text);
+    if (topicMatches.length > 0) {
+      return {
+        pass: false,
+        blocker: 'competitor_offer_disqualified',
+        reason: 'competitor_offer_matched',
+        matched_terms: topicMatches,
+        reject_rules_checked: ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence'],
+      };
+    }
     return {
       pass: false,
       blocker: 'icp_zero_after_company_extract',

@@ -93,4 +93,43 @@ describe('Signal Hunt locked Beaver ICP gate', () => {
 
     expect(gate.pass).toBe(true);
   });
+
+  // Regression for the 2026-06-09 vertical-first proof: confirmed in-ICP
+  // verticals that merely MENTION cold email / lead gen (course topics or
+  // client outcomes) must NOT be killed by the competitor gate. Topic wording
+  // only disqualifies when no in-ICP vertical is proven.
+  it.each([
+    ['training provider teaching cold email', 'Thriving Talents is a corporate training provider in Malaysia. Our courses cover cold email outreach, sales coaching and negotiation skills.'],
+    ['training provider with lead-gen course', 'MMT is an in-house corporate training company offering workshops on lead generation and B2B selling.'],
+    ['marketing agency that ran a lead-gen campaign', 'BrandMint is a creative marketing agency that helped a client with a lead generation campaign last year.'],
+  ])('passes %s (topic mention, vertical confirmed)', (_label, raw_snippet) => {
+    const gate = evaluate({
+      company: 'Vertical Company',
+      signal_summary: raw_snippet,
+      raw_snippet,
+      source_channel: 'vertical_directory',
+    });
+
+    expect(gate.pass).toBe(true);
+    expect(gate.vertical_match).toBeTruthy();
+  });
+
+  it.each([
+    ['bare lead-gen page, no vertical', 'GrowthScale helps you book more meetings with lead generation and cold email systems.'],
+    ['bare cold-outreach page, no vertical', 'We run cold outreach and demand generation to fill your pipeline.'],
+  ])('still blocks %s through the topic gate when no vertical is proven', (_label, raw_snippet) => {
+    const gate = evaluate({
+      company: 'Ambiguous Company',
+      signal_summary: raw_snippet,
+      raw_snippet,
+      source_channel: 'web_search',
+    });
+
+    expect(gate).toMatchObject({
+      pass: false,
+      blocker: 'competitor_offer_disqualified',
+      reason: 'competitor_offer_matched',
+    });
+    expect(gate.matched_terms.length).toBeGreaterThan(0);
+  });
 });

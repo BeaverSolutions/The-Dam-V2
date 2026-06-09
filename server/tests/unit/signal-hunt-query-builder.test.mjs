@@ -354,7 +354,7 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       matched_terms: ['Leo Burnett'],
     });
 
-    expect(signalHunt._test.evaluateSignalCompanyIcpGate({
+    const pipelineProsGate = signalHunt._test.evaluateSignalCompanyIcpGate({
       company: 'Pipeline Pros',
       signal_summary: 'Pipeline Pros is a lead generation agency hiring SDRs.',
       raw_snippet: 'Lead generation agency hiring sales development reps',
@@ -362,12 +362,16 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
       verticals: ['B2B corporate training'],
       active_industries: ['B2B corporate training'],
       competitor_offers: ['lead generation'],
-    })).toMatchObject({
+    });
+    // Genuine lead-gen agency: blocked on the hard competitor check (configured
+    // competitor_offers + service-shaped "lead generation agency" wording),
+    // before vertical confirmation.
+    expect(pipelineProsGate).toMatchObject({
       pass: false,
       blocker: 'competitor_offer_disqualified',
       reason: 'competitor_offer_matched',
-      matched_terms: ['lead generation'],
     });
+    expect(pipelineProsGate.matched_terms).toEqual(expect.arrayContaining(['lead generation']));
   });
 
   it('runs the company ICP gate before decision-maker lookup and email enrichment', () => {
