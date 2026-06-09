@@ -49,6 +49,7 @@ const pipelineTrace = require('./pipelineTrace');
 const { checkBudget, BudgetExceededError, isBudgetExceededError } = require('./budget');
 const directivesSvc = require('./directives');
 const repairPolicy = require('./repairPolicy');
+const { isAggregatorUrl } = require('./companyEvidenceResolver');
 
 // ─── Feature flag ──────────────────────────────────────────────────────────
 // During Phase 2 migration both code paths coexist in the repo. Flip via
@@ -1300,6 +1301,104 @@ async function icpGateSoftDelete(clientId, lead, options = {}) {
 
 const PLACEHOLDER_RE = /\[NAME\]|\[COMPANY\]|\{\{|\}\}/i;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const CONTACT_LABEL_RE = /^(unknown contact|marketing company profile|company profile|key executive team|executive team|management team|leadership team|founding team|founder team|sales team|marketing team|admin team|support team|customer service|contact us|the team)$/i;
+const TEAM_CONTACT_LABEL_RE = /^(key\s+)?(executive|management|leadership|founding|founder|sales|marketing|admin|support)\s+team$/i;
+const AGGREGATOR_COMPANY_NAME_RE = /^(clutch|clutch\.co|goodfirms|sortlist|designrush|techbehemoths|themanifest|the manifest|topdevelopers|trustpilot|yelp|yellowpages|glassdoor|crunchbase|wikipedia)$/i;
+const AGGREGATOR_TOKEN_RE = /\b(clutch|goodfirms|sortlist|designrush|techbehemoths|themanifest|topdevelopers|trustpilot|yelp|yellowpages|glassdoor|crunchbase|wikipedia)\b/i;
+const WEBSITE_FIELD_RE = /(url|website|domain|link|href)/i;
+
+function normalizeLeadText(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ');
+}
+
+function isInvalidContactName(name) {
+  const normalized = normalizeLeadText(name);
+  return CONTACT_LABEL_RE.test(normalized) || TEAM_CONTACT_LABEL_RE.test(normalized);
+}
+
+function emailDomain(email = '') {
+  const match = String(email || '').toLowerCase().match(/@([^@\s]+)$/);
+  return match ? match[1].trim() : '';
+}
+
+function collectEvidenceStrings(value, out = [], depth = 0) {
+  if (!value || depth > 5) return out;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (text) out.push(text);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectEvidenceStrings(item, out, depth + 1);
+    return out;
+  }
+  if (typeof value !== 'object') return out;
+
+  for (const [key, nested] of Object.entries(value)) {
+    if (
+      WEBSITE_FIELD_RE.test(key)
+      || key === 'source'
+      || key === 'evidence'
+      || key === 'signal_package'
+      || key === 'company_icp_fit'
+      || typeof nested === 'object'
+    ) {
+      collectEvidenceStrings(nested, out, depth + 1);
+    }
+  }
+  return out;
+}
+
+function isConcreteCompanyWebsite(value) {
+  const raw = String(value || '').trim();
+  return !!raw
+    && /[a-z0-9-]+\.[a-z]{2,}/i.test(raw)
+    && !/linkedin\.com/i.test(raw)
+    && !isAggregatorUrl(raw);
+}
+
+function hasDirectCompanyWebsite(lead) {
+  const meta = getMetadata(lead || {});
+  const signalPackage = getSignalPackage(lead || {}) || {};
+  return [
+    lead?.company_website,
+    lead?.website,
+    lead?.company_url,
+    lead?.domain,
+    meta.company_website,
+    meta.website,
+    meta.company_url,
+    meta.domain,
+    signalPackage.company_website,
+    signalPackage.website,
+    signalPackage.company_url,
+    signalPackage.domain,
+  ].some(isConcreteCompanyWebsite);
+}
+
+function isDirectoryOrAggregatorCompanyLead(lead) {
+  const company = normalizeLeadText(lead?.company);
+  const domain = emailDomain(lead?.email || '');
+  if (AGGREGATOR_COMPANY_NAME_RE.test(company) || AGGREGATOR_TOKEN_RE.test(domain)) {
+    return true;
+  }
+
+  const evidence = collectEvidenceStrings({
+    metadata: getMetadata(lead || {}),
+    signal_package: getSignalPackage(lead || {}),
+    source_url: lead?.source_url,
+    url: lead?.url,
+    website: lead?.website,
+    company_website: lead?.company_website,
+    company_url: lead?.company_url,
+    domain: lead?.domain,
+  });
+  const hasAggregatorEvidence = evidence.some(value => (
+    isAggregatorUrl(value) || AGGREGATOR_TOKEN_RE.test(value)
+  ));
+
+  return hasAggregatorEvidence && !hasDirectCompanyWebsite(lead);
+}
 
 /**
  * Pre-draft check: does this lead have enough metadata to be worth drafting?
@@ -1312,15 +1411,24 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  * Returns:
  *   { ready: true }
  * or
- *   { ready: false, reason: 'missing_name' | 'missing_company' | 'no_contact_method' }
+ *   { ready: false, reason: 'missing_name' | 'invalid_contact_name' | 'missing_company' |
+ *                            'directory_or_aggregator_company' | 'no_contact_method' }
  */
 function leadReadinessGate(lead) {
   if (!lead) return { ready: false, reason: 'no_lead' };
-  if (!lead.name || lead.name === 'Unknown Contact') {
+  const name = normalizeLeadText(lead.name);
+  const company = normalizeLeadText(lead.company);
+  if (!name || name === 'Unknown Contact') {
     return { ready: false, reason: 'missing_name' };
   }
-  if (!lead.company || lead.company === 'Unknown Company') {
+  if (isInvalidContactName(name)) {
+    return { ready: false, reason: 'invalid_contact_name' };
+  }
+  if (!company || company === 'Unknown Company') {
     return { ready: false, reason: 'missing_company' };
+  }
+  if (isDirectoryOrAggregatorCompanyLead(lead)) {
+    return { ready: false, reason: 'directory_or_aggregator_company' };
   }
   const hasEmail = lead.email && EMAIL_RE.test(lead.email);
   const hasLinkedIn = !!lead.linkedin_url;
