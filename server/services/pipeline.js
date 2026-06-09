@@ -183,8 +183,24 @@ async function processLead(clientId, lead, ctx = {}) {
     return { outcome: 'circuit_breaker_skip' };
   }
 
+  // ── 3. Pre-enrichment readiness gate ──
+  // Keep invalid source/company identity away from provider fanout.
+  const sourceReadiness = leadReadinessGate(lead, { requireContactMethod: false });
+  if (!sourceReadiness.ready) {
+    await logsService.createLog(clientId, {
+      agent: 'director', action: 'lead_not_ready', target_type: 'lead', target_id: lead.id,
+      metadata: { reason: sourceReadiness.reason, channel: null, path: pipelinePath, boundary: 'pre_enrichment' },
+    }).catch(() => {});
+    await trace('icp_rejected', 'lead_not_ready', {
+      agent: 'director',
+      reason: sourceReadiness.reason,
+      metadata: { lead_name: lead.name, lead_company: lead.company, boundary: 'pre_enrichment' },
+    });
+    return { outcome: 'lead_not_ready', reason: sourceReadiness.reason };
+  }
+
   try {
-    // ── 3. Context build (superset of both paths' fields) ──
+    // ── 4. Context build (superset of both paths' fields) ──
     const meta = lead.metadata || {};
     const contextParts = [
       `Name: ${lead.name}`, `Company: ${lead.company}`, `Title: ${lead.title || 'N/A'}`,
@@ -219,13 +235,13 @@ async function processLead(clientId, lead, ctx = {}) {
       console.log(`[pipeline.processLead] Skipping open-web personalization for ${lead.name}: ${allowPersonalisationSearch ? 'missing signal_package' : 'paid signal disabled'}`);
     }
 
-    // ── 4. Email enrichment (Anymail -> Icypeas -> Snov -> Hunter -> MillionVerifier) ──
+    // ── 5. Email enrichment (Anymail -> Icypeas -> Snov -> Hunter -> MillionVerifier) ──
     await enrichEmail(clientId, lead, {
       pipeline_path: pipelinePath,
       hunterService,
     });
 
-    // ── 5. Channel selection ──
+    // ── 6. Channel selection ──
     let linkedinAlreadyTried = false;
     if (!lead.email && lead.linkedin_url) {
       const prev = await pool.query(
@@ -245,14 +261,18 @@ async function processLead(clientId, lead, ctx = {}) {
       return { outcome: 'channel_exhausted' };
     }
 
-    // ── 6. Pre-draft readiness gate ──
+    // ── 6b. Full readiness gate after enrichment ──
     const readiness = leadReadinessGate(lead);
     if (!readiness.ready) {
       await logsService.createLog(clientId, {
         agent: 'director', action: 'lead_not_ready', target_type: 'lead', target_id: lead.id,
-        metadata: { reason: readiness.reason, channel, path: pipelinePath },
+        metadata: { reason: readiness.reason, channel, path: pipelinePath, boundary: 'post_enrichment' },
       }).catch(() => {});
-      await trace('icp_rejected', 'lead_not_ready', { agent: 'director', reason: readiness.reason, metadata: { lead_name: lead.name, lead_company: lead.company } });
+      await trace('icp_rejected', 'lead_not_ready', {
+        agent: 'director',
+        reason: readiness.reason,
+        metadata: { lead_name: lead.name, lead_company: lead.company, boundary: 'post_enrichment' },
+      });
       return { outcome: 'lead_not_ready', reason: readiness.reason };
     }
 
@@ -1305,6 +1325,8 @@ const CONTACT_LABEL_RE = /^(unknown contact|marketing company profile|company pr
 const TEAM_CONTACT_LABEL_RE = /^(key\s+)?(executive|management|leadership|founding|founder|sales|marketing|admin|support)\s+team$/i;
 const AGGREGATOR_COMPANY_NAME_RE = /^(clutch|clutch\.co|goodfirms|sortlist|designrush|techbehemoths|themanifest|the manifest|topdevelopers|trustpilot|yelp|yellowpages|glassdoor|crunchbase|wikipedia)$/i;
 const AGGREGATOR_TOKEN_RE = /\b(clutch|goodfirms|sortlist|designrush|techbehemoths|themanifest|topdevelopers|trustpilot|yelp|yellowpages|glassdoor|crunchbase|wikipedia)\b/i;
+const DIRECTORY_SOURCE_RE = /\b(agency_directory|training_directory|vertical_directory)\b/i;
+const DIRECTORY_TITLE_COMPANY_RE = /\b(top\s*\d+|best|leading)\b.*\b(providers?|companies|agencies|firms|vendors)\b|\b(providers?|companies|agencies|firms|vendors)\b.*\b(in|malaysia|singapore|kuala\s*lumpur|kl|prices?|directory|listing|ranking|reviews?|202[0-9])\b|\b(corporate\s+training\s+in|providers?\s+(&|and)\s+prices?)\b/i;
 const WEBSITE_FIELD_RE = /(url|website|domain|link|href)/i;
 
 function normalizeLeadText(value) {
@@ -1314,6 +1336,10 @@ function normalizeLeadText(value) {
 function isInvalidContactName(name) {
   const normalized = normalizeLeadText(name);
   return CONTACT_LABEL_RE.test(normalized) || TEAM_CONTACT_LABEL_RE.test(normalized);
+}
+
+function isDirectoryTitleCompanyName(company) {
+  return DIRECTORY_TITLE_COMPANY_RE.test(normalizeLeadText(company));
 }
 
 function emailDomain(email = '') {
@@ -1376,10 +1402,32 @@ function hasDirectCompanyWebsite(lead) {
   ].some(isConcreteCompanyWebsite);
 }
 
+function hasDirectorySource(lead) {
+  const meta = getMetadata(lead || {});
+  const signalPackage = getSignalPackage(lead || {}) || {};
+  return [
+    lead?.platform,
+    lead?.source_channel,
+    lead?.sourceChannel,
+    meta.platform,
+    meta.source_channel,
+    meta.sourceChannel,
+    signalPackage.platform,
+    signalPackage.source_channel,
+    signalPackage.sourceChannel,
+  ].some(value => DIRECTORY_SOURCE_RE.test(String(value || '')));
+}
+
 function isDirectoryOrAggregatorCompanyLead(lead) {
   const company = normalizeLeadText(lead?.company);
   const domain = emailDomain(lead?.email || '');
   if (AGGREGATOR_COMPANY_NAME_RE.test(company) || AGGREGATOR_TOKEN_RE.test(domain)) {
+    return true;
+  }
+  if (isDirectoryTitleCompanyName(company)) {
+    return true;
+  }
+  if (hasDirectorySource(lead) && !hasDirectCompanyWebsite(lead)) {
     return true;
   }
 
@@ -1413,8 +1461,11 @@ function isDirectoryOrAggregatorCompanyLead(lead) {
  * or
  *   { ready: false, reason: 'missing_name' | 'invalid_contact_name' | 'missing_company' |
  *                            'directory_or_aggregator_company' | 'no_contact_method' }
+ *
+ * Pass { requireContactMethod: false } only for the pre-enrichment source gate.
  */
-function leadReadinessGate(lead) {
+function leadReadinessGate(lead, options = {}) {
+  const { requireContactMethod = true } = options || {};
   if (!lead) return { ready: false, reason: 'no_lead' };
   const name = normalizeLeadText(lead.name);
   const company = normalizeLeadText(lead.company);
@@ -1432,7 +1483,7 @@ function leadReadinessGate(lead) {
   }
   const hasEmail = lead.email && EMAIL_RE.test(lead.email);
   const hasLinkedIn = !!lead.linkedin_url;
-  if (!hasEmail && !hasLinkedIn) {
+  if (requireContactMethod && !hasEmail && !hasLinkedIn) {
     return { ready: false, reason: 'no_contact_method' };
   }
   return { ready: true };

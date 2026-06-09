@@ -6,6 +6,7 @@ const {
   isGeoSelectionFeedback,
   leadStatusForFeedback,
   leadSelectionFeedbackExclusionSql,
+  currentSignalPackageEligibilitySql,
 } = require('../../services/founderFeedbackSignals.js');
 
 describe('founder feedback signal classifier', () => {
@@ -39,5 +40,16 @@ describe('founder feedback signal classifier', () => {
     expect(sql).toContain('ff.lead_id = l.id');
     expect(sql).toContain("'founder_note'");
     expect(sql).toContain('COALESCE(ff.rejection_reason');
+  });
+
+  it('requires stronger company identity before reusing cached signal_hunt leads', () => {
+    const sql = currentSignalPackageEligibilitySql('l');
+
+    expect(sql).toContain("COALESCE(l.source, '') <> 'signal_hunt'");
+    expect(sql).toContain("l.metadata->>'company_website'");
+    expect(sql).toContain("metadata->'signal_package'->>'company_website'");
+    expect(sql).toContain('agency_directory');
+    expect(sql).toContain('vertical_directory');
+    expect(sql).toContain('leading[[:space:]]+corporate[[:space:]]+training');
   });
 });

@@ -244,6 +244,7 @@ function buildSignalPackage(lead = {}, options = {}) {
   };
   const signalId = firstNonEmpty(existing.signal_id, metadata.signal_id, lead.signal, metadata.company_discovery_strategy, 'legacy_research_signal');
   const sourceUrl = firstNonEmpty(existing.source_url, metadata.source_url, metadata.linkedin_company_url, lead.linkedin_company_url);
+  const companyWebsite = firstNonEmpty(existing.company_website, metadata.company_website, lead.company_website, lead.website, lead.company_url, lead.domain);
   const evidence = firstNonEmpty(existing.evidence, metadata.evidence, metadata.company_discovery_snippet, lead.snippet, lead.why_now);
   const whyNow = firstNonEmpty(existing.why_now, metadata.why_now, lead.why_now, evidence);
 
@@ -252,6 +253,7 @@ function buildSignalPackage(lead = {}, options = {}) {
     signal_family: firstNonEmpty(existing.signal_family, metadata.signal_family, metadata.company_discovery_strategy, 'legacy_research'),
     source_channel: firstNonEmpty(existing.source_channel, metadata.source_channel, lead.data_source, 'web_search'),
     source_url: sourceUrl,
+    ...(companyWebsite ? { company_website: companyWebsite } : {}),
     evidence,
     evidence_date: existing.evidence_date || metadata.evidence_date || evidenceDate(options),
     company_icp_fit: existing.company_icp_fit || metadata.company_icp_fit || {

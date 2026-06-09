@@ -35,6 +35,16 @@ function leadSelectionFeedbackExclusionSql(leadAlias = 'l') {
 function currentSignalPackageEligibilitySql(leadAlias = 'l') {
   const fit = `COALESCE(${leadAlias}.metadata->'signal_package'->'company_icp_fit', ${leadAlias}.metadata->'company_icp_fit', '{}'::jsonb)`;
   const checked = `COALESCE((${fit})->'reject_rules_checked', '[]'::jsonb)`;
+  const company = `COALESCE(${leadAlias}.company, '')`;
+  const sourceLabel = `LOWER(CONCAT_WS(' ', ${leadAlias}.metadata->>'platform', ${leadAlias}.metadata->>'source_channel', ${leadAlias}.metadata->'signal_package'->>'platform', ${leadAlias}.metadata->'signal_package'->>'source_channel'))`;
+  const companyWebsite = `COALESCE(${leadAlias}.metadata->'signal_package'->>'company_website', ${leadAlias}.metadata->>'company_website', ${leadAlias}.metadata->'signal_package'->>'website', ${leadAlias}.metadata->>'website', ${leadAlias}.metadata->'signal_package'->>'company_url', ${leadAlias}.metadata->>'company_url', '')`;
+  const directoryTitleCompanySql =
+    'leading[[:space:]]+corporate[[:space:]]+training|' +
+    '(top[[:space:]]*[0-9]+|best|leading).*' +
+    '(providers?|companies|agencies|firms|vendors)|' +
+    '(providers?|companies|agencies|firms|vendors).*' +
+    '(in|malaysia|singapore|kuala[[:space:]]*lumpur|kl|prices?|directory|listing|ranking|reviews?|202[0-9])|' +
+    '(corporate[[:space:]]+training[[:space:]]+in|providers?[[:space:]]+(&|and)[[:space:]]+prices?)';
   return `AND (
           COALESCE(${leadAlias}.source, '') <> 'signal_hunt'
           OR (
@@ -42,6 +52,11 @@ function currentSignalPackageEligibilitySql(leadAlias = 'l') {
             AND (${checked}) ? 'competitor_offers'
             AND (${checked}) ? 'company_icp_evidence'
             AND NULLIF(BTRIM((${fit})->>'vertical_match'), '') IS NOT NULL
+            AND ${company} !~* '${directoryTitleCompanySql}'
+            AND (
+              ${sourceLabel} !~* '(agency_directory|training_directory|vertical_directory)'
+              OR NULLIF(BTRIM(${companyWebsite}), '') IS NOT NULL
+            )
           )
         )`;
 }

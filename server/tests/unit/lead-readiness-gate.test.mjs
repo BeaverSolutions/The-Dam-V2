@@ -76,6 +76,73 @@ describe('pipeline.leadReadinessGate', () => {
     expect(r.reason).toBe('directory_or_aggregator_company');
   });
 
+  it('rejects SEO page-title companies from vertical directory sources', () => {
+    const r = leadReadinessGate({
+      ...base,
+      name: 'Jeff Tan Ka Wei',
+      company: "Malaysia's Leading Corporate Training Providers",
+      email: null,
+      linkedin_url: 'https://linkedin.com/in/jefftan',
+      metadata: {
+        platform: 'agency_directory',
+        source_channel: 'vertical_directory',
+        signal_package: {
+          platform: 'agency_directory',
+          source_channel: 'vertical_directory',
+          source_url: 'https://thrivingtalents.com/',
+        },
+      },
+    });
+
+    expect(r.ready).toBe(false);
+    expect(r.reason).toBe('directory_or_aggregator_company');
+  });
+
+  it('rejects vertical directory leads without persisted direct company website evidence', () => {
+    const r = leadReadinessGate({
+      ...base,
+      name: 'Ed Ley',
+      company: 'CorporateTrainingMY',
+      email: null,
+      linkedin_url: 'https://linkedin.com/in/edley',
+      metadata: {
+        platform: 'agency_directory',
+        source_channel: 'vertical_directory',
+        signal_package: {
+          platform: 'agency_directory',
+          source_channel: 'vertical_directory',
+          source_url: 'https://corporatetrainingmalaysia.com/corporate-training-kuala-lumpur',
+        },
+      },
+    });
+
+    expect(r.ready).toBe(false);
+    expect(r.reason).toBe('directory_or_aggregator_company');
+  });
+
+  it('allows vertical directory leads after Research persists direct company website evidence', () => {
+    const r = leadReadinessGate({
+      ...base,
+      name: 'Alexandre Hanszmann',
+      company: 'Thriving Talents',
+      email: null,
+      linkedin_url: 'https://linkedin.com/in/alexandrehanszmann',
+      metadata: {
+        platform: 'agency_directory',
+        source_channel: 'vertical_directory',
+        company_website: 'https://thrivingtalents.com',
+        signal_package: {
+          platform: 'agency_directory',
+          source_channel: 'vertical_directory',
+          source_url: 'https://thrivingtalents.com/',
+          company_website: 'https://thrivingtalents.com',
+        },
+      },
+    });
+
+    expect(r.ready).toBe(true);
+  });
+
   it('keeps real marketing agencies eligible when the contact and company are concrete', () => {
     const r = leadReadinessGate({
       ...base,
@@ -112,6 +179,15 @@ describe('pipeline.leadReadinessGate', () => {
     const r = leadReadinessGate({ ...base, email: null, linkedin_url: null });
     expect(r.ready).toBe(false);
     expect(r.reason).toBe('no_contact_method');
+  });
+
+  it('can run as an identity-only gate before email enrichment', () => {
+    const r = leadReadinessGate({
+      ...base,
+      email: null,
+      linkedin_url: null,
+    }, { requireContactMethod: false });
+    expect(r.ready).toBe(true);
   });
 
   it('rejects lead whose email has no @ character', () => {

@@ -99,6 +99,39 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
     expect(useExistingBody).toContain('allowPersonalisationSearch: allowsPaidPersonalisation(allowPaidSignal, maxPaidSignalQueries)');
   });
 
+  it('source readiness runs before provider email enrichment and contact readiness stays after enrichment', () => {
+    const existingPipelineStart = agentsSource.indexOf('async function processExistingLeadsPipeline');
+    const existingPipelineEnd = agentsSource.indexOf('async function claimDailyPaidSignalAttempt', existingPipelineStart);
+    const existingPipelineBody = agentsSource.slice(existingPipelineStart, existingPipelineEnd);
+    const signalSourceReadiness = existingPipelineBody.indexOf('const sourceReadiness_sp = pipeline.leadReadinessGate(lead, { requireContactMethod: false });');
+    const signalEnrichment = existingPipelineBody.indexOf('await pipeline.enrichEmail(clientId, lead, {');
+    const signalContactReadiness = existingPipelineBody.indexOf('const readiness_sp = pipeline.leadReadinessGate(lead);', signalEnrichment);
+
+    const kickoffPipelineStart = agentsSource.indexOf('async function processLeadPipeline(lead)');
+    const kickoffPipelineEnd = agentsSource.indexOf('for (const lead of leads)', kickoffPipelineStart);
+    const kickoffPipelineBody = agentsSource.slice(kickoffPipelineStart, kickoffPipelineEnd);
+    const kickoffSourceReadiness = kickoffPipelineBody.indexOf('const sourceReadiness = pipeline.leadReadinessGate(lead, { requireContactMethod: false });');
+    const kickoffEnrichment = kickoffPipelineBody.indexOf('await pipeline.enrichEmail(clientId, lead, {');
+    const kickoffContactReadiness = kickoffPipelineBody.indexOf('const readiness = pipeline.leadReadinessGate(lead);', kickoffEnrichment);
+
+    const v2SourceReadiness = pipelineSource.indexOf('const sourceReadiness = leadReadinessGate(lead, { requireContactMethod: false });');
+    const v2Enrichment = pipelineSource.indexOf('await enrichEmail(clientId, lead, {');
+    const v2ContactReadiness = pipelineSource.indexOf('const readiness = leadReadinessGate(lead);', v2Enrichment);
+
+    expect(signalSourceReadiness).toBeGreaterThan(-1);
+    expect(signalEnrichment).toBeGreaterThan(-1);
+    expect(signalContactReadiness).toBeGreaterThan(signalEnrichment);
+    expect(signalSourceReadiness).toBeLessThan(signalEnrichment);
+    expect(kickoffSourceReadiness).toBeGreaterThan(-1);
+    expect(kickoffEnrichment).toBeGreaterThan(-1);
+    expect(kickoffContactReadiness).toBeGreaterThan(kickoffEnrichment);
+    expect(kickoffSourceReadiness).toBeLessThan(kickoffEnrichment);
+    expect(v2SourceReadiness).toBeGreaterThan(-1);
+    expect(v2Enrichment).toBeGreaterThan(-1);
+    expect(v2ContactReadiness).toBeGreaterThan(v2Enrichment);
+    expect(v2SourceReadiness).toBeLessThan(v2Enrichment);
+  });
+
   it('omitted manual-campaign paid query caps use computed capacity, while explicit zero still blocks spend', () => {
     expect(agentsSource).toContain('function normalisePaidSignalCap(maxPaidSignalQueries)');
     expect(agentsSource).toContain('maxPaidSignalQueries === null || maxPaidSignalQueries === undefined');

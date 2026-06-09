@@ -864,6 +864,10 @@ function getSignalPackage(source = {}) {
 function hasCurrentSignalPackageIcpEvidence(lead = {}) {
   const meta = safeJsonObject(lead.metadata);
   if (lead.source !== 'signal_hunt' && !meta.signal_package && !meta.company_icp_fit) return true;
+  if (lead.source === 'signal_hunt') {
+    const readiness = pipeline.leadReadinessGate(lead, { requireContactMethod: false });
+    if (!readiness.ready) return false;
+  }
   const signalPackage = getSignalPackage(lead) || {};
   const fit = safeJsonObject(signalPackage.company_icp_fit || meta.company_icp_fit);
   const checked = Array.isArray(fit.reject_rules_checked) ? fit.reject_rules_checked : [];
@@ -3200,6 +3204,30 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         continue;
       }
 
+      // ── Pre-enrichment readiness gate ──────────────────────────────────
+      // Validate company/contact identity before provider fanout. Directory
+      // rows and SEO page-title companies must not burn Hunter/MV/LLM quota.
+      const sourceReadiness_sp = pipeline.leadReadinessGate(lead, { requireContactMethod: false });
+      if (!sourceReadiness_sp.ready) {
+        console.warn(`[signal-pipeline] Pre-enrichment skip: ${lead.name || 'unknown'} @ ${lead.company || 'unknown'} — ${sourceReadiness_sp.reason}`);
+        await logsService.createLog(clientId, {
+          agent: 'director', action: 'lead_not_ready',
+          target_type: 'lead', target_id: lead.id,
+          metadata: { reason: sourceReadiness_sp.reason, channel: null, path: 'signal_pipeline', boundary: 'pre_enrichment' },
+        }).catch(() => {});
+        pipelineTrace.traceStage(clientId, {
+          lead_id: lead.id,
+          kickoff_id: plan_id,
+          stage: 'icp_rejected',
+          status: 'lead_not_ready',
+          agent: 'director',
+          reason: sourceReadiness_sp.reason,
+          pipeline_path: 'signal_pipeline',
+          metadata: { lead_name: lead.name, lead_company: lead.company, boundary: 'pre_enrichment' },
+        }).catch(() => {});
+        continue;
+      }
+
       // Build Sales Beaver context from the signal metadata
       const meta = lead.metadata || {};
       const contextParts = [
@@ -3333,17 +3361,16 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         }
       }
 
-      // ── Phase 3 pivot (2026-05-08): pre-draft lead readiness gate ─────
-      // Don't burn Sales Beaver tokens on leads with missing name / company /
-      // contact-method. Mirrors the kickoff pipeline guard added the same commit.
-      // Both pipelines now converge on Enforcer-only post-draft review.
+      // ── Full readiness gate after enrichment ───────────────────────────
+      // Contact-method validation stays here so valid companies can still
+      // receive email enrichment before being held as incomplete.
       const readiness_sp = pipeline.leadReadinessGate(lead);
       if (!readiness_sp.ready) {
-        console.warn(`[signal-pipeline] Pre-draft skip: ${lead.name || 'unknown'} @ ${lead.company || 'unknown'} — ${readiness_sp.reason}`);
+        console.warn(`[signal-pipeline] Post-enrichment skip: ${lead.name || 'unknown'} @ ${lead.company || 'unknown'} — ${readiness_sp.reason}`);
         await logsService.createLog(clientId, {
           agent: 'director', action: 'lead_not_ready',
           target_type: 'lead', target_id: lead.id,
-          metadata: { reason: readiness_sp.reason, channel, path: 'signal_pipeline' },
+          metadata: { reason: readiness_sp.reason, channel, path: 'signal_pipeline', boundary: 'post_enrichment' },
         }).catch(() => {});
         pipelineTrace.traceStage(clientId, {
           lead_id: lead.id,
@@ -3353,7 +3380,7 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
           agent: 'director',
           reason: readiness_sp.reason,
           pipeline_path: 'signal_pipeline',
-          metadata: { lead_name: lead.name, lead_company: lead.company },
+          metadata: { lead_name: lead.name, lead_company: lead.company, boundary: 'post_enrichment' },
         }).catch(() => {});
         continue;
       }
@@ -5581,6 +5608,32 @@ async function directorExecute(clientId, {
       return;
     }
 
+    // ── Pre-enrichment readiness gate ────────────────────────────────────
+    // Lead identity must be concrete before public-web/domain/email providers
+    // run. This is stricter than the old pre-draft placement and prevents
+    // directory/page-title rows from burning provider quota.
+    const sourceReadiness = pipeline.leadReadinessGate(lead, { requireContactMethod: false });
+    if (!sourceReadiness.ready) {
+      console.warn(`[pipeline] Pre-enrichment skip: ${lead.name || 'unknown'} @ ${lead.company || 'unknown'} — ${sourceReadiness.reason}`);
+      diagnostics.messages_failed++;
+      await logsService.createLog(clientId, {
+        agent: 'director', action: 'lead_not_ready',
+        target_type: 'lead', target_id: lead.id,
+        metadata: { reason: sourceReadiness.reason, channel: null, path: 'kickoff_pipeline', boundary: 'pre_enrichment' },
+      }).catch(() => {});
+      pipelineTrace.traceStage(clientId, {
+        lead_id: lead.id,
+        kickoff_id: plan_id,
+        stage: 'icp_rejected',
+        status: 'lead_not_ready',
+        agent: 'director',
+        reason: sourceReadiness.reason,
+        pipeline_path: 'kickoff_pipeline',
+        metadata: { lead_name: lead.name, lead_company: lead.company, boundary: 'pre_enrichment' },
+      }).catch(() => {});
+      return;
+    }
+
     const meta = lead.metadata || {};
     const contextParts = [
       `Name: ${lead.name}`,
@@ -5714,20 +5767,17 @@ async function directorExecute(clientId, {
 
     const hint = CHANNEL_HINTS[selectedChannel];
 
-    // ── Phase 3 pivot (2026-05-08): pre-draft lead readiness gate ─────
-    // Replaces the legacy captainValidate post-draft check. We don't waste
-    // Sales Beaver tokens on leads with missing name/company/contact-method.
-    // captainValidate's placeholder + empty-body checks are dropped — Enforcer
-    // already catches both via its rubric. Both pipelines now converge on
-    // Enforcer-only post-draft review.
+    // ── Full readiness gate after enrichment ─────────────────────────────
+    // Contact-method validation stays after enrichment so otherwise-valid
+    // companies can still be enriched before being held as incomplete.
     const readiness = pipeline.leadReadinessGate(lead);
     if (!readiness.ready) {
-      console.warn(`[pipeline] Pre-draft skip: ${lead.name || 'unknown'} @ ${lead.company || 'unknown'} — ${readiness.reason}`);
+      console.warn(`[pipeline] Post-enrichment skip: ${lead.name || 'unknown'} @ ${lead.company || 'unknown'} — ${readiness.reason}`);
       diagnostics.messages_failed++;
       await logsService.createLog(clientId, {
         agent: 'director', action: 'lead_not_ready',
         target_type: 'lead', target_id: lead.id,
-        metadata: { reason: readiness.reason, channel: selectedChannel, path: 'kickoff_pipeline' },
+        metadata: { reason: readiness.reason, channel: selectedChannel, path: 'kickoff_pipeline', boundary: 'post_enrichment' },
       }).catch(() => {});
       pipelineTrace.traceStage(clientId, {
         lead_id: lead.id,
@@ -5737,7 +5787,7 @@ async function directorExecute(clientId, {
         agent: 'director',
         reason: readiness.reason,
         pipeline_path: 'kickoff_pipeline',
-        metadata: { lead_name: lead.name, lead_company: lead.company },
+        metadata: { lead_name: lead.name, lead_company: lead.company, boundary: 'post_enrichment' },
       }).catch(() => {});
       return;
     }
