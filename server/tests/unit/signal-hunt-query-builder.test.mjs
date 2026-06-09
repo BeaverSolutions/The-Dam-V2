@@ -374,15 +374,20 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(pipelineProsGate.matched_terms).toEqual(expect.arrayContaining(['lead generation']));
   });
 
-  it('runs the company ICP gate before decision-maker lookup and email enrichment', () => {
+  it('runs the company ICP gate (LLM read or regex) before decision-maker lookup and email enrichment', () => {
     const runStart = src.indexOf('async function runSignalHunt');
-    const gateIdx = src.indexOf('const companyGate = evaluateSignalCompanyIcpGate', runStart);
-    const decisionMakerIdx = src.indexOf('const person = await findDecisionMaker', runStart);
+    // Vertical-first qualifies via the Research Beaver read; signal-first via the regex gate.
+    const verticalGateIdx = src.indexOf('qualifyCompanyByReading({', runStart);
+    const signalGateIdx = src.indexOf('companyGate = evaluateSignalCompanyIcpGate', runStart);
+    const decisionMakerIdx = src.indexOf('findDecisionMaker(signal.company', runStart);
     const emailIdx = src.indexOf('const enriched = await findEmail', runStart);
 
-    expect(gateIdx).toBeGreaterThan(runStart);
-    expect(gateIdx).toBeLessThan(decisionMakerIdx);
-    expect(gateIdx).toBeLessThan(emailIdx);
+    expect(verticalGateIdx).toBeGreaterThan(runStart);
+    expect(signalGateIdx).toBeGreaterThan(runStart);
+    // Both qualification gates run before the paid decision-maker lookup and enrichment.
+    expect(verticalGateIdx).toBeLessThan(decisionMakerIdx);
+    expect(signalGateIdx).toBeLessThan(decisionMakerIdx);
+    expect(decisionMakerIdx).toBeLessThan(emailIdx);
   });
 
   it('uses the market-sensor parser for industry publication snippets', () => {
@@ -874,17 +879,13 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(signalConfig.max_results_per_query).toBeLessThan(signalHunt._test.MAX_VERTICAL_RESULTS_PER_QUERY);
   });
 
-  it('runs the shared company-shape gate (name+snippet) BEFORE consuming paid decision-maker budget', () => {
+  it('signal-first keeps the shared company-shape gate (name+snippet) before paid lookup', () => {
     const runStart = src.indexOf('async function runSignalHunt');
-    const icpPassedIdx = src.indexOf('stageStats.icp_passed++', runStart);
-    const shapeCheckIdx = src.indexOf('companyShapeRejection(shapeText)', runStart);
+    const shapeCheckIdx = src.indexOf('companyShapeRejection([signal.company, signal.raw_snippet, signal.signal_summary]', runStart);
     const consumeForLookupIdx = src.indexOf("'paid_query_budget_exhausted_before_decision_maker_lookup'", runStart);
-    expect(icpPassedIdx).toBeGreaterThan(runStart);
-    expect(shapeCheckIdx).toBeGreaterThan(icpPassedIdx);
+    expect(shapeCheckIdx).toBeGreaterThan(runStart);
     expect(shapeCheckIdx).toBeLessThan(consumeForLookupIdx);
     expect(src).toContain('company_shape_pre_lookup');
-    // Pre-lookup gate matches on NAME + SNIPPET only (not scraped homepage prose).
-    expect(src).toContain("[signal.company, signal.raw_snippet, signal.signal_summary]");
   });
 
   it('widens the candidate loop for vertical-first runs so gate-passing SMEs are not truncated', () => {
@@ -895,6 +896,63 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(src).toContain('uniqueSignals.slice(0, candidateLoopCap)');
     // And the candidate loop existed before this change (regression guard).
     expect(src.indexOf('candidateLoopCap')).toBeGreaterThan(src.indexOf('async function runSignalHunt'));
+  });
+
+  describe('Research Beaver reads the page (vertical-first qualification)', () => {
+    const icp = { active_industries: ['marketing agency', 'B2B corporate training'], geo: ['MY'] };
+    const q = signalHunt._test.qualifyCompanyByReading;
+
+    it('qualifies a real in-ICP MY SME read from the page', async () => {
+      const mock = async () => ({
+        is_real_company: true, company_name: 'Thriving Talents', in_icp_vertical: true,
+        vertical_match: 'B2B corporate training', employee_band: '11-50', geo_ok: true,
+        is_competitor: false, is_directory: false,
+        decision_maker: { name: 'Alexandre Hanszmann', title: 'Founder' }, reason: 'MY corporate training SME',
+      });
+      const v = await q({ company: 'x', url: 'https://thrivingtalents.com', pageText: 'corporate training provider in Malaysia', icp, callAgentImpl: mock });
+      expect(v.qualified).toBe(true);
+      expect(v.company_name).toBe('Thriving Talents');
+      expect(v.decision_maker).toMatchObject({ name: 'Alexandre Hanszmann' });
+    });
+
+    it('drops a directory / listicle (is_directory) instead of saving it as a company', async () => {
+      const mock = async () => ({ is_real_company: false, is_directory: true, in_icp_vertical: true, employee_band: 'unknown', reason: 'listicle' });
+      const v = await q({ company: 'x', url: 'https://corporatetrainingmalaysia.com/top-providers', pageText: 'Top 10 providers', icp, callAgentImpl: mock });
+      expect(v.qualified).toBe(false);
+    });
+
+    it('drops a global/enterprise brand on employee band (200+)', async () => {
+      const mock = async () => ({ is_real_company: true, company_name: 'Invensis', in_icp_vertical: true, employee_band: '200+', geo_ok: true, reason: 'global brand' });
+      const v = await q({ company: 'x', pageText: 'global training company', icp, callAgentImpl: mock });
+      expect(v.qualified).toBe(false);
+    });
+
+    it('does NOT disqualify an SME that merely serves government clients', async () => {
+      const mock = async () => ({ is_real_company: true, company_name: 'Crossurvive', in_icp_vertical: true, vertical_match: 'B2B corporate training', employee_band: '11-50', geo_ok: true, is_competitor: false, is_directory: false, decision_maker: { name: null, title: null }, reason: 'SME that trains govt clients' });
+      const v = await q({ company: 'x', pageText: 'We deliver corporate training to government agencies and GLCs across Malaysia', icp, callAgentImpl: mock });
+      expect(v.qualified).toBe(true);
+      expect(v.company_name).toBe('Crossurvive');
+    });
+
+    it('surfaces an LLM failure instead of silently falling back to regex', async () => {
+      const mock = async () => { throw new Error('openai 400 bad model'); };
+      const v = await q({ company: 'x', pageText: 'something', icp, callAgentImpl: mock });
+      expect(v.error).toMatch(/research_beaver_read_failed/);
+      expect(v.qualified).toBeUndefined();
+    });
+
+    it('vertical-first loop calls Research Beaver to read + judge, and surfaces LLM failures', () => {
+      const runStart = src.indexOf('async function runSignalHunt');
+      const verticalBranch = src.indexOf('isVerticalFirstCandidate', runStart);
+      const readCall = src.indexOf('qualifyCompanyByReading({', runStart);
+      expect(verticalBranch).toBeGreaterThan(runStart);
+      expect(readCall).toBeGreaterThan(verticalBranch);
+      // Commit 2: LLM failure is surfaced, not swallowed into regex.
+      expect(src).toContain('research_beaver_llm_failed');
+      expect(src).toContain('research_beaver_disqualified');
+      // Final ICP net runs on the clean Brave snippet, not homepage prose.
+      expect(src).toContain('snippet: signal.raw_snippet');
+    });
   });
 
   it('refuses incomplete Signal Hunt packages before contactGate persistence', () => {

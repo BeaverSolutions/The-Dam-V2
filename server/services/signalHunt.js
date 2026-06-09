@@ -1958,7 +1958,18 @@ Rules:
       console.warn('[signalHunt] budget cap reached during signal parsing:', err.message);
       throw err;
     }
-    console.warn('[signalHunt] budgeted signal parsing failed:', err.message);
+    // The LLM extractor failed. We still fall back to deterministic regex so
+    // signal-first doesn't hard-stop, but the degradation must be VISIBLE — a
+    // broken provider silently dropping to regex is the failure mode that hid
+    // the "research does no reasoning" defect. Log it explicitly.
+    console.warn('[signalHunt] budgeted signal parsing failed — DEGRADED to deterministic regex:', err.message);
+    if (clientId) {
+      await logsService.createLog(clientId, {
+        agent: 'research_beaver',
+        action: 'research_beaver_llm_degraded',
+        metadata: { stage: 'extract_signals_from_results', error: err.message, fell_back_to: 'deterministic_regex' },
+      }).catch(() => {});
+    }
   }
 
   return deterministicSignals;
@@ -2080,6 +2091,88 @@ async function findDecisionMaker(companyName, icpTitles = [], country = 'MY', op
     console.warn(`[signalHunt] findDecisionMaker failed for ${companyName}:`, err.message);
     return null;
   }
+}
+
+/**
+ * Research Beaver READS a company's web page and judges ICP fit — the core of
+ * actual research, replacing the regex tower for the vertical-first lane.
+ * Runs on the OpenAI-backed `research_beaver` agent (gpt-4.1-mini). Given the
+ * already-fetched page text + the tenant ICP, it decides: real company (not a
+ * directory)? in-ICP vertical? 5-50 size? right geo? competitor? — and pulls a
+ * decision-maker if the page shows one. This is the one thing a regex can't do:
+ * tell a directory from a company, a real name from a page title, and
+ * "serves government clients" from "is a government agency".
+ *
+ * Returns { qualified, company_name, vertical_match, employee_band, geo_ok,
+ * is_competitor, is_directory, decision_maker, reason } — or { error } on LLM
+ * failure (caller surfaces it; we do NOT silently fall back to regex).
+ */
+async function qualifyCompanyByReading({ clientId, company, url, pageText, icp, callAgentImpl = callAgent } = {}) {
+  const text = String(pageText || '').replace(/\s+/g, ' ').trim().slice(0, 3000);
+  if (!text) return { qualified: false, reason: 'no_page_text_to_read' };
+
+  const verticals = icpVerticalTerms(icp);
+  const geo = (listFrom(icp?.geo).length > 0 ? listFrom(icp.geo) : ['MY']).join(', ');
+  const prompt = `You are Research Beaver qualifying a company for B2B outreach. Read the company's web page text and decide if it fits the ICP.
+
+PROVISIONAL COMPANY NAME: ${company || 'unknown'}
+URL: ${url || 'n/a'}
+TARGET VERTICALS: ${verticals.join(' OR ') || 'B2B services'}
+TARGET GEO: ${geo}
+TARGET SIZE: 5-50 employees (SMEs). Reject global / enterprise brands and large agency networks.
+REJECT: directories/listicles/aggregators (a page that LISTS many companies rather than being one company); universities/colleges/schools; government/NGO bodies; and competitors whose OWN offer is outbound / lead-gen / cold-email / appointment-setting / SDR-as-a-service.
+IMPORTANT: a company that SERVES government clients, or that TEACHES a "cold email" or "sales" course, is NOT itself a government agency or a competitor. Judge what the company IS, not who or what it mentions.
+
+PAGE TEXT:
+${text}
+
+Return ONLY this JSON object:
+{
+  "is_real_company": true or false,
+  "company_name": "the actual company name read from the page (never a page title or listicle headline)",
+  "in_icp_vertical": true or false,
+  "vertical_match": "which target vertical it matches, or null",
+  "employee_band": "1-10" or "11-50" or "51-200" or "200+" or "unknown",
+  "geo_ok": true or false,
+  "is_competitor": true or false,
+  "is_directory": true or false,
+  "decision_maker": { "name": "full name visible on the page or null", "title": "their title or null" },
+  "reason": "one short sentence explaining the verdict"
+}`;
+
+  let parsed;
+  try {
+    parsed = await callAgentImpl('research_beaver', prompt, { clientId });
+  } catch (err) {
+    if (isBudgetExceededError(err)) throw err;
+    return { error: `research_beaver_read_failed: ${err.message}` };
+  }
+
+  let v = parsed && typeof parsed === 'object' && !('raw' in parsed) ? parsed : null;
+  if (!v && typeof parsed?.raw === 'string') {
+    try { v = JSON.parse(parsed.raw); } catch { v = null; }
+  }
+  if (!v || typeof v !== 'object') return { error: 'research_beaver_unparseable_verdict' };
+
+  const sizeOk = ['1-10', '11-50', 'unknown'].includes(String(v.employee_band || 'unknown'));
+  const qualified = !!v.is_real_company
+    && !v.is_directory
+    && !!v.in_icp_vertical
+    && v.geo_ok !== false
+    && !v.is_competitor
+    && sizeOk;
+
+  return {
+    qualified,
+    company_name: typeof v.company_name === 'string' && v.company_name.trim() ? v.company_name.trim() : null,
+    vertical_match: v.vertical_match || null,
+    employee_band: v.employee_band || 'unknown',
+    geo_ok: v.geo_ok !== false,
+    is_competitor: !!v.is_competitor,
+    is_directory: !!v.is_directory,
+    decision_maker: (v.decision_maker && typeof v.decision_maker === 'object') ? v.decision_maker : null,
+    reason: typeof v.reason === 'string' ? v.reason : (qualified ? 'qualified' : 'not_in_icp'),
+  };
 }
 
 /**
@@ -2349,12 +2442,23 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     const country = signal.country || countryCodeFromText(signal.raw_snippet || signal.signal_summary || '') || 'MY';
     const countryName = countryNameFromCode(country);
 
-    // Vertical-first candidates are domain-anchored, not title-scraped. Resolve
-    // the real company name from the homepage (og:site_name) before the gate and
-    // the paid decision-maker lookup, so we don't burn budget chasing a page
-    // title ("Top 10 Corporate Training Providers …") instead of a company.
-    if (signal.discovery_lane === 'vertical_first' || signal.signal_lite === true || isVerticalFirstQuery(signal)) {
+    const isVerticalFirstCandidate = signal.discovery_lane === 'vertical_first'
+      || signal.signal_lite === true
+      || isVerticalFirstQuery(signal);
+
+    let companyGate = null;
+    let llmDecisionMaker = null;
+
+    if (isVerticalFirstCandidate) {
+      // ── Vertical-first: Research Beaver READS the page and judges. ──────────
+      // Fetch the homepage (resolveCompanyIdentity), then hand the page text to
+      // gpt-4.1-mini to decide real-company / in-ICP / 5-50 size / geo /
+      // competitor / directory and pull a decision-maker if visible. This one
+      // read replaces the title-scrape + aggregator host-list + keyword vertical
+      // match + shape regex — the regex tower that saved directories, used page
+      // titles as names, and false-rejected SMEs on homepage prose.
       const identity = await resolveCompanyIdentity(signal, {}).catch(() => null);
+      let pageText = signal.raw_snippet || '';
       if (identity) {
         if (identity.company && identity.company !== signal.company) {
           signal.metadata = { ...(signal.metadata || {}), provisional_company: signal.company, company_identity_source: identity.source };
@@ -2362,118 +2466,182 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
         }
         if (identity.website && !signal.company_website) signal.company_website = identity.website;
         if (identity.page_text) {
+          pageText = identity.page_text;
           signal.company_description = [signal.company_description, identity.page_text].filter(Boolean).join(' ');
         }
       }
+
+      const verdict = await qualifyCompanyByReading({
+        clientId,
+        company: signal.company,
+        url: signal.company_website || signal.source_url || null,
+        pageText: pageText || signal.company_description || signal.signal_summary,
+        icp,
+      });
+
+      if (verdict.error) {
+        // Commit 2: surface LLM failure — do NOT silently degrade to regex.
+        stageStats.research_beaver_errors = (stageStats.research_beaver_errors || 0) + 1;
+        await logSignalHuntMiss(clientId, {
+          signal,
+          blocker: 'research_beaver_llm_failed',
+          reason: verdict.error,
+          metadata: { agent: 'research_beaver', stage: 'qualify_by_reading' },
+        });
+        console.warn(`[signalHunt] Research Beaver read FAILED for ${signal.company}: ${verdict.error}`);
+        continue;
+      }
+      if (!verdict.qualified) {
+        await logSignalHuntMiss(clientId, {
+          signal,
+          blocker: 'research_beaver_disqualified',
+          reason: verdict.reason || 'not_in_icp',
+          metadata: {
+            employee_band: verdict.employee_band,
+            geo_ok: verdict.geo_ok,
+            is_competitor: verdict.is_competitor,
+            is_directory: verdict.is_directory,
+            vertical_match: verdict.vertical_match,
+          },
+        });
+        console.log(`[signalHunt] Research Beaver dropped ${signal.company}: ${verdict.reason}`);
+        continue;
+      }
+
+      if (verdict.company_name) signal.company = verdict.company_name;
+      companyGate = {
+        pass: true,
+        vertical_match: verdict.vertical_match,
+        icp_evidence: verdict.vertical_match ? [verdict.vertical_match] : [],
+        reject_rules_checked: ['research_beaver_read'],
+      };
+      signal.metadata = {
+        ...(signal.metadata || {}),
+        company_evidence_resolver: {
+          company: signal.company,
+          vertical_match: verdict.vertical_match,
+          source: 'research_beaver_read',
+          confidence: 0.9,
+        },
+        research_beaver_verdict: {
+          employee_band: verdict.employee_band,
+          geo_ok: verdict.geo_ok,
+          reason: verdict.reason,
+        },
+      };
+      if (verdict.decision_maker?.name && validDecisionMakerName(verdict.decision_maker.name)) {
+        llmDecisionMaker = {
+          name: verdict.decision_maker.name,
+          title: verdict.decision_maker.title || '',
+          source: 'research_beaver_read',
+          source_url: signal.company_website || null,
+        };
+      }
+      stageStats.icp_passed++;
+      platformFunnelTracker.recordVerticalVerified(signal);
+    } else {
+      // ── Signal-first: existing regex evidence + ICP gate (unchanged). ──────
+      const companyEvidence = await resolveCompanyEvidence(signal, icp).catch(err => ({
+        company: signal.company,
+        vertical_match: null,
+        evidence: [],
+        source: 'resolver_error',
+        confidence: 0,
+        error: err.message,
+      }));
+      if (!companyEvidence?.vertical_match) {
+        await logSignalHuntMiss(clientId, {
+          signal,
+          blocker: 'company_vertical_unproven',
+          reason: 'company_vertical_unproven',
+          metadata: {
+            expected_verticals: icpVerticalTerms(icp),
+            resolver_source: companyEvidence?.source || null,
+            resolver_confidence: companyEvidence?.confidence ?? null,
+            resolver_error: companyEvidence?.error || null,
+          },
+        });
+        console.log(`[signalHunt] Company evidence resolver blocked ${signal.company}: vertical unproven`);
+        continue;
+      }
+      const resolverEvidenceText = (companyEvidence.evidence || [])
+        .map(item => item?.text || item)
+        .filter(Boolean)
+        .join(' ');
+      signal.company_description = [
+        signal.company_description,
+        resolverEvidenceText,
+      ].filter(Boolean).join(' ');
+      signal.metadata = {
+        ...(signal.metadata || {}),
+        company_evidence_resolver: companyEvidence,
+      };
+      companyGate = evaluateSignalCompanyIcpGate(signal, icp);
+      if (!companyGate.pass) {
+        await logSignalHuntMiss(clientId, {
+          signal,
+          blocker: companyGate.blocker || 'icp_zero_after_company_extract',
+          reason: companyGate.reason || 'company_icp_gate_failed',
+          metadata: {
+            matched_terms: companyGate.matched_terms || [],
+            expected_verticals: companyGate.expected_verticals || [],
+            reject_rules_checked: companyGate.reject_rules_checked || [],
+          },
+        });
+        console.log(`[signalHunt] Company ICP gate blocked ${signal.company}: ${companyGate.reason}`);
+        continue;
+      }
+      stageStats.icp_passed++;
+      platformFunnelTracker.recordVerticalVerified(signal);
+
+      // Cheap pre-lookup company-shape gate (name + snippet only) for the
+      // signal-first lane. Vertical-first relies on the Research Beaver read.
+      const { companyShapeRejection } = require('./agents');
+      const shapeRejection = companyShapeRejection([signal.company, signal.raw_snippet, signal.signal_summary].filter(Boolean).join(' '));
+      if (shapeRejection) {
+        await logSignalHuntMiss(clientId, {
+          signal,
+          blocker: 'company_shape_pre_lookup',
+          reason: shapeRejection.reason,
+          metadata: { rejected_status: shapeRejection.status, matched_on: 'name_and_snippet' },
+        });
+        console.log(`[signalHunt] Pre-lookup company-shape block on ${signal.company}: ${shapeRejection.reason}`);
+        continue;
+      }
     }
 
-    const companyEvidence = await resolveCompanyEvidence(signal, icp).catch(err => ({
-      company: signal.company,
-      vertical_match: null,
-      evidence: [],
-      source: 'resolver_error',
-      confidence: 0,
-      error: err.message,
-    }));
-    if (!companyEvidence?.vertical_match) {
-      await logSignalHuntMiss(clientId, {
-        signal,
-        blocker: 'company_vertical_unproven',
-        reason: 'company_vertical_unproven',
-        metadata: {
-          expected_verticals: icpVerticalTerms(icp),
-          resolver_source: companyEvidence?.source || null,
-          resolver_confidence: companyEvidence?.confidence ?? null,
-          resolver_error: companyEvidence?.error || null,
+    // ── Decision-maker. Use the one Research Beaver read off the page (free,
+    // no extra paid query); otherwise fall back to the paid lookup. ──────────
+    let person = llmDecisionMaker;
+    if (!person) {
+      await assertLlmBudgetOpen(clientId);
+      if (!consumePaidQuery(1)) {
+        await logSignalHuntMiss(clientId, {
+          signal,
+          blocker: 'provider_cap_closed',
+          reason: 'paid_query_budget_exhausted_before_decision_maker_lookup',
+        });
+        console.log('[signalHunt] Paid-query budget exhausted before decision-maker lookup');
+        break;
+      }
+      let decisionMakerFallbackBlocked = false;
+      person = await findDecisionMaker(signal.company, icpTitles, country, {
+        clientId,
+        consumeFallbackSearch: () => {
+          const allowed = consumePaidQuery(1);
+          if (!allowed) decisionMakerFallbackBlocked = true;
+          return allowed;
         },
       });
-      console.log(`[signalHunt] Company evidence resolver blocked ${signal.company}: vertical unproven`);
-      continue;
-    }
-    const resolverEvidenceText = (companyEvidence.evidence || [])
-      .map(item => item?.text || item)
-      .filter(Boolean)
-      .join(' ');
-    signal.company_description = [
-      signal.company_description,
-      resolverEvidenceText,
-    ].filter(Boolean).join(' ');
-    signal.metadata = {
-      ...(signal.metadata || {}),
-      company_evidence_resolver: companyEvidence,
-    };
-    const companyGate = evaluateSignalCompanyIcpGate(signal, icp);
-    if (!companyGate.pass) {
-      await logSignalHuntMiss(clientId, {
-        signal,
-        blocker: companyGate.blocker || 'icp_zero_after_company_extract',
-        reason: companyGate.reason || 'company_icp_gate_failed',
-        metadata: {
-          matched_terms: companyGate.matched_terms || [],
-          expected_verticals: companyGate.expected_verticals || [],
-          reject_rules_checked: companyGate.reject_rules_checked || [],
-        },
-      });
-      console.log(`[signalHunt] Company ICP gate blocked ${signal.company}: ${companyGate.reason}`);
-      continue;
-    }
-    stageStats.icp_passed++;
-    platformFunnelTracker.recordVerticalVerified(signal);
-
-    // Cheap pre-lookup gate: drop wrong-TYPE/SIZE companies (gov/NGO/edu,
-    // global agency networks, enterprise brands) BEFORE spending a paid
-    // decision-maker lookup. Reuses the SAME companyShapeRejection the
-    // post-lookup ICP filter uses — one source of truth, not a parallel
-    // heuristic. Match on company NAME + original Brave snippet only (NOT the
-    // scraped homepage prose) so we catch named giants without false-rejecting
-    // SMEs whose copy merely mentions "government clients" / "universities".
-    const { companyShapeRejection } = require('./agents');
-    const shapeText = [signal.company, signal.raw_snippet, signal.signal_summary]
-      .filter(Boolean)
-      .join(' ');
-    const shapeRejection = companyShapeRejection(shapeText);
-    if (shapeRejection) {
-      await logSignalHuntMiss(clientId, {
-        signal,
-        blocker: 'company_shape_pre_lookup',
-        reason: shapeRejection.reason,
-        metadata: {
-          rejected_status: shapeRejection.status,
-          matched_on: 'name_and_snippet',
-        },
-      });
-      console.log(`[signalHunt] Pre-lookup company-shape block on ${signal.company}: ${shapeRejection.reason}`);
-      continue;
-    }
-
-    await assertLlmBudgetOpen(clientId);
-    if (!consumePaidQuery(1)) {
-      await logSignalHuntMiss(clientId, {
-        signal,
-        blocker: 'provider_cap_closed',
-        reason: 'paid_query_budget_exhausted_before_decision_maker_lookup',
-      });
-      console.log('[signalHunt] Paid-query budget exhausted before decision-maker lookup');
-      break;
-    }
-
-    let decisionMakerFallbackBlocked = false;
-    const person = await findDecisionMaker(signal.company, icpTitles, country, {
-      clientId,
-      consumeFallbackSearch: () => {
-        const allowed = consumePaidQuery(1);
-        if (!allowed) decisionMakerFallbackBlocked = true;
-        return allowed;
-      },
-    });
-    if (!person || !person.name) {
-      await logSignalHuntMiss(clientId, {
-        signal,
-        blocker: decisionMakerFallbackBlocked ? 'provider_cap_closed' : 'decision_maker_zero',
-        reason: decisionMakerFallbackBlocked ? 'paid_query_budget_exhausted_before_linkedin_decision_maker_lookup' : 'decision_maker_not_found',
-      });
-      console.log(`[signalHunt] No decision-maker found for ${signal.company}`);
-      continue;
+      if (!person || !person.name) {
+        await logSignalHuntMiss(clientId, {
+          signal,
+          blocker: decisionMakerFallbackBlocked ? 'provider_cap_closed' : 'decision_maker_zero',
+          reason: decisionMakerFallbackBlocked ? 'paid_query_budget_exhausted_before_linkedin_decision_maker_lookup' : 'decision_maker_not_found',
+        });
+        console.log(`[signalHunt] No decision-maker found for ${signal.company}`);
+        continue;
+      }
     }
     stageStats.decision_makers_found++;
 
@@ -2483,7 +2651,10 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       company: signal.company,
       title: person.title || '',
       country: countryName,
-      snippet: evidenceTextForSignal(signal),
+      // Final safety net runs on the ORIGINAL Brave snippet, not the scraped
+      // homepage prose — prose over-matches gov/edu/global terms and
+      // false-rejects real SMEs (e.g. one that "trains government clients").
+      snippet: signal.raw_snippet || '',
       score: signal.tier === 'P1' ? 90 : 70,
       metadata: {
         country: countryName,
@@ -2777,6 +2948,7 @@ module.exports = {
   _test: {
     applySignalPlaybookToConfig,
     applyApprovedPlatformPlanToConfig,
+    qualifyCompanyByReading,
     MAX_SIGNAL_RESULTS_PER_QUERY,
     MAX_VERTICAL_RESULTS_PER_QUERY,
     attachSignalPackageToSignalLead,

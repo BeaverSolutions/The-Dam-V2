@@ -160,11 +160,11 @@ describe('company evidence resolver', () => {
     }
   });
 
-  it('runs before the strict ICP gate and before paid decision-maker lookup', () => {
+  it('signal-first: resolver runs before the regex ICP gate and before paid decision-maker lookup', () => {
     const runStart = signalHuntSource.indexOf('async function runSignalHunt');
     const resolverIdx = signalHuntSource.indexOf('resolveCompanyEvidence(signal, icp', runStart);
-    const gateIdx = signalHuntSource.indexOf('const companyGate = evaluateSignalCompanyIcpGate', runStart);
-    const decisionMakerIdx = signalHuntSource.indexOf('const person = await findDecisionMaker', runStart);
+    const gateIdx = signalHuntSource.indexOf('companyGate = evaluateSignalCompanyIcpGate', runStart);
+    const decisionMakerIdx = signalHuntSource.indexOf('findDecisionMaker(signal.company', runStart);
 
     expect(resolverIdx).toBeGreaterThan(runStart);
     expect(resolverIdx).toBeLessThan(gateIdx);
