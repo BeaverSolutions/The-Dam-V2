@@ -158,23 +158,43 @@ function verticalQueryTerm(industry = '') {
   return value || 'B2B services';
 }
 
+// Geo-expanded locality phrase for vertical-first discovery. Bare country
+// names ("Malaysia") concentrate the SEO ranking on the biggest national
+// players; pairing the country with major MY/SG cities widens recall toward
+// regional SMEs that rank higher for city-scoped queries.
+function verticalLocation(geo) {
+  if (geo === 'MY') return '("Malaysia" OR "Kuala Lumpur" OR "Petaling Jaya" OR "Selangor" OR "Penang" OR "Johor")';
+  if (geo === 'SG') return '("Singapore" OR "Tanjong Pagar" OR "Raffles Place")';
+  return `"${hiringLocation(geo)}"`;
+}
+
+// Cheap negative exclusions for the highest-frequency global-network brands.
+// Mirrors (a subset of) the tenant exclusion list, but applied AT QUERY TIME
+// so giants are filtered by Brave before ever entering the funnel. Keeps
+// query length comfortably under the 400-char / 50-word limit. The
+// pre-lookup enterprise/global gate (signalHunt) catches the rest from
+// homepage text.
+const GLOBAL_BRAND_NEGATIVES = '-"WPP" -"Publicis" -"Dentsu" -"Omnicom" -"Fortune 500" -"global network"';
+
 function verticalFirstQueryForPlatform(platformId, industry, geo) {
-  const location = hiringLocation(geo);
+  const location = verticalLocation(geo);
   const term = verticalQueryTerm(industry);
   const isAgency = /agency|marketing|digital|creative|advertising|media|content|pr/i.test(term);
   const isTraining = /training|learning|coaching|skill/i.test(term);
 
+  let base;
   if (platformId === 'agency_directory') {
-    return isAgency
+    base = isAgency
       ? `("marketing agency" OR "digital agency" OR "creative agency" OR "PR agency") ${location}`
       : `("${term}" OR "${term} provider" OR "${term} company") ${location}`;
-  }
-  if (platformId === 'training_directory') {
-    return isTraining
+  } else if (platformId === 'training_directory') {
+    base = isTraining
       ? `("corporate training provider" OR "training company" OR "learning and development provider") ${location}`
       : `("${term}" OR "${term} firm" OR "${term} company") ${location}`;
+  } else {
+    base = `"${term}" ${location} (company OR provider OR agency)`;
   }
-  return `"${term}" ${location} (company OR provider OR agency)`;
+  return `${base} ${GLOBAL_BRAND_NEGATIVES}`;
 }
 
 function positiveInteger(value, fallback) {

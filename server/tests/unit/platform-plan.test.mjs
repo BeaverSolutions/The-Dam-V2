@@ -111,6 +111,64 @@ describe('platform plan builder', () => {
     expect(platformPlan.verifyPlatformPlanHash(plan)).toBe(true);
   });
 
+  it('biases vertical-first MY queries with locality + global-brand negatives without breaking Brave limits', () => {
+    const plan = platformPlan.buildPlatformPlan({
+      clientId: 'client-1',
+      icp: tenantIcp,
+      objective: 'SME-biased vertical-first discovery',
+      requestedCount: 5,
+      maxPaidQueries: 5,
+      mode: 'vertical_first',
+    });
+    const queries = plan.platform_sequence.map(item => item.query);
+    const queryText = queries.join('\n');
+
+    // Locality expansion: bare "Malaysia" is now joined by KL / PJ / Selangor /
+    // Penang / Johor so the SEO ranking widens past Kuala-Lumpur-only giants.
+    expect(queryText).toMatch(/Kuala Lumpur/);
+    expect(queryText).toMatch(/Petaling Jaya/);
+    expect(queryText).toMatch(/Selangor/);
+    expect(queryText).toMatch(/Penang/);
+
+    // Global-brand negatives applied at query time.
+    for (const q of queries) {
+      expect(q).toMatch(/-"WPP"/);
+      expect(q).toMatch(/-"Publicis"/);
+      expect(q).toMatch(/-"Dentsu"/);
+      expect(q).toMatch(/-"Omnicom"/);
+      expect(q).toMatch(/-"Fortune 500"/);
+      expect(q).toMatch(/-"global network"/);
+    }
+
+    // Brave limits respected and no hiring terms.
+    expect(plan.platform_sequence.every(item => item.query_validation.valid)).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.chars <= 400)).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.words <= 50)).toBe(true);
+    expect(queryText).not.toMatch(/sales executive|business development|account manager|hiring|careers|linkedin\.com\/jobs|jobstreet|hiredly/i);
+  });
+
+  it('expands SG vertical-first queries with locality + global-brand negatives', () => {
+    const sgIcp = {
+      active_industries: ['marketing agency', 'B2B corporate training'],
+      verticals: ['marketing agency', 'B2B corporate training'],
+      geo: ['SG'],
+    };
+    const plan = platformPlan.buildPlatformPlan({
+      clientId: 'client-1',
+      icp: sgIcp,
+      objective: 'SG SME-biased vertical-first discovery',
+      requestedCount: 5,
+      maxPaidQueries: 5,
+      mode: 'vertical_first',
+    });
+    const queryText = plan.platform_sequence.map(item => item.query).join('\n');
+    expect(queryText).toMatch(/Singapore/);
+    expect(queryText).toMatch(/-"WPP"/);
+    expect(plan.platform_sequence.every(item => item.query_validation.valid)).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.chars <= 400)).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.words <= 50)).toBe(true);
+  });
+
   it('defaults empty-signals vertical ICPs to vertical-first instead of silent hiring fallback', () => {
     const plan = platformPlan.buildPlatformPlan({
       clientId: 'client-1',
