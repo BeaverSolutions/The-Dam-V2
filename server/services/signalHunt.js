@@ -31,6 +31,7 @@ const platformRegistry = require('./platformRegistry');
 const {
   resolveCompanyEvidence,
   resolveCompanyIdentity,
+  detectEnterpriseOrGlobalMarkers,
   isAggregatorUrl,
   companyNameFromDomain,
 } = require('./companyEvidenceResolver');
@@ -2382,6 +2383,30 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
     }
     stageStats.icp_passed++;
     platformFunnelTracker.recordVerticalVerified(signal);
+
+    // Cheap pre-lookup gate: catch global/enterprise giants on free homepage
+    // text BEFORE consuming paid decision-maker budget. Vertical-first
+    // homepages frequently advertise "global", "offices in N countries",
+    // "Fortune 500" — the ICP gate would reject them anyway, but only AFTER
+    // a paid lookup. Doing this here costs zero paid units.
+    const enterpriseMarkers = detectEnterpriseOrGlobalMarkers(
+      [signal.company_description, signal.signal_summary, signal.raw_snippet]
+        .filter(Boolean)
+        .join(' ')
+    );
+    if (enterpriseMarkers.matches.length > 0) {
+      await logSignalHuntMiss(clientId, {
+        signal,
+        blocker: 'enterprise_or_global_pre_lookup',
+        reason: 'enterprise_or_global_marker_matched',
+        metadata: {
+          matched_markers: enterpriseMarkers.matches.map(m => m.marker),
+          evidence_samples: enterpriseMarkers.matches.map(m => m.evidence),
+        },
+      });
+      console.log(`[signalHunt] Pre-lookup enterprise/global block on ${signal.company}: ${enterpriseMarkers.matches.map(m => m.marker).join(', ')}`);
+      continue;
+    }
 
     await assertLlmBudgetOpen(clientId);
     if (!consumePaidQuery(1)) {

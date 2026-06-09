@@ -364,6 +364,44 @@ async function resolveCompanyIdentity(signal = {}, {
   return value;
 }
 
+// Deterministic enterprise / global markers on free homepage text. Designed
+// to run BEFORE any paid decision-maker lookup so giants are killed for free
+// instead of burning budget the ICP gate would later reject anyway. Only
+// fires on high-confidence markers — false positives bias toward rejection
+// (acceptable: real MY/SG SMEs that splash "global ambition" copy on their
+// homepage are rare; the user can edit markers if a real SME gets caught).
+const GLOBAL_HUB_CITIES = /(london|new york|nyc|paris|tokyo|sydney|berlin|amsterdam|chicago|san francisco|los angeles|toronto|dublin|stockholm|zurich|geneva|hong kong|shanghai|beijing|delhi|mumbai|bangalore|bengaluru|hyderabad)/i;
+const ENTERPRISE_GLOBAL_PATTERNS = [
+  ['offices in N+ countries', /\b(?:offices?|presence|operations?|teams?|hubs?)\s+(?:in|across)\s+(?:\w+\s+)?(\d{1,3})\+?\s+(countries|markets|cities|locations)\b/i],
+  ['global network/agency/firm', /\b(global|worldwide|international)\s+(?:\w+\s+){0,2}(network|leader|provider|agency|agencies|firm|firms|consultancy|consultancies|brand|brands|company|companies|organi[sz]ation)\b/i],
+  ['worldwide presence', /\b(worldwide|across the globe|around the world)\s+(presence|footprint|reach|operations|clients?|customers?)\b/i],
+  ['Fortune 500/1000', /\bFortune\s*(?:500|1000)\b/i],
+  ['team of 100+', /\b(?:team|workforce|staff|employees?)\s+of\s+(\d{3,5})\+?\b/i],
+  ['100+ employees', /\b(\d{3,5})\+?\s+(?:employees|professionals|consultants|specialists|people)\b/i],
+  ['part of <global group>', /\b(?:part of|a member of|company of|brand of)\s+(?:the\s+)?(WPP|Publicis|Dentsu|Omnicom|IPG|Interpublic|Havas|Stagwell|S4 Capital|Edelman|Burson|Hill\s*\+?\s*Knowlton)\b/i],
+];
+
+function detectEnterpriseOrGlobalMarkers(text = '') {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return { matches: [] };
+  const matches = [];
+  for (const [label, pattern] of ENTERPRISE_GLOBAL_PATTERNS) {
+    const m = normalized.match(pattern);
+    if (!m) continue;
+    // Threshold filters for numeric markers.
+    if (label === 'offices in N+ countries' && Number(m[1]) < 5) continue;
+    if (label === 'team of 100+' && Number(m[1]) < 100) continue;
+    if (label === '100+ employees' && Number(m[1]) < 100) continue;
+    matches.push({ marker: label, evidence: m[0].slice(0, 120) });
+  }
+  // Non-MY/SG global HQ marker (separate so we can tag it distinctly).
+  const hq = normalized.match(/\b(?:headquartered|head\s*offices?|global\s+hq)\s+(?:in|at)\s+([A-Za-z][A-Za-z ,]{2,40})/i);
+  if (hq && GLOBAL_HUB_CITIES.test(hq[1]) && !/malaysia|singapore|kuala lumpur|kl\b|petaling jaya|cyberjaya|johor|penang/i.test(hq[1])) {
+    matches.push({ marker: 'headquartered in non-MY/SG global hub', evidence: hq[0].slice(0, 120) });
+  }
+  return { matches };
+}
+
 function clearCompanyEvidenceCache() {
   evidenceCache.clear();
   identityCache.clear();
@@ -372,6 +410,7 @@ function clearCompanyEvidenceCache() {
 module.exports = {
   resolveCompanyEvidence,
   resolveCompanyIdentity,
+  detectEnterpriseOrGlobalMarkers,
   isAggregatorUrl,
   companyNameFromDomain,
   companyNameFromHtml,
@@ -386,5 +425,6 @@ module.exports = {
     isAggregatorUrl,
     companyNameFromDomain,
     companyNameFromHtml,
+    detectEnterpriseOrGlobalMarkers,
   },
 };

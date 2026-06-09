@@ -844,6 +844,18 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
     expect(signalConfig.max_results_per_query).toBeLessThan(signalHunt._test.MAX_VERTICAL_RESULTS_PER_QUERY);
   });
 
+  it('runs the cheap enterprise/global marker check BEFORE consuming paid decision-maker budget', () => {
+    const runStart = src.indexOf('async function runSignalHunt');
+    const icpPassedIdx = src.indexOf('stageStats.icp_passed++', runStart);
+    const markerCheckIdx = src.indexOf('detectEnterpriseOrGlobalMarkers', runStart);
+    const consumeForLookupIdx = src.indexOf("'paid_query_budget_exhausted_before_decision_maker_lookup'", runStart);
+    expect(icpPassedIdx).toBeGreaterThan(runStart);
+    expect(markerCheckIdx).toBeGreaterThan(icpPassedIdx);
+    expect(markerCheckIdx).toBeLessThan(consumeForLookupIdx);
+    expect(src).toContain('enterprise_or_global_pre_lookup');
+    expect(src).toContain('enterprise_or_global_marker_matched');
+  });
+
   it('widens the candidate loop for vertical-first runs so gate-passing SMEs are not truncated', () => {
     // Source-level assertion: the candidate loop slice is widened only when
     // verticalFirstExecution is true.
