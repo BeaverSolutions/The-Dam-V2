@@ -2419,6 +2419,12 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     // pending Hunter retry. Pre-tiering leads (NULL) treated as Tier B if they
     // have linkedin and Tier-A-eligible if they have a non-pattern_unknown email
     // — strict tier filter keeps the picker honest even if backfill missed a row.
+    // The picker must apply the same "no existing message" filter the draw uses
+    // (line ~2617). Otherwise the picker counts pool-existing leads that the draw
+    // will skip, chooses email channel on a phantom pool, and falls to cold
+    // research that's gated by trusted_platform_strategy. Observed 2026-06-10:
+    // 11 Tier A leads counted as "email_ready" but all 11 had existing messages,
+    // so draw returned 0 and kickoff blocked at cold_research_fallback.
     const { rows: poolCounts } = await pool.query(
       `SELECT
          COUNT(*) FILTER (WHERE lead_tier = 'A' AND email IS NOT NULL AND email <> '') AS email_ready,
@@ -2429,7 +2435,12 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
          AND status = 'new'
          AND deleted_at IS NULL
          ${leadSelectionFeedbackExclusionSql('leads')}
-         ${currentSignalPackageEligibilitySql('leads')}`,
+         ${currentSignalPackageEligibilitySql('leads')}
+         AND NOT EXISTS (
+           SELECT 1 FROM messages m
+           WHERE m.lead_id = leads.id AND m.client_id = leads.client_id
+             AND m.status <> 'deleted'
+         )`,
       [clientId]
     );
     const poolEmailReady   = parseInt(poolCounts[0].email_ready) || 0;
