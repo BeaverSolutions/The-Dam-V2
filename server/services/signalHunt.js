@@ -2610,6 +2610,38 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       }
     }
 
+    // signal.company is now canonical (vertical-first identity resolver or
+    // signal-first company evidence resolver). Skip duplicates here so we
+    // don't burn the decision-maker lookup + Anymail/Icypeas/Snov/Hunter/
+    // MillionVerifier waterfall re-enriching a lead already in the pool.
+    if (signal.company) {
+      const existing = await pool.query(
+        `SELECT id FROM leads
+         WHERE client_id = $1
+           AND lower(company) = lower($2)
+           AND deleted_at IS NULL
+         LIMIT 1`,
+        [clientId, signal.company]
+      );
+      if (existing.rows.length > 0) {
+        stageStats.duplicate_company_pre_enrichment = (stageStats.duplicate_company_pre_enrichment || 0) + 1;
+        await logsService.createLog(clientId, {
+          agent: 'research_beaver',
+          action: 'signal_lead_duplicate_skipped',
+          target_type: 'lead',
+          target_id: existing.rows[0].id,
+          metadata: {
+            source: 'signal_hunt',
+            stage: 'pre_enrichment',
+            lead_company: signal.company,
+            signal_id: signal.signal_id || null,
+          },
+        }).catch(() => {});
+        console.log(`[signalHunt] Pre-enrichment dedup skip: ${signal.company} already in pool`);
+        continue;
+      }
+    }
+
     // ── Decision-maker. Use the one Research Beaver read off the page (free,
     // no extra paid query); otherwise fall back to the paid lookup. ──────────
     let person = llmDecisionMaker;
