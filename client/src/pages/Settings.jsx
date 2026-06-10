@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Mail, CheckCircle, XCircle, Search, Save, Eye, EyeOff, Send, AtSign, Calendar, MessageSquare, CreditCard } from 'lucide-react';
+import { Mail, CheckCircle, XCircle, Search, Save, Eye, EyeOff, Send, AtSign, Calendar, MessageSquare, CreditCard, Brain } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { getUser } from '../utils/auth';
 
@@ -19,7 +19,7 @@ export default function Settings() {
   const { request } = useApi();
   const user = getUser();
 
-  const [integrations, setIntegrations] = useState({ gmail: { connected: false }, agentmail: { connected: false }, apollo: { connected: false }, hunter: { connected: false }, brave: { connected: false } });
+  const [integrations, setIntegrations] = useState({ gmail: { connected: false }, agentmail: { connected: false }, apollo: { connected: false }, hunter: { connected: false }, brave: { connected: false }, llm: { connected: false, tenant_key: false, platform_fallback: false, provider: 'openai', label: 'Not configured' } });
   const [intLoading, setIntLoading] = useState(true);
 
   const [icp, setIcp] = useState({ industries: '', company_size: '', geographies: '', job_titles: '' });
@@ -62,6 +62,14 @@ export default function Settings() {
   const [braveSaving, setBraveSaving] = useState(false);
   const [braveSaved, setBraveSaved] = useState(false);
   const [braveError, setBraveError] = useState('');
+
+  // LLM BYOK state
+  const [llmProvider, setLlmProvider] = useState('openai');
+  const [llmKey, setLlmKey] = useState('');
+  const [llmKeyVisible, setLlmKeyVisible] = useState(false);
+  const [llmSaving, setLlmSaving] = useState(false);
+  const [llmSaved, setLlmSaved] = useState(false);
+  const [llmError, setLlmError] = useState('');
 
   // Gmail disconnect
   const [gmailDisconnecting, setGmailDisconnecting] = useState(false);
@@ -185,13 +193,18 @@ export default function Settings() {
   const loadIntegrations = () => {
     request('/integrations/status')
       .then(res => {
-        if (res?.data) {
-          setIntegrations(res.data);
-          if (res.data.calendly) setCalendlyInfo(res.data.calendly);
-          if (res.data.google_calendar) setCalendarInfo(res.data.google_calendar);
-          if (res.data.whatsapp) setWhatsappInfo(res.data.whatsapp);
-        }
-      })
+    if (res?.data) {
+      setIntegrations(res.data);
+      if (res.data.calendly) setCalendlyInfo(res.data.calendly);
+      if (res.data.google_calendar) setCalendarInfo(res.data.google_calendar);
+      if (res.data.whatsapp) setWhatsappInfo(res.data.whatsapp);
+      if (res.data.llm?.provider) {
+        setLlmProvider(res.data.llm.provider);
+      } else if (res.data.llm?.connected === false) {
+        setLlmProvider('openai');
+      }
+    }
+  })
       .catch(() => {})
       .finally(() => setIntLoading(false));
   };
@@ -416,6 +429,41 @@ export default function Settings() {
     } catch {}
   };
 
+  const handleSaveLlmKey = async () => {
+    if (!llmKey.trim()) return;
+    setLlmSaving(true);
+    setLlmError('');
+    try {
+      await request('/integrations/llm/key', {
+        method: 'POST',
+        body: JSON.stringify({ provider: llmProvider, api_key: llmKey.trim() }),
+      });
+      setLlmSaved(true);
+      setLlmKey('');
+      setTimeout(() => setLlmSaved(false), 2500);
+      loadIntegrations();
+    } catch (err) {
+      setLlmError(err?.message || 'Failed to save key');
+    }
+    setLlmSaving(false);
+  };
+
+  const handleDisconnectLlm = async () => {
+    try {
+      await request('/integrations/llm/key', { method: 'DELETE' });
+      setIntegrations(prev => ({
+        ...prev,
+        llm: {
+          connected: false,
+          tenant_key: false,
+          platform_fallback: false,
+          provider: llmProvider,
+          label: 'Not configured',
+        },
+      }));
+    } catch {}
+  };
+
   const handleSaveICP = async () => {
     setIcpSaving(true);
     try {
@@ -448,6 +496,7 @@ export default function Settings() {
   const apolloInfo = integrations.apollo;
   const hunterInfo = integrations.hunter;
   const braveInfo = integrations.brave;
+  const llmInfo = integrations.llm;
   const selectedBillingOption = billing?.plan_options?.find(option => option.term === billingTerm);
 
   return (
@@ -886,6 +935,84 @@ export default function Settings() {
                     </button>
                   </div>
                   {braveError && <div style={{ fontSize: '0.75rem', color: 'var(--orange)', marginTop: '0.375rem' }}>{braveError}</div>}
+                </div>
+              )}
+            </div>
+
+            {/* LLM BYOK (OpenAI / Anthropic) */}
+            <div style={{ padding: '0.875rem 0', borderTop: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: llmInfo?.connected ? '0' : '0.875rem' }}>
+                <div style={{ width: 36, height: 36, borderRadius: 'var(--radius)', background: 'var(--bg)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <Brain size={18} style={{ color: llmInfo?.connected ? 'var(--lime)' : 'var(--text-muted)' }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 500, fontSize: '0.875rem' }}>LLM BYOK</div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
+                    {llmInfo?.connected
+                      ? `Provider: ${llmInfo.provider || llmProvider} ${llmInfo.tenant_key ? '(tenant key)' : llmInfo.platform_fallback ? '(Beaver platform)' : ''}`
+                      : 'Set a tenant-owned OpenAI or Anthropic key for LLM calls. External tenants cannot use platform keys.'}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem' }}>
+                    {llmInfo?.connected
+                      ? <><CheckCircle size={13} style={{ color: 'var(--lime)' }} /> <span style={{ color: 'var(--lime)' }}>{llmInfo.label || 'Connected'}</span></>
+                      : <><XCircle size={13} style={{ color: 'var(--orange)' }} /> <span style={{ color: 'var(--orange)' }}>{llmInfo?.label || 'Not configured'}</span></>
+                    }
+                  </div>
+                  {llmInfo?.connected && llmInfo?.tenant_key && (
+                    <button
+                      className="btn btn-secondary"
+                      style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem', color: 'var(--orange)', borderColor: 'var(--orange)' }}
+                      onClick={handleDisconnectLlm}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {!llmInfo?.connected && (
+                <div style={{ paddingLeft: 52 }}>
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem' }}>
+                    <select
+                      className="form-input"
+                      value={llmProvider}
+                      onChange={e => setLlmProvider(e.target.value)}
+                      style={{ maxWidth: 160, fontSize: '0.875rem' }}
+                    >
+                      <option value="openai">OpenAI</option>
+                      <option value="anthropic">Anthropic</option>
+                    </select>
+                    <button
+                      className="btn btn-primary"
+                      style={{ fontSize: '0.75rem', padding: '0.45rem 0.875rem', whiteSpace: 'nowrap' }}
+                      onClick={handleSaveLlmKey}
+                      disabled={llmSaving || !llmKey.trim()}
+                    >
+                      {llmSaving ? 'Saving…' : llmSaved ? '✓ Saved' : 'Save Key'}
+                    </button>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <div style={{ position: 'relative', flex: 1 }}>
+                      <input
+                        className="form-input"
+                        type={llmKeyVisible ? 'text' : 'password'}
+                        placeholder="Paste provider API key…"
+                        value={llmKey}
+                        onChange={e => setLlmKey(e.target.value)}
+                        style={{ paddingRight: '2.5rem', fontSize: '0.875rem' }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setLlmKeyVisible(v => !v)}
+                        style={{ position: 'absolute', right: '0.6rem', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 0, display: 'flex', alignItems: 'center' }}
+                      >
+                        {llmKeyVisible ? <EyeOff size={14} /> : <Eye size={14} />}
+                      </button>
+                    </div>
+                  </div>
+                  {llmError && <div style={{ fontSize: '0.75rem', color: 'var(--orange)', marginTop: '0.375rem' }}>{llmError}</div>}
                 </div>
               )}
             </div>

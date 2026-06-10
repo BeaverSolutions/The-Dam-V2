@@ -28,15 +28,20 @@ const { resolveTenantAwarePrompt } = require('../tenantPromptResolver');
 
 const REQUEST_TIMEOUT_MS = Number(process.env.OPENAI_REQUEST_TIMEOUT_MS) || 60_000;
 
-let client;
-try {
-  client = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-    timeout: REQUEST_TIMEOUT_MS,
-    maxRetries: 2,
-  });
-} catch (err) {
-  console.warn('[openai] Failed to initialise OpenAI client:', err.message);
+function createOpenAIClient(apiKey) {
+  const key = String(apiKey || '').trim();
+  if (!key) return null;
+
+  try {
+    return new OpenAI({
+      apiKey: key,
+      timeout: REQUEST_TIMEOUT_MS,
+      maxRetries: 2,
+    });
+  } catch (err) {
+    console.warn('[openai] Failed to initialise OpenAI client:', err.message);
+    return null;
+  }
 }
 
 // ─── Model mapping ──────────────────────────────────────────────────────────
@@ -108,7 +113,8 @@ async function enforceBudget(clientId, agentKey) {
  * Single-shot agent call. Mirrors claude.js callAgent — returns parsed JSON
  * (or { raw } on parse failure).
  */
-async function callAgentOpenAI(agentKey, userMessage, context = {}) {
+async function callAgentOpenAI(agentKey, userMessage, context = {}, apiKey = null) {
+  const client = createOpenAIClient(apiKey || process.env.OPENAI_API_KEY);
   if (!client) throw new Error('OpenAI client not initialised (OPENAI_API_KEY missing?)');
 
   const agent = AGENTS[agentKey];
@@ -174,7 +180,8 @@ async function callAgentOpenAI(agentKey, userMessage, context = {}) {
  * whole loop in OpenAI's native function-calling format and returns
  * { text, toolCalls, iterations, stop_reason }.
  */
-async function callAgentWithToolsOpenAI(agentKey, userMessage, tools, toolHandler, context = {}) {
+async function callAgentWithToolsOpenAI(agentKey, userMessage, tools, toolHandler, context = {}, apiKey = null) {
+  const client = createOpenAIClient(apiKey || process.env.OPENAI_API_KEY);
   if (!client) throw new Error('OpenAI client not initialised (OPENAI_API_KEY missing?)');
   if (!Array.isArray(tools) || tools.length === 0) throw new Error('callAgentWithTools requires a non-empty tools array');
   if (typeof toolHandler !== 'function') throw new Error('callAgentWithTools requires a toolHandler function');

@@ -11,6 +11,7 @@ const apolloService = require('../services/apollo');
 const agentmailService = require('../services/agentmail');
 const hunterService = require('../services/hunter');
 const braveService = require('../services/brave');
+const llmConfig = require('../services/llmConfig');
 const secrets = require('../services/secrets');
 
 /* ─── Integration status ─────────────────────────────────── */
@@ -27,12 +28,13 @@ router.get('/status', async (req, res, next) => {
       encKeyOk = false;
     }
 
-    const [gmailConnected, calendarConnected, apolloKey, hunterKey, braveStatus, agentmailInbox, calendlyRow, whatsappRow] = await Promise.all([
+    const [gmailConnected, calendarConnected, apolloKey, hunterKey, braveStatus, llmStatus, agentmailInbox, calendlyRow, whatsappRow] = await Promise.all([
       gmailService.isConnected(req.clientId),
       googleCalendarService.isConnected(req.clientId),
       encKeyOk ? apolloService.getApiKey(req.clientId) : Promise.resolve(null),
       encKeyOk ? hunterService.getApiKey(req.clientId) : Promise.resolve(null),
       encKeyOk ? braveService.getStatus(req.clientId) : Promise.resolve({ connected: false, tenant_key: false, platform_fallback: false, label: 'Encryption key error' }),
+      encKeyOk ? llmConfig.getStatus(req.clientId) : Promise.resolve({ connected: false, tenant_key: false, platform_fallback: false, label: 'Encryption key error' }),
       agentmailOk ? agentmailService.getStoredInbox(req.clientId) : Promise.resolve(null),
       pool.query(
         `SELECT content FROM agent_memory WHERE client_id = $1 AND agent = 'system' AND key = 'calendly_url' LIMIT 1`,
@@ -90,6 +92,10 @@ router.get('/status', async (req, res, next) => {
         brave: {
           ...braveStatus,
           label: !encKeyOk ? 'Encryption key error' : braveStatus.label,
+        },
+        llm: {
+          ...llmStatus,
+          label: !encKeyOk ? 'Encryption key error' : llmStatus.label,
         },
         calendly: {
           connected: !!calendlyUrl,
@@ -516,6 +522,51 @@ router.delete('/brave/key', async (req, res, next) => {
     await braveService.deleteApiKey(req.clientId);
     await logsService.createLog(req.clientId, {
       agent: 'system', action: 'brave_key_removed', target_type: 'integration', metadata: {},
+    });
+    res.json({ data: { status: 'removed' } });
+  } catch (err) { next(err); }
+});
+
+/* ─── LLM BYOK (OpenAI / Anthropic) ───────────────────── */
+
+router.post('/llm/key',
+  [
+    body('provider').isIn(['openai', 'anthropic']),
+    body('api_key').isString().trim().notEmpty(),
+    validate,
+  ],
+  async (req, res, next) => {
+    try {
+      await llmConfig.setConfig(req.clientId, req.body.provider, req.body.api_key);
+      await logsService.createLog(req.clientId, {
+        agent: 'system', action: 'llm_key_saved', target_type: 'integration',
+        metadata: { provider: req.body.provider },
+      });
+      res.json({ data: { status: 'saved' } });
+    } catch (err) {
+      if (err.message?.includes('ENCRYPTION_KEY')) {
+        return res.status(500).json({ error: 'Server encryption key is misconfigured. Check ENCRYPTION_KEY env var.', code: 'ENCRYPTION_KEY_INVALID' });
+      }
+      if (err.code === 'LLM_PROVIDER_INVALID' || err.code === 'LLM_KEY_INVALID') {
+        return res.status(400).json({ error: err.message, code: err.code });
+      }
+      next(err);
+    }
+  }
+);
+
+router.get('/llm/status', async (req, res, next) => {
+  try {
+    const status = await llmConfig.getStatus(req.clientId);
+    res.json({ data: status });
+  } catch (err) { next(err); }
+});
+
+router.delete('/llm/key', async (req, res, next) => {
+  try {
+    await llmConfig.deleteConfig(req.clientId);
+    await logsService.createLog(req.clientId, {
+      agent: 'system', action: 'llm_key_removed', target_type: 'integration', metadata: {},
     });
     res.json({ data: { status: 'removed' } });
   } catch (err) { next(err); }

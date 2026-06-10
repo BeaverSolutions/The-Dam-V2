@@ -336,6 +336,33 @@ describe('onboarding readiness contracts', () => {
     expect(settingsSource).toContain("request('/integrations/brave/key', { method: 'DELETE'");
     expect(settingsSource).toContain('braveKeyVisible');
   });
+
+  it('LLM BYOK is tenant-scoped with no platform fallback for external tenants', () => {
+    const llmConfigSource = optionalService('llmConfig.js');
+    const integrationsSource = route('integrations.js');
+    const settingsSource = clientPage('Settings.jsx');
+
+    expect(llmConfigSource).toContain('tenant_key');
+    expect(llmConfigSource).toContain('platformEnvConfig');
+    expect(llmConfigSource).toContain('requireConfig');
+    expect(llmConfigSource).toContain('provider: normalizedProvider, key: normalizedKey');
+    expect(llmConfigSource).toContain('LLM_TENANT_KEY_MISSING');
+    expect(llmConfigSource).toContain('process.env.OPENAI_API_KEY');
+    expect(llmConfigSource).toContain("process.env.ANTHROPIC_API_KEY");
+
+    expect(integrationsSource).toContain("router.post('/llm/key'");
+    expect(integrationsSource).toContain("router.get('/llm/status'");
+    expect(integrationsSource).toContain("router.delete('/llm/key'");
+    expect(integrationsSource).toContain('action: \'llm_key_saved\'');
+    expect(integrationsSource).toContain('action: \'llm_key_removed\'');
+    expect(integrationsSource).toContain('llm:');
+    expect(integrationsSource).toContain('...llmStatus');
+
+    expect(settingsSource).toContain("request('/integrations/llm/key', {");
+    expect(settingsSource).toContain("method: 'POST'");
+    expect(settingsSource).toContain("method: 'DELETE'");
+    expect(settingsSource).toContain('llmProvider');
+  });
 });
 
 describe('auto-approval recovery contracts', () => {

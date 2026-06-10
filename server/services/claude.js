@@ -5,6 +5,8 @@ const { CLAUDE_MODEL, MAX_TOKENS, AGENTS } = require('../config/agents');
 const { checkBudget, logUsage, notifyBudgetExceeded, BudgetExceededError } = require('./budget');
 const { getCurrentClientId } = require('../middleware/clientContext');
 const { resolveTenantAwarePrompt } = require('./tenantPromptResolver');
+const llmConfig = require('./llmConfig');
+const { callAgentOpenAI, callAgentWithToolsOpenAI } = require('./llm/openai');
 
 // 30s ceiling on any Claude call. If a model is slow, we fail fast
 // rather than leaking a hanging HTTP connection that the background
@@ -40,13 +42,6 @@ function pickFallbackModel(model) {
   return null;
 }
 
-function selectedLLMProvider() {
-  const explicit = (process.env.LLM_PROVIDER || '').trim().toLowerCase();
-  if (explicit) return explicit;
-  if (process.env.OPENAI_API_KEY) return 'openai';
-  return 'anthropic';
-}
-
 function allowUnattributedLLM() {
   return process.env.ALLOW_UNATTRIBUTED_LLM === 'true' || process.env.NODE_ENV === 'test';
 }
@@ -56,6 +51,35 @@ function requireClientIdForLLM(agentKey) {
   err.code = 'LLM_CLIENT_ID_REQUIRED';
   err.status = 400;
   return err;
+}
+
+function selectedLLMProvider() {
+  const explicit = (process.env.LLM_PROVIDER || '').trim().toLowerCase();
+  if (explicit) return explicit;
+  if (process.env.OPENAI_API_KEY) return 'openai';
+  return 'anthropic';
+}
+
+async function resolveLLMConfig(agentKey, context = {}) {
+  const clientId = context?.clientId || getCurrentClientId() || null;
+
+  if (!clientId && !allowUnattributedLLM()) {
+    throw requireClientIdForLLM(agentKey);
+  }
+
+  if (!clientId) {
+    const platformConfig = llmConfig.platformEnvConfig() || {};
+
+    return {
+      ...platformConfig,
+      provider: platformConfig.provider || selectedLLMProvider(),
+      key: platformConfig.key || null,
+      tenant_key: false,
+      clientId: null,
+    };
+  }
+
+  return { ...(await llmConfig.requireConfig(clientId)), clientId };
 }
 
 // ─── Execution-mode suffix ─────────────────────────────────────
@@ -92,9 +116,11 @@ async function callAgent(agentKey, userMessage, context = {}) {
   // LLM provider switch: explicit LLM_PROVIDER wins; otherwise OPENAI_API_KEY
   // selects the OpenAI adapter. Lazy require so the OpenAI SDK only loads when
   // the provider is actually OpenAI.
-  if (selectedLLMProvider() === 'openai') {
-    return require('./llm/openai').callAgentOpenAI(agentKey, userMessage, context);
+  const resolved = await resolveLLMConfig(agentKey, context);
+  if (resolved.provider === 'openai') {
+    return callAgentOpenAI(agentKey, userMessage, context, resolved.key);
   }
+
   if (!client) throw new Error('Anthropic client not initialised');
 
   const agent = AGENTS[agentKey];
@@ -109,7 +135,7 @@ async function callAgent(agentKey, userMessage, context = {}) {
   // the prompt, which caused the Ranger to see raw UUIDs/metadata and reject
   // clean messages for "unfilled template variables." All context the agent
   // needs must be in the userMessage itself, not smuggled through this param.
-  const clientId = context?.clientId || getCurrentClientId() || null;
+  const clientId = resolved.clientId;
   const contextStr = '';
 
   // ─── Budget gate ───────────────────────────────────────────
@@ -235,8 +261,9 @@ async function callAgent(agentKey, userMessage, context = {}) {
  */
 async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, context = {}) {
   // LLM provider switch: see callAgent. OpenAI adapter owns its own tool loop.
-  if (selectedLLMProvider() === 'openai') {
-    return require('./llm/openai').callAgentWithToolsOpenAI(agentKey, userMessage, tools, toolHandler, context);
+  const resolved = await resolveLLMConfig(agentKey, context);
+  if (resolved.provider === 'openai') {
+    return callAgentWithToolsOpenAI(agentKey, userMessage, tools, toolHandler, context, resolved.key);
   }
   if (!client) throw new Error('Anthropic client not initialised');
   if (!Array.isArray(tools) || tools.length === 0) throw new Error('callAgentWithTools requires a non-empty tools array');
@@ -251,7 +278,7 @@ async function callAgentWithTools(agentKey, userMessage, tools, toolHandler, con
   // (e.g. Captain Beaver loading myclaw/*.md persona files). Falls back to the config prompt.
   // Override path skips token resolution (caller is fully responsible for content);
   // config-prompt path resolves {{OUTREACH_RULES}} / {{PROOF_NUMBERS}} from sales-rules/.
-  const clientId = context?.clientId || getCurrentClientId() || null;
+  const clientId = resolved.clientId;
 
   // Budget gate (reuse single-shot logic)
   if (!clientId && !allowUnattributedLLM()) {
