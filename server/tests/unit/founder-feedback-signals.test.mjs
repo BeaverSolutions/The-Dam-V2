@@ -52,4 +52,11 @@ describe('founder feedback signal classifier', () => {
     expect(sql).toContain('vertical_directory');
     expect(sql).toContain('leading[[:space:]]+corporate[[:space:]]+training');
   });
+
+  it('accepts research_beaver_read leads as eligible when vertical-first verification exists', () => {
+    const sql = currentSignalPackageEligibilitySql('l');
+
+    expect(sql).toContain("'research_beaver_read'");
+    expect(sql).toContain('vertical_match');
+  });
 });

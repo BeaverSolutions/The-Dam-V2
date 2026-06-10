@@ -48,9 +48,14 @@ function currentSignalPackageEligibilitySql(leadAlias = 'l') {
   return `AND (
           COALESCE(${leadAlias}.source, '') <> 'signal_hunt'
           OR (
-            (${checked}) ? 'tenant_exclusions'
-            AND (${checked}) ? 'competitor_offers'
-            AND (${checked}) ? 'company_icp_evidence'
+            (
+              (
+                (${checked}) ? 'tenant_exclusions'
+                AND (${checked}) ? 'competitor_offers'
+                AND (${checked}) ? 'company_icp_evidence'
+              )
+              OR (${checked}) ? 'research_beaver_read'
+            )
             AND NULLIF(BTRIM((${fit})->>'vertical_match'), '') IS NOT NULL
             AND ${company} !~* '${directoryTitleCompanySql}'
             AND (
