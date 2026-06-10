@@ -99,8 +99,8 @@ function campaignTargetFromCommand(command) {
 }
 
 function minPaidQueriesForExternalTarget(target) {
-  const n = Math.max(1, Number(target) || 1);
-  return Math.max(4, n * 4);
+  const n = Math.max(0, Number(target) || 0);
+  return Math.max(0, (n * 2) + Math.min(2, n));
 }
 
 async function getRunCampaignPreflight(clientId, command) {
