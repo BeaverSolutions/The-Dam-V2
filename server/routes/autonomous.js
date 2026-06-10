@@ -93,10 +93,14 @@ function boundedChatSignalQueryCap(requestedLimit) {
   return Math.max(3, Math.min(20, (Math.ceil(n) * 3) + 2));
 }
 
-function boundedResearchProofQueryCap(requestedCap) {
+function boundedResearchProofQueryCap(requestedCap, discoveryMode = 'signal_first') {
+  // vertical_first spends ~2 queries per candidate on decision-maker lookup
+  // (homepage/team + linkedin/in) on top of discovery, so a 5-query cap
+  // exhausts mid-loop. signal_first does ~1 lookup per candidate, so 5 is fine.
+  const floor = discoveryMode === 'vertical_first' ? 12 : 5;
   const n = Number(requestedCap);
-  if (!Number.isFinite(n) || n <= 0) return 5;
-  return Math.max(5, Math.min(18, Math.floor(n)));
+  if (!Number.isFinite(n) || n <= 0) return floor;
+  return Math.max(floor, Math.min(18, Math.floor(n)));
 }
 
 function approvedPlatformPlanRequest(body = {}) {
@@ -1276,7 +1280,8 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
   }
 
   const proofLimit = 5;
-  const proofPaidQueryCap = boundedResearchProofQueryCap(req.body?.max_paid_queries);
+  const proofDiscoveryMode = req.body?.mode === 'vertical_first' ? 'vertical_first' : 'proof';
+  const proofPaidQueryCap = boundedResearchProofQueryCap(req.body?.max_paid_queries, proofDiscoveryMode === 'vertical_first' ? 'vertical_first' : 'signal_first');
   const proofCounts = async () => {
     const { rows: [row] } = await pool.query(
       `WITH bounds AS (
@@ -1323,7 +1328,6 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
       platformFunnelFromSignalHuntResult,
     } = require('../services/signalHunt');
     const { buildPlatformPlan, loadApprovedPlatformPlan } = require('../services/platformPlan');
-    const proofDiscoveryMode = req.body?.mode === 'vertical_first' ? 'vertical_first' : 'proof';
     const platformPlanPreview = buildPlatformPlan({
       clientId,
       icp,

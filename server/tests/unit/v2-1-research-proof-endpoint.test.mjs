@@ -18,7 +18,8 @@ describe('V2.1 research proof endpoint', () => {
 
     expect(body).toContain("router.post('/v2-1/research-proof', requireInternalKey");
     expect(body).toContain('const proofLimit = 5;');
-    expect(body).toContain('const proofPaidQueryCap = boundedResearchProofQueryCap(req.body?.max_paid_queries);');
+    expect(body).toContain('boundedResearchProofQueryCap(req.body?.max_paid_queries');
+    expect(body).toContain("proofDiscoveryMode = req.body?.mode === 'vertical_first'");
     expect(body).toContain('previewSignalHuntPlan');
     expect(body).toContain('buildPlatformPlan');
     expect(body).toContain('loadApprovedPlatformPlan');
