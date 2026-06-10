@@ -1323,13 +1323,14 @@ router.post('/v2-1/research-proof', requireInternalKey, async (req, res) => {
       platformFunnelFromSignalHuntResult,
     } = require('../services/signalHunt');
     const { buildPlatformPlan, loadApprovedPlatformPlan } = require('../services/platformPlan');
+    const proofDiscoveryMode = req.body?.mode === 'vertical_first' ? 'vertical_first' : 'proof';
     const platformPlanPreview = buildPlatformPlan({
       clientId,
       icp,
       objective: `V2.1 research proof: find ${proofLimit} in-ICP approval-ready leads`,
       requestedCount: proofLimit,
       maxPaidQueries: proofPaidQueryCap,
-      mode: 'proof',
+      mode: proofDiscoveryMode,
       allowedPlatforms: Array.isArray(req.body?.allowed_platforms) ? req.body.allowed_platforms : null,
     });
     const requestedPlatformPlan = approvedPlatformPlanRequest(req.body);
