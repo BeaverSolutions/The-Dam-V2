@@ -51,8 +51,9 @@ describe('Signal Hunt ICP plumbing', () => {
   });
 
   it('does not feed Director Signal Hunt from getMemory director/icp', () => {
-    const signalFirstStart = agents.indexOf('signal_first_started');
-    const signalFirstBlock = agents.slice(signalFirstStart - 900, agents.indexOf('diagnostics.signal_first_raw', signalFirstStart));
+    const signalFirstStart = agents.indexOf("const { runSignalHunt, saveSignalLeads");
+    const runSignalStart = agents.indexOf('runSignalHunt(clientId', signalFirstStart);
+    const signalFirstBlock = agents.slice(signalFirstStart, agents.indexOf('diagnostics.signal_first_raw', runSignalStart));
 
     expect(signalFirstBlock).toContain('loadIcpForSignalHunt');
     expect(signalFirstBlock).not.toContain("getMemory(clientId, 'director', 'icp')");

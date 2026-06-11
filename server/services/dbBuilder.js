@@ -463,7 +463,9 @@ async function saveLead(clientId, lead, searchQuery, enrichContext = null) {
 
 async function sourceLeads(clientId, deficit, config) {
   // Lazy-load to avoid circular requires at startup
-  const { runSignalHunt, saveSignalLeads } = require('./signalHunt');
+  const { runSignalHunt, saveSignalLeads, platformFunnelFromSignalHuntResult } = require('./signalHunt');
+  const { loadLatestApprovedPlatformPlan } = require('./platformPlan');
+  const { recordSignalHuntPlatformFunnel, updateStrategyStateFromPlan } = require('./platformYield');
   const researchModule = require('./research');
 
   // Load canonical tenant ICP, falling back to director memory when needed.
@@ -493,6 +495,15 @@ async function sourceLeads(clientId, deficit, config) {
     Math.min(envInt('DB_BUILDER_SIGNAL_FIRST_QUERY_CAP', 12), config.batch_size || 20)
   );
   const legacyResearchFallbackEnabled = process.env.DB_BUILDER_LEGACY_RESEARCH_FALLBACK_ENABLED === 'true';
+  const deficitPlatformPlan = await loadLatestApprovedPlatformPlan(clientId, {
+    discoveryMode: 'vertical_first',
+  }).catch(err => {
+    logger.warn({ msg: '[db-builder] approved platform plan lookup failed', clientId, err: err.message });
+    return null;
+  });
+  const effectiveSignalQueryCap = deficitPlatformPlan
+    ? Math.max(1, Math.floor(Number(deficitPlatformPlan.max_paid_queries || signalQueryCap) || signalQueryCap))
+    : signalQueryCap;
 
   // 2026-05-15: enrichContext was referenced by saveLead() below but never
   // defined in this scope — every cron batch threw ReferenceError, caught
@@ -516,15 +527,42 @@ async function sourceLeads(clientId, deficit, config) {
     }
 
     try {
-      const signalLeads = await runSignalHunt(clientId, {
-        maxLeads: config.batch_size,
-        icp: icpMemory,
-        maxPaidQueries: signalQueryCap,
-        plan_id: 'db_builder_deficit',
-      });
-      const savedSignalLeads = await saveSignalLeads(clientId, signalLeads);
-      const signalSaved = Array.isArray(savedSignalLeads) ? savedSignalLeads.length : 0;
-      totalSaved += signalSaved;
+      let signalLeads = [];
+      let savedSignalLeads = [];
+      let signalSaved = 0;
+      let platformYieldEvents = [];
+
+      if (deficitPlatformPlan) {
+        signalLeads = await runSignalHunt(clientId, {
+          maxLeads: config.batch_size,
+          icp: icpMemory,
+          maxPaidQueries: effectiveSignalQueryCap,
+          platformPlan: deficitPlatformPlan,
+          plan_id: deficitPlatformPlan.id || deficitPlatformPlan.plan_hash || 'db_builder_deficit',
+        });
+        savedSignalLeads = await saveSignalLeads(clientId, signalLeads);
+        signalSaved = Array.isArray(savedSignalLeads) ? savedSignalLeads.length : 0;
+        totalSaved += signalSaved;
+        platformYieldEvents = await recordSignalHuntPlatformFunnel(clientId, {
+          funnel: platformFunnelFromSignalHuntResult(signalLeads),
+          savedLeads: savedSignalLeads,
+          plan: deficitPlatformPlan,
+          mode: deficitPlatformPlan.mode || 'proof',
+          source: 'db_builder_deficit',
+          metadata: {
+            trigger: 'db_builder_deficit',
+          },
+        }).catch(err => {
+          logger.warn({ msg: '[db-builder] deficit platform yield record failed', err: err.message });
+          return [];
+        });
+        await updateStrategyStateFromPlan(clientId, deficitPlatformPlan, {
+          saved_leads: signalSaved,
+          approval_ready: signalSaved,
+          blocker: signalSaved > 0 ? null : 'zero_saved_leads',
+          trusted_by: 'db_builder_deficit',
+        }).catch(err => logger.warn({ msg: '[db-builder] deficit strategy state update failed', err: err.message }));
+      }
 
       await logsService.createLog(clientId, {
         agent: 'research_beaver',
@@ -533,11 +571,14 @@ async function sourceLeads(clientId, deficit, config) {
         metadata: {
           batch: i + 1,
           of: batchCount,
-          source: 'signal_hunt',
+          source: deficitPlatformPlan ? 'signal_hunt' : 'none',
           found: signalLeads.length,
           saved: signalSaved,
           save_stats: savedSignalLeads?.saveStats || null,
-          max_paid_queries: signalQueryCap,
+          max_paid_queries: effectiveSignalQueryCap,
+          platform_plan_id: deficitPlatformPlan?.id || null,
+          platform_plan_hash: deficitPlatformPlan?.plan_hash || null,
+          platform_yield_events: platformYieldEvents.map(row => row.id),
           legacy_research_fallback_enabled: legacyResearchFallbackEnabled,
         },
       });
@@ -550,12 +591,15 @@ async function sourceLeads(clientId, deficit, config) {
           metadata: {
             batch: i + 1,
             of: batchCount,
-            source: 'signal_hunt',
+            source: deficitPlatformPlan ? 'signal_hunt' : 'none',
             found: signalLeads.length,
             saved: signalSaved,
-            queries: signalQueryCap,
+            queries: deficitPlatformPlan ? effectiveSignalQueryCap : 0,
+            platform_plan_id: deficitPlatformPlan?.id || null,
+            platform_plan_hash: deficitPlatformPlan?.plan_hash || null,
+            platform_yield_events: platformYieldEvents.map(row => row.id),
             legacy_research_fallback_enabled: legacyResearchFallbackEnabled,
-            fallback_skipped_reason: signalSaved > 0 ? 'signal_first_saved' : 'legacy_research_disabled',
+            fallback_skipped_reason: signalSaved > 0 ? 'signal_first_saved' : (deficitPlatformPlan ? 'legacy_research_disabled' : 'platform_plan_required'),
           },
         });
 
@@ -564,6 +608,7 @@ async function sourceLeads(clientId, deficit, config) {
           batch: i + 1,
           found: signalLeads.length,
           saved: signalSaved,
+          platform_plan_id: deficitPlatformPlan?.id || null,
           legacy_research_fallback_enabled: legacyResearchFallbackEnabled,
         });
 
@@ -581,8 +626,10 @@ async function sourceLeads(clientId, deficit, config) {
         metadata: {
           batch: i + 1,
           of: batchCount,
-          reason: 'signal_first_saved_zero',
-          max_paid_queries: signalQueryCap,
+          reason: deficitPlatformPlan ? 'signal_first_saved_zero' : 'platform_plan_required',
+          max_paid_queries: effectiveSignalQueryCap,
+          platform_plan_id: deficitPlatformPlan?.id || null,
+          platform_plan_hash: deficitPlatformPlan?.plan_hash || null,
         },
       });
 

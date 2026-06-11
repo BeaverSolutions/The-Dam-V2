@@ -117,6 +117,11 @@ describe('P0 stabilization contracts', () => {
     expect(agents).toContain('required_paid_queries');
     expect(agents).toContain('signal_first_started');
     expect(agents).toContain('runSignalHunt');
+    expect(agents).toContain('loadLatestApprovedPlatformPlan');
+    expect(agents).toContain('platformPlan: executionPlatformPlan');
+    expect(agents).toContain('recordSignalHuntPlatformFunnel');
+    expect(agents).toContain("process.env.DIRECTOR_LEGACY_SIGNAL_FIRST_FALLBACK_ENABLED === 'true'");
+    expect(agents).toContain("err.code = 'platform_plan_required'");
     expect(agents).toContain('signal_first_terminal_block');
     expect(agents).toContain("const blocker = diagnostics.signal_first_error ? 'signal_first_failed' : 'signal_first_unfulfilled'");
     expect(agents.indexOf('signal_first_terminal_block')).toBeLessThan(
@@ -397,9 +402,14 @@ describe('P0 stabilization contracts', () => {
     const sourceBody = dbBuilder.slice(sourceStart, sourceEnd);
 
     expect(sourceBody).toContain("require('./signalHunt')");
+    expect(sourceBody).toContain("require('./platformPlan')");
+    expect(sourceBody).toContain('loadLatestApprovedPlatformPlan');
     expect(sourceBody).toContain('runSignalHunt(clientId');
+    expect(sourceBody).toContain('platformPlan: deficitPlatformPlan');
+    expect(sourceBody).toContain('recordSignalHuntPlatformFunnel');
     expect(sourceBody).toContain('saveSignalLeads(clientId');
     expect(sourceBody).toContain("'db_signal_first_complete'");
+    expect(sourceBody).toContain('platform_plan_required');
     expect(sourceBody).toContain("envInt('DB_BUILDER_SIGNAL_FIRST_QUERY_CAP', 12)");
     expect(sourceBody).toContain("process.env.DB_BUILDER_LEGACY_RESEARCH_FALLBACK_ENABLED === 'true'");
     expect(sourceBody.indexOf('runSignalHunt(clientId')).toBeLessThan(sourceBody.indexOf('researchModule.researchLeads(clientId'));

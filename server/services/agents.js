@@ -3941,6 +3941,16 @@ async function directorExecute(clientId, {
   allowPaidSignal = true,
   sourceMode = 'manual_campaign',
   maxPaidSignalQueries = null,
+  approved_platform_plan_id = null,
+  platform_plan_id = null,
+  approvedPlatformPlanId = null,
+  platformPlanId = null,
+  confirm_platform_plan_hash = null,
+  platform_plan_hash = null,
+  confirmPlatformPlanHash = null,
+  platformPlanHash = null,
+  confirm_plan_hash = null,
+  confirmPlanHash = null,
 }) {
   await logsService.createLog(clientId, {
     agent: 'director',
@@ -4527,6 +4537,9 @@ async function directorExecute(clientId, {
   );
   diagnostics.source_mode = sourceMode;
   diagnostics.max_paid_signal_queries = paidSignalCap;
+  const requestedPlatformPlanId = String(approved_platform_plan_id || approvedPlatformPlanId || platform_plan_id || platformPlanId || '').trim();
+  const requestedPlatformPlanHash = String(confirm_platform_plan_hash || confirmPlatformPlanHash || platform_plan_hash || platformPlanHash || confirm_plan_hash || confirmPlanHash || '').trim();
+  const legacyDirectorSignalFallbackEnabled = process.env.DIRECTOR_LEGACY_SIGNAL_FIRST_FALLBACK_ENABLED === 'true';
 
   // Step 0b: Signal-first sourcing. This is the primary cold-sourcing brain:
   // signal -> company -> decision-maker -> Sales/Enforcer. Generic profile
@@ -4582,14 +4595,43 @@ async function directorExecute(clientId, {
       };
     }
     const signalPlan = buildSignalFirstSourcingPlan(remainingTarget, campaignSearchBudgetRemaining);
-    const signalBudget = signalPlan.paidQueryBudget;
-    campaignSearchBudgetRemaining = Math.max(0, campaignSearchBudgetRemaining - signalBudget);
+    let signalBudget = signalPlan.paidQueryBudget;
     diagnostics.signal_first_budget_reserved = signalBudget;
     diagnostics.signal_first_requested = signalPlan.maxSignalLeads;
     diagnostics.signal_first_buffer_leads = signalPlan.bufferLeads;
     try {
-      const { runSignalHunt, saveSignalLeads } = require('./signalHunt');
+      const { runSignalHunt, saveSignalLeads, platformFunnelFromSignalHuntResult } = require('./signalHunt');
+      const { loadApprovedPlatformPlan, loadLatestApprovedPlatformPlan } = require('./platformPlan');
+      const { recordSignalHuntPlatformFunnel, updateStrategyStateFromPlan } = require('./platformYield');
       const signalIcp = await loadIcpForSignalHunt(clientId, { source: 'service' });
+      let executionPlatformPlan = null;
+      let executionPlatformPlanSource = null;
+      if (requestedPlatformPlanId || requestedPlatformPlanHash) {
+        executionPlatformPlan = await loadApprovedPlatformPlan(clientId, requestedPlatformPlanId, requestedPlatformPlanHash);
+        executionPlatformPlanSource = 'approved_platform_plan_request';
+      } else {
+        executionPlatformPlan = await loadLatestApprovedPlatformPlan(clientId, {
+          discoveryMode: 'vertical_first',
+        }).catch(err => {
+          console.warn('[director] latest approved platform plan lookup failed:', err.message);
+          return null;
+        });
+        executionPlatformPlanSource = executionPlatformPlan ? 'latest_approved_platform_plan' : null;
+      }
+      if (!executionPlatformPlan && !legacyDirectorSignalFallbackEnabled) {
+        const err = new Error('Approved platform plan is required before paid signal execution');
+        err.code = 'platform_plan_required';
+        throw err;
+      }
+      if (executionPlatformPlan) {
+        const planPaidQueryCap = Math.max(1, Math.floor(Number(executionPlatformPlan.max_paid_queries || signalBudget) || signalBudget));
+        signalBudget = Math.min(signalBudget, planPaidQueryCap);
+        diagnostics.signal_first_platform_plan_id = executionPlatformPlan.id || null;
+        diagnostics.signal_first_platform_plan_hash = executionPlatformPlan.plan_hash || null;
+        diagnostics.signal_first_platform_plan_source = executionPlatformPlanSource;
+        diagnostics.signal_first_budget_reserved = signalBudget;
+      }
+      campaignSearchBudgetRemaining = Math.max(0, campaignSearchBudgetRemaining - signalBudget);
       await logsService.createLog(clientId, {
         agent: 'director',
         action: 'signal_first_started',
@@ -4600,6 +4642,9 @@ async function directorExecute(clientId, {
           max_signal_leads: signalPlan.maxSignalLeads,
           buffer_leads: signalPlan.bufferLeads,
           source_mode: sourceMode,
+          platform_plan_id: executionPlatformPlan?.id || null,
+          platform_plan_hash: executionPlatformPlan?.plan_hash || null,
+          platform_plan_source: executionPlatformPlanSource,
         },
       }).catch(() => {});
 
@@ -4607,12 +4652,14 @@ async function directorExecute(clientId, {
         maxLeads: signalPlan.maxSignalLeads,
         icp: signalIcp,
         maxPaidQueries: signalBudget,
-        plan_id,
+        platformPlan: executionPlatformPlan,
+        plan_id: executionPlatformPlan?.id || plan_id,
       });
       diagnostics.signal_first_raw = Array.isArray(signalLeads) ? signalLeads.length : 0;
 
+      let savedSignalLeads = [];
       if (Array.isArray(signalLeads) && signalLeads.length > 0) {
-        const savedSignalLeads = await saveSignalLeads(clientId, signalLeads);
+        savedSignalLeads = await saveSignalLeads(clientId, signalLeads);
         signalLeadsCount = savedSignalLeads.length;
         diagnostics.signal_first_saved = signalLeadsCount;
         diagnostics.signal_first_save_stats = savedSignalLeads.saveStats || null;
@@ -4637,12 +4684,35 @@ async function directorExecute(clientId, {
           diagnostics.signal_first_approved = signalApprovedCount;
         }
       }
+      if (executionPlatformPlan) {
+        const platformYieldEvents = await recordSignalHuntPlatformFunnel(clientId, {
+          funnel: platformFunnelFromSignalHuntResult(signalLeads),
+          savedLeads: savedSignalLeads,
+          plan: executionPlatformPlan,
+          mode: executionPlatformPlan.mode || 'proof',
+          source: 'director_signal_first',
+          metadata: {
+            plan_id,
+            source_mode: sourceMode,
+          },
+        }).catch(err => {
+          console.warn('[director] signal-first platform yield record failed:', err.message);
+          return [];
+        });
+        diagnostics.signal_first_platform_yield_events = platformYieldEvents.map(row => row.id);
+        await updateStrategyStateFromPlan(clientId, executionPlatformPlan, {
+          saved_leads: signalLeadsCount,
+          approval_ready: signalApprovedCount,
+          blocker: signalApprovedCount > 0 ? null : 'zero_approval_ready_outputs',
+          trusted_by: 'director_signal_first',
+        }).catch(err => console.warn('[director] signal-first strategy state update failed:', err.message));
+      }
     } catch (err) {
       diagnostics.signal_first_error = err.message;
       await logsService.createLog(clientId, {
         agent: 'director',
         action: 'signal_first_failed',
-        metadata: { plan_id, error: err.message },
+        metadata: { plan_id, error: err.message, code: err.code || null },
       }).catch(() => {});
     }
   }
@@ -4827,6 +4897,16 @@ async function directorExecute(clientId, {
           allowPaidSignal,
           sourceMode,
           maxPaidSignalQueries,
+          approved_platform_plan_id,
+          platform_plan_id,
+          approvedPlatformPlanId,
+          platformPlanId,
+          confirm_platform_plan_hash,
+          platform_plan_hash,
+          confirmPlatformPlanHash,
+          platformPlanHash,
+          confirm_plan_hash,
+          confirmPlanHash,
         });
       }
 
@@ -6319,6 +6399,16 @@ async function directorExecute(clientId, {
         allowPaidSignal,
         sourceMode,
         maxPaidSignalQueries,
+        approved_platform_plan_id,
+        platform_plan_id,
+        approvedPlatformPlanId,
+        platformPlanId,
+        confirm_platform_plan_hash,
+        platform_plan_hash,
+        confirmPlatformPlanHash,
+        platformPlanHash,
+        confirm_plan_hash,
+        confirmPlanHash,
       });
     }
   }

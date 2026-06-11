@@ -40,6 +40,12 @@ describe('chat campaign control', () => {
     expect(autonomousSource).toContain('extra_daily_request');
     expect(autonomousSource).toContain('spend_cap');
     expect(autonomousSource).toContain('stop_rule');
+    expect(autonomousSource).toContain("process.env.CHAT_LEGACY_SIGNAL_HUNT_FALLBACK_ENABLED === 'true'");
+    expect(autonomousSource).toContain('signal_hunt_platform_plan_required');
+    expect(autonomousSource).toContain('platformPlan: signalHuntPlatformPlan');
+    expect(chatCampaignBody).toContain('const requestedPlatformPlan = approvedPlatformPlanRequest(req.body || {})');
+    expect(chatCampaignBody).toContain('approved_platform_plan_id: requestedPlatformPlan.planId || undefined');
+    expect(chatCampaignBody).toContain('confirm_platform_plan_hash: requestedPlatformPlan.planHash || undefined');
     expect(captainSource).toContain('platform_plan_preview_required');
     expect(captainSource).toContain('extra_daily_request');
     expect(captainSource).toContain('spend_cap');

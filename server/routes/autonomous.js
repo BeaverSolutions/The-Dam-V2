@@ -299,6 +299,7 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
         return 0;
       });
       const planId = uuidv4();
+      const requestedPlatformPlan = approvedPlatformPlanRequest(req.body || {});
 
       // Keep chat-triggered runs bounded. "Find 5" must not fall through to the
       // DB-pool default of 20 before Director sees the command.
@@ -384,13 +385,15 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
             directorExecute(client_id, {
               plan_id: planId,
               command: `DB-POOL BATCH: Process ${poolLeads.length} pre-researched leads from the lead pool. Draft outreach using any signal/angle data in their metadata.`,
-              use_existing_leads: poolLeads.map(l => l.id),
-              limit: poolLeads.length,
-              allowPaidSignal: false,
-              sourceMode: 'chat_db_pool',
-            }).catch(err => {
-              console.error(`[chat] DB pool directorExecute failed:`, err.message);
-            })
+            use_existing_leads: poolLeads.map(l => l.id),
+            limit: poolLeads.length,
+            allowPaidSignal: false,
+            sourceMode: 'chat_db_pool',
+            approved_platform_plan_id: requestedPlatformPlan.planId || undefined,
+            confirm_platform_plan_hash: requestedPlatformPlan.planHash || undefined,
+          }).catch(err => {
+            console.error(`[chat] DB pool directorExecute failed:`, err.message);
+          })
           );
         } else if (poolLeads.length > 0) {
           await logsService.createLog(client_id, {
@@ -419,6 +422,8 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
             command: effectiveCommand,
             limit: requestedLimit,
             maxPaidSignalQueries,
+            approved_platform_plan_id: requestedPlatformPlan.planId || undefined,
+            confirm_platform_plan_hash: requestedPlatformPlan.planHash || undefined,
           }).catch(err => {
             console.error(`[chat] directorExecute failed for plan ${planId}:`, err.message);
           })
@@ -459,10 +464,45 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
         5
       ));
       const signalPaidQueryCap = boundedChatSignalQueryCap(signalLimit);
+      const requestedSignalPlatformPlan = approvedPlatformPlanRequest(req.body || {});
+      const legacyChatSignalFallbackEnabled = process.env.CHAT_LEGACY_SIGNAL_HUNT_FALLBACK_ENABLED === 'true';
+      let signalHuntPlatformPlan = null;
+      let signalHuntPlatformPlanSource = null;
+      try {
+        const { loadApprovedPlatformPlan, loadLatestApprovedPlatformPlan } = require('../services/platformPlan');
+        if (requestedSignalPlatformPlan.planId || requestedSignalPlatformPlan.planHash) {
+          signalHuntPlatformPlan = await loadApprovedPlatformPlan(
+            client_id,
+            requestedSignalPlatformPlan.planId,
+            requestedSignalPlatformPlan.planHash
+          );
+          signalHuntPlatformPlanSource = 'approved_platform_plan_request';
+        } else {
+          signalHuntPlatformPlan = await loadLatestApprovedPlatformPlan(client_id, {
+            discoveryMode: 'vertical_first',
+          }).catch(err => {
+            console.warn('[chat] latest approved platform plan lookup failed:', err.message);
+            return null;
+          });
+          signalHuntPlatformPlanSource = signalHuntPlatformPlan ? 'latest_approved_platform_plan' : null;
+        }
+      } catch (err) {
+        return res.status(409).json({
+          ...response,
+          error: err.message,
+          code: String(err.code || 'APPROVED_PLATFORM_PLAN_REQUIRED').toUpperCase(),
+          data: {
+            mode: 'signal_hunt_platform_plan_required',
+            received_plan_id: requestedSignalPlatformPlan.planId,
+            received_plan_hash: requestedSignalPlatformPlan.planHash,
+          },
+        });
+      }
       const plan = await previewSignalHuntPlan(client_id, {
         icp,
         maxLeads: signalLimit,
         maxPaidQueries: signalPaidQueryCap,
+        platformPlan: signalHuntPlatformPlan,
       });
 
       if (req.body?.allow_paid_signal_hunt !== true) {
@@ -472,9 +512,24 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
           mode: 'signal_hunt_preview',
           max_limit: 5,
           required_flag: 'allow_paid_signal_hunt=true',
+          platform_plan_id: signalHuntPlatformPlan?.id || null,
+          platform_plan_hash: signalHuntPlatformPlan?.plan_hash || null,
+          platform_plan_source: signalHuntPlatformPlanSource,
           query_plan: plan,
         };
         return res.json(response);
+      }
+      if (!signalHuntPlatformPlan && !legacyChatSignalFallbackEnabled) {
+        return res.status(409).json({
+          ...response,
+          error: 'Approved platform plan is required before paid signal execution',
+          code: 'APPROVED_PLATFORM_PLAN_REQUIRED',
+          data: {
+            mode: 'signal_hunt_platform_plan_required',
+            required_execution_fields: ['approved_platform_plan_id', 'confirm_platform_plan_hash'],
+            query_plan: plan,
+          },
+        });
       }
 
       response.reply = `Running bounded signal hunt in the background. Target: ${signalLimit} Research-only lead${signalLimit === 1 ? '' : 's'}. No Sales, Enforcer, approvals, or send queue will be triggered from this chat branch.`;
@@ -483,6 +538,9 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
         mode: 'bounded_signal_hunt_research_only',
         requested_limit: signalLimit,
         paid_query_cap: signalPaidQueryCap,
+        platform_plan_id: signalHuntPlatformPlan?.id || null,
+        platform_plan_hash: signalHuntPlatformPlan?.plan_hash || null,
+        platform_plan_source: signalHuntPlatformPlanSource,
         query_plan: plan,
       };
 
@@ -493,10 +551,24 @@ router.post('/chat', requireInternalKey, async (req, res, next) => {
               maxLeads: signalLimit,
               icp,
               maxPaidQueries: signalPaidQueryCap,
+              platformPlan: signalHuntPlatformPlan,
+              plan_id: signalHuntPlatformPlan?.id || signalHuntPlatformPlan?.plan_hash || null,
             });
+            let saved = [];
             if (leads.length > 0) {
-              const saved = await saveSignalLeads(client_id, leads);
+              saved = await saveSignalLeads(client_id, leads);
               console.log(`[chat] Signal hunt saved ${saved.length} leads for ${client_id}`);
+            }
+            if (signalHuntPlatformPlan) {
+              const { platformFunnelFromSignalHuntResult } = require('../services/signalHunt');
+              const { recordSignalHuntPlatformFunnel } = require('../services/platformYield');
+              await recordSignalHuntPlatformFunnel(client_id, {
+                funnel: platformFunnelFromSignalHuntResult(leads),
+                savedLeads: saved,
+                plan: signalHuntPlatformPlan,
+                mode: signalHuntPlatformPlan.mode || 'proof',
+                source: 'chat_signal_hunt',
+              }).catch(err => console.warn('[chat] Signal hunt platform yield record failed:', err.message));
             }
           } catch (err) {
             console.error('[chat] Signal hunt background failed:', err.message);
