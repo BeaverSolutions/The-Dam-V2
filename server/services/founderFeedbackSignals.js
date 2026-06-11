@@ -38,6 +38,9 @@ function currentSignalPackageEligibilitySql(leadAlias = 'l') {
   const company = `COALESCE(${leadAlias}.company, '')`;
   const sourceLabel = `LOWER(CONCAT_WS(' ', ${leadAlias}.metadata->>'platform', ${leadAlias}.metadata->>'source_channel', ${leadAlias}.metadata->'signal_package'->>'platform', ${leadAlias}.metadata->'signal_package'->>'source_channel'))`;
   const companyWebsite = `COALESCE(${leadAlias}.metadata->'signal_package'->>'company_website', ${leadAlias}.metadata->>'company_website', ${leadAlias}.metadata->'signal_package'->>'website', ${leadAlias}.metadata->>'website', ${leadAlias}.metadata->'signal_package'->>'company_url', ${leadAlias}.metadata->>'company_url', '')`;
+  const evidenceLabel = `LOWER(CONCAT_WS(' ', ${leadAlias}.metadata->>'source_url', ${leadAlias}.metadata->>'url', ${leadAlias}.metadata->>'source', ${leadAlias}.metadata->'signal_package'->>'source_url', ${leadAlias}.metadata->'signal_package'->>'url', ${leadAlias}.metadata->'signal_package'->>'source'))`;
+  const aggregatorEvidenceSql = '(clutch|goodfirms|sortlist|designrush|techbehemoths|themanifest|topdevelopers|trustpilot|yelp|yellowpages|glassdoor|crunchbase|wikipedia)';
+  const concreteCompanyWebsite = `(NULLIF(BTRIM(${companyWebsite}), '') IS NOT NULL AND ${companyWebsite} !~* '${aggregatorEvidenceSql}' AND ${companyWebsite} !~* 'linkedin[.]com')`;
   const directoryTitleCompanySql =
     'leading[[:space:]]+corporate[[:space:]]+training|' +
     '(top[[:space:]]*[0-9]+|best|leading).*' +
@@ -60,7 +63,11 @@ function currentSignalPackageEligibilitySql(leadAlias = 'l') {
             AND ${company} !~* '${directoryTitleCompanySql}'
             AND (
               ${sourceLabel} !~* '(agency_directory|training_directory|vertical_directory)'
-              OR NULLIF(BTRIM(${companyWebsite}), '') IS NOT NULL
+              OR ${concreteCompanyWebsite}
+            )
+            AND NOT (
+              ${evidenceLabel} ~* '${aggregatorEvidenceSql}'
+              AND NOT ${concreteCompanyWebsite}
             )
           )
         )`;

@@ -69,6 +69,18 @@ function hasConfiguredBuyingSignals(icp = {}) {
   return signalCandidates(icp).some(signal => signal && signal.enabled !== false);
 }
 
+function hasVerticalFirstDiscoverySignal(icp = {}) {
+  return signalCandidates(icp)
+    .filter(signal => signal && signal.enabled !== false)
+    .some(signal => (
+      signal.family === 'vertical_first_discovery'
+      || signal.signal_family === 'vertical_first_discovery'
+      || signal.id === 'vertical_first_discovery'
+      || signal.signal_id === 'vertical_first_discovery'
+      || (Array.isArray(signal.source_channels) && signal.source_channels.includes('vertical_first'))
+    ));
+}
+
 function firstGeo(icp = {}) {
   const candidates = [
     ...list(icp.icp?.geographies),
@@ -138,12 +150,22 @@ function discoveryModeForRequest(mode) {
 
 function sourcingLaneDefaultForPlan(icp = {}, requestedMode = 'proof') {
   if (discoveryModeForRequest(requestedMode) === 'vertical_first') return null;
-  if (hasConfiguredBuyingSignals(icp)) return null;
-  if (configuredActiveIndustries(icp).length === 0) return null;
+  const industries = configuredActiveIndustries(icp);
+  if (industries.length === 0) return null;
+  if (hasVerticalFirstDiscoverySignal(icp)) return null;
+  if (hasConfiguredBuyingSignals(icp)) {
+    return {
+      from: 'signal_first',
+      to: 'vertical_first',
+      reason: 'tenant_vertical_icp_generic_signals',
+      active_industries: industries,
+    };
+  }
   return {
     from: 'signal_first',
     to: 'vertical_first',
     reason: 'tenant_buying_signals_empty_vertical_icp',
+    active_industries: industries,
   };
 }
 
@@ -351,6 +373,15 @@ function normalizeStoredJson(value, fallback) {
   }
 }
 
+function normalizePlatformPlanRow(row = {}) {
+  return {
+    ...row,
+    platform_sequence: array(normalizeStoredJson(row.platform_sequence, [])),
+    excluded_platforms: array(normalizeStoredJson(row.excluded_platforms, [])),
+    stop_rule: normalizeStoredJson(row.stop_rule, {}) || {},
+  };
+}
+
 async function loadApprovedPlatformPlan(clientId, planId, planHash) {
   if (!clientId || !planId || !planHash) {
     const err = new Error('Approved platform plan is required before paid signal execution');
@@ -378,19 +409,36 @@ async function loadApprovedPlatformPlan(clientId, planId, planHash) {
     throw err;
   }
 
-  const row = rows[0];
-  return {
-    ...row,
-    platform_sequence: array(normalizeStoredJson(row.platform_sequence, [])),
-    excluded_platforms: array(normalizeStoredJson(row.excluded_platforms, [])),
-    stop_rule: normalizeStoredJson(row.stop_rule, {}) || {},
-  };
+  return normalizePlatformPlanRow(rows[0]);
+}
+
+async function loadLatestApprovedPlatformPlan(clientId, { discoveryMode = null } = {}) {
+  if (!clientId) return null;
+  const { rows } = await pool.query(
+    `SELECT id, client_id, status, mode, objective, requested_count, max_paid_queries,
+            budget_cap_usd, platform_sequence, excluded_platforms, stop_rule,
+            query_set_hash, plan_hash, approved_by, approved_at, expires_at, created_at
+       FROM platform_plans
+      WHERE client_id = $1
+        AND status = 'approved'
+        AND expires_at > NOW()
+      ORDER BY approved_at DESC NULLS LAST, created_at DESC
+      LIMIT 10`,
+    [clientId]
+  );
+  const plans = rows.map(normalizePlatformPlanRow);
+  if (!discoveryMode) return plans[0] || null;
+  return plans.find(plan => (
+    Array.isArray(plan.platform_sequence)
+    && plan.platform_sequence.some(step => step.discovery_mode === discoveryMode)
+  )) || null;
 }
 
 module.exports = {
   buildPlatformPlan,
   hashPlan,
   loadApprovedPlatformPlan,
+  loadLatestApprovedPlatformPlan,
   stableJson,
   verifyPlatformPlanHash,
 };

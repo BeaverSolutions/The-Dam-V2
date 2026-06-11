@@ -1648,6 +1648,57 @@ async function loadTrustedPlatformStrategy(clientId, strategyKey = null) {
   return rows[0] || null;
 }
 
+function scheduledPlatformPlanPaidQueryCap(platformPlan, fallbackCap) {
+  const planCap = Number(platformPlan?.max_paid_queries);
+  if (Number.isFinite(planCap) && planCap > 0) return Math.floor(planCap);
+  const fallback = Number(fallbackCap);
+  if (!Number.isFinite(fallback) || fallback <= 0) return 0;
+  return boundedResearchProofQueryCap(fallback, 'vertical_first');
+}
+
+async function loadScheduledPlatformPlan(clientId, icp, {
+  target = 5,
+  maxPaidQueries = null,
+  trustedPlatformStrategy = null,
+} = {}) {
+  const {
+    buildPlatformPlan,
+    loadLatestApprovedPlatformPlan,
+  } = require('../services/platformPlan');
+  const approvedPlan = await loadLatestApprovedPlatformPlan(clientId, {
+    discoveryMode: 'vertical_first',
+  }).catch(err => {
+    logger.warn({ msg: '[kickoff] latest approved platform plan lookup failed', clientId, err: err.message });
+    return null;
+  });
+  if (approvedPlan) {
+    return {
+      plan: approvedPlan,
+      source: 'approved_platform_plan',
+      approved: true,
+    };
+  }
+  if (!trustedPlatformStrategy) return { plan: null, source: null, approved: false };
+
+  const paidCap = scheduledPlatformPlanPaidQueryCap(null, maxPaidQueries);
+  if (paidCap <= 0) return { plan: null, source: null, approved: false };
+
+  const trustedPlan = buildPlatformPlan({
+    clientId,
+    icp,
+    objective: `Trusted scheduled Research Beaver top-up for ${Math.min(Number(target) || 5, 20)} in-ICP leads`,
+    requestedCount: Math.min(Number(target) || 5, 20),
+    maxPaidQueries: paidCap,
+    mode: 'trusted_scheduled',
+  });
+
+  return {
+    plan: trustedPlan,
+    source: 'trusted_strategy_state',
+    approved: false,
+  };
+}
+
 async function runAutonomousKickoff(clientId) {
   if (_runningKickoffs.has(clientId)) {
     console.log(`[Autonomous] Client ${clientId} kickoff already running — skipping concurrent trigger`);
@@ -1686,10 +1737,10 @@ async function _runAutonomousKickoffInner(clientId, options = {}) {
     await logAction(clientId, 'director', 'trusted_platform_strategy_required', 'system', null, {
       ...metadata,
       context,
-      reason: trustedDailySpendEnabled ? 'no_trusted_strategy_above_threshold' : 'trusted_daily_spend_disabled',
+      reason: trustedDailySpendEnabled ? 'no_approved_plan_or_trusted_strategy_above_threshold' : 'approved_platform_plan_required',
       required_yield_pct: 30,
-      gate: 'platform_strategy_state',
-      required_status: 'trusted',
+      gate: 'approved_platform_plan_or_platform_strategy_state',
+      required_status: 'approved_plan_or_trusted_strategy',
       trusted_daily_spend_enabled: trustedDailySpendEnabled,
     });
     return {
@@ -2252,49 +2303,100 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
     gap: remainingGap, sent: sentAfterFollowUps, target, brief: brief.substring(0, 200),
   });
 
+  const scheduledPlatformStrategy = await loadScheduledPlatformPlan(clientId, icp, {
+    target: Math.min(remainingGap, 20),
+    maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+    trustedPlatformStrategy,
+  });
+  const scheduledPlatformPlan = scheduledPlatformStrategy.plan;
+  const scheduledPlatformPlanSource = scheduledPlatformStrategy.source;
+  const scheduledMaxPaidQueries = scheduledPlatformPlan
+    ? scheduledPlatformPlanPaidQueryCap(scheduledPlatformPlan, DAILY_WEB_LINKEDIN_SIGNAL_CAP)
+    : 0;
+
   // ── Phase C: optional signal prefill ─────────────────────────────────
   // Default OFF for daily kickoff: DB pool must execute before paid Signal
   // Hunt. Enable DAILY_KICKOFF_SIGNAL_PREFILL_ENABLED only when intentionally
-  // testing signal-first spend with explicit capacity and output monitoring.
+  // testing platform-plan-backed spend with explicit capacity and output monitoring.
   if (process.env.DAILY_KICKOFF_SIGNAL_PREFILL_ENABLED === 'true') {
-    try {
-      const { runSignalHunt, saveSignalLeads } = require('../services/signalHunt');
-      const signalTarget = Math.min(remainingGap, 30); // don't exceed daily gap
-      console.log(`[Autonomous] Phase C: Running signal hunt for up to ${signalTarget} P1/P2 leads`);
+    if (!scheduledPlatformPlan || scheduledMaxPaidQueries <= 0) {
+      console.warn('[Autonomous] Daily signal prefill enabled but no approved/trusted platform plan is available — skipping paid prefill.');
+      await logAction(clientId, 'director', 'daily_signal_prefill_skipped', 'system', null, {
+        reason: 'approved_platform_plan_required',
+        boundary: 'no_raw_signal_prefill_without_platform_plan',
+        cap: scheduledMaxPaidQueries,
+      }).catch(() => {});
+    } else {
+      try {
+        const { runSignalHunt, saveSignalLeads, platformFunnelFromSignalHuntResult } = require('../services/signalHunt');
+        const { recordSignalHuntPlatformFunnel, updateStrategyStateFromPlan } = require('../services/platformYield');
+        const signalTarget = Math.min(remainingGap, 30); // don't exceed daily gap
+        console.log(`[Autonomous] Phase C: Running platform-plan signal hunt for up to ${signalTarget} P1/P2 leads`);
 
-      const signalLeads = await runSignalHunt(clientId, {
-        maxLeads: signalTarget,
-        icp,
-        maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
-      });
-      if (signalLeads.length > 0) {
-        const saved = await saveSignalLeads(clientId, signalLeads);
-        console.log(`[Autonomous] Signal hunt saved ${saved.length} pre-qualified leads (P1=${saved.filter(l => l.signal_tier === 'P1').length})`);
+        const signalLeads = await runSignalHunt(clientId, {
+          maxLeads: signalTarget,
+          icp,
+          maxPaidQueries: scheduledMaxPaidQueries,
+          platformPlan: scheduledPlatformPlan,
+          plan_id: scheduledPlatformPlan.id || scheduledPlatformPlan.plan_hash || null,
+        });
+        const saved = signalLeads.length > 0 ? await saveSignalLeads(clientId, signalLeads) : [];
+        const platformYieldEvents = await recordSignalHuntPlatformFunnel(clientId, {
+          funnel: platformFunnelFromSignalHuntResult(signalLeads),
+          savedLeads: saved,
+          plan: scheduledPlatformPlan,
+          mode: scheduledPlatformPlan.mode || 'trusted_scheduled',
+          source: 'daily_kickoff_signal_prefill',
+          metadata: {
+            platform_plan_source: scheduledPlatformPlanSource,
+          },
+        }).catch(err => {
+          logger.warn({ msg: '[kickoff] signal prefill platform yield record failed', err: err.message });
+          return [];
+        });
+        await updateStrategyStateFromPlan(clientId, scheduledPlatformPlan, {
+          saved_leads: saved.length,
+          approval_ready: saved.length,
+          blocker: saved.length > 0 ? null : 'zero_saved_leads',
+          trusted_by: 'daily_kickoff_signal_prefill',
+        }).catch(err => logger.warn({ msg: '[kickoff] signal prefill strategy state update failed', err: err.message }));
+        await logAction(clientId, 'director', 'daily_signal_prefill_complete', 'system', null, {
+          found: signalLeads.length,
+          saved: saved.length,
+          cap: scheduledMaxPaidQueries,
+          platform_plan_id: scheduledPlatformPlan.id || null,
+          platform_plan_hash: scheduledPlatformPlan.plan_hash || null,
+          platform_plan_source: scheduledPlatformPlanSource || null,
+          platform_yield_events: platformYieldEvents.map(row => row.id),
+        }).catch(() => {});
+        if (signalLeads.length > 0) {
+          console.log(`[Autonomous] Signal hunt saved ${saved.length} pre-qualified leads (P1=${saved.filter(l => l.signal_tier === 'P1').length})`);
 
-        // Trigger directorExecute with signal-sourced leads already in the DB.
-        // The command is a signal-specific brief so Captain gates are naturally
-        // bypassed (leads were pre-qualified by signal detection).
-        if (saved.length > 0) {
-          const signalBrief = `SIGNAL-SOURCED BATCH: Process ${saved.length} pre-qualified leads already saved with P1/P2 signals. These are not cold — they have real buying triggers (hiring, funding, expansion). Draft outreach that references the specific signal for each lead. Do NOT re-run research, use the leads already saved today.`;
-          try {
-            await directorExecute(clientId, {
-              plan_id: uuidv4(),
-              command: signalBrief,
-              batchIndex: 0,
-              limit: saved.length,
-              use_existing_leads: saved.map(l => l.id), // NEW: hint to directorExecute
-              allowPaidSignal: false,
-              sourceMode: 'daily_signal_prefill_saved_leads',
-            });
-          } catch (err) {
-            console.warn('[Autonomous] Signal batch directorExecute failed:', err.message);
+          // Trigger directorExecute with signal-sourced leads already in the DB.
+          // The command is a signal-specific brief so Captain gates are naturally
+          // bypassed (leads were pre-qualified by signal detection).
+          if (saved.length > 0) {
+            const signalBrief = `SIGNAL-SOURCED BATCH: Process ${saved.length} pre-qualified leads already saved with P1/P2 signals. These are not cold — they have real buying triggers (hiring, funding, expansion). Draft outreach that references the specific signal for each lead. Do NOT re-run research, use the leads already saved today.`;
+            try {
+              await directorExecute(clientId, {
+                plan_id: uuidv4(),
+                command: signalBrief,
+                batchIndex: 0,
+                limit: saved.length,
+                use_existing_leads: saved.map(l => l.id), // NEW: hint to directorExecute
+                allowPaidSignal: false,
+                sourceMode: 'daily_signal_prefill_saved_leads',
+              });
+            } catch (err) {
+              console.warn('[Autonomous] Signal batch directorExecute failed:', err.message);
+            }
           }
+        } else {
+          console.log('[Autonomous] Signal hunt returned 0 leads — falling through to cold research');
         }
-      } else {
-        console.log('[Autonomous] Signal hunt returned 0 leads — falling through to cold research');
+      } catch (err) {
+        console.warn('[Autonomous] Signal hunt phase failed, continuing with cold research:', err.message);
       }
-    } catch (err) {
-      console.warn('[Autonomous] Signal hunt phase failed, continuing with cold research:', err.message);
     }
   } else {
     console.log('[Autonomous] Daily signal prefill disabled — DB pool executes first; Research Beaver top-up runs via DB Builder.');
@@ -2484,19 +2586,22 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
           batch, emailGap, linkedinGap, poolEmailReady, poolLinkedinOnly,
           context: 'pool_dry_on_demand_research', boundary: 'no_generic_paid_fallback',
         });
-        if (!webLinkedinTopupAttempted && DAILY_WEB_LINKEDIN_SIGNAL_CAP > 0) {
-          if (!trustedPlatformStrategy) {
+        if (!webLinkedinTopupAttempted && scheduledMaxPaidQueries > 0) {
+          if (!scheduledPlatformPlan) {
             return await blockUntrustedScheduledPlatformSpend('pool_dry_channel_target', {
               batch,
-              cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
-              maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+              cap: scheduledMaxPaidQueries,
+              maxPaidQueries: scheduledMaxPaidQueries,
             });
           }
           webLinkedinTopupAttempted = true;
           await logAction(clientId, 'director', 'web_linkedin_topup_attempted', 'system', null, {
             batch,
-            cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+            cap: scheduledMaxPaidQueries,
             context: 'pool_dry_channel_target',
+            platform_plan_id: scheduledPlatformPlan.id || null,
+            platform_plan_hash: scheduledPlatformPlan.plan_hash || null,
+            platform_plan_source: scheduledPlatformPlanSource || null,
           });
           let topupResult = null;
           try {
@@ -2504,34 +2609,45 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
             topupResult = await sourceLeadsOnDemand(clientId, {
               neededChannel: emailGap > 0 ? 'email' : 'linkedin',
               batchSize: Math.min(Math.max(emailGap, linkedinGap), BATCH_SIZE),
-              maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+              maxPaidQueries: scheduledMaxPaidQueries,
+              platformPlan: scheduledPlatformPlan,
+              platformPlanSource: scheduledPlatformPlanSource,
             });
           } catch (err) {
             console.warn('[Autonomous] Daily web/LinkedIn top-up failed before output verification:', err.message);
             await logAction(clientId, 'director', 'daily_web_linkedin_topup_failed', 'system', null, {
               batch,
-              cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+              cap: scheduledMaxPaidQueries,
               context: 'pool_dry_channel_target',
               error: err.message,
               boundary: 'verify_even_after_topup_failure',
+              platform_plan_id: scheduledPlatformPlan.id || null,
+              platform_plan_hash: scheduledPlatformPlan.plan_hash || null,
+              platform_plan_source: scheduledPlatformPlanSource || null,
             });
           }
           const topupSaved = Number(topupResult?.saved || topupResult?.leads_found || topupResult?.summary?.leads_found || 0);
           if (topupSaved === 0) {
             await logAction(clientId, 'director', 'daily_web_linkedin_topup_empty', 'system', null, {
               batch,
-              cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+              cap: scheduledMaxPaidQueries,
               reason: topupResult?.reason || topupResult?.summary?.blocker || topupResult?.summary?.reason || topupResult?.status || 'topup_failed_or_no_results',
               boundary: 'no_burn_zero_raw_stop',
+              platform_plan_id: scheduledPlatformPlan.id || null,
+              platform_plan_hash: scheduledPlatformPlan.plan_hash || null,
+              platform_plan_source: scheduledPlatformPlanSource || null,
             });
           } else {
             await logAction(clientId, 'director', 'daily_web_linkedin_topup_success', 'system', null, {
               batch,
-              cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+              cap: scheduledMaxPaidQueries,
               saved: topupSaved,
               health: topupResult?.health || null,
               reason: topupResult?.reason || topupResult?.status || 'topup_saved',
               boundary: 'topup_saved_retry_same_kickoff',
+              platform_plan_id: scheduledPlatformPlan.id || null,
+              platform_plan_hash: scheduledPlatformPlan.plan_hash || null,
+              platform_plan_source: scheduledPlatformPlanSource || null,
             });
             continue;
           }
@@ -2548,13 +2664,13 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
       }
 
       const neededChannel = emailGap > 0 ? 'email' : 'linkedin';
-      if (!trustedPlatformStrategy) {
+      if (!scheduledPlatformPlan || scheduledMaxPaidQueries <= 0) {
         return await blockUntrustedScheduledPlatformSpend('pool_dry_on_demand_research', {
           batch,
           neededChannel,
           attempt: poolDryResearchAttempts + 1,
-          cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
-          maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+          cap: scheduledMaxPaidQueries,
+          maxPaidQueries: scheduledMaxPaidQueries,
         });
       }
 
@@ -2562,6 +2678,9 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
       console.log(`[Autonomous] Triggering on-demand Research Beaver (attempt ${poolDryResearchAttempts}/${MAX_POOL_DRY_RESEARCH}, channel=${neededChannel})`);
       await logAction(clientId, 'director', 'pool_dry_triggering_research', 'system', null, {
         batch, neededChannel, attempt: poolDryResearchAttempts,
+        platform_plan_id: scheduledPlatformPlan.id || null,
+        platform_plan_hash: scheduledPlatformPlan.plan_hash || null,
+        platform_plan_source: scheduledPlatformPlanSource || null,
       });
 
       try {
@@ -2569,7 +2688,9 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         const result = await sourceLeadsOnDemand(clientId, {
           neededChannel,
           batchSize: BATCH_SIZE,
-          maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+          maxPaidQueries: scheduledMaxPaidQueries,
+          platformPlan: scheduledPlatformPlan,
+          platformPlanSource: scheduledPlatformPlanSource,
         });
 
         if (result.saved === 0) {
@@ -2705,20 +2826,21 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
             allowPaidSignal: false,
             sourceMode: 'daily_db_pool',
           });
-          usedDbPool = true;
           const dbDrafted = Number(dbResult?.summary?.messages_drafted || 0);
           const dbApproved = Number(dbResult?.summary?.approved || 0);
           const dbRejected = Number(dbResult?.summary?.rejected || 0);
           if (dbDrafted + dbApproved + dbRejected === 0) {
-            console.warn(`[Autonomous] DB pool batch ${batch} produced zero drafts/rejections — stopping to avoid no-output spend loop.`);
+            console.warn(`[Autonomous] DB pool batch ${batch} produced zero drafts/rejections — treating pool as unusable and falling through to the single capped Research Beaver top-up.`);
             await logAction(clientId, 'director', 'db_pool_zero_output_stop', 'system', null, {
               batch,
               pool_size: passingIds.length,
               draft_size: draftSize,
               summary: dbResult?.summary || null,
-              boundary: 'no_burn_zero_output',
+              boundary: 'bounded_platform_topup_after_unusable_pool',
             });
-            break;
+            usedDbPool = false;
+          } else {
+            usedDbPool = true;
           }
         } else {
           console.warn(`[Autonomous] After ICP audit, pool dropped below threshold (${passingIds.length} passing). Falling back to cold research.`);
@@ -2757,18 +2879,21 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         });
         break;
       }
-      if (!trustedPlatformStrategy) {
+      if (!scheduledPlatformPlan || scheduledMaxPaidQueries <= 0) {
         return await blockUntrustedScheduledPlatformSpend('cold_research_fallback', {
           batch,
-          cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
-          maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+          cap: scheduledMaxPaidQueries,
+          maxPaidQueries: scheduledMaxPaidQueries,
         });
       }
       webLinkedinTopupAttempted = true;
       await logAction(clientId, 'director', 'web_linkedin_topup_attempted', 'system', null, {
         batch,
-        cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+        cap: scheduledMaxPaidQueries,
         context: 'cold_research_fallback',
+        platform_plan_id: scheduledPlatformPlan.id || null,
+        platform_plan_hash: scheduledPlatformPlan.plan_hash || null,
+        platform_plan_source: scheduledPlatformPlanSource || null,
       });
       let topupError = null;
       let topupResult = null;
@@ -2777,17 +2902,22 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         topupResult = await sourceLeadsOnDemand(clientId, {
           neededChannel: emailGap > 0 ? 'email' : 'linkedin',
           batchSize: draftSize,
-          maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+          maxPaidQueries: scheduledMaxPaidQueries,
+          platformPlan: scheduledPlatformPlan,
+          platformPlanSource: scheduledPlatformPlanSource,
         });
       } catch (err) {
         topupError = err;
         console.warn('[Autonomous] Daily web/LinkedIn top-up failed before output verification:', err.message);
         await logAction(clientId, 'director', 'daily_web_linkedin_topup_failed', 'system', null, {
           batch,
-          cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+          cap: scheduledMaxPaidQueries,
           context: 'cold_research_fallback',
           error: err.message,
           boundary: 'verify_even_after_topup_failure',
+          platform_plan_id: scheduledPlatformPlan.id || null,
+          platform_plan_hash: scheduledPlatformPlan.plan_hash || null,
+          platform_plan_source: scheduledPlatformPlanSource || null,
         });
       }
 
@@ -2804,20 +2934,26 @@ Return JSON: {"subject":${escalation.new_channel === 'email' ? '"..."' : 'null'}
         console.warn(`[Autonomous] Batch ${batch} added 0 leads after the capped web/LinkedIn top-up. Stopping for no-burn.`);
         await logAction(clientId, 'director', 'daily_web_linkedin_topup_empty', 'system', null, {
           batch,
-          cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+          cap: scheduledMaxPaidQueries,
           reason: topupError?.message || topupResult?.reason || 'no_new_saved_leads',
           boundary: 'no_burn_zero_raw_stop',
+          platform_plan_id: scheduledPlatformPlan.id || null,
+          platform_plan_hash: scheduledPlatformPlan.plan_hash || null,
+          platform_plan_source: scheduledPlatformPlanSource || null,
         });
         await logAction(clientId, 'director', 'research_pool_exhausted', 'system', null, { batch, liveSent, target });
         break;
       }
       await logAction(clientId, 'director', 'daily_web_linkedin_topup_success', 'system', null, {
         batch,
-        cap: DAILY_WEB_LINKEDIN_SIGNAL_CAP,
+        cap: scheduledMaxPaidQueries,
         saved: Math.max(0, parseInt(afterSaved) - parseInt(beforeSaved)),
         reason: topupResult?.reason || topupResult?.status || 'topup_saved',
         context: 'cold_research_fallback',
         boundary: 'topup_saved_retry_next_batch',
+        platform_plan_id: scheduledPlatformPlan.id || null,
+        platform_plan_hash: scheduledPlatformPlan.plan_hash || null,
+        platform_plan_source: scheduledPlatformPlanSource || null,
       });
     }
 

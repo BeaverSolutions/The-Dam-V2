@@ -37,7 +37,8 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
     expect(poolDryGate).toBeGreaterThan(-1);
     expect(firstGenericCall).toBeGreaterThan(-1);
     expect(poolDryGate).toBeLessThan(firstGenericCall);
-    expect(autonomousSource.slice(firstGenericCall, firstGenericCall + 250)).toContain('maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP');
+    expect(autonomousSource.slice(firstGenericCall, firstGenericCall + 350)).toContain('maxPaidQueries: scheduledMaxPaidQueries');
+    expect(autonomousSource.slice(firstGenericCall, firstGenericCall + 350)).toContain('platformPlan: scheduledPlatformPlan');
   });
 
   it('does not keep the old zero-streak rescue path alive', () => {
@@ -77,7 +78,10 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
     expect(autonomousSource).toContain('Number(process.env.DAILY_WEB_LINKEDIN_SIGNAL_CAP || 6)');
     expect(autonomousSource).toContain('sourceLeadsOnDemand(clientId');
     expect(autonomousSource).not.toContain("sourceMode: 'daily_web_linkedin_topup'");
-    expect(autonomousSource).toContain('maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP');
+    expect(autonomousSource).toContain('maxPaidQueries: scheduledMaxPaidQueries');
+    expect(autonomousSource).toContain('platformPlan: scheduledPlatformPlan');
+    expect(autonomousSource).toContain('loadScheduledPlatformPlan');
+    expect(dbBuilderSource).toContain('platform_plan_required');
     expect(autonomousSource).toContain("'daily_web_linkedin_topup_empty'");
     expect(autonomousSource).toContain("'web_linkedin_topup_attempted'");
     expect(autonomousSource).toContain("'daily_web_linkedin_topup_deduped'");
@@ -230,11 +234,15 @@ describe('budget-cap no-burn boundary', () => {
     expect(pipelineSource).toContain("'budget_exceeded_abort'");
   });
 
-  it('stops DB-pool loops after a zero-output batch', () => {
+  it('treats zero-output DB pool batches as unusable before the single bounded top-up', () => {
     const dbCall = autonomousSource.indexOf('const dbResult = await directorExecute');
     const zeroStop = autonomousSource.indexOf("'db_pool_zero_output_stop'");
+    const fallthrough = autonomousSource.indexOf('usedDbPool = false;', zeroStop);
+    const coldFallback = autonomousSource.indexOf("context: 'cold_research_fallback'", zeroStop);
     expect(dbCall).toBeGreaterThan(-1);
     expect(zeroStop).toBeGreaterThan(dbCall);
+    expect(fallthrough).toBeGreaterThan(zeroStop);
+    expect(coldFallback).toBeGreaterThan(fallthrough);
   });
 
   it('dedupes research enrichment before paid work and keeps it bounded', () => {
@@ -305,10 +313,12 @@ describe('budget-cap no-burn boundary', () => {
     expect(runCall).toBeGreaterThan(budgetGate);
   });
 
-  it('does not run paid daily Signal Hunt before DB pool execution by default', () => {
+  it('does not run raw paid daily Signal Hunt before DB pool execution by default', () => {
     expect(autonomousSource).toContain("DAILY_KICKOFF_SIGNAL_PREFILL_ENABLED === 'true'");
     expect(autonomousSource).toContain('daily_signal_prefill_skipped');
     expect(autonomousSource).toContain('db_pool_before_paid_signal_hunt');
+    expect(autonomousSource).toContain('no_raw_signal_prefill_without_platform_plan');
+    expect(autonomousSource).toContain('recordSignalHuntPlatformFunnel');
   });
 
   it('uses eligible uncontacted pool truth for DB Builder top-up decisions', () => {

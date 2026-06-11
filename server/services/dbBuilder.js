@@ -1372,7 +1372,13 @@ async function sourceLeadsViaVP(clientId, { batchSize = 20 } = {}) {
 
 // ── On-Demand Sourcing (called by autonomous kickoff when pool is dry) ───────
 
-async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSize = 20, maxPaidQueries = null } = {}) {
+async function sourceLeadsOnDemand(clientId, {
+  neededChannel = 'email',
+  batchSize = 20,
+  maxPaidQueries = null,
+  platformPlan = null,
+  platformPlanSource = null,
+} = {}) {
   const budget = await checkBudget(clientId);
   if (!budget.allowed) {
     logger.info({ msg: '[db-builder] on-demand: budget exhausted before provider work' });
@@ -1382,7 +1388,8 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
   // Autonomous policy (2026-06-02): VP is manual CSV/subscribed-client only.
   // Beaver autonomous sourcing is web/LinkedIn discovery first, then downstream
   // email enrichment uses Hunter before MillionVerifier pattern verification.
-  const { runSignalHunt, saveSignalLeads } = require('./signalHunt');
+  const { runSignalHunt, saveSignalLeads, platformFunnelFromSignalHuntResult } = require('./signalHunt');
+  const { recordSignalHuntPlatformFunnel, updateStrategyStateFromPlan } = require('./platformYield');
 
   const icpMemory = await loadCanonicalIcp(clientId);
   if (!icpMemory) {
@@ -1392,35 +1399,12 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
 
   const legacyResearchFallbackEnabled = process.env.DB_BUILDER_LEGACY_RESEARCH_FALLBACK_ENABLED === 'true';
   const paidQueryCap = Math.max(0, Math.floor(Number(maxPaidQueries) || 0));
+  const platformPaidQueryCap = Number(platformPlan?.max_paid_queries);
+  const effectivePaidQueryCap = Number.isFinite(platformPaidQueryCap) && platformPaidQueryCap > 0
+    ? Math.floor(platformPaidQueryCap)
+    : paidQueryCap;
 
-  try {
-    const signalLeads = await runSignalHunt(clientId, {
-      maxLeads: batchSize,
-      icpMemory,
-      icp: icpMemory,
-      maxPaidQueries: paidQueryCap,
-      plan_id: 'kickoff_on_demand_topup',
-    });
-    const savedSignalLeads = await saveSignalLeads(clientId, signalLeads);
-    const saved = Array.isArray(savedSignalLeads) ? savedSignalLeads.length : 0;
-
-    await logsService.createLog(clientId, {
-      agent: 'research_beaver',
-      action: 'on_demand_signal_first_complete',
-      target_type: 'system',
-      metadata: {
-        trigger: 'pool_dry_kickoff',
-        mode: 'web_linkedin_topup',
-        source: 'signal_hunt',
-        neededChannel,
-        found: signalLeads.length,
-        saved,
-        save_stats: savedSignalLeads?.saveStats || null,
-        maxPaidQueries: paidQueryCap,
-        legacy_research_fallback_enabled: legacyResearchFallbackEnabled,
-      },
-    });
-
+  if (!platformPlan) {
     await logsService.createLog(clientId, {
       agent: 'research_beaver',
       action: 'on_demand_sourcing_complete',
@@ -1428,38 +1412,121 @@ async function sourceLeadsOnDemand(clientId, { neededChannel = 'email', batchSiz
       metadata: {
         trigger: 'pool_dry_kickoff',
         mode: 'web_linkedin_topup',
-        source: 'signal_hunt',
-        source_order: 'signal_hunt_contact_gate',
+        source: 'none',
         neededChannel,
-        found: signalLeads.length,
-        saved,
-        save_stats: savedSignalLeads?.saveStats || null,
-        maxPaidQueries: paidQueryCap,
-        fallback_skipped_reason: saved > 0 ? 'signal_first_saved' : (legacyResearchFallbackEnabled ? null : 'legacy_research_disabled'),
-      },
-    });
-
-    if (saved > 0 || !legacyResearchFallbackEnabled) {
-      const health = await checkDbHealth(clientId);
-      logger.info({ msg: '[db-builder] on-demand signal-first complete', found: signalLeads.length, saved, pool_email: health.withEmail });
-      return { saved, health, reason: saved > 0 ? 'signal_hunt_topup' : 'signal_hunt_no_results' };
-    }
-  } catch (err) {
-    logger.warn({ msg: '[db-builder] on-demand signal hunt failed', err: err.message });
-    await logsService.createLog(clientId, {
-      agent: 'research_beaver',
-      action: 'on_demand_signal_first_error',
-      target_type: 'system',
-      metadata: {
-        trigger: 'pool_dry_kickoff',
-        mode: 'web_linkedin_topup',
-        neededChannel,
-        error: err.message,
-        maxPaidQueries: paidQueryCap,
+        found: 0,
+        saved: 0,
+        fallback_skipped_reason: legacyResearchFallbackEnabled ? null : 'platform_plan_required',
+        legacy_research_fallback_enabled: legacyResearchFallbackEnabled,
       },
     }).catch(() => {});
     if (!legacyResearchFallbackEnabled) {
-      return { saved: 0, reason: 'signal_hunt_error' };
+      logger.info({ msg: '[db-builder] on-demand: approved platform plan required before scheduled web/LinkedIn spend' });
+      return { saved: 0, reason: 'platform_plan_required' };
+    }
+  }
+
+  if (platformPlan) {
+    try {
+      const signalLeads = await runSignalHunt(clientId, {
+        maxLeads: batchSize,
+        icpMemory,
+        icp: icpMemory,
+        maxPaidQueries: effectivePaidQueryCap,
+        platformPlan,
+        plan_id: platformPlan.id || platformPlan.plan_hash || 'kickoff_on_demand_topup',
+      });
+      const savedSignalLeads = await saveSignalLeads(clientId, signalLeads);
+      const saved = Array.isArray(savedSignalLeads) ? savedSignalLeads.length : 0;
+      const platformYieldEvents = await recordSignalHuntPlatformFunnel(clientId, {
+        funnel: platformFunnelFromSignalHuntResult(signalLeads),
+        savedLeads: savedSignalLeads,
+        plan: platformPlan,
+        mode: platformPlan.mode || 'trusted_scheduled',
+        source: 'db_builder_on_demand_topup',
+        metadata: {
+          trigger: 'pool_dry_kickoff',
+          platform_plan_source: platformPlanSource,
+        },
+      }).catch(err => {
+        logger.warn({ msg: '[db-builder] on-demand platform yield record failed', err: err.message });
+        return [];
+      });
+      await updateStrategyStateFromPlan(clientId, platformPlan, {
+        saved_leads: saved,
+        approval_ready: saved,
+        blocker: saved > 0 ? null : 'zero_saved_leads',
+        trusted_by: 'db_builder_on_demand_topup',
+      }).catch(err => logger.warn({ msg: '[db-builder] on-demand strategy state update failed', err: err.message }));
+
+      await logsService.createLog(clientId, {
+        agent: 'research_beaver',
+        action: 'on_demand_signal_first_complete',
+        target_type: 'system',
+        metadata: {
+          trigger: 'pool_dry_kickoff',
+          mode: 'web_linkedin_topup',
+          source: 'signal_hunt',
+          neededChannel,
+          found: signalLeads.length,
+          saved,
+          save_stats: savedSignalLeads?.saveStats || null,
+          maxPaidQueries: effectivePaidQueryCap,
+          platform_plan_id: platformPlan.id || null,
+          platform_plan_hash: platformPlan.plan_hash || null,
+          platform_plan_source: platformPlanSource || null,
+          platform_yield_events: platformYieldEvents.map(row => row.id),
+          legacy_research_fallback_enabled: legacyResearchFallbackEnabled,
+        },
+      });
+
+      await logsService.createLog(clientId, {
+        agent: 'research_beaver',
+        action: 'on_demand_sourcing_complete',
+        target_type: 'system',
+        metadata: {
+          trigger: 'pool_dry_kickoff',
+          mode: 'web_linkedin_topup',
+          source: 'signal_hunt',
+          source_order: 'signal_hunt_contact_gate',
+          neededChannel,
+          found: signalLeads.length,
+          saved,
+          save_stats: savedSignalLeads?.saveStats || null,
+          maxPaidQueries: effectivePaidQueryCap,
+          platform_plan_id: platformPlan.id || null,
+          platform_plan_hash: platformPlan.plan_hash || null,
+          platform_plan_source: platformPlanSource || null,
+          platform_yield_events: platformYieldEvents.map(row => row.id),
+          fallback_skipped_reason: saved > 0 ? 'signal_first_saved' : (legacyResearchFallbackEnabled ? null : 'legacy_research_disabled'),
+        },
+      });
+
+      if (saved > 0 || !legacyResearchFallbackEnabled) {
+        const health = await checkDbHealth(clientId);
+        logger.info({ msg: '[db-builder] on-demand signal-first complete', found: signalLeads.length, saved, pool_email: health.withEmail });
+        return { saved, health, reason: saved > 0 ? 'signal_hunt_topup' : 'signal_hunt_no_results' };
+      }
+    } catch (err) {
+      logger.warn({ msg: '[db-builder] on-demand signal hunt failed', err: err.message });
+      await logsService.createLog(clientId, {
+        agent: 'research_beaver',
+        action: 'on_demand_signal_first_error',
+        target_type: 'system',
+        metadata: {
+          trigger: 'pool_dry_kickoff',
+          mode: 'web_linkedin_topup',
+          neededChannel,
+          error: err.message,
+          maxPaidQueries: effectivePaidQueryCap,
+          platform_plan_id: platformPlan?.id || null,
+          platform_plan_hash: platformPlan?.plan_hash || null,
+          platform_plan_source: platformPlanSource || null,
+        },
+      }).catch(() => {});
+      if (!legacyResearchFallbackEnabled) {
+        return { saved: 0, reason: 'signal_hunt_error' };
+      }
     }
   }
 

@@ -54,6 +54,9 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(onDemandBody).not.toContain('sourceLeadsViaVP');
     expect(onDemandBody).toContain('runSignalHunt');
     expect(onDemandBody).toContain('saveSignalLeads');
+    expect(onDemandBody).toContain('platformPlan');
+    expect(onDemandBody).toContain('platform_plan_required');
+    expect(onDemandBody).toContain('recordSignalHuntPlatformFunnel');
     expect(onDemandBody).toContain("'on_demand_signal_first_complete'");
     expect(onDemandBody.indexOf('runSignalHunt')).toBeLessThan(onDemandBody.indexOf('researchModule.researchLeads'));
     expect(onDemandBody).toContain('maxPaidQueries');
@@ -77,7 +80,11 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(kickoffBody).toContain('allowPaidSignal: false');
     expect(kickoffBody).toContain('sourceLeadsOnDemand(clientId');
     expect(kickoffBody).not.toContain("sourceMode: 'daily_web_linkedin_topup'");
-    expect(kickoffBody).toContain('maxPaidQueries: DAILY_WEB_LINKEDIN_SIGNAL_CAP');
+    expect(kickoffBody).toContain('loadScheduledPlatformPlan');
+    expect(kickoffBody).toContain('scheduledPlatformPlan');
+    expect(kickoffBody).toContain('scheduledMaxPaidQueries');
+    expect(kickoffBody).toContain('maxPaidQueries: scheduledMaxPaidQueries');
+    expect(kickoffBody).toContain('platformPlan: scheduledPlatformPlan');
     expect(kickoffBody).toContain('if (poolLeads.length > 0)');
     expect(kickoffBody).toContain('if (passingIds.length > 0)');
     expect(kickoffBody).toContain('limit: passingIds.length');
@@ -97,6 +104,8 @@ describe('BeavrDam autonomous end-to-end contract', () => {
 
     expect(kickoffBody).toContain('platform_strategy_state');
     expect(kickoffBody).toContain('trusted');
+    expect(kickoffBody).toContain('approved_platform_plan_required');
+    expect(kickoffBody).toContain('approved_platform_plan_or_platform_strategy_state');
     expect(kickoffBody).toContain('CAPTAIN_TRUSTED_DAILY_SPEND_ENABLED');
     expect(kickoffBody).toContain('trusted_platform_strategy_required');
     expect(kickoffBody).toContain('maxPaidQueries');

@@ -21,6 +21,16 @@ const tenantIcp = {
   },
 };
 
+const hiringSignalIcp = {
+  profile_version: 6,
+  icp: {
+    geographies: ['MY'],
+    buying_signals: [
+      { id: 'hiring_sales_roles', family: 'hiring_capability_build', enabled: true, priority: 1 },
+    ],
+  },
+};
+
 const verticalFirstIcp = {
   profile_version: 6,
   icp: {
@@ -34,7 +44,7 @@ describe('platform plan builder', () => {
   it('creates separate no-spend platform calls for MY hiring instead of one crammed query', () => {
     const plan = platformPlan.buildPlatformPlan({
       clientId: 'client-1',
-      icp: tenantIcp,
+      icp: hiringSignalIcp,
       objective: 'find 5 in-ICP approval-ready leads',
       requestedCount: 5,
       maxPaidQueries: 5,
@@ -55,7 +65,7 @@ describe('platform plan builder', () => {
   it('plans hiring reach queries by role and geo without quoted tenant vertical', () => {
     const plan = platformPlan.buildPlatformPlan({
       clientId: 'client-1',
-      icp: tenantIcp,
+      icp: hiringSignalIcp,
       objective: 'find 5 in-ICP approval-ready leads',
       requestedCount: 5,
       maxPaidQueries: 5,
@@ -194,10 +204,32 @@ describe('platform plan builder', () => {
     expect(platformPlan.verifyPlatformPlanHash(plan)).toBe(true);
   });
 
-  it('excludes press/news from first MY hiring proof when stronger job platforms exist', () => {
+  it('defaults Beaver-style vertical ICPs with generic signals to vertical-first', () => {
     const plan = platformPlan.buildPlatformPlan({
       clientId: 'client-1',
       icp: tenantIcp,
+      objective: 'find 5 in-ICP approval-ready leads',
+      requestedCount: 5,
+      maxPaidQueries: 5,
+      mode: 'proof',
+    });
+    const queryText = plan.platform_sequence.map(item => item.query).join('\n').toLowerCase();
+
+    expect(plan.discovery_mode).toBe('vertical_first');
+    expect(plan.sourcing_lane_defaulted).toMatchObject({
+      from: 'signal_first',
+      to: 'vertical_first',
+      reason: 'tenant_vertical_icp_generic_signals',
+    });
+    expect(queryText).toContain('corporate training');
+    expect(queryText).not.toMatch(/sales executive|business development|account manager|linkedin\.com\/jobs|jobstreet|hiredly/i);
+    expect(platformPlan.verifyPlatformPlanHash(plan)).toBe(true);
+  });
+
+  it('excludes press/news from first MY hiring proof when stronger job platforms exist', () => {
+    const plan = platformPlan.buildPlatformPlan({
+      clientId: 'client-1',
+      icp: hiringSignalIcp,
       requestedCount: 5,
       maxPaidQueries: 3,
       mode: 'proof',
@@ -214,14 +246,14 @@ describe('platform plan builder', () => {
   it('hashes the exact plan so paid execution can verify confirmation', () => {
     const first = platformPlan.buildPlatformPlan({
       clientId: 'client-1',
-      icp: tenantIcp,
+      icp: hiringSignalIcp,
       requestedCount: 5,
       maxPaidQueries: 3,
       mode: 'proof',
     });
     const second = platformPlan.buildPlatformPlan({
       clientId: 'client-1',
-      icp: tenantIcp,
+      icp: hiringSignalIcp,
       requestedCount: 5,
       maxPaidQueries: 3,
       mode: 'proof',
@@ -246,7 +278,7 @@ describe('platform plan builder', () => {
   it('normalizes invalid requested and paid query counts without leaking NaN', () => {
     const plan = platformPlan.buildPlatformPlan({
       clientId: 'client-1',
-      icp: tenantIcp,
+      icp: hiringSignalIcp,
       requestedCount: 'nope',
       maxPaidQueries: 'also-nope',
       mode: 'proof',
@@ -296,6 +328,65 @@ describe('platform plan builder', () => {
     ]);
     expect(loaded.excluded_platforms).toEqual([]);
     expect(loaded.stop_rule.stop_on_invalid_query).toBe(true);
+  });
+
+  it('loads the latest approved vertical-first plan for scheduled sourcing', async () => {
+    let sql = '';
+    let params = [];
+    pool.query = async (query, values) => {
+      sql = query;
+      params = values;
+      return {
+        rows: [
+          {
+            id: 'signal-plan',
+            client_id: 'client-1',
+            status: 'approved',
+            mode: 'proof',
+            objective: 'hiring proof',
+            requested_count: 5,
+            max_paid_queries: 5,
+            budget_cap_usd: null,
+            platform_sequence: [{ platform: 'jobstreet_my', discovery_mode: 'signal_first' }],
+            excluded_platforms: [],
+            stop_rule: {},
+            query_set_hash: 'signalhash',
+            plan_hash: 'signalplanhash',
+            approved_by: 'mj',
+            approved_at: '2026-06-08T00:00:00.000Z',
+            expires_at: '2026-06-09T00:00:00.000Z',
+            created_at: '2026-06-08T00:00:00.000Z',
+          },
+          {
+            id: 'vertical-plan',
+            client_id: 'client-1',
+            status: 'approved',
+            mode: 'proof',
+            objective: 'vertical proof',
+            requested_count: 5,
+            max_paid_queries: 12,
+            budget_cap_usd: null,
+            platform_sequence: [{ platform: 'training_directory', discovery_mode: 'vertical_first' }],
+            excluded_platforms: [],
+            stop_rule: {},
+            query_set_hash: 'verticalhash',
+            plan_hash: 'verticalplanhash',
+            approved_by: 'mj',
+            approved_at: '2026-06-08T00:00:00.000Z',
+            expires_at: '2026-06-09T00:00:00.000Z',
+            created_at: '2026-06-08T00:00:00.000Z',
+          },
+        ],
+      };
+    };
+
+    const loaded = await platformPlan.loadLatestApprovedPlatformPlan('client-1', { discoveryMode: 'vertical_first' });
+
+    expect(sql).toContain("AND status = 'approved'");
+    expect(sql).toContain('ORDER BY approved_at DESC NULLS LAST, created_at DESC');
+    expect(params).toEqual(['client-1']);
+    expect(loaded.id).toBe('vertical-plan');
+    expect(loaded.max_paid_queries).toBe(12);
   });
 
   it('throws platform_plan_required when an approved plan cannot be loaded', async () => {
