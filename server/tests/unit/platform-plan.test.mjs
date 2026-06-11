@@ -202,8 +202,71 @@ describe('platform plan builder', () => {
     expect(plan.platform_sequence.map(item => item.platform)).toEqual(
       expect.arrayContaining(['agency_directory', 'training_directory', 'vertical_web'])
     );
-    expect(plan.platform_sequence.map(item => item.query).join('\n')).toContain('"United States"');
+    expect(plan.platform_sequence.map(item => item.query).join('\n')).toContain('"Tampa"');
     expect(platformPlan.verifyPlatformPlanHash(plan)).toBe(true);
+  });
+
+  it('biases US roofing vertical-first queries toward local SMB operators', () => {
+    const plan = platformPlan.buildPlatformPlan({
+      clientId: 'tin-city',
+      icp: {
+        active_industries: ['roofing'],
+        verticals: ['roofing'],
+        geo: ['United States'],
+        buying_signals: [
+          { id: 'roofing_hiring_sales_ops', family: 'hiring_capability_build', enabled: true },
+        ],
+      },
+      objective: 'Tin City roofing proof',
+      requestedCount: 5,
+      maxPaidQueries: 5,
+      mode: 'vertical_first',
+    });
+    const queryText = plan.platform_sequence.map(item => item.query).join('\n');
+
+    expect(queryText).toContain('roofing contractor');
+    expect(queryText).toMatch(/Tampa/);
+    expect(queryText).toMatch(/Dallas/);
+    expect(queryText).toMatch(/Phoenix/);
+    expect(queryText).toMatch(/local roofing contractor/);
+    expect(queryText).toMatch(/owner/);
+    expect(queryText).toMatch(/president/);
+    expect(queryText).toMatch(/owner OR president OR "about us" OR "meet the team"/);
+    expect(queryText).toMatch(/-"ZoomInfo"/);
+    expect(queryText).toMatch(/-"Yelp"/);
+    expect(queryText).toMatch(/-"Angi"/);
+    expect(queryText).toMatch(/-"HomeAdvisor"/);
+    expect(queryText).toMatch(/-"Tecta"/);
+    expect(queryText).toMatch(/-"Beacon"/);
+    expect(queryText).toMatch(/-"QXO"/);
+    expect(queryText).not.toMatch(/WPP|Publicis|Dentsu|Omnicom/);
+    expect(plan.platform_sequence.every(item => item.geo === 'US')).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.valid)).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.chars <= 400)).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.words <= 50)).toBe(true);
+  });
+
+  it('biases Canada roofing vertical-first queries with Canadian localities', () => {
+    const plan = platformPlan.buildPlatformPlan({
+      clientId: 'tin-city',
+      icp: {
+        active_industries: ['roofing contractor'],
+        verticals: ['roofing contractor'],
+        geo: ['Canada'],
+      },
+      objective: 'Tin City Canada roofing proof',
+      requestedCount: 3,
+      maxPaidQueries: 3,
+      mode: 'vertical_first',
+    });
+    const queryText = plan.platform_sequence.map(item => item.query).join('\n');
+
+    expect(queryText).toMatch(/Toronto/);
+    expect(queryText).toMatch(/Vancouver/);
+    expect(queryText).toMatch(/Calgary/);
+    expect(plan.platform_sequence.every(item => item.geo === 'CA')).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.valid)).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.words <= 50)).toBe(true);
   });
 
   it('defaults empty-signals vertical ICPs to vertical-first instead of silent hiring fallback', () => {

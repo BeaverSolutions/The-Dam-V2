@@ -191,6 +191,9 @@ function sourcingLaneDefaultForPlan(icp = {}, requestedMode = 'proof') {
 
 function verticalQueryTerm(industry = '') {
   const value = String(industry || '').trim();
+  if (/roof|roofing|roofer/i.test(value)) {
+    return 'roofing contractor';
+  }
   if (/corporate training|professional training|l&d|learning|coaching|skills development/i.test(value)) {
     return 'corporate training';
   }
@@ -207,6 +210,8 @@ function verticalQueryTerm(industry = '') {
 function verticalLocation(geo) {
   if (geo === 'MY') return '("Malaysia" OR "Kuala Lumpur" OR "Petaling Jaya" OR "Selangor" OR "Penang" OR "Johor")';
   if (geo === 'SG') return '("Singapore" OR "Tanjong Pagar" OR "Raffles Place")';
+  if (geo === 'US') return '("Tampa" OR "Miami" OR "Dallas" OR "Austin" OR "Phoenix" OR "Denver")';
+  if (geo === 'CA') return '("Toronto" OR "Vancouver" OR "Calgary" OR "Ottawa")';
   return `"${hiringLocation(geo)}"`;
 }
 
@@ -217,26 +222,41 @@ function verticalLocation(geo) {
 // pre-lookup enterprise/global gate (signalHunt) catches the rest from
 // homepage text.
 const GLOBAL_BRAND_NEGATIVES = '-"WPP" -"Publicis" -"Dentsu" -"Omnicom" -"Fortune 500" -"global network"';
+const SERVICE_BUSINESS_NEGATIVES = '-"ZoomInfo" -"Yelp" -"Angi" -"HomeAdvisor" -"Houzz" -"Tecta" -"Beacon" -"QXO"';
+
+function queryNegativesForTerm(term = '') {
+  if (/roof|contractor|plumbing|hvac|landscap|remodel|construction/i.test(term)) {
+    return SERVICE_BUSINESS_NEGATIVES;
+  }
+  return GLOBAL_BRAND_NEGATIVES;
+}
 
 function verticalFirstQueryForPlatform(platformId, industry, geo) {
   const location = verticalLocation(geo);
   const term = verticalQueryTerm(industry);
   const isAgency = /agency|marketing|digital|creative|advertising|media|content|pr/i.test(term);
   const isTraining = /training|learning|coaching|skill/i.test(term);
+  const isServiceBusiness = /roof|contractor|plumbing|hvac|landscap|remodel|construction/i.test(term);
 
   let base;
   if (platformId === 'agency_directory') {
-    base = isAgency
+    base = isServiceBusiness
+      ? `("local ${term}" OR "family owned ${term}" OR "${term} near me") ${location}`
+      : isAgency
       ? `("marketing agency" OR "digital agency" OR "creative agency" OR "PR agency") ${location}`
       : `("${term}" OR "${term} provider" OR "${term} company") ${location}`;
   } else if (platformId === 'training_directory') {
-    base = isTraining
+    base = isServiceBusiness
+      ? `("${term}" OR "roof replacement" OR "commercial roofing") ${location}`
+      : isTraining
       ? `("corporate training provider" OR "training company" OR "learning and development provider") ${location}`
       : `("${term}" OR "${term} firm" OR "${term} company") ${location}`;
   } else {
-    base = `"${term}" ${location} (company OR provider OR agency)`;
+    base = isServiceBusiness
+      ? `"${term}" ${location} (owner OR president OR "about us" OR "meet the team")`
+      : `"${term}" ${location} (company OR provider OR agency)`;
   }
-  return `${base} ${GLOBAL_BRAND_NEGATIVES}`;
+  return `${base} ${queryNegativesForTerm(term)}`;
 }
 
 function positiveInteger(value, fallback) {

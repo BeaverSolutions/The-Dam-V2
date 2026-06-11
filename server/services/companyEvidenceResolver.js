@@ -251,6 +251,15 @@ async function fetchEvidenceText(url, fetchImpl) {
   return htmlToText(html);
 }
 
+async function fetchHtml(url, fetchImpl) {
+  if (typeof fetchImpl !== 'function') return '';
+  const res = await fetchImpl(url, {
+    headers: { 'user-agent': 'BeavrDamEvidenceResolver/1.0' },
+  });
+  if (!res || res.ok === false) return '';
+  return await res.text();
+}
+
 function unresolvedResult(company, evidence = []) {
   return {
     company,
@@ -347,17 +356,34 @@ async function resolveCompanyIdentity(signal = {}, {
   }
 
   let html = '';
+  let pageText = '';
   try {
-    const res = await fetchImpl(origin, { headers: { 'user-agent': 'BeavrDamEvidenceResolver/1.0' } });
-    if (res && res.ok !== false) html = await res.text();
+    html = await fetchHtml(origin, fetchImpl);
+    pageText = htmlToText(html);
   } catch { /* fall back to domain-derived name */ }
+
+  // Local service businesses often put owner/founder/team details on their
+  // About page, not the homepage. Read one lightweight About URL for the
+  // vertical-first LLM qualification pass before spending lookup budget.
+  if (origin) {
+    for (const path of ['/about', '/about-us']) {
+      try {
+        const aboutHtml = await fetchHtml(`${origin}${path}`, fetchImpl);
+        const aboutText = htmlToText(aboutHtml);
+        if (aboutText) {
+          pageText = [pageText, aboutText].filter(Boolean).join(' ');
+          break;
+        }
+      } catch { /* free evidence lookup failed; keep homepage text */ }
+    }
+  }
 
   const name = companyNameFromHtml(html) || companyNameFromDomain(origin) || provisional;
   const value = {
     company: name || provisional,
     website: origin,
     source: html ? (companyNameFromHtml(html) ? 'homepage' : 'domain') : 'domain',
-    page_text: htmlToText(html),
+    page_text: pageText.slice(0, MAX_EVIDENCE_TEXT * 2),
     resolved: Boolean(name && name !== provisional),
   };
   identityCache.set(cacheKey, { value, expires_at: now + ttlMs });

@@ -114,12 +114,17 @@ describe('company evidence resolver', () => {
     )).toBe('MMT Academy');
   });
 
-  it('resolveCompanyIdentity upgrades a domain anchor to the real homepage name', async () => {
+  it('resolveCompanyIdentity upgrades a domain anchor and reads about-page owner evidence', async () => {
     resolver.clearCompanyEvidenceCache();
-    let fetchCount = 0;
+    const fetched = [];
     const fetchImpl = async (url) => {
-      fetchCount++;
-      expect(url).toBe('https://thrivingtalents.com');
+      fetched.push(url);
+      if (url === 'https://thrivingtalents.com/about') {
+        return {
+          ok: true,
+          text: async () => '<html><body>Founded by Jane Tan, Managing Director and owner.</body></html>',
+        };
+      }
       return {
         ok: true,
         text: async () => '<html><head><meta property="og:site_name" content="Thriving Talents"></head><body>We are a corporate training provider in Malaysia.</body></html>',
@@ -133,10 +138,11 @@ describe('company evidence resolver', () => {
     const first = await resolver.resolveCompanyIdentity(signal, { fetchImpl });
     expect(first).toMatchObject({ company: 'Thriving Talents', source: 'homepage', resolved: true });
     expect(first.page_text).toMatch(/corporate training provider/i);
+    expect(first.page_text).toMatch(/Jane Tan, Managing Director/i);
 
     const second = await resolver.resolveCompanyIdentity(signal, { fetchImpl });
     expect(second.from_cache).toBe(true);
-    expect(fetchCount).toBe(1);
+    expect(fetched).toEqual(['https://thrivingtalents.com', 'https://thrivingtalents.com/about']);
   });
 
   it('resolveCompanyIdentity does not fetch aggregator URLs', async () => {
