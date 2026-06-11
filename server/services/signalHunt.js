@@ -1491,7 +1491,8 @@ function normaliseExtractedSignals(items = [], fallbackSignalType = 'buying_sign
       why_now: item.why_now || item.signal_summary || item.summary || item.outreach_angle || item.angle || '',
       angle: item.angle || item.outreach_angle || item.suggested_angle || '',
       confidence: normaliseSignalConfidence(item.confidence, item),
-    }));
+    }))
+    .filter(item => jobBoardProofGate(item, { signal_type: fallbackSignalType }).ok);
 }
 
 function extractedSignalItems(parsed) {
@@ -1651,7 +1652,80 @@ function validSignalCompanyName(value = '') {
   if (/^(?:shah alam|petaling jaya|cyberjaya|kuala lumpur|subang jaya|klang|putrajaya|johor bahru|penang|greater kuala lumpur|klang valley)$/i.test(company)) return false;
   if (/\b(?:job board|job portal|career portal|career platform|resume database|cv database|salary guide)\b/i.test(company)) return false;
   if (/^(?:easy apply|top applicants|full[- ]time|on[- ]site|remote|hybrid)$/i.test(company)) return false;
+  if (/\b(?:roofing|roofer|commercial roofing)\b/i.test(company)
+    && /\b(?:estimator|project manager|sales manager|sales representative|sales rep|salesperson|laborer|installer|superintendent|foreman|crew|worker)\b/i.test(company)
+    && !/\b(?:inc|llc|ltd|limited|corp|corporation|company|co\.?|services|contractors)\s*(?:inc|llc|ltd|limited|corp|corporation|company|co\.?)?\b/i.test(company)) {
+    return false;
+  }
   return true;
+}
+
+function jobBoardUrlDetails(url = '') {
+  const sourceUrl = String(url || '').trim();
+  if (!sourceUrl) return { host: '', path: '', search: '', knownJobBoard: false };
+  try {
+    const parsed = new URL(sourceUrl);
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    return {
+      host,
+      path: parsed.pathname.toLowerCase(),
+      search: parsed.search.toLowerCase(),
+      knownJobBoard: /(indeed\.com|linkedin\.com|ziprecruiter\.com|glassdoor\.com|simplyhired\.com|talent\.com)/i.test(host),
+    };
+  } catch {
+    return { host: '', path: sourceUrl.toLowerCase(), search: '', knownJobBoard: false };
+  }
+}
+
+function isHiringSignalDescriptor(source = {}, fallbackSignalType = '') {
+  const text = [
+    fallbackSignalType,
+    source.signal_type,
+    source.signal_id,
+    source.signal_family,
+    source.source_channel,
+  ].filter(Boolean).join(' ').toLowerCase();
+  return /hiring|sales_roles|vacancy|job/.test(text)
+    || ['linkedin_jobs', 'company_careers', 'job_boards'].includes(String(source.source_channel || '').toLowerCase());
+}
+
+function isSpecificHiringProofUrl(url = '') {
+  const details = jobBoardUrlDetails(url);
+  if (!details.host && !details.path) return false;
+  if (/indeed\.com$/i.test(details.host)) {
+    return details.path.includes('/viewjob') || /[?&]jk=/.test(details.search);
+  }
+  if (/linkedin\.com$/i.test(details.host)) {
+    return /^\/jobs\/view\/[^/]+/i.test(details.path);
+  }
+  if (/ziprecruiter\.com$/i.test(details.host)) {
+    return /^\/c\/[^/]+\/job\/[^/]+/i.test(details.path);
+  }
+  return !details.knownJobBoard;
+}
+
+function genericJobBoardPageReason(url = '') {
+  const details = jobBoardUrlDetails(url);
+  if (!details.knownJobBoard) return null;
+  if (isSpecificHiringProofUrl(url)) return null;
+  if (/indeed\.com$/i.test(details.host) && /^\/q-/.test(details.path)) return 'generic_indeed_query_page';
+  if (/linkedin\.com$/i.test(details.host) && /^\/jobs\//.test(details.path)) return 'generic_linkedin_jobs_page';
+  if (/ziprecruiter\.com$/i.test(details.host) && /^\/jobs\//i.test(details.path)) return 'generic_ziprecruiter_jobs_page';
+  return 'generic_job_board_page';
+}
+
+function jobBoardProofGate(source = {}, query = {}) {
+  const fallbackSignalType = query.signal_type || query.signal_id || query.signal || '';
+  if (!isHiringSignalDescriptor(source, fallbackSignalType)) return { ok: true };
+  const sourceUrl = source.source_url || source.url || source.link || '';
+  if (!sourceUrl) {
+    return { ok: false, blocker: 'job_post_detail_missing', reason: 'missing_hiring_source_url' };
+  }
+  const genericReason = genericJobBoardPageReason(sourceUrl);
+  if (genericReason) {
+    return { ok: false, blocker: 'generic_job_board_page', reason: genericReason };
+  }
+  return { ok: true };
 }
 
 function cleanHiringCompanyName(value = '') {
@@ -1702,6 +1776,11 @@ function deterministicHiringSignals(results = [], query = {}) {
 
   return (Array.isArray(results) ? results : [])
     .filter(result => result && !resultOutsideTargetCountry(result, country))
+    .filter(result => jobBoardProofGate({
+      source_url: result.link || result.url || '',
+      source_channel: query.source_channel,
+      signal_type: query.signal_type || query.signal_id,
+    }, query).ok)
     .map(result => {
       const company = hiringCompanyFromResult(result);
       if (!company) return null;
@@ -2540,6 +2619,18 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       stageStats.icp_passed++;
       platformFunnelTracker.recordVerticalVerified(signal);
     } else {
+      const proofGate = jobBoardProofGate(signal, signal);
+      if (!proofGate.ok) {
+        await logSignalHuntMiss(clientId, {
+          signal,
+          blocker: proofGate.blocker,
+          reason: proofGate.reason,
+        });
+        platformFunnelTracker.recordBlocked(signal, proofGate.blocker);
+        console.log(`[signalHunt] Job-board proof blocked ${signal.company}: ${proofGate.reason}`);
+        continue;
+      }
+
       // ── Signal-first: existing regex evidence + ICP gate (unchanged). ──────
       const companyEvidence = await resolveCompanyEvidence(signal, icp).catch(err => ({
         company: signal.company,
@@ -2995,6 +3086,9 @@ module.exports = {
     extractedSignalItems,
     deterministicPublicationSignals,
     deterministicHiringSignals,
+    jobBoardProofGate,
+    genericJobBoardPageReason,
+    isSpecificHiringProofUrl,
     isVerticalFirstPlatformPlan,
     verticalFirstSignalsFromResults,
     missingSignalPackageSaveMetadata,
