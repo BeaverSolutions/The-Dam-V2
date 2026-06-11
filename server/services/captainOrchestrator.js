@@ -2221,6 +2221,24 @@ function verticalTermsForTenant(tenant = {}) {
   });
 }
 
+function isServiceBusinessHiringScope(terms = []) {
+  return terms.some(term => /roof|roofing|roofer|contractor|plumbing|hvac|landscap|remodel|construction/i.test(term));
+}
+
+function isActionableJobBoardHiringSignal(signal = {}, tenant = {}) {
+  const family = String(signal.family || signal.signal_family || '').toLowerCase();
+  const id = String(signal.id || signal.signal_id || '').toLowerCase();
+  const channels = list(signal.source_channels).map(channel => channel.toLowerCase());
+  if (family !== 'hiring_capability_build' && !/hiring|job|sales_ops/.test(id)) return false;
+  const scopeTerms = [
+    ...verticalTermsForTenant(tenant),
+    ...list(signal.query_terms),
+    id,
+  ];
+  if (!isServiceBusinessHiringScope(scopeTerms)) return false;
+  return channels.some(channel => ['job_boards', 'linkedin_jobs', 'company_careers'].includes(channel));
+}
+
 function shouldDefaultVerticalFirstLane(tenant = {}) {
   // Vertical-first primary applies when the tenant has explicit active_industries
   // (a vertical-defined ICP). Generic job-board signals (hiring, expansion, leadership)
@@ -2237,6 +2255,8 @@ function shouldDefaultVerticalFirstLane(tenant = {}) {
     (Array.isArray(s.source_channels) && s.source_channels.includes('vertical_first')) ||
     s.family === 'vertical_first_discovery'
   );
+  const hasActionableJobBoardHiringSignal = signals.some(signal => isActionableJobBoardHiringSignal(signal, tenant));
+  if (hasActionableJobBoardHiringSignal) return false;
   // Vertical ICP with only generic (job-board/news) signals → use vertical-first primary
   return !hasVerticalFirstSignal;
 }

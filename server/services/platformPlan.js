@@ -99,6 +99,31 @@ function hasVerticalFirstDiscoverySignal(icp = {}) {
     ));
 }
 
+function isServiceBusinessHiringScope(terms = []) {
+  return terms.some(term => /roof|roofing|roofer|contractor|plumbing|hvac|landscap|remodel|construction/i.test(term));
+}
+
+function isActionableJobBoardHiringSignal(signal = {}, icp = {}) {
+  const family = String(signal.family || signal.signal_family || '').toLowerCase();
+  const id = String(signal.id || signal.signal_id || '').toLowerCase();
+  const channels = Array.isArray(signal.source_channels) ? signal.source_channels.map(item => String(item).toLowerCase()) : [];
+  if (family !== 'hiring_capability_build' && !/hiring|job|sales_ops/.test(id)) return false;
+  const scopeTerms = [
+    ...configuredActiveIndustries(icp),
+    ...listAny(signal.query_terms),
+    ...listAny(signal.terms),
+    id,
+  ];
+  if (!isServiceBusinessHiringScope(scopeTerms)) return false;
+  return channels.some(channel => ['job_boards', 'linkedin_jobs', 'company_careers'].includes(channel));
+}
+
+function hasActionableJobBoardHiringSignal(icp = {}) {
+  return signalCandidates(icp)
+    .filter(signal => signal && signal.enabled !== false)
+    .some(signal => isActionableJobBoardHiringSignal(signal, icp));
+}
+
 function firstGeo(icp = {}) {
   const candidates = [
     ...listAny(icp.icp?.geographies),
@@ -150,14 +175,29 @@ function hiringLocation(geo) {
 }
 
 const HIRING_ROLES = '("sales executive" OR "business development" OR "account manager")';
+const ROOFING_HIRING_ROLES = '("roofing sales representative" OR "roofing project manager" OR "roofing estimator" OR "roofing sales manager")';
 
-function hiringQueryForPlatform(platformId, industry, geo) {
+function hiringRolesForIndustry(industry = '', signal = {}) {
+  const terms = [
+    ...listAny(signal.query_terms),
+    ...listAny(signal.terms),
+  ];
+  if (terms.some(term => /roof/i.test(term)) || /roof|roofing|roofer/i.test(industry)) {
+    return ROOFING_HIRING_ROLES;
+  }
+  return HIRING_ROLES;
+}
+
+function hiringQueryForPlatform(platformId, industry, geo, signal = {}) {
   const location = hiringLocation(geo);
-  if (platformId === 'jobstreet_my') return `site:my.jobstreet.com ${HIRING_ROLES} ${location}`;
-  if (platformId === 'hiredly_my') return `site:hiredly.com ${HIRING_ROLES} ${location}`;
-  if (platformId === 'linkedin_jobs') return `site:linkedin.com/jobs/view ${HIRING_ROLES} ${location}`;
-  if (platformId === 'company_careers') return `("careers" OR "jobs") ${HIRING_ROLES} ${location}`;
-  return `${HIRING_ROLES} ${location}`;
+  const roles = hiringRolesForIndustry(industry, signal);
+  if (platformId === 'indeed_us') return `site:indeed.com ${roles} "${location}"`;
+  if (platformId === 'indeed_ca') return `site:ca.indeed.com ${roles} "${location}"`;
+  if (platformId === 'jobstreet_my') return `site:my.jobstreet.com ${roles} ${location}`;
+  if (platformId === 'hiredly_my') return `site:hiredly.com ${roles} ${location}`;
+  if (platformId === 'linkedin_jobs') return `site:linkedin.com/jobs/view ${roles} "${location}"`;
+  if (platformId === 'company_careers') return `("careers" OR "jobs") ${roles} "${location}"`;
+  return `${roles} "${location}"`;
 }
 
 function planModeForRequest(mode) {
@@ -173,6 +213,7 @@ function sourcingLaneDefaultForPlan(icp = {}, requestedMode = 'proof') {
   const industries = configuredActiveIndustries(icp);
   if (industries.length === 0) return null;
   if (hasVerticalFirstDiscoverySignal(icp)) return null;
+  if (hasActionableJobBoardHiringSignal(icp)) return null;
   if (hasConfiguredBuyingSignals(icp)) {
     return {
       from: 'signal_first',
@@ -327,13 +368,14 @@ function buildPlatformPlan({
     : allPlatforms.map(platform => ({ platform, industry }));
   const selectedInputs = platformInputs
     .filter(item => !allowed || allowed.has(item.platform.id))
+    .filter(item => !(signalFamily === 'hiring_capability_build' && item.platform.id === 'press_news'))
     .slice(0, paidQueryLimit);
 
   const platformSequence = selectedInputs.map(({ platform, industry: sourceIndustry }, index) => {
     const query = discoveryMode === 'vertical_first'
       ? verticalFirstQueryForPlatform(platform.id, sourceIndustry, geo)
       : (signalFamily === 'hiring_capability_build'
-        ? hiringQueryForPlatform(platform.id, sourceIndustry, geo)
+        ? hiringQueryForPlatform(platform.id, sourceIndustry, geo, signal)
         : `"${sourceIndustry}" "${geo}" "${signalId}"`);
     const queryValidation = registry.validateQuery(query, platform.provider);
     return {

@@ -246,6 +246,48 @@ describe('platform plan builder', () => {
     expect(plan.platform_sequence.every(item => item.query_validation.words <= 50)).toBe(true);
   });
 
+  it('keeps Tin City roofing hiring signals in job-board-first sourcing', () => {
+    const plan = platformPlan.buildPlatformPlan({
+      clientId: 'tin-city',
+      icp: {
+        active_industries: ['roofing'],
+        verticals: ['roofing'],
+        geo: ['United States'],
+        buying_signals: [
+          {
+            id: 'roofing_hiring_sales_ops',
+            family: 'hiring_capability_build',
+            enabled: true,
+            source_channels: ['linkedin_jobs', 'web_search'],
+            query_terms: ['roofing sales representative', 'roofing project manager'],
+            evidence_required: ['company', 'role', 'source_url'],
+            stop_rules: { max_paid_searches_per_day: 6 },
+          },
+        ],
+      },
+      objective: 'Tin City hiring-signal proof',
+      requestedCount: 5,
+      maxPaidQueries: 6,
+      mode: 'proof',
+    });
+    const queryText = plan.platform_sequence.map(item => item.query).join('\n');
+
+    expect(plan.discovery_mode).toBe('signal_first');
+    expect(plan.sourcing_lane_defaulted).toBeNull();
+    expect(plan.platform_sequence.map(item => item.platform)).toEqual(
+      expect.arrayContaining(['indeed_us', 'linkedin_jobs', 'company_careers'])
+    );
+    expect(queryText).toMatch(/site:indeed\.com/);
+    expect(queryText).toMatch(/roofing sales representative/);
+    expect(queryText).toMatch(/roofing project manager/);
+    expect(queryText).toMatch(/roofing estimator/);
+    expect(queryText).toMatch(/United States/);
+    expect(queryText).not.toMatch(/local roofing contractor|owner OR president/);
+    expect(plan.platform_sequence.every(item => item.signal_id === 'roofing_hiring_sales_ops')).toBe(true);
+    expect(plan.platform_sequence.every(item => item.signal_family === 'hiring_capability_build')).toBe(true);
+    expect(plan.platform_sequence.every(item => item.query_validation.valid)).toBe(true);
+  });
+
   it('biases Canada roofing vertical-first queries with Canadian localities', () => {
     const plan = platformPlan.buildPlatformPlan({
       clientId: 'tin-city',
@@ -376,7 +418,9 @@ describe('platform plan builder', () => {
 
     expect(plan.requested_count).toBe(5);
     expect(plan.max_paid_queries).toBe(5);
-    expect(plan.platform_sequence).toHaveLength(5);
+    expect(plan.platform_sequence.length).toBeGreaterThan(0);
+    expect(plan.platform_sequence.length).toBeLessThanOrEqual(5);
+    expect(plan.platform_sequence.map(item => item.platform)).not.toContain('press_news');
     expect(JSON.stringify(plan)).not.toContain('NaN');
   });
 

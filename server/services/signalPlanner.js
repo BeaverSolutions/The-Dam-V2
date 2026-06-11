@@ -34,6 +34,24 @@ function sourceChannelsForPlan(signal, preferred) {
   return channels.length > 0 ? channels : ['web_search'];
 }
 
+function serviceBusinessHiringSignal(signal = {}, industry = '') {
+  const family = String(signal.family || '').toLowerCase();
+  const id = String(signal.id || '').toLowerCase();
+  const terms = [
+    industry,
+    id,
+    ...list(signal.query_terms),
+  ].join(' ');
+  return (family === 'hiring_capability_build' || /hiring|job|sales_ops/.test(id))
+    && /roof|roofing|roofer|contractor|plumbing|hvac|landscap|remodel|construction/i.test(terms);
+}
+
+function sourceChannelsForSignalPlan(signal, preferred, industry) {
+  const channels = sourceChannelsForPlan(signal, preferred);
+  if (!serviceBusinessHiringSignal(signal, industry)) return channels;
+  return ['job_boards', ...channels.filter(channel => channel !== 'job_boards')];
+}
+
 function queryPrefixForSource(sourceChannel) {
   if (sourceChannel === 'linkedin_jobs') return 'site:linkedin.com/jobs/view';
   if (sourceChannel === 'company_careers') return '("careers" OR "jobs" OR "join our team")';
@@ -58,6 +76,9 @@ function hiringLocationQuery(geoName) {
 
 function hiringRoleQuery(term) {
   const cleanTerm = String(term || '').trim() || 'sales';
+  if (/roof|roofing|roofer/i.test(cleanTerm)) {
+    return '("roofing sales representative" OR "roofing project manager" OR "roofing estimator" OR "roofing sales manager")';
+  }
   return `("${cleanTerm}" OR "Sales Executive" OR "Account Executive" OR "Business Development Manager" OR "Sales Manager")`;
 }
 
@@ -67,9 +88,10 @@ function localJobBoardPrefix(geoName) {
 }
 
 function localJobBoardDomains(geoName) {
-  return /malaysia/i.test(geoName)
-    ? ['site:my.jobstreet.com', 'site:jobstreet.com.my', 'site:hiredly.com']
-    : [];
+  if (/malaysia/i.test(geoName)) return ['site:my.jobstreet.com', 'site:jobstreet.com.my', 'site:hiredly.com'];
+  if (/united states|usa/i.test(geoName)) return ['site:indeed.com'];
+  if (/canada/i.test(geoName)) return ['site:ca.indeed.com'];
+  return [];
 }
 
 function hiringSourcePrefix(sourceChannel, geoName) {
@@ -174,7 +196,7 @@ function buildSignalPlan({
   const finalIndustries = industries.length > 0 ? industries : [null];
   const terms = list(signal.query_terms).length > 0 ? list(signal.query_terms) : [signal.family];
   const selectedSource = firstSourceChannel(signal, sourceChannel);
-  const sourceChannels = sourceChannelsForPlan(signal, sourceChannel);
+  const sourceChannels = sourceChannelsForSignalPlan(signal, sourceChannel, finalIndustries[0]);
   const stopRules = signal.stop_rules || {};
   const cap = Math.max(1, Number(maxQueries || stopRules.max_paid_searches_per_day || 6));
   const competitorOffers = list(signal.reject_rules?.competitor_offers || icp.competitor_offers);

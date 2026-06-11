@@ -1306,6 +1306,41 @@ describe('signal extraction helpers', () => {
     expect(signals.every(s => s.confidence >= 0.65 && s.source_url)).toBe(true);
   });
 
+  it('deterministically extracts roofing companies from Indeed job result titles', () => {
+    const results = [
+      {
+        title: 'Roofing Sales Representative - Apex Roofing & Restoration | Indeed',
+        link: 'https://www.indeed.com/viewjob?jk=abc123',
+        snippet: 'Dallas, TX. Apex Roofing & Restoration is hiring a roofing sales representative.',
+        date: '2 days ago',
+      },
+      {
+        title: 'Roofing Project Manager at North Star Roofing | Indeed',
+        link: 'https://www.indeed.com/viewjob?jk=def456',
+        snippet: 'Phoenix, AZ. North Star Roofing is hiring a project manager for roofing crews.',
+        date: '1 day ago',
+      },
+      {
+        title: 'Roofing jobs in United States | Indeed',
+        link: 'https://www.indeed.com/q-roofing-jobs.html',
+        snippet: 'Browse roofing jobs from many employers.',
+      },
+    ];
+
+    const signals = signalHunt._test.deterministicHiringSignals(results, {
+      signal_type: 'roofing_hiring_sales_ops',
+      source_channel: 'job_boards',
+      country: 'US',
+    });
+
+    expect(signals.map(s => s.company)).toEqual(['Apex Roofing & Restoration', 'North Star Roofing']);
+    expect(signals.every(s => s.source_url.includes('indeed.com/viewjob'))).toBe(true);
+    expect(signals[0]).toMatchObject({
+      signal_type: 'roofing_hiring_sales_ops',
+      confidence: 0.68,
+    });
+  });
+
   it('merges deterministic publication fallback without duplicating parser output', () => {
     expect(signalHunt._test.mergeExtractedSignalSets([{
       company: 'Kingdom Digital',

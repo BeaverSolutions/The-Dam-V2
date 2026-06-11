@@ -283,6 +283,48 @@ describe('Captain signal orchestration (V2.1 Phase 5)', () => {
     });
   });
 
+  it('keeps vertical tenants signal-first when a hiring signal is explicitly job-board actionable', () => {
+    const tinCityLikeTenant = {
+      source: 'tenant_profiles',
+      icp: {
+        active_industries: ['roofing'],
+        verticals: ['roofing'],
+        geo: ['US'],
+        personas: ['Owner', 'Founder', 'CEO', 'President'],
+      },
+      buying_signals: [
+        {
+          id: 'roofing_hiring_sales_ops',
+          family: 'hiring_capability_build',
+          enabled: true,
+          priority: 1,
+          source_channels: ['linkedin_jobs', 'web_search'],
+          query_terms: ['roofing sales representative', 'roofing project manager'],
+          evidence_required: ['company', 'role', 'source_url'],
+          stop_rules: { max_paid_searches_per_day: 6 },
+        },
+      ],
+    };
+
+    const decision = captain._test.buildCaptainSignalOrchestration({
+      tenant: tinCityLikeTenant,
+      currentSignalId: null,
+      signalScorecard: {},
+      spend: { provider_cap_closed: false, daily_budget_remaining_usd: 5 },
+      queue: { pending_approvals: 0, capacity: 20 },
+      channelReadiness: { email: true, linkedin: true },
+    });
+
+    expect(decision.next_playbook).toMatchObject({
+      signal_id: 'roofing_hiring_sales_ops',
+      signal_family: 'hiring_capability_build',
+      source_channel: 'job_boards',
+    });
+    expect(decision.next_playbook.platform_plan_required).not.toBe(true);
+    expect(decision.next_playbook.queries.map(q => q.query).join('\n')).toMatch(/roofing sales representative/);
+    expect(decision.next_playbook.queries.map(q => q.query).join('\n')).toMatch(/site:indeed\.com/);
+  });
+
   it('keeps signal-first for broad-ICP tenants (no active_industries, has buying signals)', () => {
     // tenant fixture has icp.verticals but no active_industries — stays signal-first
     const decision = captain._test.buildCaptainSignalOrchestration({
