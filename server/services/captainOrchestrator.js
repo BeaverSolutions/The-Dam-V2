@@ -390,7 +390,7 @@ async function collectTeamKPIs(clientId) {
       stale_approvals AS (
         SELECT
           COUNT(*) AS pending_n,
-          EXTRACT(EPOCH FROM (NOW() - MIN(created_at))) / 3600.0 AS oldest_hours
+          EXTRACT(EPOCH FROM (NOW() - MIN(a.created_at))) / 3600.0 AS oldest_hours
         FROM approvals a
         JOIN messages m ON m.id = a.message_id AND m.client_id = a.client_id
         WHERE a.client_id = $1
