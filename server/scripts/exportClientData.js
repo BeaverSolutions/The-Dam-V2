@@ -20,8 +20,9 @@
  *   5. Saves the file back
  */
 
-require('dotenv').config();
 const path = require('path');
+const { loadEnvironment } = require('../utils/envBootstrap');
+loadEnvironment({ projectRoot: path.join(__dirname, '..') });
 const pool = require('../db/pool');
 
 // Try to load ExcelJS — install it if missing

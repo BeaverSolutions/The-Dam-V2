@@ -17,8 +17,9 @@
  * Schedule: Run weekly (Sunday night or Monday morning)
  */
 
-require('dotenv').config();
 const path = require('path');
+const { loadEnvironment } = require('../utils/envBootstrap');
+loadEnvironment({ projectRoot: path.join(__dirname, '..') });
 const pool = require('../db/pool');
 
 let ExcelJS;

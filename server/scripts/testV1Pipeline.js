@@ -12,7 +12,12 @@
 // failures (no DB) are swallowed by the existing catch in claude.js.
 
 const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env'), override: true });
+const { loadEnvironment } = require('../utils/envBootstrap');
+loadEnvironment({
+  projectRoot: path.join(__dirname, '..', '..'),
+  explicitPath: path.join(__dirname, '..', '..', '.env'),
+  override: true,
+});
 process.chdir(path.join(__dirname, '..'));
 
 if (!process.env.ANTHROPIC_API_KEY) {

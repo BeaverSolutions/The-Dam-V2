@@ -3,7 +3,8 @@
 // to clear in-memory bad state. Root cause: Supavisor pooler in transaction mode doesn't
 // preserve SET ROLE state. Need session-mode connection OR refactor to SET LOCAL inside
 // transactions before re-enabling RLS_ENFORCE_ENABLED=true.
-require('dotenv').config();
+const { loadEnvironment } = require('./utils/envBootstrap');
+loadEnvironment({ projectRoot: __dirname });
 
 const express = require('express');
 const helmet = require('helmet');
