@@ -3,6 +3,9 @@
 .env.local
 .env.*.local
 
+# Keep Tin City impact artifacts local-only (docs/config/enabled .env)
+clients/tin-city-impact/
+
 # Dependencies
 node_modules/
 client/node_modules/
