@@ -127,4 +127,38 @@ describe('tenant context buying signal runtime contract', () => {
     });
     expect(icp.buying_signals).toEqual([]);
   });
+
+  it('projects active tenant geo as both array and legacy string for Signal Hunt callers', async () => {
+    activeProfile(baseProfile({
+      icp: {
+        active_industries: ['roofing'],
+        verticals: ['roofing_contractor'],
+        personas: ['Owner', 'Founder'],
+        geo: ['United States', 'Canada'],
+      },
+      buying_signals: [
+        {
+          id: 'roofing_hiring_sales_ops',
+          family: 'hiring_capability_build',
+          enabled: true,
+          priority: 1,
+          query_terms: ['roofing company hiring sales rep'],
+          source_channels: ['linkedin_jobs', 'web_search'],
+          evidence_required: ['company', 'role', 'source_url'],
+          decision_maker_strategy: ['company_website_team_page'],
+          stop_rules: { max_queries: 8, max_candidates: 15, stop_if_zero_after: 4 },
+          reject_rules: { exclusions: [], competitor_offers: [] },
+        },
+      ],
+    }));
+
+    const icp = await getLegacyIcpForClient('client-1', { source: 'service' });
+
+    expect(icp).toMatchObject({
+      source: 'tenant_profiles',
+      geo: ['United States', 'Canada'],
+      geographies: 'United States, Canada',
+      active_industries: ['roofing'],
+    });
+  });
 });

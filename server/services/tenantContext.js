@@ -404,12 +404,19 @@ function legacyIcpFromProfile(profile) {
   const activeIndustries = Array.isArray(icp.active_industries)
     ? icp.active_industries.map(v => String(v || '').trim()).filter(Boolean)
     : [];
+  const geo = Array.isArray(icp.geo)
+    ? icp.geo.map(v => String(v || '').trim()).filter(Boolean)
+    : [];
   return {
     job_titles:  Array.isArray(icp.personas) ? icp.personas.join(', ') : '',
     industries:  activeIndustries.join(', '),
     verticals:   activeIndustries.join(', '),
     active_industries: activeIndustries,
-    geographies: Array.isArray(icp.geo) ? icp.geo.join(', ') : '',
+    // Legacy callers are mixed: older prompt builders expect a comma string,
+    // while Signal Hunt / platform plans need an array so they do not collapse
+    // tenant geos such as "United States, Canada" into an unsupported code.
+    geo,
+    geographies: geo.join(', '),
     exclusions:  Array.isArray(icp.exclusions) ? icp.exclusions : [],
     competitor_offers: Array.isArray(icp.competitor_offers) ? icp.competitor_offers : [],
     buying_signals: runtimeBuyingSignals(profile),

@@ -67,6 +67,15 @@ function resolveLegacyPrompt(agentKey, rawPrompt, getOutreachRulesImpl, getProof
   return resolved;
 }
 
+function prependTenantContext(rawPrompt, tenantContext) {
+  return [
+    `${formatTenantContext(tenantContext)}
+
+This tenant profile is authoritative. It overrides any default ICP examples, default verticals, default geography, default offer, default proof, and default voice inside the base agent prompt below. Do not reject a lead for failing Beaver Solutions' default ICP when it fits this tenant profile.`,
+    rawPrompt,
+  ].filter(Boolean).join('\n\n');
+}
+
 async function resolveTenantAwarePrompt({
   agentKey,
   rawPrompt,
@@ -78,10 +87,6 @@ async function resolveTenantAwarePrompt({
   getOutreachRulesImpl = getOutreachRules,
   getProofNumbersImpl = getProofNumbers,
 } = {}) {
-  if (!hasPromptPlaceholders(rawPrompt)) {
-    return rawPrompt;
-  }
-
   const role = roleForAgent(agentKey);
   if (clientId && role) {
     const authCtx = createAuthContextImpl({ clientId, source });
@@ -91,10 +96,17 @@ async function resolveTenantAwarePrompt({
     });
 
     if (tenantContext?.active === true) {
-      return rawPrompt
-        .replace('{{OUTREACH_RULES}}', formatTenantContext(tenantContext))
-        .replace('{{PROOF_NUMBERS}}', formatTenantProof(tenantContext));
+      if (hasPromptPlaceholders(rawPrompt)) {
+        return rawPrompt
+          .replace('{{OUTREACH_RULES}}', formatTenantContext(tenantContext))
+          .replace('{{PROOF_NUMBERS}}', formatTenantProof(tenantContext));
+      }
+      return prependTenantContext(rawPrompt, tenantContext);
     }
+  }
+
+  if (!hasPromptPlaceholders(rawPrompt)) {
+    return rawPrompt;
   }
 
   return resolveLegacyPrompt(agentKey, rawPrompt, getOutreachRulesImpl, getProofNumbersImpl);
@@ -108,5 +120,6 @@ module.exports = {
     formatTenantContext,
     formatTenantProof,
     hasPromptPlaceholders,
+    prependTenantContext,
   },
 };

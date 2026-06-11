@@ -8,6 +8,24 @@ function list(value) {
   return Array.isArray(value) ? value.map(item => String(item).trim()).filter(Boolean) : [];
 }
 
+function listAny(value) {
+  if (Array.isArray(value)) return value.map(item => String(item).trim()).filter(Boolean);
+  if (typeof value === 'string') return value.split(/[,;\n]/).map(item => item.trim()).filter(Boolean);
+  return [];
+}
+
+function geoCode(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return null;
+  if (['us', 'usa', 'u.s.', 'united states', 'united states of america'].includes(text)) return 'US';
+  if (['ca', 'canada'].includes(text)) return 'CA';
+  if (['my', 'malaysia'].includes(text)) return 'MY';
+  if (['sg', 'singapore'].includes(text)) return 'SG';
+  if (['au', 'australia'].includes(text)) return 'AU';
+  if (['uk', 'gb', 'united kingdom', 'great britain', 'england'].includes(text)) return 'UK';
+  return String(value || '').trim().toUpperCase();
+}
+
 function array(value) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
 }
@@ -83,12 +101,12 @@ function hasVerticalFirstDiscoverySignal(icp = {}) {
 
 function firstGeo(icp = {}) {
   const candidates = [
-    ...list(icp.icp?.geographies),
-    ...list(icp.icp?.geo),
-    ...list(icp.geographies),
-    ...list(icp.geo),
+    ...listAny(icp.icp?.geographies),
+    ...listAny(icp.icp?.geo),
+    ...listAny(icp.geographies),
+    ...listAny(icp.geo),
   ];
-  return String(candidates[0] || 'MY').toUpperCase();
+  return geoCode(candidates[0]) || 'MY';
 }
 
 function activeIndustry(icp = {}) {
@@ -126,6 +144,8 @@ function activeIndustries(icp = {}) {
 function hiringLocation(geo) {
   if (geo === 'MY') return 'Malaysia';
   if (geo === 'SG') return 'Singapore';
+  if (geo === 'US') return 'United States';
+  if (geo === 'CA') return 'Canada';
   return geo;
 }
 

@@ -179,6 +179,33 @@ describe('platform plan builder', () => {
     expect(plan.platform_sequence.every(item => item.query_validation.words <= 50)).toBe(true);
   });
 
+  it('normalizes tenant-profile comma-string geographies before platform selection', () => {
+    const plan = platformPlan.buildPlatformPlan({
+      clientId: 'tin-city',
+      icp: {
+        active_industries: ['roofing'],
+        verticals: 'roofing',
+        geographies: 'United States, Canada',
+        buying_signals: [
+          { id: 'roofing_hiring_sales_ops', family: 'hiring_capability_build', enabled: true },
+        ],
+      },
+      objective: 'Tin City vertical-first proof',
+      requestedCount: 2,
+      maxPaidQueries: 6,
+      mode: 'vertical_first',
+    });
+
+    expect(plan.discovery_mode).toBe('vertical_first');
+    expect(plan.platform_sequence.length).toBeGreaterThan(0);
+    expect(plan.platform_sequence.every(item => item.geo === 'US')).toBe(true);
+    expect(plan.platform_sequence.map(item => item.platform)).toEqual(
+      expect.arrayContaining(['agency_directory', 'training_directory', 'vertical_web'])
+    );
+    expect(plan.platform_sequence.map(item => item.query).join('\n')).toContain('"United States"');
+    expect(platformPlan.verifyPlatformPlanHash(plan)).toBe(true);
+  });
+
   it('defaults empty-signals vertical ICPs to vertical-first instead of silent hiring fallback', () => {
     const plan = platformPlan.buildPlatformPlan({
       clientId: 'client-1',
