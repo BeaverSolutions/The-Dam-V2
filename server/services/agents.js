@@ -1546,7 +1546,16 @@ function brandSafetyCheck(body, leadContext = {}) {
     return { safe: false, reason: 'credential_leak' };
   }
 
-  // 4. Wrong name mismatch (if lead context provided)
+  // 4. Inbound-pitch-mined leads must never reveal that their spam/pitch to us
+  // became the sourcing signal. The cold draft uses the demonstrated pain, not
+  // "your email/pitch/message to us".
+  if (/\b(?:i|we)?\s*(?:got|received|saw|read)\s+your\s+(?:email|pitch|message|note|outreach)\b/i.test(body) ||
+      /\bthanks?\s+for\s+(?:reaching out|your\s+(?:email|pitch|message|note))\b/i.test(body) ||
+      /\byour\s+(?:email|pitch|message|note|outreach)\s+(?:to us|earlier|last week|yesterday)\b/i.test(body)) {
+    return { safe: false, reason: 'inbound_pitch_reference' };
+  }
+
+  // 5. Wrong name mismatch (if lead context provided)
   if (leadContext?.name) {
     const leadTokens = String(leadContext.name || '').trim().split(/\s+/).filter(Boolean);
     const normaliseNameToken = (value = '') => String(value)
@@ -1571,7 +1580,7 @@ function brandSafetyCheck(body, leadContext = {}) {
     }
   }
 
-  // 5. Fabricated growth/funding claims without data (heuristic)
+  // 6. Fabricated growth/funding claims without data (heuristic)
   if (leadContext && !leadContext.signal && !leadContext.why_now) {
     const fabricationPatterns = [
       /\brecently raised\b/i,
@@ -1586,7 +1595,7 @@ function brandSafetyCheck(body, leadContext = {}) {
     }
   }
 
-  // 6. Fabricated email address in body (2026-05-14: Hari Kishan h@tamsaglobal.com class).
+  // 7. Fabricated email address in body (2026-05-14: Hari Kishan h@tamsaglobal.com class).
   // Sales Beaver sometimes invents a contact email — short slug @ company-shaped-domain.
   // Sending to a fabricated address bounces / hits spam traps / wastes the warm signal.
   // Any email in the body must match the lead's known email OR be a recognised sender

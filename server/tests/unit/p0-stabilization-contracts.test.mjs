@@ -385,7 +385,10 @@ describe('P0 stabilization contracts', () => {
     const signalHunt = service('services/signalHunt.js');
 
     expect(signalHunt).toContain('function hasIcpSearchScope');
-    expect(signalHunt).toContain('const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : []');
+    expect(signalHunt).toContain('async function buildDynamicSignalQueriesFromIcp');
+    expect(signalHunt).toContain('const staticIcpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : []');
+    expect(signalHunt).toContain('const dynamicIcpQueries = hasIcpSearchScope(icp) ? await buildDynamicSignalQueriesFromIcp(clientId, icp) : []');
+    expect(signalHunt).toContain('const icpQueries = [...dynamicIcpQueries, ...staticIcpQueries]');
     expect(signalHunt).toContain('function trustedSignalHuntConfigContent');
     expect(signalHunt).toContain('rejected_config_source');
     expect(signalHunt).not.toContain('...icpQueries, ...configuredQueries');

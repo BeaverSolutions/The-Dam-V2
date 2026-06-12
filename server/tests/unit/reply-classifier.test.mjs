@@ -134,6 +134,40 @@ describe('replyClassifier.classify — category detection', () => {
     });
   });
 
+  describe('spam / vendor_cold_pitch', () => {
+    it('classifies unsolicited B2B vendor pitches as spam:vendor_cold_pitch', () => {
+      const r = classify({
+        from: 'Samantha Lee <samantha@growthpilot.my>',
+        subject: 'Helping training firms book more meetings',
+        body: 'I help B2B companies with outbound lead generation and appointment setting. Would you be open to a quick call next week?',
+      });
+
+      expect(r.category).toBe(CATEGORIES.SPAM);
+      expect(r.subcategory).toBe('vendor_cold_pitch');
+      expect(r.sender_domain).toBe('growthpilot.my');
+    });
+
+    it('does not let vendor-pitch wording override bounce priority', () => {
+      const r = classify({
+        from: 'mailer-daemon@google.com',
+        subject: 'Undeliverable: Helping training firms book more meetings',
+        body: 'Would you be open to a quick call? 550 5.1.1 user unknown.',
+      });
+
+      expect(r.category).toBe(CATEGORIES.HARD_BOUNCE);
+    });
+
+    it('does not classify freemail vendor-looking text as vendor_cold_pitch', () => {
+      const r = classify({
+        from: 'random sender <pitcher@gmail.com>',
+        subject: 'Quick collaboration',
+        body: 'We help companies with lead generation. Would you be open to a call?',
+      });
+
+      expect(r.category).toBe(CATEGORIES.REAL_REPLY);
+    });
+  });
+
   describe('real_reply (default)', () => {
     it('classifies a genuine prospect reply as real_reply', () => {
       const r = classify({ from: 'jacob@tincityimpact.com', subject: 'Re: Quick question', body: 'Hey, sounds interesting. Tell me more.' });
@@ -176,11 +210,12 @@ describe('replyClassifier.classify — category detection', () => {
   });
 
   describe('CATEGORIES export', () => {
-    it('exports the five expected category constants', () => {
+    it('exports the six expected category constants', () => {
       expect(CATEGORIES.HARD_BOUNCE).toBe('hard_bounce');
       expect(CATEGORIES.SOFT_BOUNCE).toBe('soft_bounce');
       expect(CATEGORIES.AUTO_REPLY).toBe('auto_reply');
       expect(CATEGORIES.UNSUBSCRIBE).toBe('unsubscribe');
+      expect(CATEGORIES.SPAM).toBe('spam');
       expect(CATEGORIES.REAL_REPLY).toBe('real_reply');
     });
   });

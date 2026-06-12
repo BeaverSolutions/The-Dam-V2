@@ -136,7 +136,9 @@ describe('signalHunt source contracts (ICP-first query priority)', () => {
   const industriesFn = src.slice(industriesFnStart, industriesFnEnd);
 
   it('uses one authoritative query source and rejects stale stored config', () => {
-    expect(src).toContain('const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : []');
+    expect(src).toContain('const staticIcpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : []');
+    expect(src).toContain('const dynamicIcpQueries = hasIcpSearchScope(icp) ? await buildDynamicSignalQueriesFromIcp(clientId, icp) : []');
+    expect(src).toContain('const icpQueries = [...dynamicIcpQueries, ...staticIcpQueries]');
     expect(src).toContain('function trustedSignalHuntConfigContent');
     expect(src).toContain('rejected_config_source');
     expect(src).toContain('active_tenant_profile_buying_signals');

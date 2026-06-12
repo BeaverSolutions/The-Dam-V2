@@ -60,6 +60,12 @@ function brandSafetyCheck(body, leadContext = {}) {
     return { safe: false, reason: 'credential_leak' };
   }
 
+  if (/\b(?:i|we)?\s*(?:got|received|saw|read)\s+your\s+(?:email|pitch|message|note|outreach)\b/i.test(body) ||
+      /\bthanks?\s+for\s+(?:reaching out|your\s+(?:email|pitch|message|note))\b/i.test(body) ||
+      /\byour\s+(?:email|pitch|message|note|outreach)\s+(?:to us|earlier|last week|yesterday)\b/i.test(body)) {
+    return { safe: false, reason: 'inbound_pitch_reference' };
+  }
+
   if (leadContext?.name) {
     const leadTokens = String(leadContext.name || '').trim().split(/\s+/).filter(Boolean);
     const normaliseNameToken = (value = '') => String(value)
@@ -249,6 +255,19 @@ describe('Brand Safety Check', () => {
       const result = brandSafetyCheck('Hi Ahmad,\n\nToken: sk-abcdefghijklmnopqrstuvwxyz');
       expect(result.safe).toBe(false);
       expect(result.reason).toBe('credential_leak');
+    });
+  });
+
+  describe('inbound pitch reference detection', () => {
+    it('rejects drafts that reference the vendor pitch/email to us', () => {
+      const result = brandSafetyCheck('Hi Samantha,\n\nSaw your email about lead generation. How are you finding outbound capacity now?', { name: 'Samantha Lee' });
+      expect(result.safe).toBe(false);
+      expect(result.reason).toBe('inbound_pitch_reference');
+    });
+
+    it('allows normal cold copy that uses the observed pain without mentioning their pitch', () => {
+      const result = brandSafetyCheck('Hi Samantha,\n\nNoticed GrowthPilot is running outbound for training clients. Is keeping reply quality consistent becoming a weekly issue?', { name: 'Samantha Lee' });
+      expect(result.safe).toBe(true);
     });
   });
 

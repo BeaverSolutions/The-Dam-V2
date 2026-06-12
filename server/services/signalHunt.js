@@ -36,6 +36,7 @@ const {
 } = require('./companyEvidenceResolver');
 const { normalizeBuyingSignalsForTenant } = require('../config/buyingSignals');
 const crypto = require('crypto');
+const noaaHail = require('./providers/noaaHail');
 
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -57,9 +58,10 @@ const MAX_VERTICAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_VERTICAL_RESULTS_PER_
 // BUMP THIS whenever extraction, normalisation, or proof-gate logic changes.
 // The repeated-zero guard keys zero-output memory by this version — a parsing
 // fix shipped without a bump stays blocked by the OLD code's zero results
-// (2026-06-12: 4cf68e9 job-board proof gate shipped on v3, retest 409'd on
-// the pre-patch zero key until v4).
-const SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v4';
+// (2026-06-12: v5 adds NOAA hail metro-scoped vertical discovery and changes
+// hail signal source_url semantics to the NOAA report, while company identity
+// still resolves from the discovered company page).
+const SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v5';
 
 function klDateString() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -469,6 +471,7 @@ function listFrom(value) {
 function countryCodeFromText(value) {
   const s = String(value || '').toLowerCase();
   if (/\b(united states|usa|u\.s\.|us)\b/.test(s)) return 'US';
+  if (/\b(canada|ca)\b/.test(s)) return 'CA';
   if (/\b(singapore|sg)\b/.test(s)) return 'SG';
   if (/\b(malaysia|my|kuala lumpur|klang valley)\b/.test(s)) return 'MY';
   if (/\b(australia|au)\b/.test(s)) return 'AU';
@@ -479,6 +482,7 @@ function countryCodeFromText(value) {
 function countryNameFromCode(code) {
   const c = String(code || '').toUpperCase();
   if (c === 'US') return 'United States';
+  if (c === 'CA') return 'Canada';
   if (c === 'SG') return 'Singapore';
   if (c === 'AU') return 'Australia';
   if (c === 'GB' || c === 'UK') return 'United Kingdom';
@@ -523,6 +527,7 @@ function industriesFromIcp(icp = {}) {
 
 function titlesFromIcp(icp = {}) {
   return [
+    ...listFrom(icp.personas),
     ...listFrom(icp.job_titles),
     ...listFrom(icp.target_titles),
     ...listFrom(icp.titles),
@@ -530,6 +535,131 @@ function titlesFromIcp(icp = {}) {
   ]
     .map(v => String(v).trim())
     .filter(Boolean);
+}
+
+function isNoaaHailSignal(signal = {}) {
+  const text = [
+    signal.id,
+    signal.signal_id,
+    signal.family,
+    ...listFrom(signal.source_channels),
+    ...listFrom(signal.query_terms),
+  ].join(' ').toLowerCase();
+  return /\bhail\b/.test(text) || text.includes('noaa_spc_hail');
+}
+
+function icpAllowsNoaaHail(icp = {}) {
+  return countriesFromIcp(icp).some(country => country.code === 'US');
+}
+
+function hailEventWhyNow(event = {}) {
+  if (!event) return null;
+  const size = Number(event.size_inches || event.max_size_inches || ((Number(event.size_hundredths || event.max_size_hundredths) || 0) / 100));
+  const sizeText = Number.isFinite(size) && size > 0 ? `${Number(size.toFixed(2))}-inch` : 'large';
+  const county = event.county || event.report?.county || 'local';
+  const state = event.state || event.report?.state || '';
+  const date = event.report_date || event.report?.report_date || '';
+  return `${sizeText} hail reported in ${county}, ${state} on ${date} (NOAA SPC)`.replace(/\s+/g, ' ').trim();
+}
+
+function hailEventForMetro(metro = {}) {
+  const report = metro.report || metro;
+  return {
+    city: metro.city || report.metro,
+    county: metro.county || report.county,
+    state: metro.state || report.state,
+    size_hundredths: metro.max_size_hundredths || report.size_hundredths,
+    size_inches: metro.max_size_inches || report.size_inches,
+    report_date: metro.report_date || report.report_date,
+    source_url: metro.source_url || report.source_url,
+  };
+}
+
+function buildHailEventDiscoveryQueries(reports = [], {
+  signal = {},
+  icp = {},
+} = {}) {
+  if (!icpAllowsNoaaHail(icp)) return [];
+  const stopRules = signal.stop_rules || {};
+  const minSizeHundredths = Math.max(1, Number(stopRules.min_size_hundredths || stopRules.min_hail_size_hundredths || 100) || 100);
+  const maxMetros = Math.max(1, Number(stopRules.max_metros || 4) || 4);
+  const maxQueries = Math.max(1, Number(stopRules.max_queries || stopRules.max_paid_searches_per_day || maxMetros * 2) || maxMetros * 2);
+  const terms = listFrom(signal.query_terms).length > 0
+    ? listFrom(signal.query_terms)
+    : ['roofing contractor', 'roofing company'];
+  const expectedEvidence = listFrom(signal.evidence_required).length > 0
+    ? listFrom(signal.evidence_required)
+    : ['company', 'pain', 'source_url'];
+  const metros = noaaHail.targetMetrosFromReports(reports, {
+    minSizeHundredths,
+    maxMetros,
+  });
+  const queries = [];
+  for (const metro of metros) {
+    const hailEvent = hailEventForMetro(metro);
+    for (const term of terms) {
+      if (queries.length >= maxQueries) break;
+      const cleanTerm = String(term || '').replace(/"/g, '').trim();
+      if (!cleanTerm) continue;
+      const whyNow = hailEventWhyNow(hailEvent);
+      queries.push({
+        query: `"${cleanTerm}" "${hailEvent.city}" "${hailEvent.state}"`,
+        provider: 'brave',
+        platform: 'vertical_web',
+        signal_type: signal.id || 'noaa_hail_roofing',
+        signal_id: signal.id || 'noaa_hail_roofing',
+        signal_family: signal.family || 'pain_friction_evidence',
+        source_channel: 'vertical_web',
+        tier: signal.tier || 'P1',
+        country: 'US',
+        cost_class: 'paid_search',
+        expected_evidence: expectedEvidence,
+        industry: cleanTerm,
+        term: cleanTerm,
+        source_term: cleanTerm,
+        parser: 'vertical_directory_company',
+        discovery_mode: 'vertical_first',
+        hail_event: hailEvent,
+        why_now: whyNow,
+        signal_summary: `${whyNow}; discover local roofing companies in ${hailEvent.city}, ${hailEvent.state}.`,
+        angle: `Open on storm-response demand after the hail report in ${hailEvent.county}, ${hailEvent.state}.`,
+      });
+    }
+  }
+  return queries;
+}
+
+async function buildDynamicSignalQueriesFromIcp(clientId, icp = {}) {
+  const tenant = signalPlannerTenantFromIcp(icp);
+  const signals = normalizeBuyingSignalsForTenant(tenant, {
+    allowDefaults: false,
+  }).filter(signal => signal.enabled !== false && isNoaaHailSignal(signal));
+  if (signals.length === 0 || !icpAllowsNoaaHail(icp)) return [];
+
+  const queries = [];
+  for (const signal of signals) {
+    const stopRules = signal.stop_rules || {};
+    const days = Math.max(1, Number(stopRules.days_back || stopRules.lookback_days || 7) || 7);
+    try {
+      const reports = await noaaHail.fetchRecentHailReports({ days });
+      queries.push(...buildHailEventDiscoveryQueries(reports, { signal, icp }));
+    } catch (err) {
+      console.warn('[signalHunt] NOAA hail provider failed:', err.message);
+      if (clientId) {
+        await logsService.createLog(clientId, {
+          agent: 'research_beaver',
+          action: 'signal_provider_failed',
+          target_type: 'provider',
+          metadata: {
+            provider: 'noaa_spc_hail',
+            signal_id: signal.id || null,
+            reason: err.message,
+          },
+        }).catch(() => {});
+      }
+    }
+  }
+  return queries;
 }
 
 function normalizedEvidenceText(value = '') {
@@ -986,6 +1116,7 @@ function buildSignalQueriesFromIcp(icp = {}) {
   const perSignalQueries = [];
 
   for (const [idx, signal] of signals.entries()) {
+    if (isNoaaHailSignal(signal)) continue;
     try {
       const plan = signalPlanner.buildSignalPlan({
         tenant,
@@ -1023,12 +1154,25 @@ function normalizeSignalQuery(item, fallbackCountry = 'MY') {
   const country = String(raw.country || countryCodeFromText(query) || fallbackCountry || 'MY').toUpperCase();
   return {
     query,
+    provider: raw.provider,
+    platform: raw.platform,
     signal_id: raw.signal_id || raw.id || raw.signal,
     signal_family: raw.signal_family || raw.family,
     source_channel: raw.source_channel || raw.sourceChannel,
     signal_type: raw.signal_type || raw.type || 'buying_signal',
     tier: raw.tier || 'P2',
     country,
+    cost_class: raw.cost_class || raw.costClass,
+    expected_evidence: raw.expected_evidence || raw.expectedEvidence,
+    industry: raw.industry || null,
+    term: raw.term || null,
+    source_term: raw.source_term || raw.sourceTerm || raw.term || null,
+    parser: raw.parser || null,
+    discovery_mode: raw.discovery_mode || raw.discoveryMode || null,
+    hail_event: raw.hail_event || raw.hailEvent || null,
+    why_now: raw.why_now || raw.whyNow || null,
+    signal_summary: raw.signal_summary || raw.signalSummary || null,
+    angle: raw.angle || null,
   };
 }
 
@@ -1042,6 +1186,7 @@ function signalFamilyForType(signalType = '') {
   if (/vendor|category|review|compare|alternative|intent/.test(s)) return 'category_vendor_research';
   if (/stack|tech|crm|revops|migration|integration/.test(s)) return 'technology_stack_change';
   if (/regulatory|regulation|compliance|permit|deadline|audit/.test(s)) return 'regulatory_deadline_pressure';
+  if (/hail|storm|weather|roof/.test(s)) return 'pain_friction_evidence';
   if (/pain|friction|manual_process|bottleneck|hard_to_scale|struggling/.test(s)) return 'pain_friction_evidence';
   if (/event|sponsor|webinar|conference|exhibitor|speaker/.test(s)) return 'event_market_presence';
   return 'buying_signal';
@@ -1337,7 +1482,9 @@ async function loadSignalConfig(clientId, icp = {}, { maxPaidQueries = null } = 
       metadata: rejectedConfigSource,
     }).catch(() => {});
   }
-  const icpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : [];
+  const staticIcpQueries = hasIcpSearchScope(icp) ? buildSignalQueriesFromIcp(icp) : [];
+  const dynamicIcpQueries = hasIcpSearchScope(icp) ? await buildDynamicSignalQueriesFromIcp(clientId, icp) : [];
+  const icpQueries = [...dynamicIcpQueries, ...staticIcpQueries];
   const tenantProfileBlocked = isActiveTenantProfileIcp(icp)
     && hasIcpSearchScope(icp)
     && icpQueries.length === 0;
@@ -1901,6 +2048,7 @@ function verticalFirstSignalsFromResults(results = [], query = {}) {
   const platform = query.platform || query.source_channel || 'vertical_web';
   const sourceChannel = query.source_channel || platform || 'vertical_web';
   const seenDomains = new Set();
+  const hailEvent = query.hail_event || null;
   return (Array.isArray(results) ? results : [])
     .map(result => {
       const sourceUrl = result.link || result.url || '';
@@ -1922,6 +2070,12 @@ function verticalFirstSignalsFromResults(results = [], query = {}) {
       const title = String(result.title || result.name || '').trim();
       const snippet = String(result.snippet || result.description || title).trim();
       const evidence = snippet || title || `${company} matched vertical-first discovery.`;
+      const signalSourceUrl = hailEvent?.source_url || sourceUrl;
+      const hailWhyNow = hailEvent ? hailEventWhyNow(hailEvent) : null;
+      const signalSummary = query.signal_summary
+        ? `${query.signal_summary} Company evidence: ${title || evidence}.`
+        : `Signal-lite vertical-first company discovery for ${company}: ${title || evidence}.`;
+      const whyNow = query.why_now || hailWhyNow || `${company} matched the tenant vertical in a vertical-first discovery source; use a cold-outreach-no-signal opener unless a richer signal is attached later.`;
       return {
         company,
         company_website: origin || sourceUrl || null,
@@ -1933,10 +2087,10 @@ function verticalFirstSignalsFromResults(results = [], query = {}) {
         platform,
         provider: query.provider || 'brave',
         platform_plan_id: query.platform_plan_id || query.plan_id || null,
-        source_url: sourceUrl,
-        signal_summary: `Signal-lite vertical-first company discovery for ${company}: ${title || evidence}.`,
-        why_now: `${company} matched the tenant vertical in a vertical-first discovery source; use a cold-outreach-no-signal opener unless a richer signal is attached later.`,
-        angle: `Open on the relevant vertical and ask how ${company} is building outbound pipeline this quarter.`,
+        source_url: signalSourceUrl,
+        signal_summary: signalSummary,
+        why_now: whyNow,
+        angle: query.angle || `Open on the relevant vertical and ask how ${company} is building outbound pipeline this quarter.`,
         raw_snippet: evidence,
         company_description: evidence,
         signal_lite: true,
@@ -1955,7 +2109,9 @@ function verticalFirstSignalsFromResults(results = [], query = {}) {
           provider: query.provider || 'brave',
           platform_plan_id: query.platform_plan_id || query.plan_id || null,
           source_channel: sourceChannel,
-          source_url: sourceUrl,
+          source_url: signalSourceUrl,
+          company_source_url: sourceUrl || null,
+          hail_event: hailEvent || undefined,
           evidence,
           source_term: query.source_term || query.term || null,
         },
@@ -3073,6 +3229,7 @@ module.exports = {
   loadSignalConfig,
   previewSignalHuntPlan,
   platformFunnelFromSignalHuntResult,
+  evaluateSignalCompanyIcpGate,
   _test: {
     applySignalPlaybookToConfig,
     applyApprovedPlatformPlanToConfig,
@@ -3083,6 +3240,10 @@ module.exports = {
     signalPackageMissingFields,
     signalFamilyForType,
     buildSignalQueriesFromIcp,
+    buildHailEventDiscoveryQueries,
+    buildDynamicSignalQueriesFromIcp,
+    isNoaaHailSignal,
+    normalizeSignalQuery,
     sourceAwareQueriesForCountry,
     titlesFromIcp,
     evaluateSignalCompanyIcpGate,

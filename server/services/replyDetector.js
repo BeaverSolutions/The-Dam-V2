@@ -7,6 +7,7 @@ const logsService = require('./logs');
 const pipelineTrace = require('./pipelineTrace');
 const { handleReply } = require('./replyHandler');
 const replyClassifier = require('./replyClassifier');
+const inboundPitchProspecting = require('./inboundPitchProspecting');
 
 const BASIC_REPLY_TRACKING_POLICY = Object.freeze({
   mode: 'v2_1_basic',
@@ -17,7 +18,7 @@ const BASIC_REPLY_TRACKING_POLICY = Object.freeze({
 });
 
 // 2026-05-23 P0.5 (Contract 1): inbound classification BEFORE setting
-// reply_detected_at. Six categories (spam deferred to v2). Source of truth:
+// reply_detected_at. Six categories. Source of truth:
 // MJxClaude/memory/preferences.md 2026-05-21 reply pipeline contracts.
 //
 // Triggered for Jacob Froats / Tin City Impact case (real reply correctly
@@ -317,7 +318,7 @@ async function checkRepliesForClient(clientId) {
  */
 async function handleNonReply(clientId, ctx) {
   const { messageId, leadId, threadId, provider, snippet, inboundFrom, inboundSubject, classification } = ctx;
-  const { category, reason, matched_pattern } = classification;
+  const { category, subcategory, reason, matched_pattern } = classification;
 
   const logMetaBase = {
     lead_id: leadId,
@@ -331,6 +332,45 @@ async function handleNonReply(clientId, ctx) {
   };
 
   try {
+    if (category === 'spam' && subcategory === 'vendor_cold_pitch') {
+      const capture = await inboundPitchProspecting.captureVendorColdPitch(clientId, {
+        messageId,
+        leadId,
+        threadId,
+        provider,
+        snippet,
+        inboundFrom,
+        inboundSubject,
+        classification,
+      }).catch(err => ({ action: 'error', reason: err.message }));
+
+      await pool.query(
+        `UPDATE messages
+         SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
+             updated_at = NOW()
+         WHERE id = $2 AND client_id = $3`,
+        [
+          JSON.stringify({
+            is_spam: true,
+            spam_subcategory: 'vendor_cold_pitch',
+            spam_recorded_at: new Date().toISOString(),
+            original_reply_snippet: (snippet || '').slice(0, 300),
+            inbound_pitch_capture: capture,
+          }),
+          messageId, clientId,
+        ]
+      );
+
+      await logsService.createLog(clientId, {
+        agent: 'system',
+        action: 'spam_vendor_cold_pitch_recorded',
+        target_type: 'message',
+        target_id: messageId,
+        metadata: { ...logMetaBase, subcategory, capture },
+      });
+      return;
+    }
+
     if (category === 'hard_bounce') {
       // Message: mark failed, persist bounce metadata. Do NOT set reply_detected_at.
       await pool.query(

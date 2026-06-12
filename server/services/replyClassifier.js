@@ -14,7 +14,6 @@
  * Caller is responsible for executing the system action (DB writes, Telegram,
  * pipeline transitions). This module classifies only.
  *
- * v1 cuts: spam category deferred (high false-positive risk, low fire rate).
  * v1 cuts: auto-reply re-check scheduling deferred (return-date parsing is
  * separate infra).
  */
@@ -29,19 +28,44 @@ const AUTO_REPLY_SUBJECT = /^(auto[- ]?reply|automatic reply|out[- ]of[- ]office
 const AUTO_REPLY_BODY = /currently (out|away|on leave)|back on \w+|i'?m on (leave|vacation|holiday)|out of (the )?office until|auto[- ]?reply|away from my desk|limited access to email/i;
 
 const UNSUBSCRIBE_BODY = /\bunsubscribe\b|\bremove me\b|\bstop emailing\b|\bdo not contact\b|\bopt[- ]out\b|\btake me off\b/i;
+const VENDOR_PITCH_BODY = /\b(?:we|i)\s+(?:help|work with|support|speciali[sz]e|offer|provide|run|build)\b|\b(?:lead generation|appointment setting|cold email|cold outreach|outbound campaigns?|sales automation|book(?:ing)? more meetings|generate more leads|pipeline generation)\b/i;
+const VENDOR_PITCH_CTA = /\b(?:would you be open|open to a|quick call|book a call|book a demo|schedule a call|worth a chat|interested in|can we connect|let'?s chat)\b/i;
+
+const FREEMAIL_DOMAINS = new Set([
+  'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.com.my', 'yahoo.com.sg',
+  'hotmail.com', 'outlook.com', 'live.com', 'msn.com', 'icloud.com', 'me.com',
+  'aol.com', 'proton.me', 'protonmail.com', 'zoho.com', 'mail.com',
+]);
 
 const CATEGORIES = {
   HARD_BOUNCE: 'hard_bounce',
   SOFT_BOUNCE: 'soft_bounce',
   AUTO_REPLY: 'auto_reply',
   UNSUBSCRIBE: 'unsubscribe',
+  SPAM: 'spam',
   REAL_REPLY: 'real_reply',
 };
 
+function extractEmailAddr(headerValue) {
+  if (!headerValue) return '';
+  const m = String(headerValue).match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+  return m ? m[0].toLowerCase() : '';
+}
+
+function senderDomainFromHeader(headerValue) {
+  const email = extractEmailAddr(headerValue);
+  if (!email) return '';
+  return email.split('@')[1].replace(/^mail\./, '').toLowerCase();
+}
+
+function isFreemailDomain(domain = '') {
+  return FREEMAIL_DOMAINS.has(String(domain || '').toLowerCase());
+}
+
 /**
- * Classify an inbound message into one of five categories (spam deferred to v2).
+ * Classify an inbound message into one of six categories.
  *
- * Priority order: hard_bounce > soft_bounce > auto_reply > unsubscribe > real_reply.
+ * Priority order: hard_bounce > soft_bounce > auto_reply > unsubscribe > spam > real_reply.
  * The order matters — an unsubscribe-style phrase inside a bounce body must
  * resolve as bounce, not unsubscribe.
  *
@@ -92,9 +116,24 @@ function classify({ from = '', subject = '', body = '' } = {}) {
     return { category: CATEGORIES.UNSUBSCRIBE, reason: 'opt-out request', matched_pattern: unsub[0] };
   }
 
-  // 5. Real reply — default. Caller proceeds to existing reply_detected_at +
+  // 5. Spam / unsolicited inbound. Keep this deliberately narrow: only
+  // company-domain B2B vendor pitches with an explicit sales CTA.
+  const domain = senderDomainFromHeader(f);
+  const vendorPitch = (b.match(VENDOR_PITCH_BODY) || s.match(VENDOR_PITCH_BODY));
+  const vendorCta = (b.match(VENDOR_PITCH_CTA) || s.match(VENDOR_PITCH_CTA));
+  if (domain && !isFreemailDomain(domain) && vendorPitch && vendorCta) {
+    return {
+      category: CATEGORIES.SPAM,
+      subcategory: 'vendor_cold_pitch',
+      reason: 'unsolicited B2B vendor pitch',
+      matched_pattern: vendorPitch[0],
+      sender_domain: domain,
+    };
+  }
+
+  // 6. Real reply — default. Caller proceeds to existing reply_detected_at +
   // sentiment classification + handleReply flow.
   return { category: CATEGORIES.REAL_REPLY, reason: 'no system pattern matched', matched_pattern: null };
 }
 
-module.exports = { classify, CATEGORIES };
+module.exports = { classify, CATEGORIES, _test: { senderDomainFromHeader, isFreemailDomain } };
