@@ -44,6 +44,7 @@ const SOURCE_CHANNEL_CAPABILITIES = {
   founder_posts: ['company', 'pain', 'source_url'],
   support_pages: ['company', 'pain', 'source_url'],
   noaa_spc_hail: ['county', 'state', 'size', 'source_url'],
+  etris_directory: ['company', 'registration', 'last_verified', 'source_url'],
   event_pages: ['company', 'event', 'source_url'],
   sponsor_lists: ['company', 'event', 'source_url'],
   webinars: ['company', 'event', 'source_url'],

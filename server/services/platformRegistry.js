@@ -6,6 +6,20 @@ const BRAVE_LIMITS = Object.freeze({ maxChars: 400, maxWords: 50 });
 
 const PLATFORM_DEFINITIONS = Object.freeze([
   {
+    id: 'etris_directory',
+    label: 'ETRIS Directory',
+    provider: 'etris_directory',
+    source_channel: 'etris_directory',
+    supportedGeos: ['MY'],
+    signalFamilies: ['pain_friction_evidence', 'category_vendor_research'],
+    discoveryModes: [],
+    priority: 4,
+    queryLimits: null,
+    parser: 'etris_directory_provider',
+    evidenceRequired: ['company', 'registration', 'last_verified', 'source_url'],
+    knownFailureModes: ['directory_shape_changed', 'missing_provider_contact', 'stale_provider_record'],
+  },
+  {
     id: 'agency_directory',
     label: 'Agency Directory',
     provider: 'brave',

@@ -37,6 +37,7 @@ const {
 const { normalizeBuyingSignalsForTenant } = require('../config/buyingSignals');
 const crypto = require('crypto');
 const noaaHail = require('./providers/noaaHail');
+const etrisDirectory = require('./providers/etrisDirectory');
 
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -58,10 +59,10 @@ const MAX_VERTICAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_VERTICAL_RESULTS_PER_
 // BUMP THIS whenever extraction, normalisation, or proof-gate logic changes.
 // The repeated-zero guard keys zero-output memory by this version — a parsing
 // fix shipped without a bump stays blocked by the OLD code's zero results
-// (2026-06-12: v5 adds NOAA hail metro-scoped vertical discovery and changes
-// hail signal source_url semantics to the NOAA report, while company identity
-// still resolves from the discovered company page).
-const SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v5';
+// (2026-06-12: v6 adds explicit free-provider ETRIS directory extraction.
+// This changes query execution semantics because a directory provider can emit
+// first-class signal candidates without spending a paid search unit.)
+const SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v6';
 
 function klDateString() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -109,6 +110,12 @@ function signalPaidBudgetSplit(maxPaidQueries = null, maxLeads = 1, { verticalFi
     discovery: Math.max(0, total - lookup),
     lookup,
   };
+}
+
+function isFreeSignalProviderQuery(query = {}) {
+  const provider = String(query.provider || '').toLowerCase();
+  const costClass = String(query.cost_class || query.costClass || '').toLowerCase();
+  return provider === 'etris_directory' || costClass === 'free_directory' || costClass === 'free';
 }
 
 function platformFunnelKeyFor(step = {}) {
@@ -162,9 +169,9 @@ function createPlatformFunnelTracker({ mode = 'proof', planId = null } = {}) {
     return rows.get(key);
   };
 
-  const recordSearch = (step, results = []) => {
+  const recordSearch = (step, results = [], { paidUnits = 1 } = {}) => {
     const row = ensure(step);
-    row.paid_units += 1;
+    row.paid_units += Math.max(0, Number(paidUnits) || 0);
     row.raw_results += Array.isArray(results) ? results.length : 0;
     return row;
   };
@@ -370,7 +377,18 @@ function executableDiscoveryQueriesForBudget(queries = [], paidQueryBudget = {})
   const discovery = paidQueryBudget?.discovery;
   if (discovery === null || discovery === undefined) return queries;
   const limit = Math.max(0, Math.floor(Number(discovery) || 0));
-  return queries.slice(0, limit);
+  const selected = [];
+  let paidSelected = 0;
+  for (const query of queries) {
+    if (isFreeSignalProviderQuery(query)) {
+      selected.push(query);
+      continue;
+    }
+    if (paidSelected >= limit) continue;
+    selected.push(query);
+    paidSelected++;
+  }
+  return selected;
 }
 
 function shouldStopSignalDiscovery({
@@ -548,8 +566,33 @@ function isNoaaHailSignal(signal = {}) {
   return /\bhail\b/.test(text) || text.includes('noaa_spc_hail');
 }
 
+function isEtrisDirectorySignal(signal = {}) {
+  const text = [
+    signal.id,
+    signal.signal_id,
+    signal.family,
+    ...listFrom(signal.source_channels),
+    ...listFrom(signal.query_terms),
+  ].join(' ').toLowerCase();
+  return text.includes('etris_directory')
+    || /\betris\b/.test(text)
+    || /\bhrd\s*corp\b/.test(text);
+}
+
 function icpAllowsNoaaHail(icp = {}) {
   return countriesFromIcp(icp).some(country => country.code === 'US');
+}
+
+function icpAllowsEtrisDirectory(icp = {}) {
+  const hasMalaysia = countriesFromIcp(icp).some(country => country.code === 'MY');
+  if (!hasMalaysia) return false;
+  const industryText = [
+    ...listFrom(icp.active_industries),
+    ...listFrom(icp.industries),
+    ...listFrom(icp.verticals),
+    ...listFrom(icp.segments),
+  ].join(' ').toLowerCase();
+  return /\b(training|learning|l&d|coach|coaching|upskill|skills development|academy|corporate education)\b/.test(industryText);
 }
 
 function hailEventWhyNow(event = {}) {
@@ -629,15 +672,53 @@ function buildHailEventDiscoveryQueries(reports = [], {
   return queries;
 }
 
+function buildEtrisDirectoryQueriesFromIcp(icp = {}, signal = {}) {
+  if (!isEtrisDirectorySignal(signal) || !icpAllowsEtrisDirectory(icp)) return [];
+  const stopRules = signal.stop_rules || {};
+  const letters = listFrom(stopRules.letters || stopRules.browse_letters || stopRules.browseLetters || ['a'])
+    .map(value => String(value || '').trim().toLowerCase())
+    .filter(value => value === '0-9' || /^[a-z]$/.test(value))
+    .slice(0, 6);
+  const normalizedLetters = letters.length > 0 ? [...new Set(letters)] : ['a'];
+  const maxProviderPages = Math.max(1, Math.min(25, Number(stopRules.max_provider_pages || stopRules.maxProviderPages || 5) || 5));
+  const expectedEvidence = listFrom(signal.evidence_required).length > 0
+    ? listFrom(signal.evidence_required)
+    : ['company', 'registration', 'last_verified', 'source_url'];
+  return [{
+    query: `ETRIS training providers browse ${normalizedLetters.join(',')}`,
+    provider: 'etris_directory',
+    platform: 'etris_directory',
+    signal_type: signal.id || 'etris_registered_training_provider',
+    signal_id: signal.id || 'etris_registered_training_provider',
+    signal_family: signal.family || 'pain_friction_evidence',
+    source_channel: 'etris_directory',
+    tier: signal.tier || 'P1',
+    country: 'MY',
+    cost_class: 'free_directory',
+    expected_evidence: expectedEvidence,
+    industry: 'B2B corporate training',
+    term: 'HRD Corp registered training provider',
+    source_term: 'ETRIS directory',
+    parser: 'etris_directory_provider',
+    letters: normalizedLetters,
+    max_provider_pages: maxProviderPages,
+  }];
+}
+
 async function buildDynamicSignalQueriesFromIcp(clientId, icp = {}) {
   const tenant = signalPlannerTenantFromIcp(icp);
   const signals = normalizeBuyingSignalsForTenant(tenant, {
     allowDefaults: false,
-  }).filter(signal => signal.enabled !== false && isNoaaHailSignal(signal));
-  if (signals.length === 0 || !icpAllowsNoaaHail(icp)) return [];
+  }).filter(signal => signal.enabled !== false && (isNoaaHailSignal(signal) || isEtrisDirectorySignal(signal)));
+  if (signals.length === 0) return [];
 
   const queries = [];
   for (const signal of signals) {
+    if (isEtrisDirectorySignal(signal)) {
+      queries.push(...buildEtrisDirectoryQueriesFromIcp(icp, signal));
+      continue;
+    }
+    if (!icpAllowsNoaaHail(icp)) continue;
     const stopRules = signal.stop_rules || {};
     const days = Math.max(1, Number(stopRules.days_back || stopRules.lookback_days || 7) || 7);
     try {
@@ -1170,10 +1251,17 @@ function normalizeSignalQuery(item, fallbackCountry = 'MY') {
     parser: raw.parser || null,
     discovery_mode: raw.discovery_mode || raw.discoveryMode || null,
     hail_event: raw.hail_event || raw.hailEvent || null,
+    letters: raw.letters || raw.browse_letters || raw.browseLetters || null,
+    max_provider_pages: raw.max_provider_pages || raw.maxProviderPages || null,
     why_now: raw.why_now || raw.whyNow || null,
     signal_summary: raw.signal_summary || raw.signalSummary || null,
     angle: raw.angle || null,
   };
+}
+
+function isEtrisDirectoryQuery(query = {}) {
+  return String(query.provider || '').toLowerCase() === 'etris_directory'
+    || String(query.source_channel || '').toLowerCase() === 'etris_directory';
 }
 
 function signalFamilyForType(signalType = '') {
@@ -2496,13 +2584,15 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
 
   // Step 1: Run all signal queries in sequence (cost control)
   for (const q of config.queries) {
-    if (shouldStopSignalDiscovery({ discoveryQueriesRun, paidQueryBudget })) {
+    if (!isFreeSignalProviderQuery(q) && shouldStopSignalDiscovery({ discoveryQueriesRun, paidQueryBudget })) {
       console.log('[signalHunt] Discovery-query budget reached; reserving paid budget for decision-maker lookup');
       break;
     }
 
-    await assertLlmBudgetOpen(clientId);
     const provider = q.provider || 'brave';
+    if (!isFreeSignalProviderQuery(q)) {
+      await assertLlmBudgetOpen(clientId);
+    }
     const validation = platformRegistry.validateQuery(q.query, provider);
     if (!validation.valid) {
       const queryBlocker = validation.blocker || 'provider_query_limit_exceeded';
@@ -2549,38 +2639,59 @@ async function runSignalHunt(clientId, { maxLeads = 20, icp = {}, maxPaidQueries
       return attachPlatformFunnelToSignalHuntResult([], platformFunnelTracker.events());
     }
 
-    if (!consumePaidQuery(1)) {
+    if (!isFreeSignalProviderQuery(q) && !consumePaidQuery(1)) {
       console.log('[signalHunt] Paid-query budget exhausted before open-web signal search');
       break;
     }
 
     console.log(`[signalHunt] Running query: ${q.query}`);
     queriesRun++;
-    discoveryQueriesRun++;
+    if (!isFreeSignalProviderQuery(q)) discoveryQueriesRun++;
     try {
       const country = q.country || 'MY';
       const geoText = countryNameFromCode(country);
-      const results = await searchOpenWeb(q.query, config.max_results_per_query || 5, { country, clientId });
-      const safeResults = Array.isArray(results) ? results : [];
-      platformFunnelTracker.recordSearch(q, safeResults);
-      rawResultsTotal += safeResults.length;
-      stageStats.raw_results_total = rawResultsTotal;
-      for (const result of safeResults.slice(0, 2)) {
-        if (rawSample.length >= 12) break;
-        rawSample.push({
-          query: q.query,
-          title: String(result.title || '').slice(0, 160),
-          url: String(result.link || '').slice(0, 240),
-          source: String(result.source || '').slice(0, 80),
-          date: result.date || null,
-        });
-      }
-      if (safeResults.length === 0) continue;
+      let validSignals = [];
+      if (isEtrisDirectoryQuery(q)) {
+        const extracted = await etrisDirectory.fetchEtrisSignals(q);
+        const safeSignals = Array.isArray(extracted) ? extracted : [];
+        platformFunnelTracker.recordSearch(q, safeSignals, { paidUnits: 0 });
+        rawResultsTotal += safeSignals.length;
+        stageStats.raw_results_total = rawResultsTotal;
+        for (const signal of safeSignals.slice(0, 2)) {
+          if (rawSample.length >= 12) break;
+          rawSample.push({
+            query: q.query,
+            title: String(signal.company || '').slice(0, 160),
+            url: String(signal.source_url || '').slice(0, 240),
+            source: 'etris_directory',
+            date: signal.signal_date || signal.metadata?.last_verified || null,
+          });
+        }
+        if (safeSignals.length === 0) continue;
+        validSignals = safeSignals.filter(s => s.company && validSignalCompanyName(s.company) && s.confidence >= 0.5);
+      } else {
+        const results = await searchOpenWeb(q.query, config.max_results_per_query || 5, { country, clientId });
+        const safeResults = Array.isArray(results) ? results : [];
+        platformFunnelTracker.recordSearch(q, safeResults);
+        rawResultsTotal += safeResults.length;
+        stageStats.raw_results_total = rawResultsTotal;
+        for (const result of safeResults.slice(0, 2)) {
+          if (rawSample.length >= 12) break;
+          rawSample.push({
+            query: q.query,
+            title: String(result.title || '').slice(0, 160),
+            url: String(result.link || '').slice(0, 240),
+            source: String(result.source || '').slice(0, 80),
+            date: result.date || null,
+          });
+        }
+        if (safeResults.length === 0) continue;
 
-      const extracted = (verticalFirstExecution || isVerticalFirstQuery(q))
-        ? verticalFirstSignalsFromResults(safeResults, { ...q, platform_plan_id: activePlanId || q.platform_plan_id || null })
-        : await extractSignalsFromResults(clientId, safeResults, q, geoText);
-      const validSignals = extracted.filter(s => s.company && validSignalCompanyName(s.company) && s.confidence >= 0.5);
+        const extracted = (verticalFirstExecution || isVerticalFirstQuery(q))
+          ? verticalFirstSignalsFromResults(safeResults, { ...q, platform_plan_id: activePlanId || q.platform_plan_id || null })
+          : await extractSignalsFromResults(clientId, safeResults, q, geoText);
+        validSignals = extracted.filter(s => s.company && validSignalCompanyName(s.company) && s.confidence >= 0.5);
+      }
       platformFunnelTracker.recordExtraction(q, validSignals.length);
 
       // Assign tier from the query config
@@ -3241,8 +3352,12 @@ module.exports = {
     signalFamilyForType,
     buildSignalQueriesFromIcp,
     buildHailEventDiscoveryQueries,
+    buildEtrisDirectoryQueriesFromIcp,
     buildDynamicSignalQueriesFromIcp,
     isNoaaHailSignal,
+    isEtrisDirectorySignal,
+    isEtrisDirectoryQuery,
+    isFreeSignalProviderQuery,
     normalizeSignalQuery,
     sourceAwareQueriesForCountry,
     titlesFromIcp,

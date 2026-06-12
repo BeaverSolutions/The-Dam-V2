@@ -196,6 +196,16 @@ describe('buying signal config foundation', () => {
     }
   });
 
+  it('declares ETRIS directory as an explicit free-data source channel', () => {
+    expect(buyingSignals.SOURCE_CHANNEL_CAPABILITIES.etris_directory).toEqual([
+      'company',
+      'registration',
+      'last_verified',
+      'source_url',
+    ]);
+    expect(buyingSignals.SIGNAL_LIBRARY.pain_friction_evidence.source_channels).not.toContain('etris_directory');
+  });
+
   it('does not silently default active tenant runtime paths when buying signals are missing', () => {
     const runtimeSignals = buyingSignals.normalizeBuyingSignalsForTenant(baseProfile({
       buying_signals: [],

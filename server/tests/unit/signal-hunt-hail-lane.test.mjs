@@ -23,8 +23,8 @@ function hailReport(overrides = {}) {
 }
 
 describe('Signal Hunt NOAA hail lane', () => {
-  it('asserts parser version v5 for the extraction/query-shape change', () => {
-    expect(source('services/signalHunt.js')).toContain("SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v5'");
+  it('asserts parser version v6 for the extraction/query-shape change', () => {
+    expect(source('services/signalHunt.js')).toContain("SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v6'");
   });
 
   it('builds bounded metro-scoped roofing discovery queries from NOAA hail events', () => {
