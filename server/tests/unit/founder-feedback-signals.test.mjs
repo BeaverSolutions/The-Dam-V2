@@ -57,6 +57,18 @@ describe('founder feedback signal classifier', () => {
     expect(sql).toContain("AND NOT (");
   });
 
+  it('matches JS readiness for blog/listicle source URLs without direct company website proof', () => {
+    const sql = currentSignalPackageEligibilitySql('l');
+
+    expect(sql).toContain('/(category|categories|tag|tags|blog|news|article|articles)/');
+    expect(sql).toContain('top[-');
+    expect(sql).toContain('best[-');
+    expect(sql).toContain('listicle');
+    expect(sql).toContain('comparison');
+    expect(sql).toContain('guide');
+    expect(sql).toContain("AND NOT (");
+  });
+
   it('accepts research_beaver_read leads as eligible when vertical-first verification exists', () => {
     const sql = currentSignalPackageEligibilitySql('l');
 

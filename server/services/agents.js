@@ -861,21 +861,43 @@ function getSignalPackage(source = {}) {
     || null;
 }
 
-function hasCurrentSignalPackageIcpEvidence(lead = {}) {
+function currentSignalPackageReadiness(lead = {}) {
   const meta = safeJsonObject(lead.metadata);
-  if (lead.source !== 'signal_hunt' && !meta.signal_package && !meta.company_icp_fit) return true;
+  if (lead.source !== 'signal_hunt' && !meta.signal_package && !meta.company_icp_fit) {
+    return { ok: true };
+  }
   if (lead.source === 'signal_hunt') {
     const readiness = pipeline.leadReadinessGate(lead, { requireContactMethod: false });
-    if (!readiness.ready) return false;
+    if (!readiness.ready) {
+      return {
+        ok: false,
+        reason: readiness.reason || 'lead_readiness_gate_failed',
+        missing: readiness.reason === 'directory_or_aggregator_company' ? ['company_website'] : [],
+      };
+    }
   }
   const signalPackage = getSignalPackage(lead) || {};
   const fit = safeJsonObject(signalPackage.company_icp_fit || meta.company_icp_fit);
   const checked = Array.isArray(fit.reject_rules_checked) ? fit.reject_rules_checked : [];
-  return checked.includes('tenant_exclusions')
-    && checked.includes('competitor_offers')
-    && checked.includes('company_icp_evidence')
-    && typeof fit.vertical_match === 'string'
-    && fit.vertical_match.trim().length > 0;
+  const missing = [];
+  for (const requiredCheck of ['tenant_exclusions', 'competitor_offers', 'company_icp_evidence']) {
+    if (!checked.includes(requiredCheck)) missing.push(requiredCheck);
+  }
+  if (typeof fit.vertical_match !== 'string' || fit.vertical_match.trim().length === 0) {
+    missing.push('vertical_match');
+  }
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      reason: 'signal_package_icp_evidence_incomplete',
+      missing,
+    };
+  }
+  return { ok: true };
+}
+
+function hasCurrentSignalPackageIcpEvidence(lead = {}) {
+  return currentSignalPackageReadiness(lead).ok;
 }
 
 function isCompetitorOffer(source = {}, signalPackage = null) {
@@ -3033,7 +3055,8 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
   const currentPackageLeads = [];
   let staleSignalPackageRejected = 0;
   for (const lead of leads) {
-    if (hasCurrentSignalPackageIcpEvidence(lead)) {
+    const packageReadiness = currentSignalPackageReadiness(lead);
+    if (packageReadiness.ok) {
       currentPackageLeads.push(lead);
       continue;
     }
@@ -3049,6 +3072,9 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
         lead_company: lead.company,
         source: lead.source,
         reason: 'signal_hunt_lead_missing_current_company_icp_evidence_gate',
+        readiness_reason: packageReadiness.reason,
+        missing: packageReadiness.missing || [],
+        missing_company_website: (packageReadiness.missing || []).includes('company_website') || undefined,
       },
     }).catch(() => {});
     pipelineTrace.traceStage(clientId, {
@@ -3059,7 +3085,14 @@ async function processExistingLeadsPipeline(clientId, plan_id, leads, options = 
       agent: 'director',
       reason: 'signal_hunt_lead_missing_current_company_icp_evidence_gate',
       pipeline_path: 'signal_pipeline',
-      metadata: { lead_name: lead.name, lead_company: lead.company, source: lead.source },
+      metadata: {
+        lead_name: lead.name,
+        lead_company: lead.company,
+        source: lead.source,
+        readiness_reason: packageReadiness.reason,
+        missing: packageReadiness.missing || [],
+        missing_company_website: (packageReadiness.missing || []).includes('company_website') || undefined,
+      },
     }).catch(() => {});
   }
   leads = currentPackageLeads;
@@ -6867,6 +6900,7 @@ module.exports = {
     enforcerEvidenceGate,
     captainFallbackDraft,
     getSignalPackage,
+    currentSignalPackageReadiness,
     signalPackageMissingFields,
     minPaidQueriesForExternalTarget,
     buildSignalFirstSourcingPlan,

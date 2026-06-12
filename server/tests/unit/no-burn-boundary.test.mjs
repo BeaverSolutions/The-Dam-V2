@@ -177,6 +177,17 @@ describe('autonomous kickoff loop — no-burn boundary (Phase 2c)', () => {
     expect(agentsSource).toContain("'stale_signal_package'");
   });
 
+  it('stale signal package rejections expose the concrete pre-draft readiness reason', () => {
+    const existingPipelineStart = agentsSource.indexOf('async function processExistingLeadsPipeline');
+    const existingPipelineEnd = agentsSource.indexOf('await logsService.createLog(clientId, {', agentsSource.indexOf('signal_pipeline_executing', existingPipelineStart));
+    const existingPipelineBody = agentsSource.slice(existingPipelineStart, existingPipelineEnd);
+
+    expect(existingPipelineBody).toContain('currentSignalPackageReadiness(lead)');
+    expect(existingPipelineBody).toContain('readiness_reason');
+    expect(existingPipelineBody).toContain('missing:');
+    expect(existingPipelineBody).toContain('company_website');
+  });
+
   it('pipeline traces use valid stages for repair and channel blocks', () => {
     expect(existsSync(traceStageMigrationPath)).toBe(true);
     const migration = readFileSync(traceStageMigrationPath, 'utf-8').replace(/\r\n/g, '\n');

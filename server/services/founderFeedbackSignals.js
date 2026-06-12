@@ -39,7 +39,9 @@ function currentSignalPackageEligibilitySql(leadAlias = 'l') {
   const sourceLabel = `LOWER(CONCAT_WS(' ', ${leadAlias}.metadata->>'platform', ${leadAlias}.metadata->>'source_channel', ${leadAlias}.metadata->'signal_package'->>'platform', ${leadAlias}.metadata->'signal_package'->>'source_channel'))`;
   const companyWebsite = `COALESCE(${leadAlias}.metadata->'signal_package'->>'company_website', ${leadAlias}.metadata->>'company_website', ${leadAlias}.metadata->'signal_package'->>'website', ${leadAlias}.metadata->>'website', ${leadAlias}.metadata->'signal_package'->>'company_url', ${leadAlias}.metadata->>'company_url', '')`;
   const evidenceLabel = `LOWER(CONCAT_WS(' ', ${leadAlias}.metadata->>'source_url', ${leadAlias}.metadata->>'url', ${leadAlias}.metadata->>'source', ${leadAlias}.metadata->'signal_package'->>'source_url', ${leadAlias}.metadata->'signal_package'->>'url', ${leadAlias}.metadata->'signal_package'->>'source'))`;
-  const aggregatorEvidenceSql = '(clutch|goodfirms|sortlist|designrush|techbehemoths|themanifest|topdevelopers|trustpilot|yelp|yellowpages|glassdoor|crunchbase|wikipedia)';
+  const aggregatorHostEvidenceSql = '(clutch|goodfirms|sortlist|designrush|techbehemoths|themanifest|topdevelopers|trustpilot|yelp|yellowpages|glassdoor|crunchbase|wikipedia|facebook[.]com|instagram[.]com|youtube[.]com|medium[.]com|quora|reddit)';
+  const aggregatorPathEvidenceSql = '(/(category|categories|tag|tags|blog|news|article|articles)/|top[-[:space:]]?[0-9]+|(^|[-/[:space:]])top[-[:space:]][a-z]|(^|[-/[:space:]])best[-[:space:]]|(providers?|companies|agencies|firms|vendors)[-[:space:]](in|malaysia|singapore|my|sg|kl|asia)([^a-z]|$)|[-/](list|listing|listicle|directory|ranking|rankings|reviews?|comparison|guide)([^a-z]|$))';
+  const aggregatorEvidenceSql = `(${aggregatorHostEvidenceSql}|${aggregatorPathEvidenceSql})`;
   const concreteCompanyWebsite = `(NULLIF(BTRIM(${companyWebsite}), '') IS NOT NULL AND ${companyWebsite} !~* '${aggregatorEvidenceSql}' AND ${companyWebsite} !~* 'linkedin[.]com')`;
   const directoryTitleCompanySql =
     'leading[[:space:]]+corporate[[:space:]]+training|' +
