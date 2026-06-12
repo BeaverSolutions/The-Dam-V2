@@ -54,7 +54,12 @@ const MAX_SIGNAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_RESULTS_PER_QUERY', 3);
 // funnel — the candidate-side cost is free (regex + cheap homepage fetch);
 // only gate-passing candidates spend the paid decision-maker budget.
 const MAX_VERTICAL_RESULTS_PER_QUERY = envInt('SIGNAL_HUNT_VERTICAL_RESULTS_PER_QUERY', 12);
-const SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v3';
+// BUMP THIS whenever extraction, normalisation, or proof-gate logic changes.
+// The repeated-zero guard keys zero-output memory by this version — a parsing
+// fix shipped without a bump stays blocked by the OLD code's zero results
+// (2026-06-12: 4cf68e9 job-board proof gate shipped on v3, retest 409'd on
+// the pre-patch zero key until v4).
+const SIGNAL_HUNT_PARSER_VERSION = 'universal_signal_planner_v4';
 
 function klDateString() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
