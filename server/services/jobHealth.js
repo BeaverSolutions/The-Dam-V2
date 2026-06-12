@@ -37,6 +37,7 @@ const AUTONOMY_DEGRADED_REASONS = new Set([
   'repeated_zero_output_query_set',
   'same_query_set_failed',
   'provider_cap_closed',
+  'process_restart_orphan',
 ]);
 
 const AUTONOMY_DEGRADED_PATTERNS = [
@@ -52,6 +53,7 @@ const AUTONOMY_DEGRADED_PATTERNS = [
   /low[_ -]yield[_ -]outputs?/i,
   /zero[-_ ]output/i,
   /no output proof/i,
+  /process[_ -]restart[_ -]orphan/i,
 ];
 
 function ensureJob(jobName) {

@@ -187,7 +187,7 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(healthBody).toContain('lead_pool: {');
   });
 
-  it('start markers are not kickoff work proof and KPI-gap blocks unverified daily kickoff runs', () => {
+  it('start markers are not kickoff work proof and KPI-gap blocks only unverified daily kickoff runs', () => {
     const healthBody = functionBody(autonomousSource, "router.get('/system-health'", '/* ─── POST /api/autonomous/mark-linkedin-sent');
     const kpiGapBody = functionBody(indexSource, 'async function runKpiGapKickoff', 'async function runCaptainDirectiveSweep');
     const dailyKickoffBody = functionBody(indexSource, 'async function runDailyKickoff', 'async function runMarketSensingCron');
@@ -200,10 +200,18 @@ describe('BeavrDam autonomous end-to-end contract', () => {
     expect(kpiGapBody).toContain('kpi_gap_blocked_by_unverified_daily_kickoff');
     expect(kpiGapBody).toContain('daily kickoff start marker has no output proof');
     expect(kpiGapBody).toContain('dailyKickoffWorkProof');
+    expect(kpiGapBody).toContain('const dailyKickoffProof = await getDailyKickoffProof(client.id, today)');
+    expect(kpiGapBody).toContain('const dailyKickoffFailureProof = dailyKickoffHasFailureProof(dailyKickoffProof)');
+    expect(kpiGapBody).toContain('dailyKickoffProof?.daily_kickoff_started && !dailyKickoffWorkProof && !dailyKickoffFailureProof');
+    expect(kpiGapBody).not.toContain("AND am.key = 'daily_kickoff_' || $2::text");
+    expect(kpiGapBody).not.toContain('AS daily_kickoff_started');
     expect(indexSource).toContain('function dailyKickoffHasWorkProof(proof)');
+    expect(indexSource).toContain('function dailyKickoffHasFailureProof(proof)');
     expect(indexSource).toContain('async function getDailyKickoffProof(clientId, today)');
+    expect(indexSource).toContain('daily_kickoff_failure_proof');
     expect(indexSource).toContain('daily_kickoff_unverified_output_blocker');
     expect(dailyKickoffBody).toContain('daily kickoff dedupe rows present but no output proof');
+    expect(dailyKickoffBody).toContain("reason: 'process_restart_orphan'");
     expect(dailyKickoffBody).toContain("blocked: true, reason: 'daily kickoff start marker has no output proof'");
     expect(kickoffWrapperBody).toContain("'autonomous_kickoff_failed'");
     expect(kickoffWrapperBody).toContain('verifyKickoffOutput(clientId, 20, { runStartedAt: kickoffRunStartedAt })');

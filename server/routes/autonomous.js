@@ -1328,12 +1328,16 @@ router.post('/morning-kickoff', requireInternalKey, async (req, res) => {
 /* ─── Concurrent-run lock (prevents overlapping kickoffs per client) ─── */
 const _runningKickoffs = new Set();
 
+function isKickoffRunning(clientId) {
+  return _runningKickoffs.has(clientId);
+}
+
 /* ─── GET /api/autonomous/running ────────────────────────── */
 // MyClaw polls this before firing a kickoff to avoid duplicate runs.
 router.get('/running', requireInternalKey, (req, res) => {
   const { client_id } = req.query;
   if (!client_id) return res.status(400).json({ error: 'client_id query param required', code: 'MISSING_CLIENT_ID' });
-  return res.json({ data: { running: _runningKickoffs.has(client_id), client_id } });
+  return res.json({ data: { running: isKickoffRunning(client_id), client_id } });
 });
 
 /* ─── POST /api/autonomous/v2-1/research-proof ─────────────
@@ -5370,4 +5374,5 @@ router.post('/enrich-cold-signals', async (req, res) => {
 
 module.exports = router;
 module.exports.runAutonomousKickoff = runAutonomousKickoff;
+module.exports.isKickoffRunning = isKickoffRunning;
 module.exports._test = { parseRequestedLeadLimit, boundedChatSignalQueryCap, isChatCampaignIntent };

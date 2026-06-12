@@ -1013,28 +1013,51 @@ none from this broken report; check app truth before approving batches.`;
 
     // ── Daily kickoff (internal scheduler) ───────────────────────────────────
     // Fires at 9:30 AM MYT (01:30 UTC) for all clients in AUTONOMOUS_ENABLED_CLIENTS.
-    const { runAutonomousKickoff } = require('./routes/autonomous');
+    const { runAutonomousKickoff, isKickoffRunning } = require('./routes/autonomous');
+    const { markDailyKickoffOrphans } = require('./services/kickoffOrphanRecovery');
     // runWithClientContext already imported above for follow-up scheduler
 
     function dailyKickoffHasWorkProof(proof) {
       return !!proof?.daily_kickoff_work_log || Number(proof?.trace_count || 0) > 0;
     }
 
+    function dailyKickoffHasFailureProof(proof) {
+      return !!proof?.daily_kickoff_failure_proof;
+    }
+
     async function getDailyKickoffProof(clientId, today) {
       const { rows: [proof] } = await pool.query(
-        `SELECT
-           EXISTS (
-             SELECT 1 FROM agent_memory am
-              WHERE am.client_id = $1
-                AND am.agent = 'captain'
-                AND am.key = 'daily_kickoff_' || $2::text
-           )
-           OR EXISTS (
-             SELECT 1 FROM logs l
-              WHERE l.client_id = $1
-                AND l.action = 'autonomous_kickoff'
-                AND (l.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
-           ) AS daily_kickoff_started,
+        `WITH marker AS (
+           SELECT MIN(am.created_at) AS marker_at
+             FROM agent_memory am
+            WHERE am.client_id = $1
+              AND am.agent = 'captain'
+              AND am.key = 'daily_kickoff_' || $2::text
+         ),
+         start_log AS (
+           SELECT MIN(l.created_at) AS start_log_at
+             FROM logs l
+            WHERE l.client_id = $1
+              AND l.action = 'autonomous_kickoff'
+              AND (l.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+         ),
+         started AS (
+           SELECT COALESCE((SELECT marker_at FROM marker), (SELECT start_log_at FROM start_log)) AS started_at
+         ),
+         message_counts AS (
+           SELECT
+             COUNT(*) FILTER (WHERE m.status = 'sent')::int AS sent,
+             COUNT(*) FILTER (WHERE m.status IN ('pending_approval', 'approved', 'pending_send', 'linkedin_requested'))::int AS approval_ready,
+             COUNT(*) FILTER (WHERE m.status = 'pending_ranger')::int AS drafting,
+             COUNT(*) FILTER (WHERE m.status = 'ranger_rejected')::int AS rejected
+            FROM messages m, started s
+           WHERE m.client_id = $1
+             AND (m.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+             AND (s.started_at IS NULL OR m.created_at >= s.started_at)
+         )
+         SELECT
+           ((SELECT marker_at FROM marker) IS NOT NULL OR (SELECT start_log_at FROM start_log) IS NOT NULL) AS daily_kickoff_started,
+           (SELECT started_at FROM started) AS daily_kickoff_started_at,
            EXISTS (
              SELECT 1 FROM logs l
               WHERE l.client_id = $1
@@ -1061,14 +1084,44 @@ none from this broken report; check app truth before approving batches.`;
                   'campaign_target_fulfilled'
                 )
            ) AS daily_kickoff_work_log,
+           EXISTS (
+             SELECT 1 FROM agent_memory am
+              WHERE am.client_id = $1
+                AND am.agent = 'captain_orchestrator'
+                AND am.key = 'daily_kickoff_failure_' || $2::text || '_process_restart_orphan'
+           )
+           OR EXISTS (
+             SELECT 1 FROM logs l
+              WHERE l.client_id = $1
+                AND l.agent = 'captain_orchestrator'
+                AND l.action = 'autonomous_kickoff_failed'
+                AND l.metadata->>'reason' = 'process_restart_orphan'
+                AND l.metadata->>'boundary' = 'daily_kickoff_orphan_sweep'
+                AND (l.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
+           ) AS daily_kickoff_failure_proof,
            (SELECT COUNT(*)::int
               FROM pipeline_traces pt
              WHERE pt.client_id = $1
                AND pt.pipeline_path IN ('kickoff_pipeline', 'signal_pipeline')
-               AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS trace_count`,
+               AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS trace_count,
+           message_counts.sent,
+           message_counts.approval_ready,
+           message_counts.drafting,
+           message_counts.rejected
+          FROM message_counts`,
         [clientId, today]
       );
-      return proof || { daily_kickoff_started: false, daily_kickoff_work_log: false, trace_count: 0 };
+      return proof || {
+        daily_kickoff_started: false,
+        daily_kickoff_started_at: null,
+        daily_kickoff_work_log: false,
+        daily_kickoff_failure_proof: false,
+        trace_count: 0,
+        sent: 0,
+        approval_ready: 0,
+        drafting: 0,
+        rejected: 0,
+      };
     }
 
     async function recordUnverifiedDailyKickoff(clientId, today, now, source, proof = {}) {
@@ -1133,12 +1186,25 @@ none from this broken report; check app truth before approving batches.`;
         );
         if (firedRows.length >= clients.length) {
           const unverified = [];
+          const failures = [];
           for (const client of clients) {
             const proof = await getDailyKickoffProof(client.id, todayInMalaysia(now));
-            if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof)) {
+            if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof) && dailyKickoffHasFailureProof(proof)) {
+              failures.push({ client_id: client.id, slug: client.slug, reason: 'process_restart_orphan', trace_count: Number(proof.trace_count) || 0 });
+            } else if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof)) {
               unverified.push({ client_id: client.id, slug: client.slug, trace_count: Number(proof.trace_count) || 0 });
               await recordUnverifiedDailyKickoff(client.id, todayInMalaysia(now), now, 'daily_scheduler_after_window', proof);
             }
+          }
+          if (failures.length > 0) {
+            return {
+              blocked: true,
+              reason: 'process_restart_orphan',
+              fired: 0,
+              deduped: firedRows.length,
+              failures,
+              clients: clients.map(client => client.slug),
+            };
           }
           if (unverified.length > 0) {
             return {
@@ -1188,7 +1254,15 @@ none from this broken report; check app truth before approving batches.`;
         );
         if (already.length > 0) {
           const proof = await getDailyKickoffProof(client.id, todayInMalaysia(now));
-          if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof)) {
+          if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof) && dailyKickoffHasFailureProof(proof)) {
+            result.blocked++;
+            result.blockers.push({
+              client_id: client.id,
+              slug: client.slug,
+              reason: 'process_restart_orphan',
+              trace_count: Number(proof.trace_count) || 0,
+            });
+          } else if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof)) {
             result.unverified++;
             result.blocked++;
             result.blockers.push({
@@ -1253,7 +1327,17 @@ none from this broken report; check app truth before approving batches.`;
             kickoff_result: kickoffResult,
           });
         }
-        if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof)) {
+        if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof) && dailyKickoffHasFailureProof(proof)) {
+          if (!kickoffBlocker) {
+            result.blocked++;
+            result.blockers.push({
+              client_id: client.id,
+              slug: client.slug,
+              reason: 'process_restart_orphan',
+              trace_count: Number(proof.trace_count) || 0,
+            });
+          }
+        } else if (proof.daily_kickoff_started && !dailyKickoffHasWorkProof(proof)) {
           result.unverified++;
           if (!kickoffBlocker) {
             result.blocked++;
@@ -1278,6 +1362,20 @@ none from this broken report; check app truth before approving batches.`;
         : result.budgetBlocked > 0
           ? { ...result, blocked: true, reason: 'daily kickoff blocked by budget guard' }
         : { alreadyDone: true, reason: 'all clients already had daily kickoff dedupe rows', ...result };
+    }
+
+    async function runDailyKickoffOrphanSweep() {
+      if (process.env.CAPTAIN_DAILY_KICKOFF_ENABLED !== 'true') {
+        return { disabled: true, reason: 'CAPTAIN_DAILY_KICKOFF_ENABLED disabled' };
+      }
+      const enabledSlugs = (process.env.AUTONOMOUS_ENABLED_CLIENTS || '').split(',').map(s => s.trim()).filter(Boolean);
+      return markDailyKickoffOrphans({
+        pool,
+        enabledSlugs,
+        uptimeSeconds: process.uptime(),
+        getDailyKickoffProof,
+        isKickoffRunning,
+      });
     }
 
     // ── Captain EOD brief (19:20 MYT = 11:20 UTC) ────────────────────────────
@@ -1677,55 +1775,10 @@ none from this broken report; check app truth before approving batches.`;
             continue;
           }
 
-          const { rows: [dailyKickoffProof] } = await pool.query(
-            `SELECT
-               EXISTS (
-                 SELECT 1 FROM agent_memory am
-                  WHERE am.client_id = $1
-                    AND am.agent = 'captain'
-                    AND am.key = 'daily_kickoff_' || $2::text
-               )
-               OR EXISTS (
-                 SELECT 1 FROM logs l
-                  WHERE l.client_id = $1
-                    AND l.action = 'autonomous_kickoff'
-                    AND (l.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
-               ) AS daily_kickoff_started,
-               EXISTS (
-                 SELECT 1 FROM logs l
-                  WHERE l.client_id = $1
-                    AND (l.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date
-                    AND l.action IN (
-                      'db_pool_draw',
-                      'db_pool_zero_output_stop',
-                      'pool_audit_rejected',
-                      'pool_dry_for_channel_target',
-                      'generic_sourcing_disabled_skip',
-                      'daily_web_linkedin_topup_failed',
-                      'daily_web_linkedin_topup_empty',
-                      'daily_web_linkedin_topup_success',
-                      'daily_web_linkedin_topup_deduped',
-                      'research_pool_exhausted',
-                      'kickoff_zero_output',
-                      'daily_kickoff_low_yield_blocker',
-                      'captain_kickoff_blocker_required',
-                      'signal_pipeline_executing',
-                      'signal_first_started',
-                      'signal_first_failed',
-                      'campaign_target_unfulfilled',
-                      'paid_signal_disabled_stop',
-                      'campaign_target_fulfilled'
-                    )
-               ) AS daily_kickoff_work_log,
-               (SELECT COUNT(*)::int
-                  FROM pipeline_traces pt
-                 WHERE pt.client_id = $1
-                   AND pt.pipeline_path IN ('kickoff_pipeline', 'signal_pipeline')
-                   AND (pt.created_at AT TIME ZONE 'Asia/Kuala_Lumpur')::date = $2::date) AS trace_count`,
-            [client.id, today]
-          );
-          const dailyKickoffWorkProof = !!dailyKickoffProof?.daily_kickoff_work_log || Number(dailyKickoffProof?.trace_count) > 0;
-          if (dailyKickoffProof?.daily_kickoff_started && !dailyKickoffWorkProof) {
+          const dailyKickoffProof = await getDailyKickoffProof(client.id, today);
+          const dailyKickoffWorkProof = dailyKickoffHasWorkProof(dailyKickoffProof);
+          const dailyKickoffFailureProof = dailyKickoffHasFailureProof(dailyKickoffProof);
+          if (dailyKickoffProof?.daily_kickoff_started && !dailyKickoffWorkProof && !dailyKickoffFailureProof) {
             const blockerLogKey = `kpi_gap_blocked_by_unverified_daily_kickoff_${today}_${now.toISOString().slice(11, 13)}`;
             const blocker = {
               blocked_at: now.toISOString(),
@@ -2008,6 +2061,7 @@ none from this broken report; check app truth before approving batches.`;
           'captain_period_report',
           'daily_reflections',
           'daily_kickoff',
+          'daily_kickoff_orphan_sweep',
           'captain_eod_brief',
           'stuck_state_monitor',
           'market_sensing',
@@ -2078,7 +2132,14 @@ none from this broken report; check app truth before approving batches.`;
           }
         })
         .catch(err => { logger.warn({ msg: 'Captain directive sweep error', err: err.message }); jobHealth.markError('captain_directive_sweep', err.message); });
-      runKpiGapKickoff()
+      runDailyKickoffOrphanSweep()
+        .then(result => {
+          if (result?.marked > 0) jobHealth.markDegraded('daily_kickoff_orphan_sweep', 'process_restart_orphan', result);
+          else if (result?.disabled || result?.skipped) jobHealth.markSkipped('daily_kickoff_orphan_sweep', result.reason || 'daily kickoff orphan sweep skipped', result);
+          else if (result?.checked !== undefined) jobHealth.markRun('daily_kickoff_orphan_sweep', result);
+        })
+        .catch(err => { logger.warn({ msg: 'Daily kickoff orphan sweep error', err: err.message }); jobHealth.markError('daily_kickoff_orphan_sweep', err.message); })
+        .then(() => runKpiGapKickoff())
         .then(result => {
           const degradedReason = jobHealth.degradedReasonFromResult(result);
           if (degradedReason) jobHealth.markDegraded('kpi_gap_kickoff', degradedReason, result);
@@ -2087,7 +2148,7 @@ none from this broken report; check app truth before approving batches.`;
         })
         .catch(err => { logger.warn({ msg: 'KPI gap kickoff poll error', err: err.message }); jobHealth.markError('kpi_gap_kickoff', err.message); });
     }, 10 * 60 * 1000);
-    logger.info({ msg: 'Captain Beaver cron jobs registered (10min poll: 9am brief, 7pm EOD brief, hourly stuck-state monitor 9am-7pm, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, 30min KPI gap kickoff, all MYT)' });
+    logger.info({ msg: 'Captain Beaver cron jobs registered (10min poll: 9am brief, 7pm EOD brief, hourly stuck-state monitor 9am-7pm, 7pm daily reflections, Sunday 8pm review, 9:30am kickoff, orphan sweep before KPI-gap, 30min KPI gap kickoff, all MYT)' });
 
     // ── LinkedIn stale connection sweep ─────────────────────────────────────
     // Runs every 6 hours. After 3 days in `linkedin_requested`, assume the

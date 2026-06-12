@@ -55,6 +55,14 @@ describe('jobHealth scheduled autonomy blockers', () => {
     })).toBe(null);
   });
 
+  it('degrades health for process-restart orphan kickoff failures', () => {
+    expect(degradedReasonFromResult({
+      blocked: true,
+      reason: 'process_restart_orphan',
+      boundary: 'daily_kickoff_orphan_sweep',
+    })).toBe('process_restart_orphan');
+  });
+
   it('checks autonomy blocker health before marking daily and KPI-gap kickoffs green', () => {
     const dailyStart = indexSource.lastIndexOf('runDailyKickoff()');
     const dailyBody = indexSource.slice(dailyStart, indexSource.indexOf('runCaptainEodBrief()', dailyStart));

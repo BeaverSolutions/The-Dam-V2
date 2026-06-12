@@ -285,9 +285,16 @@ describe('P0 stabilization contracts', () => {
     expect(index).toContain('daily kickoff window passed without all tenant dedupe rows');
     expect(index).toContain('daily kickoff dedupe rows present but no output proof');
     expect(index).toContain('function dailyKickoffHasWorkProof(proof)');
+    expect(index).toContain('function dailyKickoffHasFailureProof(proof)');
+    expect(index).toContain('daily_kickoff_failure_proof');
+    expect(index).toContain("require('./services/kickoffOrphanRecovery')");
+    expect(index).toContain('runDailyKickoffOrphanSweep()');
     expect(index).toContain('daily_kickoff_unverified_output_blocker');
+    expect(index).toContain("reason: 'process_restart_orphan'");
     expect(index).toContain("blocked: true, reason: 'daily kickoff start marker has no output proof'");
     expect(service('routes/autonomous.js')).toContain("'autonomous_kickoff_failed'");
+    expect(service('routes/autonomous.js')).toContain('function isKickoffRunning(clientId)');
+    expect(service('routes/autonomous.js')).toContain('module.exports.isKickoffRunning = isKickoffRunning');
     expect(service('routes/autonomous.js')).toContain('verify_after_uncaught_kickoff_error');
     expect(index).toContain('minutesSinceMalaysiaMidnight(now)');
     expect(index).toContain('`daily_kickoff_${todayInMalaysia(now)}`');
